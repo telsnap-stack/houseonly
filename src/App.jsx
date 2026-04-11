@@ -93,7 +93,7 @@ async function shopifyCheckout(cartItems) {
   const rawUrl = data.cartCreate?.cart?.checkoutUrl;
   if (!rawUrl) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
 
-  window.open(rawUrl.replace('houseonly.store', 'house-only-2.myshopify.com'), '_blank');
+  window.open(rawUrl.replace('houseonly.store', 'checkout.houseonly.store'), '_blank');
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
