@@ -37,7 +37,6 @@ function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
   const tags = node.tags || [];
-  // Genre: match any tag case-insensitively
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase())) || 'Deep House';
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t)) || '';
@@ -73,23 +72,33 @@ async function fetchShopifyProducts(cursor=null) {
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
+// ── CHECKOUT — uses checkoutCreate mutation for a proper webUrl ──
 async function shopifyCheckout(cartItems) {
-  // Build checkout URL directly — no API call needed, no CORS issues
-  const lines = cartItems
+  const lineItems = cartItems
     .filter(i => i.shopifyVariantId)
-    .map(i => {
-      // Extract numeric ID from Shopify GID format
-      const id = i.shopifyVariantId.replace('gid://shopify/ProductVariant/', '');
-      return `${id}:${i.qty}`;
-    });
+    .map(i => ({ variantId: i.shopifyVariantId, quantity: i.qty }));
 
-  if (!lines.length) {
-    alert('These demo records are not in Shopify. Add real products first.');
+  if (!lineItems.length) {
+    alert('No valid Shopify variant IDs found in cart.');
     return;
   }
 
-  // Direct Shopify cart URL — works without any API call
-  const url = `https://${SHOPIFY.domain}/cart/${lines.join(',')}?channel=buy_button`;
+  const data = await shopifyQuery(
+    `mutation checkoutCreate($input: CheckoutCreateInput!) {
+      checkoutCreate(input: $input) {
+        checkout { webUrl }
+        checkoutUserErrors { field message }
+      }
+    }`,
+    { input: { lineItems } }
+  );
+
+  const errs = data.checkoutCreate?.checkoutUserErrors;
+  if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
+
+  const url = data.checkoutCreate?.checkout?.webUrl;
+  if (!url) throw new Error('No checkout URL returned from Shopify.');
+
   window.location.href = url;
 }
 
@@ -215,8 +224,22 @@ function Modal({ r, onClose, onAdd }) {
 
 // ── CART ───────────────────────────────────────────────────────
 function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
   const total = cart.reduce((s,i)=>s+i.price*i.qty,0);
   const count = cart.reduce((s,i)=>s+i.qty,0);
+
+  const handleCheckout = async () => {
+    setErr('');
+    setLoading(true);
+    try {
+      await onCheckout();
+    } catch(e) {
+      setErr(e.message || 'Checkout failed. Please try again.');
+    }
+    setLoading(false);
+  };
+
   return (
     <>
       {open&&<div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:900 }} />}
@@ -246,7 +269,8 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
               <span style={{ fontSize:10, color:S.muted, textTransform:'uppercase', letterSpacing:1 }}>Total</span>
               <span style={{ fontSize:20, fontWeight:800, color:S.accent }}>€{total.toFixed(2)}</span>
             </div>
-            <Btn ch="Checkout via Shopify" onClick={onCheckout} full />
+            {err&&<div style={{ fontSize:10, color:S.danger, marginBottom:10, lineHeight:1.5 }}>{err}</div>}
+            <Btn ch={loading?'Creating Checkout…':'Checkout via Shopify'} onClick={handleCheckout} disabled={loading} full />
             <div style={{ fontSize:8, color:S.muted, textAlign:'center', marginTop:8, letterSpacing:1.5 }}>CARD · PAYPAL · CRYPTO</div>
           </div>
         )}
@@ -270,7 +294,6 @@ function Filters({ filters, onChange, records }) {
     );
   };
 
-  // Native select styled to match the dark theme
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
       <select
@@ -297,20 +320,16 @@ function Filters({ filters, onChange, records }) {
 
   return (
     <div style={{ marginBottom:24 }}>
-      {/* Row 1: dropdowns */}
       <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
         {sel('genre', genres, 'All Genres')}
         {sel('label', labels, 'All Labels')}
       </div>
-      {/* Row 2: year pills — scrollable on mobile */}
       <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none', msOverflowStyle:'none' }}>
         {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
       </div>
-      {/* Row 3: month pills */}
       <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, marginTop:8, scrollbarWidth:'none', msOverflowStyle:'none' }}>
         {pill('month',null,'All')}{months.map(m=>pill('month',m,MN[m-1]))}
       </div>
-      <style>{`.filter-scroll::-webkit-scrollbar{display:none}`}</style>
     </div>
   );
 }
@@ -572,7 +591,6 @@ export default function App() {
   const [page,setPage]         = useState('shop');
   const [authed,setAuthed]     = useState(false);
 
-  // ── Secret admin access: //#admin in URL or Shift+Ctrl+A ──
   useEffect(()=>{
     if (window.location.hash==='#admin') setPage('login');
     const handler = (e) => {
@@ -608,7 +626,6 @@ export default function App() {
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
-  // ── Mobile-responsive nav ──────────────────────────────────
   const Nav=({children})=>(
     <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
       <Logo scale={0.65} onClick={()=>setPage('shop')} />
@@ -642,13 +659,11 @@ export default function App() {
         </div>
       </Nav>
 
-      {/* HERO */}
       <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
         <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
       </div>
 
-      {/* SHOP */}
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} />
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,marginBottom:16,textTransform:'uppercase',display:'flex',alignItems:'center',gap:10}}>
@@ -674,7 +689,13 @@ export default function App() {
       </div>
 
       <Modal r={selected} onClose={()=>setSelected(null)} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
-      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{try{await shopifyCheckout(cart);}catch(e){alert(e.message);}}} />
+      <CartDrawer
+        cart={cart}
+        open={cartOpen}
+        onClose={()=>setCartOpen(false)}
+        onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))}
+        onCheckout={()=>shopifyCheckout(cart)}
+      />
     </div>
   );
 }
