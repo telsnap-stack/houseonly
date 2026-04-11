@@ -105,10 +105,10 @@ async function shopifyCheckout(cartItems) {
   const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
 
-  const url = data.cartCreate?.cart?.checkoutUrl;
-  if (!url) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
+  const rawUrl = data.cartCreate?.cart?.checkoutUrl;
+  if (!rawUrl) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
 
-  window.location.href = url;
+  window.location.href = rawUrl.replace('houseonly.store', 'house-only-2.myshopify.com');
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
