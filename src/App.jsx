@@ -497,21 +497,32 @@ function EditModal({ record, onSave, onClose }) {
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 
 // ── CSV ENRICHER ───────────────────────────────────────────────
-async function fetchCoverArt(title, artist) {
+// Two-pass Discogs lookup: EAN barcode first, then title+artist fallback
+async function fetchCoverArt(title, artist, ean) {
+  const getImage = (data) => {
+    const r = data.results?.[0];
+    return r?.cover_image && !r.cover_image.includes('spacer') ? r.cover_image : '';
+  };
   try {
-    const clean = (s) => s.replace(/\(.*?\)/g,'').replace(/feat\.?.*/i,'').trim();
+    // Pass 1: EAN barcode (exact match)
+    if (ean) {
+      const r = await fetch(
+        `https://api.discogs.com/database/search?barcode=${encodeURIComponent(String(ean).replace(/\.0$/, ''))}&type=release&per_page=1`,
+        { headers: { 'User-Agent': 'HouseOnly/1.0 houseonly.store', 'Authorization': 'Discogs key=pPJVMuHbSHqiJPXRGJuH, secret=LwEFVJwuJhJLjuNxViSpoBCGkLWwxqEF' } }
+      );
+      const d = await r.json();
+      const img = getImage(d);
+      if (img) return img;
+    }
+    // Pass 2: title + artist search
+    const clean = (s) => String(s).replace(/\(.*?\)/g,'').replace(/feat\.?.*/i,'').trim();
     const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
-    const mb = await fetch(
-      `https://musicbrainz.org/ws/2/release/?query=${q}&fmt=json&limit=1`,
-      { headers: { 'User-Agent': 'HouseOnly/1.0 (houseonly.store)' } }
+    const r2 = await fetch(
+      `https://api.discogs.com/database/search?q=${q}&type=release&per_page=1`,
+      { headers: { 'User-Agent': 'HouseOnly/1.0 houseonly.store', 'Authorization': 'Discogs key=pPJVMuHbSHqiJPXRGJuH, secret=LwEFVJwuJhJLjuNxViSpoBCGkLWwxqEF' } }
     );
-    const mbData = await mb.json();
-    const id = mbData.releases?.[0]?.id;
-    if (!id) return '';
-    const ca = await fetch(`https://coverartarchive.org/release/${id}`);
-    if (!ca.ok) return '';
-    const caData = await ca.json();
-    return caData.images?.[0]?.thumbnails?.['500'] || caData.images?.[0]?.image || '';
+    const d2 = await r2.json();
+    return getImage(d2);
   } catch { return ''; }
 }
 
@@ -553,7 +564,8 @@ function CsvEnricher() {
       const title = String(row.Title || '');
       const artist = String(row.Artist || '');
       setProgress({ done:i, total:rows.length, current:title });
-      const imageUrl = await fetchCoverArt(title, artist);
+      const ean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+/i, '').trim();
+      const imageUrl = await fetchCoverArt(title, artist, ean);
       // Map to Shopify CSV columns
       result.push({
         'Handle': String(row.ArtNo || '').toLowerCase().replace(/[^a-z0-9]+/g,'-'),
