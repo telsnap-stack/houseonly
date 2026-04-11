@@ -355,6 +355,7 @@ async function claudeJSON(sys, msg, search=false) {
 const SCHEMA=`{"title":"","artist":"","label":"","genre":"","year":0,"price":18.99,"catalog":"","tracks":[{"t":"","d":""}],"desc":"","coverUrl":"","audioUrl":""}`;
 const GLIST='Deep House, Tech House, Afro House, Chicago House, Soulful House, Acid House, Detroit House, Disco House';
 
+
 // ── BULK IMPORTER ──────────────────────────────────────────────
 function BulkImporter({ onImportMany }) {
   const [q,setQ]=useState(''); const [st,setSt]=useState('idle'); const [res,setRes]=useState([]); const [sel,setSel]=useState({}); const [err,setErr]=useState(''); const [done,setDone]=useState(0);
@@ -494,6 +495,154 @@ function EditModal({ record, onSave, onClose }) {
 }
 
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
+
+// ── CSV ENRICHER ───────────────────────────────────────────────
+async function fetchCoverArt(title, artist) {
+  try {
+    const clean = (s) => s.replace(/\(.*?\)/g,'').replace(/feat\.?.*/i,'').trim();
+    const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
+    const mb = await fetch(
+      `https://musicbrainz.org/ws/2/release/?query=${q}&fmt=json&limit=1`,
+      { headers: { 'User-Agent': 'HouseOnly/1.0 (houseonly.store)' } }
+    );
+    const mbData = await mb.json();
+    const id = mbData.releases?.[0]?.id;
+    if (!id) return '';
+    const ca = await fetch(`https://coverartarchive.org/release/${id}`);
+    if (!ca.ok) return '';
+    const caData = await ca.json();
+    return caData.images?.[0]?.thumbnails?.['500'] || caData.images?.[0]?.image || '';
+  } catch { return ''; }
+}
+
+function CsvEnricher() {
+  const [rows, setRows] = useState([]);
+  const [status, setStatus] = useState('idle');
+  const [progress, setProgress] = useState({ done:0, total:0, current:'' });
+  const [enriched, setEnriched] = useState([]);
+  const inputRef = useRef(null);
+
+  const handleFile = async (f) => {
+    setStatus('parsing'); setRows([]); setEnriched([]);
+    // Use SheetJS to read Excel
+    const buf = await f.arrayBuffer();
+    const { read, utils } = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs');
+    const wb = read(buf);
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const raw = utils.sheet_to_json(ws, { defval:'' });
+    // Filter out blank rows
+    const clean = raw.filter(r => r.ArtNo || r.Title);
+    setRows(clean);
+    setStatus('idle');
+  };
+
+  const runEnrich = async () => {
+    if (!rows.length) return;
+    setStatus('enriching');
+    setProgress({ done:0, total:rows.length, current:'' });
+    const result = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const title = String(row.Title || '');
+      const artist = String(row.Artist || '');
+      setProgress({ done:i, total:rows.length, current:title });
+      const imageUrl = await fetchCoverArt(title, artist);
+      // Map to Shopify CSV columns
+      result.push({
+        'Handle': String(row.ArtNo || '').toLowerCase().replace(/[^a-z0-9]+/g,'-'),
+        'Title': title,
+        'Body (HTML)': '',
+        'Vendor': artist,
+        'Tags': 'vinyl',
+        'Published': 'true',
+        'Variant SKU': String(row.ArtNo || ''),
+        'Variant Price': String(row.UnitPrice || '18.99'),
+        'Variant Inventory Policy': 'deny',
+        'Variant Fulfillment Service': 'manual',
+        'Variant Requires Shipping': 'true',
+        'Variant Taxable': 'false',
+        'Variant Barcode': String(row.EAN || ''),
+        'Image Src': imageUrl,
+        'Image Alt Text': `${title} - ${artist}`,
+        'Gift Card': 'false',
+        'Status': 'active',
+      });
+      await new Promise(r => setTimeout(r, 400));
+    }
+    setProgress({ done:rows.length, total:rows.length, current:'' });
+    setEnriched(result);
+    setStatus('done');
+  };
+
+  const downloadCSV = () => {
+    if (!enriched.length) return;
+    const headers = Object.keys(enriched[0]);
+    const lines = [
+      headers.join(','),
+      ...enriched.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+    ];
+    const blob = new Blob([lines.join('
+')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'shopify_import.csv';
+    a.click();
+  };
+
+  const covered = enriched.filter(r => r['Image Src']).length;
+  const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
+        Upload your distributor Excel file. The tool converts it to Shopify format and fetches cover art automatically. Then import the CSV directly in Shopify → Products → Import.
+      </p>
+
+      <div onClick={()=>inputRef.current.click()} style={{border:`2px dashed ${rows.length?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',cursor:'pointer',marginBottom:14,transition:'border 0.15s'}}>
+        <div style={{fontSize:24,marginBottom:6}}>📥</div>
+        <div style={{fontSize:11,color:rows.length?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
+          {rows.length ? `${rows.length} records loaded` : 'Click to upload distributor Excel'}
+        </div>
+        <div style={{fontSize:9,color:S.muted,marginTop:3}}>Supports .xlsx files from Word and Sound / your distributor</div>
+        <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])} />
+      </div>
+
+      {status==='parsing' && <div style={{fontSize:10,color:S.muted}}>Reading file…</div>}
+
+      {status==='idle' && rows.length>0 && (
+        <Btn ch={`Convert + Fetch Covers for ${rows.length} Records`} onClick={runEnrich} full />
+      )}
+
+      {status==='enriching' && (
+        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>FETCHING COVERS…</span>
+            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
+            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
+          </div>
+          {progress.current&&<div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {status==='done' && (
+        <div style={{padding:14,background:'#0a1400',borderRadius:2,border:`1px solid ${S.accent}33`}}>
+          <div style={{fontSize:12,color:S.accent,fontWeight:700,marginBottom:4}}>
+            ✓ Done — {covered} of {enriched.length} covers found
+          </div>
+          <div style={{fontSize:9,color:S.muted,marginBottom:12,lineHeight:1.6}}>
+            Download and import into Shopify admin → Products → Import CSV.<br/>
+            Shopify will create all products with images in one go.
+          </div>
+          <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function AudioBatchUploader({ records, onMatch }) {
   const [matches,setMatches]=useState([]); const [unmatched,setUnmatched]=useState([]); const inputRef=useRef(null); const [drag,setDrag]=useState(false);
   const handleFiles=(files)=>{const matched=[],unmat=[],updates={};Array.from(files).forEach(file=>{if(!/\.(mp3|ogg|wav|flac|aac)$/i.test(file.name)) return;const base=file.name.replace(/\.[^.]+$/,'').trim().toLowerCase();const record=records.find(r=>r.catalog?.toLowerCase().replace(/\s/g,'')=== base.replace(/\s/g,''));const url=URL.createObjectURL(file);if(record){updates[record.id]=url;matched.push({file:file.name,title:record.title,catalog:record.catalog});}else unmat.push(file.name);});setMatches(matched);setUnmatched(unmat);onMatch(updates);};
@@ -526,10 +675,11 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
-        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}</div>
+        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}{tabBtn('csv','📄 CSV + Covers')}</div>
         {tab==='bulk'&&<BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
         {tab==='barcode'&&<BarcodeImporter onImport={onAdd} />}
         {tab==='url'&&<UrlImporter onImport={onAdd} />}
+        {tab==='csv'&&<CsvEnricher />}
       </div>
       <AudioBatchUploader records={records} onMatch={updates=>Object.entries(updates).forEach(([id,url])=>onUpdate(Number(id),{audio:url}))} />
       <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>Inventory</div>
