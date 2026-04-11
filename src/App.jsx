@@ -29,6 +29,32 @@ async function shopifyQuery(query, variables={}) {
   return data.data;
 }
 
+// Genre tag list — order matters, more specific first
+const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic'];
+const SKIP_TAGS  = [...GENRE_TAGS,'vinyl','house'];
+
+function parseProduct({ node }) {
+  const v    = node.variants.edges[0]?.node;
+  const img  = node.images.edges[0]?.node;
+  const tags = node.tags || [];
+  // Genre: match any tag case-insensitively
+  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase())) || 'Deep House';
+  const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
+  const label = tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t)) || '';
+  const desc  = node.descriptionHtml?.replace(/<[^>]+>/g,'') || '';
+  const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
+  return {
+    id: node.id, shopifyVariantId: v?.id,
+    title: node.title||'', artist, label,
+    catalog: v?.sku||'', genre, year,
+    month: new Date().getMonth()+1,
+    price: parseFloat(v?.price?.amount||18.99),
+    stock: v?.quantityAvailable??10,
+    coverUrl: img?.url||null, audio: null,
+    tracks: [], desc, g:'135deg,#1a1a2e,#16213e',
+  };
+}
+
 async function fetchShopifyProducts(cursor=null) {
   const after = cursor ? `, after: "${cursor}"` : '';
   const data = await shopifyQuery(`{
@@ -44,41 +70,27 @@ async function fetchShopifyProducts(cursor=null) {
     }
   }`);
   const { edges, pageInfo } = data.products;
-  const GENRE_TAGS = ['Deep House','Tech House','Afro House','Chicago House','Soulful House','Acid House','Detroit House','Disco House','Electronic'];
-  const SKIP = [...GENRE_TAGS,'vinyl','house'];
-  const products = edges.map(({ node }) => {
-    const v     = node.variants.edges[0]?.node;
-    const img   = node.images.edges[0]?.node;
-    const tags  = node.tags || [];
-    const genre = tags.find(t => GENRE_TAGS.includes(t)) || 'Deep House';
-    const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
-    const label = tags.find(t => !SKIP.includes(t) && !/^\d{4}$/.test(t)) || '';
-    const desc  = node.descriptionHtml?.replace(/<[^>]+>/g,'') || '';
-    const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
-    return {
-      id:node.id, shopifyVariantId:v?.id,
-      title:node.title||'', artist, label,
-      catalog:v?.sku||'', genre, year,
-      month:new Date().getMonth()+1,
-      price:parseFloat(v?.price?.amount||18.99),
-      stock:v?.quantityAvailable??10,
-      coverUrl:img?.url||null, audio:null,
-      tracks:[], desc, g:'135deg,#1a1a2e,#16213e',
-    };
-  });
-  return { products, hasNextPage:pageInfo.hasNextPage, endCursor:pageInfo.endCursor };
+  return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
 async function shopifyCheckout(cartItems) {
-  const lines = cartItems.map(i=>({ merchandiseId:i.shopifyVariantId, quantity:i.qty })).filter(l=>l.merchandiseId);
-  if (!lines.length) { alert('Add real products in Shopify admin first.'); return; }
-  const data = await shopifyQuery(`
-    mutation cartCreate($input: CartInput!) {
-      cartCreate(input: $input) { cart { checkoutUrl } userErrors { field message } }
-    }`, { input:{ lines } });
-  const url = data.cartCreate?.cart?.checkoutUrl;
-  if (url) window.location.href = url;
-  else throw new Error(data.cartCreate?.userErrors?.[0]?.message||'Checkout failed');
+  // Build checkout URL directly — no API call needed, no CORS issues
+  const lines = cartItems
+    .filter(i => i.shopifyVariantId)
+    .map(i => {
+      // Extract numeric ID from Shopify GID format
+      const id = i.shopifyVariantId.replace('gid://shopify/ProductVariant/', '');
+      return `${id}:${i.qty}`;
+    });
+
+  if (!lines.length) {
+    alert('These demo records are not in Shopify. Add real products first.');
+    return;
+  }
+
+  // Direct Shopify cart URL — works without any API call
+  const url = `https://${SHOPIFY.domain}/cart/${lines.join(',')}?channel=buy_button`;
+  window.location.href = url;
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
@@ -173,9 +185,9 @@ function Modal({ r, onClose, onAdd }) {
         <div style={{ display:'flex', flexWrap:'wrap' }}>
           <div style={{ width:240, minHeight:240, flexShrink:0, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center' }} />
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
-            <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20, lineHeight:1, marginTop:-4 }}>×</button>
+            <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
             <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>{r.label} · {r.catalog}</div>
-            <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.title}</h2>
+            <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
             <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>{r.artist}</div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
               {[r.genre,r.year].map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
@@ -201,14 +213,14 @@ function Modal({ r, onClose, onAdd }) {
   );
 }
 
-// ── CART DRAWER ────────────────────────────────────────────────
+// ── CART ───────────────────────────────────────────────────────
 function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   const total = cart.reduce((s,i)=>s+i.price*i.qty,0);
   const count = cart.reduce((s,i)=>s+i.qty,0);
   return (
     <>
       {open&&<div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:900 }} />}
-      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:340, background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column' }}>
+      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:Math.min(340,window.innerWidth), background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column' }}>
         <div style={{ padding:'18px 22px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
           <span style={{ fontWeight:800, fontSize:11, letterSpacing:2, textTransform:'uppercase' }}>Cart ({count})</span>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
@@ -243,136 +255,132 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   );
 }
 
-// ── FILTERS ────────────────────────────────────────────────────
+// ── FILTERS — mobile-friendly ──────────────────────────────────
 function Filters({ filters, onChange, records }) {
   const labels = [...new Set(records.map(r=>r.label))].sort();
   const genres = [...new Set(records.map(r=>r.genre))].sort();
-  const years  = [...new Set(records.map(r=>r.year))].sort((a,b)=>b-a);
+  const years  = [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
   const months = [...new Set(records.map(r=>r.month))].sort((a,b)=>a-b);
   const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
   const pill = (key,val,label) => {
     const active = filters[key]===val;
-    return <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'4px 12px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>{label||val}</button>;
+    return (
+      <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>
+    );
   };
-  const dropdown = (key, opts, placeholder) => (
-    <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'4px 12px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', appearance:'none', paddingRight:24, backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='${filters[key]?'%23080808':'%23585858'}'/%3E%3C/svg%3E")`, backgroundRepeat:'no-repeat', backgroundPosition:'right 8px center', transition:'all 0.15s' }}>
-      <option value="">{placeholder}</option>
-      {opts.map(o=><option key={o.val} value={o.val}>{o.label}</option>)}
-    </select>
+
+  // Native select styled to match the dark theme
+  const sel = (key, opts, placeholder) => (
+    <div style={{ position:'relative', flexShrink:0 }}>
+      <select
+        value={filters[key]||''}
+        onChange={e=>onChange(key,e.target.value||null)}
+        style={{
+          appearance:'none', WebkitAppearance:'none',
+          background:filters[key]?S.accent:S.surf,
+          color:filters[key]?'#080808':S.muted,
+          border:`1px solid ${filters[key]?S.accent:S.border}`,
+          borderRadius:20, cursor:'pointer',
+          fontSize:9, fontWeight:filters[key]?700:400,
+          letterSpacing:1.5, padding:'6px 28px 6px 14px',
+          textTransform:'uppercase', fontFamily:'inherit',
+          outline:'none', minWidth:100,
+        }}
+      >
+        <option value="">{placeholder}</option>
+        {opts.map(o=><option key={o} value={o}>{o}</option>)}
+      </select>
+      <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:filters[key]?'#080808':S.muted }}>▼</span>
+    </div>
   );
+
   return (
-    <div style={{ marginBottom:28, display:'flex', flexWrap:'wrap', gap:12, alignItems:'center' }}>
-      {dropdown('genre', genres.map(g=>({val:g,label:g})), 'All Genres')}
-      {dropdown('label', labels.map(l=>({val:l,label:l})), 'All Labels')}
-      <div style={{ display:'flex', gap:5, alignItems:'center', flexWrap:'wrap' }}>
+    <div style={{ marginBottom:24 }}>
+      {/* Row 1: dropdowns */}
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
+        {sel('genre', genres, 'All Genres')}
+        {sel('label', labels, 'All Labels')}
+      </div>
+      {/* Row 2: year pills — scrollable on mobile */}
+      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none', msOverflowStyle:'none' }}>
         {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
       </div>
-      <div style={{ display:'flex', gap:5, alignItems:'center', flexWrap:'wrap' }}>
+      {/* Row 3: month pills */}
+      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, marginTop:8, scrollbarWidth:'none', msOverflowStyle:'none' }}>
         {pill('month',null,'All')}{months.map(m=>pill('month',m,MN[m-1]))}
       </div>
+      <style>{`.filter-scroll::-webkit-scrollbar{display:none}`}</style>
     </div>
   );
 }
 
-// ── CLAUDE API HELPER ──────────────────────────────────────────
+// ── CLAUDE API ─────────────────────────────────────────────────
 function extractJSON(txt) {
   const si = txt.indexOf('[') === -1 ? txt.indexOf('{') : txt.indexOf('{') === -1 ? txt.indexOf('[') : Math.min(txt.indexOf('['), txt.indexOf('{'));
   if (si === -1) throw new Error('No JSON found');
-  const open = txt[si], close = open==='['?']':'}';
-  let depth=0, inStr=false, esc=false;
-  for (let i=si; i<txt.length; i++) {
+  const open=txt[si], close=open==='['?']':'}';
+  let depth=0,inStr=false,esc=false;
+  for (let i=si;i<txt.length;i++) {
     const c=txt[i];
-    if (esc){esc=false;continue;} if (c==='\\'&&inStr){esc=true;continue;}
-    if (c==='"'){inStr=!inStr;continue;} if (inStr) continue;
-    if (c===open) depth++; if (c===close){depth--;if(depth===0) return JSON.parse(txt.slice(si,i+1));}
+    if(esc){esc=false;continue;} if(c==='\\'&&inStr){esc=true;continue;}
+    if(c==='"'){inStr=!inStr;continue;} if(inStr) continue;
+    if(c===open) depth++; if(c===close){depth--;if(depth===0) return JSON.parse(txt.slice(si,i+1));}
   }
   throw new Error('Malformed JSON');
 }
 
-async function claudeJSON(systemPrompt, userMsg, useSearch=false) {
-  const body = { model:"claude-sonnet-4-20250514", max_tokens:3000, system:systemPrompt, messages:[{role:"user",content:userMsg}] };
-  if (useSearch) body.tools = [{type:"web_search_20250305",name:"web_search"}];
-  const resp = await fetch("https://api.anthropic.com/v1/messages", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const data = await resp.json();
-  if (data.error) throw new Error(data.error.message);
-  const txt = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-  return extractJSON(txt);
+async function claudeJSON(sys, msg, search=false) {
+  const body={model:"claude-sonnet-4-20250514",max_tokens:3000,system:sys,messages:[{role:"user",content:msg}]};
+  if(search) body.tools=[{type:"web_search_20250305",name:"web_search"}];
+  const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d=await r.json(); if(d.error) throw new Error(d.error.message);
+  return extractJSON((d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(''));
 }
 
-const RECORD_SCHEMA = `{"title":"","artist":"","label":"","genre":"","year":0,"price":18.99,"catalog":"","tracks":[{"t":"","d":""}],"desc":"","coverUrl":"","audioUrl":""}`;
-const GENRES = 'Deep House, Tech House, Afro House, Chicago House, Soulful House, Acid House, Detroit House, Disco House';
+const SCHEMA=`{"title":"","artist":"","label":"","genre":"","year":0,"price":18.99,"catalog":"","tracks":[{"t":"","d":""}],"desc":"","coverUrl":"","audioUrl":""}`;
+const GLIST='Deep House, Tech House, Afro House, Chicago House, Soulful House, Acid House, Detroit House, Disco House';
 
 // ── BULK IMPORTER ──────────────────────────────────────────────
 function BulkImporter({ onImportMany }) {
-  const [query,setQuery]=useState('');
-  const [status,setStatus]=useState('idle');
-  const [results,setResults]=useState([]);
-  const [selected,setSelected]=useState({});
-  const [errMsg,setErrMsg]=useState('');
-  const [addedCount,setAddedCount]=useState(0);
-  const SUGGESTIONS=['Quintessentials','Defected','Nervous Records','Trax Records','KDJ','Running Back','Kompakt','Larry Heard'];
-
-  const search = async () => {
-    if (!query.trim()) return;
-    setStatus('loading'); setResults([]); setSelected({}); setErrMsg(''); setAddedCount(0);
+  const [q,setQ]=useState(''); const [st,setSt]=useState('idle'); const [res,setRes]=useState([]); const [sel,setSel]=useState({}); const [err,setErr]=useState(''); const [done,setDone]=useState(0);
+  const SUGG=['Quintessentials','Defected','Nervous Records','Trax Records','KDJ','Running Back','Kompakt','Larry Heard'];
+  const search=async()=>{
+    if(!q.trim()) return; setSt('loading'); setRes([]); setSel({}); setErr(''); setDone(0);
     try {
-      const list = await claudeJSON(
-        `You are a vinyl record data extractor. Do MAX 2 web searches.
-Search: "${query}" discogs vinyl releases
-Extract up to 8 real releases. Do NOT invent data.
-Return ONLY one JSON array: [${RECORD_SCHEMA}]
-coverUrl: publicly accessible image URL (not discogs CDN).
-genre: one of ${GENRES}. price: 18.99 default.`,
-        `Find real vinyl releases for: "${query}". Return ONE JSON array only.`, true
-      );
-      const arr = Array.isArray(list)?list:[list];
-      if (!arr.length) throw new Error('No releases found.');
-      setResults(arr);
-      const sel={};arr.forEach((_,i)=>sel[i]=true);setSelected(sel);
-      setStatus('done');
-    } catch(e) { setErrMsg(e.message||'Unknown error'); setStatus('error'); }
+      const list=await claudeJSON(`You are a vinyl record data extractor. Do MAX 2 web searches.\nSearch: "${q}" discogs vinyl releases\nExtract up to 8 real releases. Do NOT invent data.\nReturn ONLY one JSON array: [${SCHEMA}]\ncoverUrl: publicly accessible image URL (not discogs CDN).\ngenre: one of ${GLIST}. price: 18.99 default.`,`Find real vinyl releases for: "${q}". Return ONE JSON array only.`,true);
+      const arr=Array.isArray(list)?list:[list]; if(!arr.length) throw new Error('No releases found.');
+      setRes(arr); const s={};arr.forEach((_,i)=>s[i]=true); setSel(s); setSt('done');
+    } catch(e){setErr(e.message||'Error'); setSt('error');}
   };
-
-  const toggleAll=()=>{ const allOn=results.every((_,i)=>selected[i]); const next={}; if(!allOn) results.forEach((_,i)=>next[i]=true); setSelected(next); };
-  const add=()=>{
-    const toAdd=results.filter((_,i)=>selected[i]).map(r=>({id:Date.now()+Math.random(),...r,audio:r.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'}));
-    onImportMany(toAdd); setAddedCount(toAdd.length); setResults([]); setSelected({}); setQuery(''); setStatus('idle');
-  };
-  const selCount=Object.values(selected).filter(Boolean).length;
-
+  const toggleAll=()=>{const on=res.every((_,i)=>sel[i]);const n={};if(!on) res.forEach((_,i)=>n[i]=true);setSel(n);};
+  const add=()=>{const t=res.filter((_,i)=>sel[i]).map(r=>({id:Date.now()+Math.random(),...r,audio:r.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'}));onImportMany(t);setDone(t.length);setRes([]);setSel({});setQ('');setSt('idle');};
+  const sc=Object.values(sel).filter(Boolean).length;
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 12px'}}>Search by label or artist. AI finds real releases from Discogs.</p>
       <div style={{display:'flex',gap:8,marginBottom:10}}>
-        <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key==='Enter'&&search()}
-          placeholder='e.g. "Quintessentials", "Defected"…'
-          style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
-        <Btn ch={status==='loading'?'Searching…':'Search'} onClick={search} disabled={status==='loading'||!query.trim()} />
+        <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==='Enter'&&search()} placeholder='e.g. "Quintessentials", "Defected"…' style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+        <Btn ch={st==='loading'?'…':'Search'} onClick={search} disabled={st==='loading'||!q.trim()} />
       </div>
-      {status==='idle'&&!addedCount&&<div style={{display:'flex',flexWrap:'wrap',gap:5}}>{SUGGESTIONS.map(s=><button key={s} onClick={()=>setQuery(s)} style={{background:S.border,color:S.muted,border:'none',borderRadius:20,cursor:'pointer',fontSize:9,letterSpacing:1,padding:'3px 10px',textTransform:'uppercase'}}>{s}</button>)}</div>}
-      {status==='loading'&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`}}><div style={{fontSize:10,color:S.muted,marginBottom:8}}>Searching for "{query}"…</div><div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden'}}><div style={{height:'100%',background:S.accent,animation:'kf 1.2s ease-in-out infinite'}} /></div><style>{`@keyframes kf{0%,100%{opacity:.4;width:20%}50%{opacity:1;width:85%}}`}</style></div>}
-      {status==='error'&&<div style={{marginTop:10,padding:12,background:'#1a0000',border:`1px solid ${S.danger}33`,borderRadius:2}}><div style={{fontSize:10,color:S.danger,fontWeight:700,marginBottom:4}}>Search failed</div><div style={{fontSize:10,color:'#ff8080'}}>{errMsg}</div></div>}
-      {addedCount>0&&status==='idle'&&<div style={{marginTop:10,fontSize:11,color:S.accent}}>✓ {addedCount} record{addedCount!==1?'s':''} added.</div>}
-      {status==='done'&&results.length>0&&(
+      {st==='idle'&&!done&&<div style={{display:'flex',flexWrap:'wrap',gap:5}}>{SUGG.map(s=><button key={s} onClick={()=>setQ(s)} style={{background:S.border,color:S.muted,border:'none',borderRadius:20,cursor:'pointer',fontSize:9,letterSpacing:1,padding:'3px 10px',textTransform:'uppercase'}}>{s}</button>)}</div>}
+      {st==='loading'&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`}}><div style={{fontSize:10,color:S.muted,marginBottom:8}}>Searching…</div><div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden'}}><div style={{height:'100%',background:S.accent,animation:'kf 1.2s ease-in-out infinite'}} /></div><style>{`@keyframes kf{0%,100%{opacity:.4;width:20%}50%{opacity:1;width:85%}}`}</style></div>}
+      {st==='error'&&<div style={{marginTop:10,padding:12,background:'#1a0000',border:`1px solid ${S.danger}33`,borderRadius:2}}><div style={{fontSize:10,color:S.danger,fontWeight:700,marginBottom:4}}>Search failed</div><div style={{fontSize:10,color:'#ff8080'}}>{err}</div></div>}
+      {done>0&&st==='idle'&&<div style={{marginTop:10,fontSize:11,color:S.accent}}>✓ {done} record{done!==1?'s':''} added.</div>}
+      {st==='done'&&res.length>0&&(
         <div style={{marginTop:14}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
-            <span style={{fontSize:10,color:S.muted}}>Found <b style={{color:S.text}}>{results.length}</b> · <b style={{color:S.accent}}>{selCount}</b> selected</span>
-            <div style={{display:'flex',gap:6}}>
-              <button onClick={toggleAll} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{results.every((_,i)=>selected[i])?'Deselect All':'Select All'}</button>
-              <Btn ch={`Add ${selCount} to Store`} onClick={add} disabled={!selCount} />
-            </div>
+            <span style={{fontSize:10,color:S.muted}}>Found <b style={{color:S.text}}>{res.length}</b> · <b style={{color:S.accent}}>{sc}</b> selected</span>
+            <div style={{display:'flex',gap:6}}><button onClick={toggleAll} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{res.every((_,i)=>sel[i])?'Deselect All':'Select All'}</button><Btn ch={`Add ${sc}`} onClick={add} disabled={!sc} /></div>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:380,overflowY:'auto',borderRadius:2,border:`1px solid ${S.border}`}}>
-            {results.map((r,i)=>(
-              <label key={i} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',background:selected[i]?'#141400':S.surf,cursor:'pointer'}}>
-                <input type="checkbox" checked={!!selected[i]} onChange={()=>setSelected(s=>({...s,[i]:!s[i]}))} style={{accentColor:S.accent,width:14,height:14,flexShrink:0,cursor:'pointer'}} />
+            {res.map((r,i)=>(
+              <label key={i} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',background:sel[i]?'#141400':S.surf,cursor:'pointer'}}>
+                <input type="checkbox" checked={!!sel[i]} onChange={()=>setSel(s=>({...s,[i]:!s[i]}))} style={{accentColor:S.accent,width:14,height:14,flexShrink:0}} />
                 {r.coverUrl?<img src={coverSrc(r.coverUrl)} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} onError={e=>e.target.style.display='none'} />:<div style={{width:40,height:40,borderRadius:2,flexShrink:0,background:'linear-gradient(135deg,#1a1a2e,#16213e)'}} />}
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:12,fontWeight:700,color:selected[i]?S.text:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}{r.artist?` — ${r.artist}`:''}</div>
-                  <div style={{fontSize:9,color:S.muted,marginTop:1}}>{r.label} · {r.catalog} · {r.year||'—'}</div>
-                </div>
-                <span style={{fontSize:11,fontWeight:700,color:selected[i]?S.accent:S.muted,flexShrink:0}}>€{Number(r.price||18.99).toFixed(2)}</span>
+                <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:700,color:sel[i]?S.text:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}{r.artist?` — ${r.artist}`:''}</div><div style={{fontSize:9,color:S.muted,marginTop:1}}>{r.label} · {r.catalog} · {r.year||'—'}</div></div>
+                <span style={{fontSize:11,fontWeight:700,color:sel[i]?S.accent:S.muted,flexShrink:0}}>€{Number(r.price||18.99).toFixed(2)}</span>
               </label>
             ))}
           </div>
@@ -385,42 +393,39 @@ genre: one of ${GENRES}. price: 18.99 default.`,
 // ── URL IMPORTER ───────────────────────────────────────────────
 function UrlImporter({ onImport }) {
   const [url,setUrl]=useState(''); const [loading,setLoading]=useState(false); const [result,setResult]=useState(null); const [err,setErr]=useState('');
-  const run=async()=>{ if (!url.trim()) return; setLoading(true); setErr(''); setResult(null); try { const r=await claudeJSON(`Extract vinyl record data from a URL. Return ONLY JSON: ${RECORD_SCHEMA}. genre: ${GENRES}.`,`Extract from: ${url}`,true); setResult(r); } catch(e){setErr(e.message);} setLoading(false); };
-  const confirm=()=>{ onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'}); setResult(null); setUrl(''); };
+  const run=async()=>{if(!url.trim()) return;setLoading(true);setErr('');setResult(null);try{const r=await claudeJSON(`Extract vinyl record data from a URL. Return ONLY JSON: ${SCHEMA}. genre: ${GLIST}.`,`Extract from: ${url}`,true);setResult(r);}catch(e){setErr(e.message);}setLoading(false);};
+  const confirm=()=>{onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'});setResult(null);setUrl('');};
   return (
     <div>
-      <div style={{display:'flex',gap:8}}>
-        <input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&run()} placeholder="Paste product URL…" style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
-        <Btn ch={loading?'…':'Import'} onClick={run} disabled={loading||!url.trim()} />
-      </div>
+      <div style={{display:'flex',gap:8}}><input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&run()} placeholder="Paste product URL…" style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} /><Btn ch={loading?'…':'Import'} onClick={run} disabled={loading||!url.trim()} /></div>
       {err&&<div style={{fontSize:10,color:S.danger,marginTop:8}}>{err}</div>}
-      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.catalog} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
+      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
     </div>
   );
 }
 
 // ── BARCODE IMPORTER ───────────────────────────────────────────
 function BarcodeImporter({ onImport }) {
-  const [barcode,setBarcode]=useState(''); const [cameraOn,setCameraOn]=useState(false); const [loading,setLoading]=useState(false); const [result,setResult]=useState(null); const [err,setErr]=useState(''); const [camErr,setCamErr]=useState('');
-  const videoRef=useRef(null); const streamRef=useRef(null); const activeRef=useRef(false);
-  const lookup=async(code)=>{ setLoading(true); setErr(''); setResult(null); try { const r=await claudeJSON(`Find vinyl by barcode. Return ONLY JSON: ${RECORD_SCHEMA}. genre: ${GENRES}.`,`Find vinyl with barcode: ${code}`,true); setResult({...r,barcode:code}); } catch(e){setErr(e.message);} setLoading(false); };
-  const startCamera=async()=>{ setCamErr(''); if (!('BarcodeDetector' in window)){setCamErr('Camera needs Chrome/Edge/Safari 17+.');return;} try { const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); streamRef.current=stream; setCameraOn(true); activeRef.current=true; setTimeout(async()=>{ if (!videoRef.current) return; videoRef.current.srcObject=stream; await videoRef.current.play().catch(()=>{}); const det=new window.BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128']}); const scan=async()=>{ if (!activeRef.current) return; try { const codes=await det.detect(videoRef.current); if (codes.length){stopCamera();setBarcode(codes[0].rawValue);lookup(codes[0].rawValue);return;} } catch {} requestAnimationFrame(scan); }; requestAnimationFrame(scan); },300); } catch {setCamErr('Could not access camera.');} };
-  const stopCamera=()=>{ activeRef.current=false; setCameraOn(false); if (streamRef.current){streamRef.current.getTracks().forEach(t=>t.stop());streamRef.current=null;} };
-  useEffect(()=>()=>stopCamera(),[]);
-  const confirm=()=>{ onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'}); setResult(null); setBarcode(''); };
+  const [bc,setBc]=useState(''); const [cam,setCam]=useState(false); const [loading,setLoading]=useState(false); const [result,setResult]=useState(null); const [err,setErr]=useState(''); const [camErr,setCamErr]=useState('');
+  const vRef=useRef(null); const sRef=useRef(null); const aRef=useRef(false);
+  const lookup=async(code)=>{setLoading(true);setErr('');setResult(null);try{const r=await claudeJSON(`Find vinyl by barcode. Return ONLY JSON: ${SCHEMA}. genre: ${GLIST}.`,`Find vinyl with barcode: ${code}`,true);setResult({...r,barcode:code});}catch(e){setErr(e.message);}setLoading(false);};
+  const startCam=async()=>{setCamErr('');if(!('BarcodeDetector'in window)){setCamErr('Needs Chrome/Edge/Safari 17+.');return;}try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});sRef.current=s;setCam(true);aRef.current=true;setTimeout(async()=>{if(!vRef.current) return;vRef.current.srcObject=s;await vRef.current.play().catch(()=>{});const d=new window.BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128']});const scan=async()=>{if(!aRef.current) return;try{const c=await d.detect(vRef.current);if(c.length){stopCam();setBc(c[0].rawValue);lookup(c[0].rawValue);return;}}catch{}requestAnimationFrame(scan);};requestAnimationFrame(scan);},300);}catch{setCamErr('Could not access camera.');}};
+  const stopCam=()=>{aRef.current=false;setCam(false);if(sRef.current){sRef.current.getTracks().forEach(t=>t.stop());sRef.current=null;}};
+  useEffect(()=>()=>stopCam(),[]);
+  const confirm=()=>{onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'});setResult(null);setBc('');};
   return (
     <div>
       <div style={{display:'flex',gap:8}}>
-        <div style={{position:'relative',flex:1}}><span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:S.muted,pointerEvents:'none'}}>▥</span><input value={barcode} onChange={e=>setBarcode(e.target.value)} onKeyDown={e=>e.key==='Enter'&&barcode.trim()&&lookup(barcode.trim())} placeholder="Scan or type EAN/UPC…" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px 8px 28px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} /></div>
-        <Btn ch={loading?'…':'Lookup'} onClick={()=>barcode.trim()&&lookup(barcode.trim())} disabled={loading||!barcode.trim()} />
-        <Btn ch="📷" variant="ghost" onClick={cameraOn?stopCamera:startCamera} />
+        <div style={{position:'relative',flex:1}}><span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:S.muted,pointerEvents:'none'}}>▥</span><input value={bc} onChange={e=>setBc(e.target.value)} onKeyDown={e=>e.key==='Enter'&&bc.trim()&&lookup(bc.trim())} placeholder="Scan or type EAN/UPC…" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px 8px 28px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} /></div>
+        <Btn ch={loading?'…':'Lookup'} onClick={()=>bc.trim()&&lookup(bc.trim())} disabled={loading||!bc.trim()} />
+        <Btn ch="📷" variant="ghost" onClick={cam?stopCam:startCam} />
       </div>
-      {cameraOn&&<div style={{marginTop:10,position:'relative',borderRadius:3,overflow:'hidden',border:`1px solid ${S.border}`}}><video ref={videoRef} style={{width:'100%',maxHeight:220,objectFit:'cover',display:'block'}} muted playsInline /><div style={{position:'absolute',inset:0,pointerEvents:'none'}}><div style={{position:'absolute',left:'10%',right:'10%',top:'50%',height:2,background:`${S.accent}88`,animation:'scan 1.6s ease-in-out infinite'}} /></div><div style={{position:'absolute',bottom:0,left:0,right:0,padding:'8px 12px',background:'rgba(0,0,0,0.7)',display:'flex',justifyContent:'space-between'}}><span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Scanning…</span><button onClick={stopCamera} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 8px',borderRadius:2}}>Cancel</button></div><style>{`@keyframes scan{0%,100%{top:25%}50%{top:70%}}`}</style></div>}
+      {cam&&<div style={{marginTop:10,position:'relative',borderRadius:3,overflow:'hidden',border:`1px solid ${S.border}`}}><video ref={vRef} style={{width:'100%',maxHeight:220,objectFit:'cover',display:'block'}} muted playsInline /><div style={{position:'absolute',inset:0,pointerEvents:'none'}}><div style={{position:'absolute',left:'10%',right:'10%',top:'50%',height:2,background:`${S.accent}88`,animation:'scan 1.6s ease-in-out infinite'}} /></div><div style={{position:'absolute',bottom:0,left:0,right:0,padding:'8px 12px',background:'rgba(0,0,0,0.7)',display:'flex',justifyContent:'space-between'}}><span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Scanning…</span><button onClick={stopCam} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 8px',borderRadius:2}}>Cancel</button></div><style>{`@keyframes scan{0%,100%{top:25%}50%{top:70%}}`}</style></div>}
       {camErr&&<div style={{fontSize:10,color:S.danger,marginTop:6}}>{camErr}</div>}
       <div style={{marginTop:6,fontSize:9,color:S.muted}}>💡 USB scanner? Click input and scan.</div>
       {err&&<div style={{fontSize:10,color:S.danger,marginTop:8}}>{err}</div>}
       {loading&&<div style={{fontSize:10,color:S.muted,marginTop:8}}>Looking up…</div>}
-      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.catalog} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
+      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
     </div>
   );
 }
@@ -448,10 +453,7 @@ function EditModal({ record, onSave, onClose }) {
         <div style={{padding:'0 24px 24px'}}>
           <div style={{display:'flex',gap:14,marginBottom:20,alignItems:'flex-start'}}>
             <div style={{width:80,height:80,borderRadius:2,flexShrink:0,background:`linear-gradient(${f.g})`,backgroundImage:coverSrc(f.coverUrl)?`url(${coverSrc(f.coverUrl)})`:'none',backgroundSize:'cover',backgroundPosition:'center'}} />
-            <div style={{flex:1}}>
-              <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Cover Image URL</div>
-              <input value={f.coverUrl||''} onChange={e=>set('coverUrl',e.target.value)} placeholder="https://…" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
-            </div>
+            <div style={{flex:1}}><div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Cover Image URL</div><input value={f.coverUrl||''} onChange={e=>set('coverUrl',e.target.value)} placeholder="https://…" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} /></div>
           </div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 16px'}}>
             <div>{inp('Title','title')}</div><div>{inp('Artist','artist')}</div>
@@ -460,16 +462,9 @@ function EditModal({ record, onSave, onClose }) {
             <div>{inp('Price (€)','price','number')}</div><div>{inp('Stock','stock','number')}</div>
           </div>
           {inp('Description','desc','textarea')}
+          <div style={{marginBottom:20}}><div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Audio Snippet URL</div><input value={f.audio||''} onChange={e=>set('audio',e.target.value)} placeholder="https://… .mp3 or .ogg" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />{f.audio&&<AudioPlayer src={f.audio} />}</div>
           <div style={{marginBottom:20}}>
-            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Audio Snippet URL</div>
-            <input value={f.audio||''} onChange={e=>set('audio',e.target.value)} placeholder="https://… .mp3 or .ogg" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
-            {f.audio&&<AudioPlayer src={f.audio} />}
-          </div>
-          <div style={{marginBottom:20}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-              <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Tracklist</div>
-              <button onClick={()=>set('tracks',[...(f.tracks||[]),{t:'',d:''}])} style={{background:S.border,border:'none',color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1,textTransform:'uppercase',padding:'3px 10px',borderRadius:2}}>+ Track</button>
-            </div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Tracklist</div><button onClick={()=>set('tracks',[...(f.tracks||[]),{t:'',d:''}])} style={{background:S.border,border:'none',color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1,textTransform:'uppercase',padding:'3px 10px',borderRadius:2}}>+ Track</button></div>
             {(f.tracks||[]).map((t,i)=>(
               <div key={i} style={{display:'flex',gap:8,marginBottom:6}}>
                 <input value={t.t} onChange={e=>set('tracks',f.tracks.map((x,j)=>j===i?{...x,t:e.target.value}:x))} placeholder="Track title" style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'6px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
@@ -478,10 +473,7 @@ function EditModal({ record, onSave, onClose }) {
               </div>
             ))}
           </div>
-          <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
-            <Btn ch="Cancel" variant="ghost" onClick={onClose} />
-            <Btn ch="Save Changes" onClick={()=>{onSave(f);onClose();}} />
-          </div>
+          <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}><Btn ch="Cancel" variant="ghost" onClick={onClose} /><Btn ch="Save Changes" onClick={()=>{onSave(f);onClose();}} /></div>
         </div>
       </div>
     </div>
@@ -491,7 +483,7 @@ function EditModal({ record, onSave, onClose }) {
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 function AudioBatchUploader({ records, onMatch }) {
   const [matches,setMatches]=useState([]); const [unmatched,setUnmatched]=useState([]); const inputRef=useRef(null); const [drag,setDrag]=useState(false);
-  const handleFiles=(files)=>{ const matched=[],unmat=[],updates={}; Array.from(files).forEach(file=>{ if (!/\.(mp3|ogg|wav|flac|aac)$/i.test(file.name)) return; const base=file.name.replace(/\.[^.]+$/,'').trim().toLowerCase(); const record=records.find(r=>r.catalog?.toLowerCase().replace(/\s/g,'')=== base.replace(/\s/g,'')); const url=URL.createObjectURL(file); if (record){updates[record.id]=url;matched.push({file:file.name,title:record.title,catalog:record.catalog});} else unmat.push(file.name); }); setMatches(matched); setUnmatched(unmat); onMatch(updates); };
+  const handleFiles=(files)=>{const matched=[],unmat=[],updates={};Array.from(files).forEach(file=>{if(!/\.(mp3|ogg|wav|flac|aac)$/i.test(file.name)) return;const base=file.name.replace(/\.[^.]+$/,'').trim().toLowerCase();const record=records.find(r=>r.catalog?.toLowerCase().replace(/\s/g,'')=== base.replace(/\s/g,''));const url=URL.createObjectURL(file);if(record){updates[record.id]=url;matched.push({file:file.name,title:record.title,catalog:record.catalog});}else unmat.push(file.name);});setMatches(matched);setUnmatched(unmat);onMatch(updates);};
   return (
     <div style={{marginBottom:28}}>
       <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>Batch Audio Upload</div>
@@ -521,7 +513,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
-        <div style={{display:'flex',gap:6,marginBottom:18}}>{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}</div>
+        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}</div>
         {tab==='bulk'&&<BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
         {tab==='barcode'&&<BarcodeImporter onImport={onAdd} />}
         {tab==='url'&&<UrlImporter onImport={onAdd} />}
@@ -530,10 +522,10 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
       <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>Inventory</div>
       <div style={{display:'flex',flexDirection:'column',gap:1}}>
         {records.map(r=>(
-          <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,background:S.surf,padding:'10px 14px',borderRadius:2}}>
+          <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,background:S.surf,padding:'10px 14px',borderRadius:2,flexWrap:'wrap'}}>
             <div style={{width:40,height:40,borderRadius:2,background:`linear-gradient(${r.g})`,backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none',backgroundSize:'cover',flexShrink:0}} />
-            <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}</div><div style={{fontSize:9,color:S.muted}}>{r.artist} · {r.label} · {r.catalog}</div></div>
-            <div style={{fontSize:12,color:S.accent,fontWeight:800,width:56,textAlign:'right'}}>€{r.price.toFixed(2)}</div>
+            <div style={{flex:1,minWidth:120}}><div style={{fontSize:12,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}</div><div style={{fontSize:9,color:S.muted}}>{r.artist} · {r.label}</div></div>
+            <div style={{fontSize:12,color:S.accent,fontWeight:800}}>€{r.price.toFixed(2)}</div>
             <div style={{display:'flex',alignItems:'center',gap:6}}>
               <button onClick={()=>adj(r.id,-1)} style={{width:22,height:22,borderRadius:2,background:S.border,border:'none',cursor:'pointer',color:S.text,fontSize:14}}>-</button>
               <span style={{fontSize:13,fontWeight:700,color:r.stock===0?S.danger:r.stock<=3?'#ff8800':S.text,width:24,textAlign:'center'}}>{r.stock}</span>
@@ -548,6 +540,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
   );
 }
 
+// ── LOGIN ──────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
   const [pw,setPw]=useState(''); const [err,setErr]=useState(false);
   const attempt=()=>{if(pw==='waxlab2024') onLogin(); else {setErr(true);setTimeout(()=>setErr(false),1500);}};
@@ -558,7 +551,6 @@ function LoginScreen({ onLogin }) {
         <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&attempt()} placeholder="Password" style={{width:'100%',background:S.bg,border:`1px solid ${err?S.danger:S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
         <Btn ch="Enter" onClick={attempt} full />
         {err&&<div style={{fontSize:10,color:S.danger,marginTop:8,textAlign:'center'}}>Incorrect password</div>}
-        <div style={{fontSize:9,color:S.muted,marginTop:12,textAlign:'center'}}>Default: waxlab2024</div>
       </div>
     </div>
   );
@@ -566,35 +558,41 @@ function LoginScreen({ onLogin }) {
 
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
-  const [records,setRecords]     = useState(RECORDS);
+  const [records,setRecords]   = useState(RECORDS);
   const [shopifyLoaded,setShopifyLoaded] = useState(false);
   const [shopifyErr,setShopifyErr]       = useState('');
-  const [hasMore,setHasMore]     = useState(false);
-  const [cursor,setCursor]       = useState(null);
-  const [loadingMore,setLoadingMore]     = useState(false);
-  const [cart,setCart]           = useState([]);
-  const [cartOpen,setCartOpen]   = useState(false);
-  const [selected,setSelected]   = useState(null);
-  const [filters,setFilters]     = useState({genre:null,label:null,year:null,month:null});
-  const [search,setSearch]       = useState('');
-  const [page,setPage]           = useState('shop');
-  const [authed,setAuthed]       = useState(false);
+  const [hasMore,setHasMore]   = useState(false);
+  const [cursor,setCursor]     = useState(null);
+  const [loadingMore,setLoadingMore] = useState(false);
+  const [cart,setCart]         = useState([]);
+  const [cartOpen,setCartOpen] = useState(false);
+  const [selected,setSelected] = useState(null);
+  const [filters,setFilters]   = useState({genre:null,label:null,year:null,month:null});
+  const [search,setSearch]     = useState('');
+  const [page,setPage]         = useState('shop');
+  const [authed,setAuthed]     = useState(false);
+
+  // ── Secret admin access: //#admin in URL or Shift+Ctrl+A ──
+  useEffect(()=>{
+    if (window.location.hash==='#admin') setPage('login');
+    const handler = (e) => {
+      if (e.shiftKey && e.ctrlKey && e.key==='A') setPage(p=>p==='shop'?'login':'shop');
+    };
+    window.addEventListener('keydown', handler);
+    return ()=>window.removeEventListener('keydown', handler);
+  },[]);
 
   useEffect(()=>{
     fetchShopifyProducts()
       .then(({ products, hasNextPage, endCursor })=>{
-        if (products.length){ setRecords(products); setShopifyLoaded(true); setHasMore(hasNextPage); setCursor(endCursor); }
+        if(products.length){ setRecords(products); setShopifyLoaded(true); setHasMore(hasNextPage); setCursor(endCursor); }
       })
       .catch(e=>setShopifyErr(e.message));
   },[]);
 
-  const loadMore = async () => {
-    if (!hasMore||loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const { products, hasNextPage, endCursor } = await fetchShopifyProducts(cursor);
-      setRecords(r=>[...r,...products]); setHasMore(hasNextPage); setCursor(endCursor);
-    } catch(e){ setShopifyErr(e.message); }
+  const loadMore=async()=>{
+    if(!hasMore||loadingMore) return; setLoadingMore(true);
+    try { const {products,hasNextPage,endCursor}=await fetchShopifyProducts(cursor); setRecords(r=>[...r,...products]); setHasMore(hasNextPage); setCursor(endCursor); } catch(e){setShopifyErr(e.message);}
     setLoadingMore(false);
   };
 
@@ -610,23 +608,24 @@ export default function App() {
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
+  // ── Mobile-responsive nav ──────────────────────────────────
   const Nav=({children})=>(
-    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 24px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-      <Logo scale={0.72} onClick={()=>setPage('shop')} />
+    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+      <Logo scale={0.65} onClick={()=>setPage('shop')} />
       {children}
     </nav>
   );
 
-  if (page==='login') return (
+  if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2}}>← Shop</button></Nav>
+      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
       <LoginScreen onLogin={()=>{setAuthed(true);setPage('admin');}} />
     </div>
   );
 
-  if (page==='admin') return (
+  if(page==='admin') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2}}>← Shop</button></Nav>
+      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
       <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setAuthed(false);setPage('shop');}} />
     </div>
   );
@@ -634,26 +633,30 @@ export default function App() {
   return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 11px',fontSize:11,fontFamily:'inherit',outline:'none',width:160}} />
-          <button onClick={()=>authed?setPage('admin'):setPage('login')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 11px',borderRadius:2}}>Admin</button>
-          <button onClick={()=>setCartOpen(true)} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 14px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase'}}>Cart{cartCount>0?` (${cartCount})`:''}</button>
+        <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…"
+            style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
+          <button onClick={()=>setCartOpen(true)} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
+            {cartCount>0?`Cart (${cartCount})`:'Cart'}
+          </button>
         </div>
       </Nav>
 
-      <div style={{padding:'72px 24px 56px',textAlign:'left',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
-        <Logo scale={2.2} />
-        <p style={{color:S.muted,fontSize:11,margin:'20px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
+      {/* HERO */}
+      <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
+        <Logo scale={window.innerWidth<480?1.4:2.2} />
+        <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
       </div>
 
-      <div style={{maxWidth:1100,margin:'0 auto',padding:'32px 20px'}}>
+      {/* SHOP */}
+      <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} />
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,marginBottom:16,textTransform:'uppercase',display:'flex',alignItems:'center',gap:10}}>
           {filtered.length} record{filtered.length!==1?'s':''}
           {shopifyLoaded&&<span style={{color:S.accent}}>● Live from Shopify</span>}
           {shopifyErr&&<span style={{color:S.danger}}>● {shopifyErr}</span>}
         </div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(190px,1fr))',gap:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
           {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={setSelected} onAdd={addToCart} />)}
         </div>
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
