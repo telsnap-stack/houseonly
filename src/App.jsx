@@ -550,7 +550,7 @@ function CsvEnricher() {
       const title = String(row.Title || '');
       const artist = String(row.Artist || '');
       setProgress({ done:i, total:rows.length, current:title });
-      const ean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+/i, '').trim();
+      const ean = row.EAN ? String(Math.round(Number(row.EAN))) : '';
       const imageUrl = await fetchCoverArt(title, artist, ean);
       // Clean EAN — remove scientific notation and trailing .0
       const eanClean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+\d+/i, s => '');
