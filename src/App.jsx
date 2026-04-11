@@ -202,7 +202,7 @@ function RecordCard({ r, onOpen, onAdd }) {
       <div style={{ padding:'12px 12px 14px' }}>
         <div style={{ fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13,fontWeight:700,color:S.text,lineHeight:1.3,marginBottom:2 }}>{r.title}</div>
-        <div style={{ fontSize:11,color:S.muted,marginBottom:10 }}>{r.artist}</div>
+        <div style={{ fontSize:11,color:S.muted,marginBottom:10 }}>{r.artist||r.vendor||''}</div>
         <div style={{ display:'flex',alignItems:'center',justifyContent:'space-between' }}>
           <span style={{ fontSize:15,fontWeight:800,color:S.accent }}>€{r.price.toFixed(2)}</span>
           <button onClick={e=>{e.stopPropagation();onAdd(r);}} disabled={r.stock===0} style={{ background:hov&&r.stock>0?S.accent:S.border,color:hov&&r.stock>0?'#080808':S.muted,border:'none',borderRadius:2,cursor:r.stock===0?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,padding:'5px 10px',textTransform:'uppercase',transition:'all 0.15s',opacity:r.stock===0?0.4:1 }}>{r.stock===0?'Sold Out':'+ Cart'}</button>
