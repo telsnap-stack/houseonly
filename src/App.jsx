@@ -497,32 +497,18 @@ function EditModal({ record, onSave, onClose }) {
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 
 // ── CSV ENRICHER ───────────────────────────────────────────────
-// Two-pass Discogs lookup: EAN barcode first, then title+artist fallback
+// Discogs proxy via Cloudflare Worker (bypasses CORS)
+const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
+
 async function fetchCoverArt(title, artist, ean) {
-  const getImage = (data) => {
-    const r = data.results?.[0];
-    return r?.cover_image && !r.cover_image.includes('spacer') ? r.cover_image : '';
-  };
   try {
-    // Pass 1: EAN barcode (exact match)
-    if (ean) {
-      const r = await fetch(
-        `https://api.discogs.com/database/search?barcode=${encodeURIComponent(String(ean).replace(/\.0$/, ''))}&type=release&per_page=1`,
-        { headers: { 'User-Agent': 'HouseOnly/1.0 houseonly.store', 'Authorization': 'Discogs key=pPJVMuHbSHqiJPXRGJuH, secret=LwEFVJwuJhJLjuNxViSpoBCGkLWwxqEF' } }
-      );
-      const d = await r.json();
-      const img = getImage(d);
-      if (img) return img;
-    }
-    // Pass 2: title + artist search
-    const clean = (s) => String(s).replace(/\(.*?\)/g,'').replace(/feat\.?.*/i,'').trim();
-    const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
-    const r2 = await fetch(
-      `https://api.discogs.com/database/search?q=${q}&type=release&per_page=1`,
-      { headers: { 'User-Agent': 'HouseOnly/1.0 houseonly.store', 'Authorization': 'Discogs key=pPJVMuHbSHqiJPXRGJuH, secret=LwEFVJwuJhJLjuNxViSpoBCGkLWwxqEF' } }
-    );
-    const d2 = await r2.json();
-    return getImage(d2);
+    const params = new URLSearchParams();
+    if (ean) params.set('ean', String(ean).replace(/\.0$/, '').trim());
+    if (title) params.set('title', title);
+    if (artist) params.set('artist', artist);
+    const r = await fetch(`${WORKER_URL}?${params.toString()}`);
+    const d = await r.json();
+    return d.imageUrl || '';
   } catch { return ''; }
 }
 
