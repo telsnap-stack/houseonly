@@ -5,12 +5,7 @@ const S = {
   text:'#efefef', muted:'#585858', accent:'#c8ff00', danger:'#ff4040',
 };
 
-const RECORDS = [
-  { id:1, title:"Late Night Ritual", artist:"Larry Heard", label:"Trax", genre:"Deep House", year:2024, month:3, price:19.99, catalog:"TX-312", stock:8, g:"135deg,#0d0d1a,#1a0d2e", tracks:[{t:"Can You Feel It",d:"8:10"},{t:"Mystery of Love",d:"6:30"}], desc:"A timeless spiritual journey through the deepest Chicago sound.", coverUrl:null, audio:null },
-  { id:2, title:"Warehouse Sessions Vol.3", artist:"DJ Sneak", label:"Defected", genre:"Chicago House", year:2024, month:2, price:21.99, catalog:"DFX-091", stock:3, g:"135deg,#1a0a00,#3d1500", tracks:[{t:"Snake Charmer",d:"7:22"},{t:"Ibiza Hustle",d:"6:15"}], desc:"Timeless warehouse energy from the master himself.", coverUrl:null, audio:null },
-  { id:3, title:"Acid Rain EP", artist:"Phuture", label:"Trax", genre:"Acid House", year:2024, month:1, price:17.99, catalog:"TX-308", stock:12, g:"135deg,#001800,#003d00", tracks:[{t:"Acid Trax",d:"10:00"},{t:"Your Only Friend",d:"8:44"}], desc:"The original acid house sound, remastered and re-pressed.", coverUrl:null, audio:null },
-  { id:4, title:"Solar System", artist:"Moodymann", label:"KDJ", genre:"Soulful House", year:2024, month:3, price:22.99, catalog:"KDJ-043", stock:5, g:"135deg,#1a1500,#4d3800", tracks:[{t:"Solar",d:"9:12"},{t:"Shades",d:"7:05"}], desc:"Moodymann at his most introspective and soulful.", coverUrl:null, audio:null },
-];
+// Shopify is the source of truth — no hardcoded fallback records
 
 // ── SHOPIFY ────────────────────────────────────────────────────
 const SHOPIFY = {
@@ -78,29 +73,19 @@ async function shopifyCheckout(cartItems) {
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
 
-  console.log('[HO] lines:', JSON.stringify(lines));
-
   if (!lines.length) {
-    throw new Error('No valid Shopify variant IDs in cart. Check console.');
+    throw new Error('No items in cart.');
   }
 
-  let data;
-  try {
-    data = await shopifyQuery(
-      `mutation cartCreate($input: CartInput!) {
-        cartCreate(input: $input) {
-          cart { checkoutUrl }
-          userErrors { field message }
-        }
-      }`,
-      { input: { lines } }
-    );
-  } catch(e) {
-    console.error('[HO] shopifyQuery error:', e);
-    throw e;
-  }
-
-  console.log('[HO] response:', JSON.stringify(data));
+  const data = await shopifyQuery(
+    `mutation cartCreate($input: CartInput!) {
+      cartCreate(input: $input) {
+        cart { checkoutUrl }
+        userErrors { field message }
+      }
+    }`,
+    { input: { lines } }
+  );
 
   const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
@@ -108,7 +93,7 @@ async function shopifyCheckout(cartItems) {
   const rawUrl = data.cartCreate?.cart?.checkoutUrl;
   if (!rawUrl) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
 
-  window.location.href = rawUrl.replace('houseonly.store', 'house-only-2.myshopify.com');
+  window.open(rawUrl.replace('houseonly.store', 'house-only-2.myshopify.com'), '_blank');
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
@@ -586,7 +571,7 @@ function LoginScreen({ onLogin }) {
 
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
-  const [records,setRecords]   = useState(RECORDS);
+  const [records,setRecords]   = useState([]);
   const [shopifyLoaded,setShopifyLoaded] = useState(false);
   const [shopifyErr,setShopifyErr]       = useState('');
   const [hasMore,setHasMore]   = useState(false);
@@ -598,7 +583,6 @@ export default function App() {
   const [filters,setFilters]   = useState({genre:null,label:null,year:null,month:null});
   const [search,setSearch]     = useState('');
   const [page,setPage]         = useState('shop');
-  const [authed,setAuthed]     = useState(false);
 
   useEffect(()=>{
     if (window.location.hash==='#admin') setPage('login');
@@ -645,14 +629,14 @@ export default function App() {
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
-      <LoginScreen onLogin={()=>{setAuthed(true);setPage('admin');}} />
+      <LoginScreen onLogin={()=>{setPage('admin');}} />
     </div>
   );
 
   if(page==='admin') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
-      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setAuthed(false);setPage('shop');}} />
+      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setPage('shop');}} />
     </div>
   );
 
