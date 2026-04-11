@@ -78,26 +78,35 @@ async function shopifyCheckout(cartItems) {
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
 
+  console.log('[HO] lines:', JSON.stringify(lines));
+
   if (!lines.length) {
-    alert('No valid Shopify variant IDs found in cart.');
-    return;
+    throw new Error('No valid Shopify variant IDs in cart. Check console.');
   }
 
-  const data = await shopifyQuery(
-    `mutation cartCreate($input: CartInput!) {
-      cartCreate(input: $input) {
-        cart { checkoutUrl }
-        userErrors { field message }
-      }
-    }`,
-    { input: { lines } }
-  );
+  let data;
+  try {
+    data = await shopifyQuery(
+      `mutation cartCreate($input: CartInput!) {
+        cartCreate(input: $input) {
+          cart { checkoutUrl }
+          userErrors { field message }
+        }
+      }`,
+      { input: { lines } }
+    );
+  } catch(e) {
+    console.error('[HO] shopifyQuery error:', e);
+    throw e;
+  }
+
+  console.log('[HO] response:', JSON.stringify(data));
 
   const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
 
   const url = data.cartCreate?.cart?.checkoutUrl;
-  if (!url) throw new Error('No checkout URL returned from Shopify.');
+  if (!url) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
 
   window.location.href = url;
 }
