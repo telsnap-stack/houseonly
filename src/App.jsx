@@ -552,24 +552,57 @@ function CsvEnricher() {
       setProgress({ done:i, total:rows.length, current:title });
       const ean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+/i, '').trim();
       const imageUrl = await fetchCoverArt(title, artist, ean);
-      // Map to Shopify CSV columns
+      // Clean EAN — remove scientific notation and trailing .0
+      const eanClean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+\d+/i, s => '');
+      const eanFinal = row.EAN ? String(Math.round(Number(row.EAN))) : '';
+      // Format type from ArtGr
+      const artGr = String(row.ArtGr || '12');
+      const format = artGr.includes('LP') ? 'LP' : artGr.includes('7') ? '7"' : '12"';
+      // Handle: lowercase ArtNo
+      const handle = String(row.ArtNo || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
       result.push({
-        'Handle': String(row.ArtNo || '').toLowerCase().replace(/[^a-z0-9]+/g,'-'),
+        'Handle': handle,
         'Title': title,
-        'Body (HTML)': '',
+        'Body (HTML)': '<p></p>',
         'Vendor': artist,
+        'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+        'Type': '',
         'Tags': 'vinyl',
-        'Published': 'true',
+        'Published': 'TRUE',
+        'Option1 Name': 'Title',
+        'Option1 Value': 'Default Title',
+        'Option1 Linked To': '',
+        'Option2 Name': '',
+        'Option2 Value': '',
+        'Option2 Linked To': '',
+        'Option3 Name': '',
+        'Option3 Value': '',
+        'Option3 Linked To': '',
         'Variant SKU': String(row.ArtNo || ''),
-        'Variant Price': String(row.UnitPrice || '18.99'),
+        'Variant Grams': '180',
+        'Variant Inventory Tracker': '',
+        'Variant Inventory Qty': String(row.Qty || '1'),
         'Variant Inventory Policy': 'deny',
         'Variant Fulfillment Service': 'manual',
-        'Variant Requires Shipping': 'true',
-        'Variant Taxable': 'false',
-        'Variant Barcode': String(row.EAN || ''),
+        'Variant Price': String(row.UnitPrice || '18.99'),
+        'Variant Compare At Price': '',
+        'Variant Requires Shipping': 'TRUE',
+        'Variant Taxable': 'FALSE',
+        'Unit Price Total Measure': '',
+        'Unit Price Total Measure Unit': '',
+        'Unit Price Base Measure': '',
+        'Unit Price Base Measure Unit': '',
+        'Variant Barcode': eanFinal,
         'Image Src': imageUrl,
-        'Image Alt Text': `${title} - ${artist}`,
-        'Gift Card': 'false',
+        'Image Position': imageUrl ? '1' : '',
+        'Image Alt Text': imageUrl ? `${title} - ${artist}` : '',
+        'Gift Card': 'FALSE',
+        'SEO Title': '',
+        'SEO Description': '',
+        'Variant Image': '',
+        'Variant Weight Unit': 'kg',
+        'Variant Tax Code': '',
+        'Cost per item': '',
         'Status': 'active',
       });
       await new Promise(r => setTimeout(r, 400));
