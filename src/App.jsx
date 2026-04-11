@@ -524,12 +524,19 @@ function CsvEnricher() {
 
   const handleFile = async (f) => {
     setStatus('parsing'); setRows([]); setEnriched([]);
-    // Use SheetJS to read Excel
+    // Use SheetJS to read Excel (loaded via CDN script tag)
     const buf = await f.arrayBuffer();
-    const { read, utils } = await import('https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs');
-    const wb = read(buf);
+    if (!window.XLSX) {
+      await new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+        s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      });
+    }
+    const wb = window.XLSX.read(buf);
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const raw = utils.sheet_to_json(ws, { defval:'' });
+    const raw = window.XLSX.utils.sheet_to_json(ws, { defval:'' });
     // Filter out blank rows
     const clean = raw.filter(r => r.ArtNo || r.Title);
     setRows(clean);
@@ -581,8 +588,7 @@ function CsvEnricher() {
       headers.join(','),
       ...enriched.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
-    const blob = new Blob([lines.join('
-')], { type:'text/csv' });
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'shopify_import.csv';
