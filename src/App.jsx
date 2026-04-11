@@ -72,31 +72,31 @@ async function fetchShopifyProducts(cursor=null) {
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
-// ── CHECKOUT — uses checkoutCreate mutation for a proper webUrl ──
+// ── CHECKOUT — uses Cart API (modern Shopify Storefront API) ──
 async function shopifyCheckout(cartItems) {
-  const lineItems = cartItems
+  const lines = cartItems
     .filter(i => i.shopifyVariantId)
-    .map(i => ({ variantId: i.shopifyVariantId, quantity: i.qty }));
+    .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
 
-  if (!lineItems.length) {
+  if (!lines.length) {
     alert('No valid Shopify variant IDs found in cart.');
     return;
   }
 
   const data = await shopifyQuery(
-    `mutation checkoutCreate($input: CheckoutCreateInput!) {
-      checkoutCreate(input: $input) {
-        checkout { webUrl }
-        checkoutUserErrors { field message }
+    `mutation cartCreate($input: CartInput!) {
+      cartCreate(input: $input) {
+        cart { checkoutUrl }
+        userErrors { field message }
       }
     }`,
-    { input: { lineItems } }
+    { input: { lines } }
   );
 
-  const errs = data.checkoutCreate?.checkoutUserErrors;
+  const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
 
-  const url = data.checkoutCreate?.checkout?.webUrl;
+  const url = data.cartCreate?.cart?.checkoutUrl;
   if (!url) throw new Error('No checkout URL returned from Shopify.');
 
   window.location.href = url;
