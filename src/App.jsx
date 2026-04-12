@@ -31,7 +31,8 @@ function parseProduct({ node }) {
   const tags = node.tags || [];
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase())) || 'Deep House';
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
-  const label = tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t)) || '';
+  const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
   const bodyHtml = node.descriptionHtml || '';
   // Strip script tags first so JSON doesn't bleed into description
   const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -635,7 +636,7 @@ function ZipImporter() {
           'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl',
           'Type': '',
-          'Tags': ['vinyl', label, genre, String(year)].filter(Boolean).join(', '),
+          'Tags': ['vinyl', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE',
           'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
