@@ -590,7 +590,7 @@ function ZipImporter() {
         const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
         const label  = String(row.ArtGr  || row.Label || row.label || '');
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
-        const price  = String(row.UnitPrice || '18.99');
+        const price  = String((parseFloat(row.UnitPrice || 18.99) * 1.60).toFixed(2));
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
 
@@ -951,7 +951,7 @@ function CsvEnricher() {
         'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
         'Variant SKU':catno,'Variant Grams':'180','Variant Inventory Tracker':'',
         'Variant Inventory Qty':String(row.Qty||'1'),'Variant Inventory Policy':'deny',
-        'Variant Fulfillment Service':'manual','Variant Price':String(row.UnitPrice||'18.99'),
+        'Variant Fulfillment Service':'manual','Variant Price':String((parseFloat(row.UnitPrice||18.99)*1.60).toFixed(2)),
         'Variant Compare At Price':'','Variant Requires Shipping':'TRUE','Variant Taxable':'FALSE',
         'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
         'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
