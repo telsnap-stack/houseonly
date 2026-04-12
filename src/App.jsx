@@ -5,8 +5,6 @@ const S = {
   text:'#efefef', muted:'#585858', accent:'#c8ff00', danger:'#ff4040',
 };
 
-// Shopify is the source of truth — no hardcoded fallback records
-
 // ── SHOPIFY ────────────────────────────────────────────────────
 const SHOPIFY = {
   domain: 'house-only-2.myshopify.com',
@@ -24,7 +22,6 @@ async function shopifyQuery(query, variables={}) {
   return data.data;
 }
 
-// Genre tag list — order matters, more specific first
 const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic'];
 const SKIP_TAGS  = [...GENRE_TAGS,'vinyl','house'];
 
@@ -35,8 +32,21 @@ function parseProduct({ node }) {
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase())) || 'Deep House';
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t)) || '';
-  const desc  = node.descriptionHtml?.replace(/<[^>]+>/g,'') || '';
+  const bodyHtml = node.descriptionHtml || '';
+  const desc  = bodyHtml.replace(/<[^>]+>/g,'') || '';
   const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
+
+  // Parse audio tracks from body HTML (injected by ZIP importer)
+  let tracks = [];
+  let audio = null;
+  const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
+  if (tracksMatch) {
+    try {
+      tracks = JSON.parse(tracksMatch[1]);
+      if (tracks[0]?.url) audio = tracks[0].url;
+    } catch {}
+  }
+
   return {
     id: node.id, shopifyVariantId: v?.id,
     title: node.title||'', artist, label,
@@ -44,8 +54,7 @@ function parseProduct({ node }) {
     month: new Date().getMonth()+1,
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
-    coverUrl: img?.url||null, audio: null,
-    tracks: [], desc, g:'135deg,#1a1a2e,#16213e',
+    coverUrl: img?.url||null, audio, tracks, desc, g:'135deg,#1a1a2e,#16213e',
   };
 }
 
@@ -67,16 +76,12 @@ async function fetchShopifyProducts(cursor=null) {
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
-// ── CHECKOUT — uses Cart API (modern Shopify Storefront API) ──
+// ── CHECKOUT ───────────────────────────────────────────────────
 async function shopifyCheckout(cartItems) {
   const lines = cartItems
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
-
-  if (!lines.length) {
-    throw new Error('No items in cart.');
-  }
-
+  if (!lines.length) throw new Error('No items in cart.');
   const data = await shopifyQuery(
     `mutation cartCreate($input: CartInput!) {
       cartCreate(input: $input) {
@@ -86,14 +91,42 @@ async function shopifyCheckout(cartItems) {
     }`,
     { input: { lines } }
   );
-
   const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
-
   const rawUrl = data.cartCreate?.cart?.checkoutUrl;
   if (!rawUrl) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
-
   window.open(rawUrl.replace('houseonly.store', 'checkout.houseonly.store'), '_blank');
+}
+
+// ── WORKER / R2 ────────────────────────────────────────────────
+const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
+const R2_PUBLIC  = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
+
+async function uploadToR2(blob, key, mimeType) {
+  const fd = new FormData();
+  fd.append('file', new File([blob], key.split('/').pop(), { type: mimeType }));
+  fd.append('key', key);
+  const r = await fetch(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
+  if (!r.ok) throw new Error(`R2 upload failed: ${r.status}`);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d.url;
+}
+
+async function fetchCoverArt(title, artist, ean, label='', year='', catno='') {
+  try {
+    const params = new URLSearchParams();
+    if (ean)    params.set('ean', String(ean).trim());
+    if (title)  params.set('title', title);
+    if (artist) params.set('artist', artist);
+    if (label)  params.set('label', label);
+    if (year)   params.set('year', String(year));
+    if (catno)  params.set('catno', catno);
+    const r = await fetch(`${WORKER_URL}?${params.toString()}`);
+    if (!r.ok) return '';
+    const d = await r.json();
+    return d.imageUrl || '';
+  } catch { return ''; }
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
@@ -181,7 +214,10 @@ function RecordCard({ r, onOpen, onAdd }) {
 
 // ── MODAL ──────────────────────────────────────────────────────
 function Modal({ r, onClose, onAdd }) {
+  const [activeTrack, setActiveTrack] = useState(0);
   if (!r) return null;
+  const tracks = r.tracks || [];
+  const currentAudio = tracks[activeTrack]?.url || r.audio;
   return (
     <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:20, backdropFilter:'blur(4px)' }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, maxWidth:680, width:'100%', maxHeight:'90vh', overflow:'auto' }}>
@@ -196,15 +232,25 @@ function Modal({ r, onClose, onAdd }) {
               {[r.genre,r.year].map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
             </div>
             <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>
-            <div style={{ marginBottom:14 }}>
-              {r.tracks.map((t,i)=>(
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
-                  <span>{String.fromCharCode(65+i)}. {t.t}</span>
-                  <span style={{ fontFamily:'monospace' }}>{t.d}</span>
-                </div>
-              ))}
-            </div>
-            <AudioPlayer src={r.audio} />
+            {tracks.length > 0 ? (
+              <div style={{ marginBottom:14 }}>
+                {tracks.map((t,i)=>(
+                  <div key={i} onClick={()=>setActiveTrack(i)} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 8px', borderBottom:`1px solid ${S.border}`, fontSize:11, color: i===activeTrack ? S.accent : S.muted, cursor:'pointer', borderRadius:2, background: i===activeTrack ? '#141400' : 'transparent' }}>
+                    <span>{i===activeTrack?'▶ ':''}{t.name}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ marginBottom:14 }}>
+                {(r.tracks||[]).map((t,i)=>(
+                  <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
+                    <span>{String.fromCharCode(65+i)}. {t.t}</span>
+                    <span style={{ fontFamily:'monospace' }}>{t.d}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <AudioPlayer src={currentAudio} />
             <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:14 }}>
               <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
               <Btn ch={r.stock===0?'Out of Stock':'Add to Cart'} disabled={r.stock===0} onClick={()=>{onAdd(r);onClose();}} full />
@@ -222,18 +268,11 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   const [err, setErr] = useState('');
   const total = cart.reduce((s,i)=>s+i.price*i.qty,0);
   const count = cart.reduce((s,i)=>s+i.qty,0);
-
   const handleCheckout = async () => {
-    setErr('');
-    setLoading(true);
-    try {
-      await onCheckout();
-    } catch(e) {
-      setErr(e.message || 'Checkout failed. Please try again.');
-    }
+    setErr(''); setLoading(true);
+    try { await onCheckout(); } catch(e) { setErr(e.message || 'Checkout failed.'); }
     setLoading(false);
   };
-
   return (
     <>
       {open&&<div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:900 }} />}
@@ -273,55 +312,35 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   );
 }
 
-// ── FILTERS — mobile-friendly ──────────────────────────────────
+// ── FILTERS ────────────────────────────────────────────────────
 function Filters({ filters, onChange, records }) {
   const labels = [...new Set(records.map(r=>r.label))].sort();
   const genres = [...new Set(records.map(r=>r.genre))].sort();
   const years  = [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
   const months = [...new Set(records.map(r=>r.month))].sort((a,b)=>a-b);
   const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
   const pill = (key,val,label) => {
     const active = filters[key]===val;
-    return (
-      <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>
-    );
+    return <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>;
   };
-
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
-      <select
-        value={filters[key]||''}
-        onChange={e=>onChange(key,e.target.value||null)}
-        style={{
-          appearance:'none', WebkitAppearance:'none',
-          background:filters[key]?S.accent:S.surf,
-          color:filters[key]?'#080808':S.muted,
-          border:`1px solid ${filters[key]?S.accent:S.border}`,
-          borderRadius:20, cursor:'pointer',
-          fontSize:9, fontWeight:filters[key]?700:400,
-          letterSpacing:1.5, padding:'6px 28px 6px 14px',
-          textTransform:'uppercase', fontFamily:'inherit',
-          outline:'none', minWidth:100,
-        }}
-      >
+      <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ appearance:'none', WebkitAppearance:'none', background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
         <option value="">{placeholder}</option>
         {opts.map(o=><option key={o} value={o}>{o}</option>)}
       </select>
       <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:filters[key]?'#080808':S.muted }}>▼</span>
     </div>
   );
-
   return (
     <div style={{ marginBottom:24 }}>
       <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
-        {sel('genre', genres, 'All Genres')}
-        {sel('label', labels, 'All Labels')}
+        {sel('genre', genres, 'All Genres')}{sel('label', labels, 'All Labels')}
       </div>
-      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none', msOverflowStyle:'none' }}>
+      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none' }}>
         {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
       </div>
-      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, marginTop:8, scrollbarWidth:'none', msOverflowStyle:'none' }}>
+      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, marginTop:8, scrollbarWidth:'none' }}>
         {pill('month',null,'All')}{months.map(m=>pill('month',m,MN[m-1]))}
       </div>
     </div>
@@ -355,6 +374,307 @@ async function claudeJSON(sys, msg, search=false) {
 const SCHEMA=`{"title":"","artist":"","label":"","genre":"","year":0,"price":18.99,"catalog":"","tracks":[{"t":"","d":""}],"desc":"","coverUrl":"","audioUrl":""}`;
 const GLIST='Deep House, Tech House, Afro House, Chicago House, Soulful House, Acid House, Detroit House, Disco House';
 
+// ── ZIP IMPORTER ───────────────────────────────────────────────
+async function loadJSZip() {
+  if (window.JSZip) return window.JSZip;
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload = () => res(window.JSZip);
+    s.onerror = () => rej(new Error('Failed to load JSZip'));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadXLSX() {
+  if (window.XLSX) return window.XLSX;
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = () => res(window.XLSX);
+    s.onerror = () => rej(new Error('Failed to load XLSX'));
+    document.head.appendChild(s);
+  });
+}
+
+function catnoFromFilename(name) {
+  // "166560-FAT072.zip" → "FAT072"
+  const m = name.match(/\d+-([A-Z0-9]+)\.zip/i);
+  return m ? m[1].toUpperCase() : name.replace(/\.zip$/i, '').toUpperCase();
+}
+
+function ZipImporter() {
+  const [excelFile, setExcelFile] = useState(null);
+  const [zipFiles, setZipFiles]   = useState([]);
+  const [status, setStatus]       = useState('idle'); // idle | processing | review
+  const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
+  const [results, setResults]     = useState([]);
+  const [error, setError]         = useState('');
+  const excelRef = useRef(null);
+  const zipRef   = useRef(null);
+
+  const assignFiles = (files) => {
+    const xlsxFiles = files.filter(f => /\.xlsx?$/i.test(f.name));
+    const zips      = files.filter(f => /\.zip$/i.test(f.name));
+    if (xlsxFiles[0]) setExcelFile(xlsxFiles[0]);
+    if (zips.length)  setZipFiles(prev => {
+      const existing = new Set(prev.map(f => f.name));
+      return [...prev, ...zips.filter(f => !existing.has(f.name))];
+    });
+  };
+
+  const process = async () => {
+    if (!excelFile || !zipFiles.length) return;
+    setError(''); setStatus('processing'); setResults([]);
+
+    try {
+      setProgress({ done:0, total:0, current:'Loading libraries…' });
+      const [JSZip, XLSX] = await Promise.all([loadJSZip(), loadXLSX()]);
+
+      // Parse Excel
+      setProgress({ done:0, total:0, current:'Parsing Excel…' });
+      const buf = await excelFile.arrayBuffer();
+      const wb  = XLSX.read(buf);
+      const ws  = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval:'' });
+
+      // Build catalog → row map
+      const rowMap = {};
+      rows.forEach(r => {
+        const catno = String(r.ArtNo || '').toUpperCase().trim();
+        if (catno) rowMap[catno] = r;
+      });
+
+      const total = zipFiles.length;
+      const processed = [];
+
+      for (let i = 0; i < zipFiles.length; i++) {
+        const zipFile = zipFiles[i];
+        const catno   = catnoFromFilename(zipFile.name);
+        const row     = rowMap[catno] || {};
+
+        setProgress({ done:i, total, current:`${catno} — extracting…` });
+
+        let coverUrl = '';
+        let tracks   = [];
+        let itemError = '';
+
+        try {
+          const zip   = await JSZip.loadAsync(zipFile);
+          const files = Object.values(zip.files).filter(f => !f.dir);
+
+          // Find best cover image
+          const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
+          const coverFile = imgFiles.find(f => /front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+
+          // Find all audio files, sorted by name
+          const audioFiles = files
+            .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+          // Upload cover to R2
+          if (coverFile) {
+            setProgress({ done:i, total, current:`${catno} — uploading cover…` });
+            const blob = await coverFile.async('blob');
+            const ext  = coverFile.name.split('.').pop().toLowerCase();
+            const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, mime);
+          }
+
+          // Upload all audio tracks to R2
+          for (const af of audioFiles) {
+            const filename = af.name.split('/').pop();
+            setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
+            const blob = await af.async('blob');
+            const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+            tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
+          }
+        } catch (e) {
+          itemError = e.message;
+        }
+
+        const title  = String(row.Title  || '');
+        const artist = String(row.Artist || '');
+        const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
+        const label  = String(row.Label || row.label || '');
+        const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
+        const price  = String(row.UnitPrice || '18.99');
+        const qty    = String(row.Qty || '1');
+        const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+
+        const audioHtml = tracks.length
+          ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>`
+          : '';
+
+        processed.push({
+          // Internal preview fields (stripped from CSV)
+          _catno: catno, _title: title, _artist: artist,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          // Shopify CSV fields
+          'Handle': handle,
+          'Title': title || catno,
+          'Body (HTML)': `<p></p>${audioHtml}`,
+          'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+          'Type': '',
+          'Tags': ['vinyl', label, String(year)].filter(Boolean).join(', '),
+          'Published': 'TRUE',
+          'Option1 Name': 'Title',
+          'Option1 Value': 'Default Title',
+          'Option1 Linked To': '',
+          'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
+          'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
+          'Variant SKU': catno,
+          'Variant Grams': '180',
+          'Variant Inventory Tracker': '',
+          'Variant Inventory Qty': qty,
+          'Variant Inventory Policy': 'deny',
+          'Variant Fulfillment Service': 'manual',
+          'Variant Price': price,
+          'Variant Compare At Price': '',
+          'Variant Requires Shipping': 'TRUE',
+          'Variant Taxable': 'FALSE',
+          'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
+          'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
+          'Variant Barcode': ean,
+          'Image Src': coverUrl,
+          'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE',
+          'SEO Title': '', 'SEO Description': '',
+          'Variant Image': '', 'Variant Weight Unit': 'kg',
+          'Variant Tax Code': '', 'Cost per item': '',
+          'Status': 'active',
+        });
+
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch (e) {
+      setError(e.message);
+      setStatus('idle');
+    }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [
+      CSV_KEYS.join(','),
+      ...results.map(row =>
+        CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(',')
+      ),
+    ];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'shopify_import_ws.csv';
+    a.click();
+  };
+
+  const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+  const covered   = results.filter(r => r._coverUrl).length;
+  const withAudio = results.filter(r => r._tracks?.length > 0).length;
+  const errors    = results.filter(r => r._error).length;
+
+  return (
+    <div>
+      <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
+        Upload your Word & Sound Excel + all ZIP files together. Covers and audio are uploaded to R2 automatically, then download the Shopify CSV.
+      </p>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e => e.preventDefault()}
+        onDrop={e => { e.preventDefault(); assignFiles([...e.dataTransfer.files]); }}
+        style={{ border:`2px dashed ${(excelFile||zipFiles.length)?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}
+      >
+        <div style={{ fontSize:28, marginBottom:6 }}>📦</div>
+        <div style={{ fontSize:11, color:(excelFile||zipFiles.length)?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>
+          Drag Excel + ZIPs here, or use buttons below
+        </div>
+        <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
+          <input ref={excelRef} type="file" accept=".xlsx,.xls" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
+          <input ref={zipRef}   type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
+          <button onClick={()=>excelRef.current.click()} style={{ background:excelFile?S.accent:S.border, border:'none', color:excelFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>
+            {excelFile ? `✓ ${excelFile.name}` : '+ Excel'}
+          </button>
+          <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>
+            {zipFiles.length ? `✓ ${zipFiles.length} ZIPs` : '+ ZIPs'}
+          </button>
+          {zipFiles.length>0 && <button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear</button>}
+        </div>
+      </div>
+
+      {/* ZIP list preview */}
+      {zipFiles.length > 0 && (
+        <div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>
+          {zipFiles.map((f,i) => (
+            <span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>
+          ))}
+        </div>
+      )}
+
+      {status==='idle' && excelFile && zipFiles.length>0 && (
+        <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
+      )}
+
+      {status==='processing' && (
+        <div style={{ padding:14, background:S.bg, borderRadius:2, border:`1px solid ${S.border}` }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+            <span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span>
+            <span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{ height:3, background:S.border, borderRadius:2, overflow:'hidden', marginBottom:8 }}>
+            <div style={{ height:'100%', background:S.accent, width:`${pct}%`, transition:'width 0.3s' }} />
+          </div>
+          {progress.current && <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {error && <div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
+
+      {status==='review' && results.length>0 && (
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
+            <div>
+              <span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span>
+              <span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}</span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
+            {results.map((r,i) => (
+              <div key={i} style={{ background:S.surf, border:`1px solid ${r._error ? S.danger : r._coverUrl ? S.border : '#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
+                <div style={{ position:'relative', paddingBottom:'100%', background:'#1a1a2e' }}>
+                  {r._coverUrl
+                    ? <img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />
+                    : <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🎵</div>
+                  }
+                  {r._error && <div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
+                  {r._tracks?.length>0 && <div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
+                  {!r._coverUrl && !r._error && <div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
+                </div>
+                <div style={{ padding:'8px 8px 6px' }}>
+                  <div style={{ fontSize:9, color:S.muted, fontFamily:'monospace', marginBottom:2 }}>{r._catno}</div>
+                  <div style={{ fontSize:10, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._title || r._catno}</div>
+                  <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._artist}</div>
+                  {r._error && <div style={{ fontSize:8, color:S.danger, marginTop:4, lineHeight:1.4 }}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── BULK IMPORTER ──────────────────────────────────────────────
 function BulkImporter({ onImportMany }) {
@@ -494,34 +814,13 @@ function EditModal({ record, onSave, onClose }) {
   );
 }
 
-// ── AUDIO BATCH UPLOADER ───────────────────────────────────────
-
 // ── CSV ENRICHER ───────────────────────────────────────────────
-// Cover art via Cloudflare Worker — Deezer UPC → Spotify (title+artist+label+year+catno) → Deezer search
-const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
-
-async function fetchCoverArt(title, artist, ean, label='', year='', catno='') {
-  try {
-    const params = new URLSearchParams();
-    if (ean)    params.set('ean', String(ean).trim());
-    if (title)  params.set('title', title);
-    if (artist) params.set('artist', artist);
-    if (label)  params.set('label', label);
-    if (year)   params.set('year', String(year));
-    if (catno)  params.set('catno', catno);
-    const r = await fetch(`${WORKER_URL}?${params.toString()}`);
-    if (!r.ok) return '';
-    const d = await r.json();
-    return d.imageUrl || '';
-  } catch { return ''; }
-}
-
 function CsvEnricher() {
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState('idle');
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
   const [enriched, setEnriched] = useState([]);
-  const [overrides, setOverrides] = useState({}); // manual image URL overrides
+  const [overrides, setOverrides] = useState({});
   const [secondPass, setSecondPass] = useState(false);
   const [secondProgress, setSecondProgress] = useState({ done:0, total:0, current:'' });
   const inputRef = useRef(null);
@@ -540,8 +839,7 @@ function CsvEnricher() {
     const wb = window.XLSX.read(buf);
     const ws = wb.Sheets[wb.SheetNames[0]];
     const raw = window.XLSX.utils.sheet_to_json(ws, { defval:'' });
-    const cleaned = raw.filter(r => r.ArtNo || r.Title);
-    setRows(cleaned);
+    setRows(raw.filter(r => r.ArtNo || r.Title));
     setStatus('idle');
   };
 
@@ -552,61 +850,35 @@ function CsvEnricher() {
     const result = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const title  = String(row.Title || '');
+      const title  = String(row.Title  || '');
       const artist = String(row.Artist || '');
-      const catno  = String(row.ArtNo || '');
+      const catno  = String(row.ArtNo  || '');
       const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
       const label  = String(row.Label || row.label || '');
       const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
       setProgress({ done:i, total:rows.length, current:`${catno} — ${title}` });
       const imageUrl = await fetchCoverArt(title, artist, ean, label, year, catno);
       const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-      const eanFinal = row.EAN ? String(Math.round(Number(row.EAN))) : '';
       result.push({
-        _title: title, _artist: artist, _catno: catno, _imageUrl: imageUrl,
-        'Handle': handle,
-        'Title': title,
-        'Body (HTML)': '<p></p>',
-        'Vendor': artist,
-        'Product Category': 'Media > Music & Sound Recordings > Vinyl',
-        'Type': '',
-        'Tags': 'vinyl',
-        'Published': 'TRUE',
-        'Option1 Name': 'Title',
-        'Option1 Value': 'Default Title',
-        'Option1 Linked To': '',
-        'Option2 Name': '',
-        'Option2 Value': '',
-        'Option2 Linked To': '',
-        'Option3 Name': '',
-        'Option3 Value': '',
-        'Option3 Linked To': '',
-        'Variant SKU': catno,
-        'Variant Grams': '180',
-        'Variant Inventory Tracker': '',
-        'Variant Inventory Qty': String(row.Qty || '1'),
-        'Variant Inventory Policy': 'deny',
-        'Variant Fulfillment Service': 'manual',
-        'Variant Price': String(row.UnitPrice || '18.99'),
-        'Variant Compare At Price': '',
-        'Variant Requires Shipping': 'TRUE',
-        'Variant Taxable': 'FALSE',
-        'Unit Price Total Measure': '',
-        'Unit Price Total Measure Unit': '',
-        'Unit Price Base Measure': '',
-        'Unit Price Base Measure Unit': '',
-        'Variant Barcode': eanFinal,
-        'Image Src': imageUrl,
-        'Image Position': imageUrl ? '1' : '',
-        'Image Alt Text': imageUrl ? `${title} - ${artist}` : '',
-        'Gift Card': 'FALSE',
-        'SEO Title': '',
-        'SEO Description': '',
-        'Variant Image': '',
-        'Variant Weight Unit': 'kg',
-        'Variant Tax Code': '',
-        'Cost per item': '',
-        'Status': 'active',
+        _title:title, _artist:artist, _catno:catno, _imageUrl:imageUrl,
+        'Handle':handle,'Title':title,'Body (HTML)':'<p></p>','Vendor':artist,
+        'Product Category':'Media > Music & Sound Recordings > Vinyl','Type':'',
+        'Tags':'vinyl','Published':'TRUE',
+        'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
+        'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
+        'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
+        'Variant SKU':catno,'Variant Grams':'180','Variant Inventory Tracker':'',
+        'Variant Inventory Qty':String(row.Qty||'1'),'Variant Inventory Policy':'deny',
+        'Variant Fulfillment Service':'manual','Variant Price':String(row.UnitPrice||'18.99'),
+        'Variant Compare At Price':'','Variant Requires Shipping':'TRUE','Variant Taxable':'FALSE',
+        'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
+        'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
+        'Variant Barcode':String(row.EAN?Math.round(Number(row.EAN)):''),
+        'Image Src':imageUrl,'Image Position':imageUrl?'1':'',
+        'Image Alt Text':imageUrl?`${title} - ${artist}`:'',
+        'Gift Card':'FALSE','SEO Title':'','SEO Description':'',
+        'Variant Image':'','Variant Weight Unit':'kg','Variant Tax Code':'',
+        'Cost per item':'','Status':'active',
       });
       await new Promise(r => setTimeout(r, 500));
     }
@@ -622,146 +894,87 @@ function CsvEnricher() {
       out['Image Src'] = finalImg;
       out['Image Position'] = finalImg ? '1' : '';
       out['Image Alt Text'] = finalImg ? `${row._title} - ${row._artist}` : '';
-      // Remove internal fields
       delete out._title; delete out._artist; delete out._catno; delete out._imageUrl;
       return out;
     });
     const headers = Object.keys(csvRows[0]);
-    const lines = [
-      headers.join(','),
-      ...csvRows.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
-    ];
+    const lines = [headers.join(','), ...csvRows.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'shopify_import.csv';
-    a.click();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'shopify_import.csv'; a.click();
   };
 
   const runSecondPass = async () => {
-    const missing = enriched.map((r,i) => ({i, r})).filter(({i,r}) =>
-      !overrides[i] && !r['Image Src']
-    );
+    const missing = enriched.map((r,i)=>({i,r})).filter(({i,r})=>!overrides[i]&&!r['Image Src']);
     if (!missing.length) return;
-    setSecondPass(true);
-    setSecondProgress({ done:0, total:missing.length, current:'' });
-    for (let idx = 0; idx < missing.length; idx++) {
-      const { i, r } = missing[idx];
-      setSecondProgress({ done:idx, total:missing.length, current:r._title });
-      const img = await fetchCoverArt(r._title, r._artist, r['Variant Barcode'], r._catno || '', '', '');
-      if (img) {
-        setOverrides(o => ({...o, [i]: img}));
-        // also update enriched record
-        setEnriched(prev => prev.map((rec, ii) => ii===i ? {...rec, 'Image Src': img} : rec));
-      }
-      await new Promise(res => setTimeout(res, 500));
+    setSecondPass(true); setSecondProgress({done:0,total:missing.length,current:''});
+    for (let idx=0;idx<missing.length;idx++) {
+      const {i,r}=missing[idx];
+      setSecondProgress({done:idx,total:missing.length,current:r._title});
+      const img = await fetchCoverArt(r._title, r._artist, r['Variant Barcode'], r._catno||'','','');
+      if (img) { setOverrides(o=>({...o,[i]:img})); setEnriched(prev=>prev.map((rec,ii)=>ii===i?{...rec,'Image Src':img}:rec)); }
+      await new Promise(res=>setTimeout(res,500));
     }
-    setSecondProgress({ done:missing.length, total:missing.length, current:'' });
+    setSecondProgress({done:missing.length,total:missing.length,current:''});
     setSecondPass(false);
   };
 
-  const covered = enriched.filter((r,i) => (overrides[i] !== undefined ? overrides[i] : r['Image Src'])).length;
-  const missing = enriched.filter((r,i) => !overrides[i] && !r['Image Src']).length;
+  const covered = enriched.filter((r,i)=>(overrides[i]!==undefined?overrides[i]:r['Image Src'])).length;
+  const missing = enriched.filter((r,i)=>!overrides[i]&&!r['Image Src']).length;
   const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
 
   return (
     <div>
-      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Upload your distributor Excel. Covers are fetched using title + artist + label + year + catalog number for precision. Review all images before downloading.
-      </p>
-
-      <div onClick={()=>inputRef.current.click()} style={{border:`2px dashed ${rows.length?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',cursor:'pointer',marginBottom:14,transition:'border 0.15s'}}>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>Upload your distributor Excel. Covers fetched via Spotify + Deezer + iTunes. Review before downloading.</p>
+      <div onClick={()=>inputRef.current.click()} style={{border:`2px dashed ${rows.length?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',cursor:'pointer',marginBottom:14}}>
         <div style={{fontSize:24,marginBottom:6}}>📥</div>
-        <div style={{fontSize:11,color:rows.length?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
-          {rows.length ? `${rows.length} records loaded` : 'Click to upload distributor Excel'}
-        </div>
-        <div style={{fontSize:9,color:S.muted,marginTop:3}}>Supports .xlsx files from Word and Sound / your distributor</div>
+        <div style={{fontSize:11,color:rows.length?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>{rows.length?`${rows.length} records loaded`:'Click to upload distributor Excel'}</div>
         <input ref={inputRef} type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])} />
       </div>
-
-      {status==='parsing' && <div style={{fontSize:10,color:S.muted}}>Reading file…</div>}
-
-      {status==='idle' && rows.length>0 && (
-        <Btn ch={`Fetch Covers for ${rows.length} Records`} onClick={runEnrich} full />
-      )}
-
-      {status==='enriching' && (
+      {status==='parsing'&&<div style={{fontSize:10,color:S.muted}}>Reading file…</div>}
+      {status==='idle'&&rows.length>0&&<Btn ch={`Fetch Covers for ${rows.length} Records`} onClick={runEnrich} full />}
+      {status==='enriching'&&(
         <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`}}>
-          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>FETCHING COVERS…</span>
-            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
-          </div>
-          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
-            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
-          </div>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}><span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>FETCHING COVERS…</span><span style={{fontSize:10,color:S.muted}}>{progress.done}/{progress.total}·{pct}%</span></div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}><div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} /></div>
           {progress.current&&<div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
         </div>
       )}
-
-      {status==='review' && enriched.length>0 && (
+      {status==='review'&&enriched.length>0&&(
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
-            <div>
-              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {covered} of {enriched.length} covers found</span>
-              {missing>0 && <span style={{fontSize:9,color:'#ff8800',marginLeft:8}}>{missing} missing</span>}
-              <span style={{fontSize:9,color:S.muted,marginLeft:8}}>Review below — paste a URL to fix any wrong image</span>
-            </div>
-            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-              {missing>0 && !secondPass && <Btn ch={`🔄 Second Pass (${missing} missing)`} onClick={runSecondPass} variant="ghost" />}
-              <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
-            </div>
+            <div><span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {covered} of {enriched.length} covers found</span>{missing>0&&<span style={{fontSize:9,color:'#ff8800',marginLeft:8}}>{missing} missing</span>}</div>
+            <div style={{display:'flex',gap:8}}>{missing>0&&!secondPass&&<Btn ch={`🔄 Second Pass (${missing})`} onClick={runSecondPass} variant="ghost" />}<Btn ch="⬇ Download CSV" onClick={downloadCSV} /></div>
           </div>
-          {secondPass && (
-            <div style={{padding:10,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:10}}>
-              <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-                <span style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1}}>SECOND PASS — ITUNES + DEEZER…</span>
-                <span style={{fontSize:9,color:S.muted}}>{secondProgress.done} / {secondProgress.total}</span>
-              </div>
-              <div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden',marginBottom:4}}>
-                <div style={{height:'100%',background:'#ff8800',width:`${secondProgress.total?Math.round((secondProgress.done/secondProgress.total)*100):0}%`,transition:'width 0.3s'}} />
-              </div>
-              {secondProgress.current&&<div style={{fontSize:9,color:S.muted}}>→ {secondProgress.current}</div>}
-            </div>
-          )}
+          {secondPass&&<div style={{padding:10,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:10}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><span style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1}}>SECOND PASS…</span><span style={{fontSize:9,color:S.muted}}>{secondProgress.done}/{secondProgress.total}</span></div><div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden',marginBottom:4}}><div style={{height:'100%',background:'#ff8800',width:`${secondProgress.total?Math.round((secondProgress.done/secondProgress.total)*100):0}%`,transition:'width 0.3s'}} /></div>{secondProgress.current&&<div style={{fontSize:9,color:S.muted}}>→ {secondProgress.current}</div>}</div>}
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:8,maxHeight:520,overflowY:'auto',padding:4}}>
-            {enriched.map((r, i) => {
-              const imgUrl = overrides[i] !== undefined ? overrides[i] : r['Image Src'];
-              const hasOverride = overrides[i] !== undefined;
+            {enriched.map((r,i)=>{
+              const imgUrl=overrides[i]!==undefined?overrides[i]:r['Image Src'];
+              const hasOverride=overrides[i]!==undefined;
               return (
                 <div key={i} style={{background:S.surf,border:`1px solid ${hasOverride?S.accent:imgUrl?S.border:'#ff4040'}`,borderRadius:3,overflow:'hidden'}}>
                   <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
-                    {imgUrl
-                      ? <img src={imgUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>{e.target.style.display='none';}} />
-                      : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>🎵</div>
-                    }
-                    {!imgUrl && <div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:8,color:'#fff',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
-                    {hasOverride && <div style={{position:'absolute',top:4,right:4,background:S.accent,borderRadius:2,fontSize:8,color:'#080808',padding:'2px 5px',fontWeight:700}}>EDITED</div>}
+                    {imgUrl?<img src={imgUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>{e.target.style.display='none';}} />:<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>🎵</div>}
+                    {!imgUrl&&<div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:8,color:'#fff',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
+                    {hasOverride&&<div style={{position:'absolute',top:4,right:4,background:S.accent,borderRadius:2,fontSize:8,color:'#080808',padding:'2px 5px',fontWeight:700}}>EDITED</div>}
                   </div>
                   <div style={{padding:'8px 8px 4px'}}>
                     <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
                     <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title}</div>
                     <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginBottom:6}}>{r._artist}</div>
-                    <input
-                      placeholder="Paste image URL to override…"
-                      defaultValue={overrides[i] || ''}
-                      onChange={e => setOverrides(o => ({...o, [i]: e.target.value}))}
-                      style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 6px',fontSize:9,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}}
-                    />
+                    <input placeholder="Paste image URL to override…" defaultValue={overrides[i]||''} onChange={e=>setOverrides(o=>({...o,[i]:e.target.value}))} style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 6px',fontSize:9,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
                   </div>
                 </div>
               );
             })}
           </div>
-          <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
-          </div>
+          <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}><Btn ch="⬇ Download CSV" onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
   );
 }
 
-
+// ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 function AudioBatchUploader({ records, onMatch }) {
   const [matches,setMatches]=useState([]); const [unmatched,setUnmatched]=useState([]); const inputRef=useRef(null); const [drag,setDrag]=useState(false);
   const handleFiles=(files)=>{const matched=[],unmat=[],updates={};Array.from(files).forEach(file=>{if(!/\.(mp3|ogg|wav|flac|aac)$/i.test(file.name)) return;const base=file.name.replace(/\.[^.]+$/,'').trim().toLowerCase();const record=records.find(r=>r.catalog?.toLowerCase().replace(/\s/g,'')=== base.replace(/\s/g,''));const url=URL.createObjectURL(file);if(record){updates[record.id]=url;matched.push({file:file.name,title:record.title,catalog:record.catalog});}else unmat.push(file.name);});setMatches(matched);setUnmatched(unmat);onMatch(updates);};
@@ -782,7 +995,7 @@ function AudioBatchUploader({ records, onMatch }) {
 
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
-  const [tab,setTab]=useState('bulk');
+  const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
   const [invPage,setInvPage]=useState(1);
   const [invSearch,setInvSearch]=useState('');
@@ -801,27 +1014,29 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
     <div style={{maxWidth:860,margin:'0 auto',padding:'36px 20px'}}>
       {editing&&<EditModal record={editing} onSave={updated=>onUpdate(updated.id,updated)} onClose={()=>setEditing(null)} />}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:28}}>
-        <div><h1 style={{margin:0,fontSize:18,fontWeight:800}}>Admin Panel</h1><div style={{fontSize:10,color:S.muted,marginTop:4}}>{records.length} records loaded · {records.reduce((s,r)=>s+r.stock,0)} units in stock{hasMore?' · more in Shopify':''}</div></div>
+        <div><h1 style={{margin:0,fontSize:18,fontWeight:800}}>Admin Panel</h1><div style={{fontSize:10,color:S.muted,marginTop:4}}>{records.length} records · {records.reduce((s,r)=>s+r.stock,0)} units in stock{hasMore?' · more in Shopify':''}</div></div>
         <Btn ch="Logout" variant="ghost" onClick={onLogout} />
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
-        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}{tabBtn('csv','📄 CSV + Covers')}</div>
-        {tab==='bulk'&&<BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
-        {tab==='barcode'&&<BarcodeImporter onImport={onAdd} />}
-        {tab==='url'&&<UrlImporter onImport={onAdd} />}
-        {tab==='csv'&&<CsvEnricher />}
+        <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
+          {tabBtn('zip','📦 ZIP Import')}
+          {tabBtn('bulk','⬇ Bulk Search')}
+          {tabBtn('barcode','▥ Barcode')}
+          {tabBtn('url','🔗 Single URL')}
+          {tabBtn('csv','📄 CSV + Covers')}
+        </div>
+        {tab==='zip'     && <ZipImporter />}
+        {tab==='bulk'    && <BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
+        {tab==='barcode' && <BarcodeImporter onImport={onAdd} />}
+        {tab==='url'     && <UrlImporter onImport={onAdd} />}
+        {tab==='csv'     && <CsvEnricher />}
       </div>
       <AudioBatchUploader records={records} onMatch={updates=>Object.entries(updates).forEach(([id,url])=>onUpdate(Number(id),{audio:url}))} />
 
-      {/* Inventory header + search + load all */}
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
-        <input
-          value={invSearch} onChange={e=>{setInvSearch(e.target.value);setInvPage(1);}}
-          placeholder="Search inventory…"
-          style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 10px',fontSize:11,fontFamily:'inherit',outline:'none',flex:1,minWidth:120,maxWidth:220}}
-        />
+        <input value={invSearch} onChange={e=>{setInvSearch(e.target.value);setInvPage(1);}} placeholder="Search inventory…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 10px',fontSize:11,fontFamily:'inherit',outline:'none',flex:1,minWidth:120,maxWidth:220}} />
         <span style={{fontSize:9,color:S.muted}}>{filtered.length} records</span>
         {hasMore&&<button onClick={onLoadMore} disabled={loadingMore} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{loadingMore?'Loading…':'Load All from Shopify'}</button>}
       </div>
@@ -843,7 +1058,6 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         ))}
       </div>
 
-      {/* Pagination */}
       {totalPages > 1 && (
         <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginTop:16}}>
           <button onClick={()=>setInvPage(p=>Math.max(1,p-1))} disabled={invPage===1} style={{background:S.border,border:'none',color:invPage===1?S.muted:S.text,cursor:invPage===1?'not-allowed':'pointer',borderRadius:2,padding:'5px 12px',fontSize:10}}>← Prev</button>
@@ -873,24 +1087,22 @@ function LoginScreen({ onLogin }) {
 
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
-  const [records,setRecords]   = useState([]);
+  const [records,setRecords]             = useState([]);
   const [shopifyLoaded,setShopifyLoaded] = useState(false);
   const [shopifyErr,setShopifyErr]       = useState('');
-  const [hasMore,setHasMore]   = useState(false);
-  const [cursor,setCursor]     = useState(null);
-  const [loadingMore,setLoadingMore] = useState(false);
-  const [cart,setCart]         = useState([]);
-  const [cartOpen,setCartOpen] = useState(false);
-  const [selected,setSelected] = useState(null);
-  const [filters,setFilters]   = useState({genre:null,label:null,year:null,month:null});
-  const [search,setSearch]     = useState('');
-  const [page,setPage]         = useState('shop');
+  const [hasMore,setHasMore]             = useState(false);
+  const [cursor,setCursor]               = useState(null);
+  const [loadingMore,setLoadingMore]     = useState(false);
+  const [cart,setCart]                   = useState([]);
+  const [cartOpen,setCartOpen]           = useState(false);
+  const [selected,setSelected]           = useState(null);
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,month:null});
+  const [search,setSearch]               = useState('');
+  const [page,setPage]                   = useState('shop');
 
   useEffect(()=>{
     if (window.location.hash==='#admin') setPage('login');
-    const handler = (e) => {
-      if (e.shiftKey && e.ctrlKey && e.key==='A') setPage(p=>p==='shop'?'login':'shop');
-    };
+    const handler = (e) => { if (e.shiftKey && e.ctrlKey && e.key==='A') setPage(p=>p==='shop'?'login':'shop'); };
     window.addEventListener('keydown', handler);
     return ()=>window.removeEventListener('keydown', handler);
   },[]);
@@ -931,14 +1143,14 @@ export default function App() {
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
-      <LoginScreen onLogin={()=>{setPage('admin');}} />
+      <LoginScreen onLogin={()=>setPage('admin')} />
     </div>
   );
 
   if(page==='admin') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
-      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setPage('shop');}} onLoadMore={loadMore} hasMore={hasMore} loadingMore={loadingMore} />
+      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>setPage('shop')} onLoadMore={loadMore} hasMore={hasMore} loadingMore={loadingMore} />
     </div>
   );
 
@@ -946,8 +1158,7 @@ export default function App() {
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…"
-            style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
           <button onClick={()=>setCartOpen(true)} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
@@ -984,13 +1195,7 @@ export default function App() {
       </div>
 
       <Modal r={selected} onClose={()=>setSelected(null)} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
-      <CartDrawer
-        cart={cart}
-        open={cartOpen}
-        onClose={()=>setCartOpen(false)}
-        onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))}
-        onCheckout={()=>shopifyCheckout(cart)}
-      />
+      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={()=>shopifyCheckout(cart)} />
     </div>
   );
 }
