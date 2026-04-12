@@ -52,23 +52,38 @@ export default {
       const token = tokenData.access_token;
 
       if (token) {
-        const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
+        // Build query: title + artist + label + year for precision
+        const label = url.searchParams.get('label') || '';
+        const year  = url.searchParams.get('year')  || '';
+        let q = `${clean(title)} ${clean(artist)}`;
+        if (label) q += ` ${clean(label)}`;
+        if (year)  q += ` year:${year}`;
         const searchRes = await fetch(
-          `https://api.spotify.com/v1/search?q=${q}&type=album&limit=1`,
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album&limit=3`,
           { headers: { 'Authorization': `Bearer ${token}` } }
         );
         const searchData = await searchRes.json() as any;
-        const img = searchData?.albums?.items?.[0]?.images?.[0]?.url;
+        const items = searchData?.albums?.items || [];
+        // Prefer exact title match if multiple results
+        const match = items.find((i: any) =>
+          i.name?.toLowerCase().includes(clean(title).toLowerCase())
+        ) || items[0];
+        const img = match?.images?.[0]?.url;
         if (img) return json(img);
       }
     } catch {}
 
     // ── 3. Fallback: Deezer by title + artist search ─────────
     try {
-      const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
-      const r = await fetch(`https://api.deezer.com/search/album?q=${q}&limit=1`);
+      const label = url.searchParams.get('label') || '';
+      const q = encodeURIComponent(`${clean(title)} ${clean(artist)}${label ? ' ' + clean(label) : ''}`);
+      const r = await fetch(`https://api.deezer.com/search/album?q=${q}&limit=3`);
       const d = await r.json() as any;
-      const img = d?.data?.[0]?.cover_xl || d?.data?.[0]?.cover_big;
+      const items = d?.data || [];
+      const match = items.find((i: any) =>
+        i.title?.toLowerCase().includes(clean(title).toLowerCase())
+      ) || items[0];
+      const img = match?.cover_xl || match?.cover_big;
       if (img && !img.includes('default')) return json(img);
     } catch {}
 

@@ -500,12 +500,14 @@ function EditModal({ record, onSave, onClose }) {
 // Cover art via Cloudflare Worker — Deezer UPC → Spotify → Deezer search
 const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
 
-async function fetchCoverArt(title, artist, ean) {
+async function fetchCoverArt(title, artist, ean, label='', year='') {
   try {
     const params = new URLSearchParams();
-    if (ean) params.set('ean', String(ean).trim());
-    if (title) params.set('title', title);
+    if (ean)    params.set('ean', String(ean).trim());
+    if (title)  params.set('title', title);
     if (artist) params.set('artist', artist);
+    if (label)  params.set('label', label);
+    if (year)   params.set('year', String(year));
     const r = await fetch(`${WORKER_URL}?${params.toString()}`);
     if (!r.ok) return '';
     const d = await r.json();
@@ -552,7 +554,9 @@ function CsvEnricher() {
       const artist = String(row.Artist || '');
       setProgress({ done:i, total:rows.length, current:title });
       const ean = row.EAN ? String(Math.round(Number(row.EAN))) : '';
-      const imageUrl = await fetchCoverArt(title, artist, ean);
+      const label = String(row.Label || row.label || '');
+      const year  = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
+      const imageUrl = await fetchCoverArt(title, artist, ean, label, year);
       // Clean EAN — remove scientific notation and trailing .0
       const eanClean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+\d+/i, s => '');
       const eanFinal = row.EAN ? String(Math.round(Number(row.EAN))) : '';
