@@ -33,18 +33,16 @@ function parseProduct({ node }) {
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t)) || '';
   const bodyHtml = node.descriptionHtml || '';
-  const desc  = bodyHtml.replace(/<[^>]+>/g,'') || '';
+  // Strip script tags first so JSON doesn't bleed into description
+  const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
+  const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
   const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
 
   // Parse audio tracks from body HTML (injected by ZIP importer)
   let tracks = [];
-  let audio = null;
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) {
-    try {
-      tracks = JSON.parse(tracksMatch[1]);
-      if (tracks[0]?.url) audio = tracks[0].url;
-    } catch {}
+    try { tracks = JSON.parse(tracksMatch[1]); } catch {}
   }
 
   return {
@@ -54,7 +52,7 @@ function parseProduct({ node }) {
     month: new Date().getMonth()+1,
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
-    coverUrl: img?.url||null, audio, tracks, desc, g:'135deg,#1a1a2e,#16213e',
+    coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
   };
 }
 
@@ -100,7 +98,6 @@ async function shopifyCheckout(cartItems) {
 
 // ── WORKER / R2 ────────────────────────────────────────────────
 const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
-const R2_PUBLIC  = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
 
 async function uploadToR2(blob, key, mimeType) {
   const fd = new FormData();
@@ -213,44 +210,84 @@ function RecordCard({ r, onOpen, onAdd }) {
 }
 
 // ── MODAL ──────────────────────────────────────────────────────
+function cleanTrackName(name) {
+  // "1_1_Various Artists - A1. Dez Andres - The World" → "A1. Dez Andres - The World"
+  // Strip leading N_N_ prefix
+  return name.replace(/^\d+_\d+_/, '').trim();
+}
+
+function TrackPlayer({ tracks }) {
+  const [playing, setPlaying] = useState(null); // index of playing track
+  const [prog, setProg] = useState(0);
+  const audioRef = useRef(null);
+
+  const play = (i) => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
+    if (playing === i) { setPlaying(null); setProg(0); return; }
+    const a = new Audio(tracks[i].url);
+    audioRef.current = a;
+    a.play().catch(()=>{});
+    setPlaying(i);
+    a.ontimeupdate = () => setProg((a.currentTime / a.duration) * 100 || 0);
+    a.onended = () => { setPlaying(null); setProg(0); };
+  };
+
+  useEffect(() => () => audioRef.current?.pause(), []);
+
+  return (
+    <div style={{ marginBottom:14 }}>
+      {tracks.map((t, i) => (
+        <div key={i} onClick={() => play(i)} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 8px', borderBottom:`1px solid ${S.border}`, cursor:'pointer', background: playing===i ? '#141400' : 'transparent', borderRadius:2 }}>
+          <div style={{ width:20, height:20, borderRadius:'50%', background: playing===i ? S.accent : S.border, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:9, color: playing===i ? '#080808' : S.muted }}>
+            {playing===i ? '⏸' : '▶'}
+          </div>
+          <span style={{ fontSize:11, color: playing===i ? S.accent : S.muted, flex:1 }}>{cleanTrackName(t.name)}</span>
+          {playing===i && (
+            <div style={{ width:60, height:2, background:S.border, borderRadius:1, overflow:'hidden', flexShrink:0 }}>
+              <div style={{ width:`${prog}%`, height:'100%', background:S.accent, transition:'width 0.1s' }} />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Modal({ r, onClose, onAdd }) {
-  const [activeTrack, setActiveTrack] = useState(0);
   if (!r) return null;
   const tracks = r.tracks || [];
-  const currentAudio = tracks[activeTrack]?.url || r.audio;
   return (
     <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:20, backdropFilter:'blur(4px)' }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, maxWidth:680, width:'100%', maxHeight:'90vh', overflow:'auto' }}>
         <div style={{ display:'flex', flexWrap:'wrap' }}>
-          <div style={{ width:240, minHeight:240, flexShrink:0, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center' }} />
+          {/* Square cover image */}
+          <div style={{ width:240, flexShrink:0, position:'relative' }}>
+            <div style={{ paddingBottom:'100%', position:'relative', background:`linear-gradient(${r.g})` }}>
+              {coverSrc(r.coverUrl) && <img src={coverSrc(r.coverUrl)} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
+            </div>
+          </div>
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
             <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
             <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>{r.label} · {r.catalog}</div>
             <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
             <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>{r.artist}</div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
-              {[r.genre,r.year].map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
+              {[r.genre,r.year].filter(Boolean).map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
             </div>
-            <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>
-            {tracks.length > 0 ? (
-              <div style={{ marginBottom:14 }}>
-                {tracks.map((t,i)=>(
-                  <div key={i} onClick={()=>setActiveTrack(i)} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 8px', borderBottom:`1px solid ${S.border}`, fontSize:11, color: i===activeTrack ? S.accent : S.muted, cursor:'pointer', borderRadius:2, background: i===activeTrack ? '#141400' : 'transparent' }}>
-                    <span>{i===activeTrack?'▶ ':''}{t.name}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div style={{ marginBottom:14 }}>
-                {(r.tracks||[]).map((t,i)=>(
-                  <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
-                    <span>{String.fromCharCode(65+i)}. {t.t}</span>
-                    <span style={{ fontFamily:'monospace' }}>{t.d}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            <AudioPlayer src={currentAudio} />
+            {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
+            {tracks.length > 0
+              ? <TrackPlayer tracks={tracks} />
+              : (r.tracks||[]).length > 0 && (
+                <div style={{ marginBottom:14 }}>
+                  {(r.tracks||[]).map((t,i)=>(
+                    <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
+                      <span>{String.fromCharCode(65+i)}. {t.t}</span>
+                      <span style={{ fontFamily:'monospace' }}>{t.d}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            }
             <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:14 }}>
               <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
               <Btn ch={r.stock===0?'Out of Stock':'Add to Cart'} disabled={r.stock===0} onClick={()=>{onAdd(r);onClose();}} full />
@@ -399,8 +436,47 @@ async function loadXLSX() {
 
 function catnoFromFilename(name) {
   // "166560-FAT072.zip" → "FAT072"
-  const m = name.match(/\d+-([A-Z0-9]+)\.zip/i);
-  return m ? m[1].toUpperCase() : name.replace(/\.zip$/i, '').toUpperCase();
+  // "166560-FAT072 (2).zip" → "FAT072"
+  const base = name.replace(/\.zip$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  const m = base.match(/^\d+-(.+)$/);
+  return (m ? m[1] : base).toUpperCase().trim();
+}
+
+async function loadPDFJS() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      res(window.pdfjsLib);
+    };
+    s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+
+async function extractSalesPaperText(pdfBlob) {
+  try {
+    const pdfjsLib = await loadPDFJS();
+    const arrayBuffer = await pdfBlob.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      fullText += content.items.map(i => i.str).join(' ') + '\n';
+    }
+    const match = fullText.match(/Releasetext:\s*([\s\S]+)/i);
+    if (!match) return '';
+    let text = match[1].trim();
+    // Strip Word & Sound address at the end
+    text = text.replace(/\bWord\s+and\s+Sound[\s\S]*/i, '').trim();
+    text = text.replace(/\bwordandsound\.net[\s\S]*/i, '').trim();
+    text = text.replace(/\s{3,}/g, '\n\n').trim();
+    return text;
+  } catch { return ''; }
 }
 
 function ZipImporter() {
@@ -409,6 +485,7 @@ function ZipImporter() {
   const [status, setStatus]       = useState('idle'); // idle | processing | review
   const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
   const [results, setResults]     = useState([]);
+  const [skippedCount, setSkippedCount] = useState(0);
   const [error, setError]         = useState('');
   const excelRef = useRef(null);
   const zipRef   = useRef(null);
@@ -445,34 +522,41 @@ function ZipImporter() {
         if (catno) rowMap[catno] = r;
       });
 
-      const total = zipFiles.length;
+      // Only process ZIPs that match an Excel row
+      const matchedZips = zipFiles.filter(f => rowMap[catnoFromFilename(f.name)]);
+      const skipped = zipFiles.length - matchedZips.length;
+      const total = matchedZips.length;
       const processed = [];
 
-      for (let i = 0; i < zipFiles.length; i++) {
-        const zipFile = zipFiles[i];
+      for (let i = 0; i < matchedZips.length; i++) {
+        const zipFile = matchedZips[i];
         const catno   = catnoFromFilename(zipFile.name);
-        const row     = rowMap[catno] || {};
+        const row     = rowMap[catno];
 
         setProgress({ done:i, total, current:`${catno} — extracting…` });
 
-        let coverUrl = '';
-        let tracks   = [];
+        let coverUrl  = '';
+        let tracks    = [];
+        let desc      = '';
         let itemError = '';
 
         try {
           const zip   = await JSZip.loadAsync(zipFile);
           const files = Object.values(zip.files).filter(f => !f.dir);
 
-          // Find best cover image
+          // Find cover image
           const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
           const coverFile = imgFiles.find(f => /front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
 
-          // Find all audio files, sorted by name
+          // Find PDF salespaper
+          const pdfFile = files.find(f => /SALESPAPER\.pdf$/i.test(f.name));
+
+          // Find all audio files sorted by name
           const audioFiles = files
             .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
             .sort((a, b) => a.name.localeCompare(b.name));
 
-          // Upload cover to R2
+          // Upload cover
           if (coverFile) {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
             const blob = await coverFile.async('blob');
@@ -481,12 +565,20 @@ function ZipImporter() {
             coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, mime);
           }
 
-          // Upload all audio tracks to R2
+          // Extract PDF description
+          if (pdfFile) {
+            setProgress({ done:i, total, current:`${catno} — reading press text…` });
+            const blob = await pdfFile.async('blob');
+            desc = await extractSalesPaperText(blob);
+          }
+
+          // Upload audio tracks
           for (const af of audioFiles) {
             const filename = af.name.split('/').pop();
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
             const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+            // Store raw filename as name (cleaned on display side)
             tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
           }
         } catch (e) {
@@ -496,61 +588,51 @@ function ZipImporter() {
         const title  = String(row.Title  || '');
         const artist = String(row.Artist || '');
         const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
-        const label  = String(row.Label || row.label || '');
+        const label  = String(row.ArtGr  || row.Label || row.label || '');
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
         const price  = String(row.UnitPrice || '18.99');
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
 
+        const descHtml  = desc ? `<p>${desc.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>` : '<p></p>';
         const audioHtml = tracks.length
           ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>`
           : '';
 
         processed.push({
-          // Internal preview fields (stripped from CSV)
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          // Shopify CSV fields
           'Handle': handle,
           'Title': title || catno,
-          'Body (HTML)': `<p></p>${audioHtml}`,
+          'Body (HTML)': `${descHtml}${audioHtml}`,
           'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl',
           'Type': '',
           'Tags': ['vinyl', label, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE',
-          'Option1 Name': 'Title',
-          'Option1 Value': 'Default Title',
-          'Option1 Linked To': '',
+          'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
-          'Variant SKU': catno,
-          'Variant Grams': '180',
-          'Variant Inventory Tracker': '',
-          'Variant Inventory Qty': qty,
-          'Variant Inventory Policy': 'deny',
-          'Variant Fulfillment Service': 'manual',
-          'Variant Price': price,
-          'Variant Compare At Price': '',
-          'Variant Requires Shipping': 'TRUE',
+          'Variant SKU': catno, 'Variant Grams': '180', 'Variant Inventory Tracker': '',
+          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'deny',
+          'Variant Fulfillment Service': 'manual', 'Variant Price': price,
+          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE',
           'Variant Taxable': 'FALSE',
           'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
           'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
           'Variant Barcode': ean,
-          'Image Src': coverUrl,
-          'Image Position': coverUrl ? '1' : '',
+          'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
           'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
-          'Gift Card': 'FALSE',
-          'SEO Title': '', 'SEO Description': '',
+          'Gift Card': 'FALSE', 'SEO Title': '', 'SEO Description': '',
           'Variant Image': '', 'Variant Weight Unit': 'kg',
-          'Variant Tax Code': '', 'Cost per item': '',
-          'Status': 'active',
+          'Variant Tax Code': '', 'Cost per item': '', 'Status': 'active',
         });
 
         setProgress({ done:i+1, total, current:'' });
       }
 
       setResults(processed);
+      setSkippedCount(zipFiles.length - matchedZips.length);
       setStatus('review');
     } catch (e) {
       setError(e.message);
@@ -640,7 +722,7 @@ function ZipImporter() {
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div>
               <span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span>
-              <span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}</span>
+              <span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span>
             </div>
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
@@ -974,25 +1056,6 @@ function CsvEnricher() {
   );
 }
 
-// ── AUDIO BATCH UPLOADER ───────────────────────────────────────
-function AudioBatchUploader({ records, onMatch }) {
-  const [matches,setMatches]=useState([]); const [unmatched,setUnmatched]=useState([]); const inputRef=useRef(null); const [drag,setDrag]=useState(false);
-  const handleFiles=(files)=>{const matched=[],unmat=[],updates={};Array.from(files).forEach(file=>{if(!/\.(mp3|ogg|wav|flac|aac)$/i.test(file.name)) return;const base=file.name.replace(/\.[^.]+$/,'').trim().toLowerCase();const record=records.find(r=>r.catalog?.toLowerCase().replace(/\s/g,'')=== base.replace(/\s/g,''));const url=URL.createObjectURL(file);if(record){updates[record.id]=url;matched.push({file:file.name,title:record.title,catalog:record.catalog});}else unmat.push(file.name);});setMatches(matched);setUnmatched(unmat);onMatch(updates);};
-  return (
-    <div style={{marginBottom:28}}>
-      <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>Batch Audio Upload</div>
-      <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFiles(e.dataTransfer.files);}} onClick={()=>inputRef.current.click()} style={{border:`2px dashed ${drag?S.accent:S.border}`,borderRadius:3,padding:'24px 20px',textAlign:'center',cursor:'pointer',background:drag?'#141400':'transparent'}}>
-        <div style={{fontSize:20,marginBottom:6}}>🎵</div>
-        <div style={{fontSize:11,color:drag?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>{drag?'Drop to upload':'Drag audio files or click to browse'}</div>
-        <div style={{fontSize:9,color:S.muted,marginTop:4}}>Name files after catalog numbers — e.g. <span style={{color:S.text,fontFamily:'monospace'}}>QTN001.mp3</span></div>
-        <input ref={inputRef} type="file" multiple accept=".mp3,.ogg,.wav,.flac,.aac" style={{display:'none'}} onChange={e=>handleFiles(e.target.files)} />
-      </div>
-      {matches.length>0&&<div style={{marginTop:10}}><div style={{fontSize:9,color:S.accent,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>✓ {matches.length} matched</div>{matches.map((m,i)=><div key={i} style={{display:'flex',gap:8,fontSize:10,color:S.muted,marginBottom:3}}><span style={{color:S.accent}}>▶</span><span style={{fontFamily:'monospace',color:S.text}}>{m.catalog}</span><span>→</span><span>{m.title}</span></div>)}</div>}
-      {unmatched.length>0&&<div style={{marginTop:8}}><div style={{fontSize:9,color:'#ff8800',letterSpacing:1,textTransform:'uppercase',marginBottom:4}}>⚠ {unmatched.length} unmatched</div>{unmatched.map((f,i)=><div key={i} style={{fontSize:10,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{f}</div>)}</div>}
-    </div>
-  );
-}
-
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
@@ -1032,7 +1095,6 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='url'     && <UrlImporter onImport={onAdd} />}
         {tab==='csv'     && <CsvEnricher />}
       </div>
-      <AudioBatchUploader records={records} onMatch={updates=>Object.entries(updates).forEach(([id,url])=>onUpdate(Number(id),{audio:url}))} />
 
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
