@@ -354,8 +354,6 @@ function Filters({ filters, onChange, records }) {
   const labels = [...new Set(records.map(r=>r.label))].sort();
   const genres = [...new Set(records.map(r=>r.genre))].sort();
   const years  = [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
-  const months = [...new Set(records.map(r=>r.month))].sort((a,b)=>a-b);
-  const MN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const pill = (key,val,label) => {
     const active = filters[key]===val;
     return <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>;
@@ -376,9 +374,6 @@ function Filters({ filters, onChange, records }) {
       </div>
       <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none' }}>
         {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
-      </div>
-      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, marginTop:8, scrollbarWidth:'none' }}>
-        {pill('month',null,'All')}{months.map(m=>pill('month',m,MN[m-1]))}
       </div>
     </div>
   );
@@ -468,15 +463,41 @@ async function extractSalesPaperText(pdfBlob) {
       const content = await page.getTextContent();
       fullText += content.items.map(i => i.str).join(' ') + '\n';
     }
-    const match = fullText.match(/Releasetext:\s*([\s\S]+)/i);
-    if (!match) return '';
-    let text = match[1].trim();
-    // Strip Word & Sound address at the end
-    text = text.replace(/\bWord\s+and\s+Sound[\s\S]*/i, '').trim();
-    text = text.replace(/\bwordandsound\.net[\s\S]*/i, '').trim();
-    text = text.replace(/\s{3,}/g, '\n\n').trim();
-    return text;
-  } catch { return ''; }
+
+    // Helper: extract value after a label keyword
+    const extract = (pattern) => {
+      const m = fullText.match(pattern);
+      return m ? m[1].trim().split(/\s{2,}|\n/)[0].trim() : '';
+    };
+
+    // Extract label name
+    const label = extract(/Label[:\s]+([^\n\r]+)/i);
+
+    // Extract genre — look for Genre/Style field
+    const genreRaw = extract(/(?:Genre|Style)[:\s]+([^\n\r]+)/i);
+    // Map to our genre list
+    const GENRE_MAP = {
+      'deep house': 'Deep House', 'tech house': 'Tech House',
+      'afro house': 'Afro House', 'chicago house': 'Chicago House',
+      'soulful house': 'Soulful House', 'acid house': 'Acid House',
+      'detroit house': 'Detroit House', 'disco house': 'Disco House',
+      'electronic': 'Electronic', 'house': 'Deep House',
+    };
+    const genreLower = genreRaw.toLowerCase();
+    const genre = Object.entries(GENRE_MAP).find(([k]) => genreLower.includes(k))?.[1] || '';
+
+    // Extract description after Releasetext:
+    const descMatch = fullText.match(/Releasetext:\s*([\s\S]+)/i);
+    let desc = '';
+    if (descMatch) {
+      desc = descMatch[1].trim();
+      desc = desc.replace(/\bWord\s+and\s+Sound[\s\S]*/i, '').trim();
+      desc = desc.replace(/\bwordandsound\.net[\s\S]*/i, '').trim();
+      desc = desc.replace(/\s{3,}/g, '\n\n').trim();
+    }
+
+    return { desc, label, genre };
+  } catch { return { desc: '', label: '', genre: '' }; }
 }
 
 function ZipImporter() {
@@ -538,6 +559,8 @@ function ZipImporter() {
         let coverUrl  = '';
         let tracks    = [];
         let desc      = '';
+        let pdfLabel  = '';
+        let pdfGenre  = '';
         let itemError = '';
 
         try {
@@ -565,11 +588,14 @@ function ZipImporter() {
             coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, mime);
           }
 
-          // Extract PDF description
+          // Extract PDF description, label, genre
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
             const blob = await pdfFile.async('blob');
-            desc = await extractSalesPaperText(blob);
+            const extracted = await extractSalesPaperText(blob);
+            desc       = extracted.desc;
+            pdfLabel   = extracted.label;
+            pdfGenre   = extracted.genre;
           }
 
           // Upload audio tracks
@@ -588,7 +614,8 @@ function ZipImporter() {
         const title  = String(row.Title  || '');
         const artist = String(row.Artist || '');
         const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
-        const label  = String(row.ArtGr  || row.Label || row.label || '');
+        const label  = pdfLabel || String(row.Label || row.label || '');
+        const genre  = pdfGenre || 'Deep House';
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
         const price  = String((parseFloat(row.UnitPrice || 18.99) * 1.60).toFixed(2));
         const qty    = String(row.Qty || '1');
@@ -608,7 +635,7 @@ function ZipImporter() {
           'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl',
           'Type': '',
-          'Tags': ['vinyl', label, String(year)].filter(Boolean).join(', '),
+          'Tags': ['vinyl', label, genre, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE',
           'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
@@ -1147,6 +1174,16 @@ function LoginScreen({ onLogin }) {
   );
 }
 
+// ── NAV ────────────────────────────────────────────────────────
+function Nav({ onLogo, children }) {
+  return (
+    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+      <Logo scale={0.65} onClick={onLogo} />
+      {children}
+    </nav>
+  );
+}
+
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
   const [records,setRecords]             = useState([]);
@@ -1158,7 +1195,7 @@ export default function App() {
   const [cart,setCart]                   = useState([]);
   const [cartOpen,setCartOpen]           = useState(false);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,month:null});
+  const [filters,setFilters] = useState({genre:null,label:null,year:null});
   const [search,setSearch]               = useState('');
   const [page,setPage]                   = useState('shop');
 
@@ -1189,36 +1226,32 @@ export default function App() {
     if(filters.genre&&r.genre!==filters.genre) return false;
     if(filters.label&&r.label!==filters.label) return false;
     if(filters.year&&r.year!==filters.year) return false;
-    if(filters.month&&r.month!==filters.month) return false;
-    if(search&&!`${r.title} ${r.artist} ${r.label}`.toLowerCase().includes(search.toLowerCase())) return false;
+    if(search){
+      const haystack=`${r.title} ${r.artist} ${r.label} ${r.catalog} ${r.desc} ${r.genre}`.toLowerCase();
+      const words=search.toLowerCase().trim().split(/\s+/);
+      if(!words.every(w=>haystack.includes(w))) return false;
+    }
     return true;
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
-  const Nav=({children})=>(
-    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
-      <Logo scale={0.65} onClick={()=>setPage('shop')} />
-      {children}
-    </nav>
-  );
-
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
+      <Nav onLogo={()=>setPage('shop')}><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
       <LoginScreen onLogin={()=>setPage('admin')} />
     </div>
   );
 
   if(page==='admin') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
+      <Nav onLogo={()=>setPage('shop')}><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
       <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>setPage('shop')} onLoadMore={loadMore} hasMore={hasMore} loadingMore={loadingMore} />
     </div>
   );
 
   return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
-      <Nav>
+      <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
           <button onClick={()=>setCartOpen(true)} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
