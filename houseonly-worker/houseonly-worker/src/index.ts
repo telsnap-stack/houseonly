@@ -99,6 +99,32 @@ export default {
       if (img && !img.includes('default')) return json(img);
     } catch {}
 
+    // ── 4. iTunes Search API (no auth, broad catalog) ──────────
+    try {
+      const q = encodeURIComponent(`${clean(title)} ${clean(artist)}`);
+      const r = await fetch(
+        `https://itunes.apple.com/search?term=${q}&entity=album&limit=5&media=music`
+      );
+      const d = await r.json() as any;
+      const results = (d.results || []).filter((i: any) => i.artworkUrl100);
+      // Score by title + artist match
+      const scored = results.map((i: any) => {
+        let score = 0;
+        const t = (i.collectionName || '').toLowerCase();
+        const a = (i.artistName || '').toLowerCase();
+        if (t.includes(clean(title).toLowerCase())) score += 3;
+        if (a.includes(clean(artist).toLowerCase())) score += 2;
+        return { i, score };
+      });
+      scored.sort((a: any, b: any) => b.score - a.score);
+      const best = scored[0]?.i;
+      if (best?.artworkUrl100) {
+        // Get high-res version (replace 100x100 with 600x600)
+        const hires = best.artworkUrl100.replace('100x100bb', '600x600bb');
+        return json(hires);
+      }
+    } catch {}
+
     // ── Nothing found ────────────────────────────────────────
     return json('');
   },

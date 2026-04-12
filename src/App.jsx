@@ -522,6 +522,8 @@ function CsvEnricher() {
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
   const [enriched, setEnriched] = useState([]);
   const [overrides, setOverrides] = useState({}); // manual image URL overrides
+  const [secondPass, setSecondPass] = useState(false);
+  const [secondProgress, setSecondProgress] = useState({ done:0, total:0, current:'' });
   const inputRef = useRef(null);
 
   const handleFile = async (f) => {
@@ -636,7 +638,30 @@ function CsvEnricher() {
     a.click();
   };
 
+  const runSecondPass = async () => {
+    const missing = enriched.map((r,i) => ({i, r})).filter(({i,r}) =>
+      !overrides[i] && !r['Image Src']
+    );
+    if (!missing.length) return;
+    setSecondPass(true);
+    setSecondProgress({ done:0, total:missing.length, current:'' });
+    for (let idx = 0; idx < missing.length; idx++) {
+      const { i, r } = missing[idx];
+      setSecondProgress({ done:idx, total:missing.length, current:r._title });
+      const img = await fetchCoverArt(r._title, r._artist, r['Variant Barcode'], r._catno || '', '', '');
+      if (img) {
+        setOverrides(o => ({...o, [i]: img}));
+        // also update enriched record
+        setEnriched(prev => prev.map((rec, ii) => ii===i ? {...rec, 'Image Src': img} : rec));
+      }
+      await new Promise(res => setTimeout(res, 500));
+    }
+    setSecondProgress({ done:missing.length, total:missing.length, current:'' });
+    setSecondPass(false);
+  };
+
   const covered = enriched.filter((r,i) => (overrides[i] !== undefined ? overrides[i] : r['Image Src'])).length;
+  const missing = enriched.filter((r,i) => !overrides[i] && !r['Image Src']).length;
   const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
 
   return (
@@ -678,10 +703,26 @@ function CsvEnricher() {
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
             <div>
               <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {covered} of {enriched.length} covers found</span>
+              {missing>0 && <span style={{fontSize:9,color:'#ff8800',marginLeft:8}}>{missing} missing</span>}
               <span style={{fontSize:9,color:S.muted,marginLeft:8}}>Review below — paste a URL to fix any wrong image</span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {missing>0 && !secondPass && <Btn ch={`🔄 Second Pass (${missing} missing)`} onClick={runSecondPass} variant="ghost" />}
+              <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            </div>
           </div>
+          {secondPass && (
+            <div style={{padding:10,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:10}}>
+              <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                <span style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1}}>SECOND PASS — ITUNES + DEEZER…</span>
+                <span style={{fontSize:9,color:S.muted}}>{secondProgress.done} / {secondProgress.total}</span>
+              </div>
+              <div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden',marginBottom:4}}>
+                <div style={{height:'100%',background:'#ff8800',width:`${secondProgress.total?Math.round((secondProgress.done/secondProgress.total)*100):0}%`,transition:'width 0.3s'}} />
+              </div>
+              {secondProgress.current&&<div style={{fontSize:9,color:S.muted}}>→ {secondProgress.current}</div>}
+            </div>
+          )}
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:8,maxHeight:520,overflowY:'auto',padding:4}}>
             {enriched.map((r, i) => {
               const imgUrl = overrides[i] !== undefined ? overrides[i] : r['Image Src'];
