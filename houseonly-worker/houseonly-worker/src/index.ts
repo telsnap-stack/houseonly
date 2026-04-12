@@ -23,6 +23,8 @@ export default {
     const clean = (s: string) =>
       s.replace(/\(.*?\)/g, '').replace(/feat\.?.*/i, '').trim();
 
+    const catno  = url.searchParams.get('catno')  || '';
+
     // ── 1. Try Deezer by UPC/EAN (exact match, no auth needed) ──
     if (ean) {
       try {
@@ -55,9 +57,10 @@ export default {
         // Build query: title + artist + label + year for precision
         const label = url.searchParams.get('label') || '';
         const year  = url.searchParams.get('year')  || '';
-        let q = `${clean(title)} ${clean(artist)}`;
-        if (label) q += ` ${clean(label)}`;
-        if (year)  q += ` year:${year}`;
+        // catno alone is the most precise — try it first
+        let q = catno ? catno : `${clean(title)} ${clean(artist)}`;
+        if (!catno && label) q += ` ${clean(label)}`;
+        if (!catno && year)  q += ` year:${year}`;
         const searchRes = await fetch(
           `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album&limit=3`,
           { headers: { 'Authorization': `Bearer ${token}` } }

@@ -497,10 +497,10 @@ function EditModal({ record, onSave, onClose }) {
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 
 // ── CSV ENRICHER ───────────────────────────────────────────────
-// Cover art via Cloudflare Worker — Deezer UPC → Spotify → Deezer search
+// Cover art via Cloudflare Worker — Deezer UPC → Spotify (title+artist+label+year+catno) → Deezer search
 const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
 
-async function fetchCoverArt(title, artist, ean, label='', year='') {
+async function fetchCoverArt(title, artist, ean, label='', year='', catno='') {
   try {
     const params = new URLSearchParams();
     if (ean)    params.set('ean', String(ean).trim());
@@ -508,6 +508,7 @@ async function fetchCoverArt(title, artist, ean, label='', year='') {
     if (artist) params.set('artist', artist);
     if (label)  params.set('label', label);
     if (year)   params.set('year', String(year));
+    if (catno)  params.set('catno', catno);
     const r = await fetch(`${WORKER_URL}?${params.toString()}`);
     if (!r.ok) return '';
     const d = await r.json();
@@ -520,11 +521,11 @@ function CsvEnricher() {
   const [status, setStatus] = useState('idle');
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
   const [enriched, setEnriched] = useState([]);
+  const [overrides, setOverrides] = useState({}); // manual image URL overrides
   const inputRef = useRef(null);
 
   const handleFile = async (f) => {
-    setStatus('parsing'); setRows([]); setEnriched([]);
-    // Use SheetJS to read Excel (loaded via CDN script tag)
+    setStatus('parsing'); setRows([]); setEnriched([]); setOverrides({});
     const buf = await f.arrayBuffer();
     if (!window.XLSX) {
       await new Promise((res, rej) => {
@@ -537,9 +538,8 @@ function CsvEnricher() {
     const wb = window.XLSX.read(buf);
     const ws = wb.Sheets[wb.SheetNames[0]];
     const raw = window.XLSX.utils.sheet_to_json(ws, { defval:'' });
-    // Filter out blank rows
-    const clean = raw.filter(r => r.ArtNo || r.Title);
-    setRows(clean);
+    const cleaned = raw.filter(r => r.ArtNo || r.Title);
+    setRows(cleaned);
     setStatus('idle');
   };
 
@@ -550,22 +550,18 @@ function CsvEnricher() {
     const result = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const title = String(row.Title || '');
+      const title  = String(row.Title || '');
       const artist = String(row.Artist || '');
-      setProgress({ done:i, total:rows.length, current:title });
-      const ean = row.EAN ? String(Math.round(Number(row.EAN))) : '';
-      const label = String(row.Label || row.label || '');
-      const year  = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
-      const imageUrl = await fetchCoverArt(title, artist, ean, label, year);
-      // Clean EAN — remove scientific notation and trailing .0
-      const eanClean = String(row.EAN || '').replace(/\.0$/, '').replace(/e\+\d+/i, s => '');
+      const catno  = String(row.ArtNo || '');
+      const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
+      const label  = String(row.Label || row.label || '');
+      const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
+      setProgress({ done:i, total:rows.length, current:`${catno} — ${title}` });
+      const imageUrl = await fetchCoverArt(title, artist, ean, label, year, catno);
+      const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
       const eanFinal = row.EAN ? String(Math.round(Number(row.EAN))) : '';
-      // Format type from ArtGr
-      const artGr = String(row.ArtGr || '12');
-      const format = artGr.includes('LP') ? 'LP' : artGr.includes('7') ? '7"' : '12"';
-      // Handle: lowercase ArtNo
-      const handle = String(row.ArtNo || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
       result.push({
+        _title: title, _artist: artist, _catno: catno, _imageUrl: imageUrl,
         'Handle': handle,
         'Title': title,
         'Body (HTML)': '<p></p>',
@@ -583,7 +579,7 @@ function CsvEnricher() {
         'Option3 Name': '',
         'Option3 Value': '',
         'Option3 Linked To': '',
-        'Variant SKU': String(row.ArtNo || ''),
+        'Variant SKU': catno,
         'Variant Grams': '180',
         'Variant Inventory Tracker': '',
         'Variant Inventory Qty': String(row.Qty || '1'),
@@ -614,15 +610,24 @@ function CsvEnricher() {
     }
     setProgress({ done:rows.length, total:rows.length, current:'' });
     setEnriched(result);
-    setStatus('done');
+    setStatus('review');
   };
 
   const downloadCSV = () => {
-    if (!enriched.length) return;
-    const headers = Object.keys(enriched[0]);
+    const csvRows = enriched.map((row, i) => {
+      const finalImg = overrides[i] !== undefined ? overrides[i] : row['Image Src'];
+      const out = {...row};
+      out['Image Src'] = finalImg;
+      out['Image Position'] = finalImg ? '1' : '';
+      out['Image Alt Text'] = finalImg ? `${row._title} - ${row._artist}` : '';
+      // Remove internal fields
+      delete out._title; delete out._artist; delete out._catno; delete out._imageUrl;
+      return out;
+    });
+    const headers = Object.keys(csvRows[0]);
     const lines = [
       headers.join(','),
-      ...enriched.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+      ...csvRows.map(row => headers.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
@@ -631,13 +636,13 @@ function CsvEnricher() {
     a.click();
   };
 
-  const covered = enriched.filter(r => r['Image Src']).length;
+  const covered = enriched.filter((r,i) => (overrides[i] !== undefined ? overrides[i] : r['Image Src'])).length;
   const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
 
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Upload your distributor Excel file. The tool converts it to Shopify format and fetches cover art automatically. Then import the CSV directly in Shopify → Products → Import.
+        Upload your distributor Excel. Covers are fetched using title + artist + label + year + catalog number for precision. Review all images before downloading.
       </p>
 
       <div onClick={()=>inputRef.current.click()} style={{border:`2px dashed ${rows.length?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',cursor:'pointer',marginBottom:14,transition:'border 0.15s'}}>
@@ -652,7 +657,7 @@ function CsvEnricher() {
       {status==='parsing' && <div style={{fontSize:10,color:S.muted}}>Reading file…</div>}
 
       {status==='idle' && rows.length>0 && (
-        <Btn ch={`Convert + Fetch Covers for ${rows.length} Records`} onClick={runEnrich} full />
+        <Btn ch={`Fetch Covers for ${rows.length} Records`} onClick={runEnrich} full />
       )}
 
       {status==='enriching' && (
@@ -668,16 +673,47 @@ function CsvEnricher() {
         </div>
       )}
 
-      {status==='done' && (
-        <div style={{padding:14,background:'#0a1400',borderRadius:2,border:`1px solid ${S.accent}33`}}>
-          <div style={{fontSize:12,color:S.accent,fontWeight:700,marginBottom:4}}>
-            ✓ Done — {covered} of {enriched.length} covers found
+      {status==='review' && enriched.length>0 && (
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {covered} of {enriched.length} covers found</span>
+              <span style={{fontSize:9,color:S.muted,marginLeft:8}}>Review below — paste a URL to fix any wrong image</span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
-          <div style={{fontSize:9,color:S.muted,marginBottom:12,lineHeight:1.6}}>
-            Download and import into Shopify admin → Products → Import CSV.<br/>
-            Shopify will create all products with images in one go.
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:8,maxHeight:520,overflowY:'auto',padding:4}}>
+            {enriched.map((r, i) => {
+              const imgUrl = overrides[i] !== undefined ? overrides[i] : r['Image Src'];
+              const hasOverride = overrides[i] !== undefined;
+              return (
+                <div key={i} style={{background:S.surf,border:`1px solid ${hasOverride?S.accent:imgUrl?S.border:'#ff4040'}`,borderRadius:3,overflow:'hidden'}}>
+                  <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
+                    {imgUrl
+                      ? <img src={imgUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>{e.target.style.display='none';}} />
+                      : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>🎵</div>
+                    }
+                    {!imgUrl && <div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:8,color:'#fff',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
+                    {hasOverride && <div style={{position:'absolute',top:4,right:4,background:S.accent,borderRadius:2,fontSize:8,color:'#080808',padding:'2px 5px',fontWeight:700}}>EDITED</div>}
+                  </div>
+                  <div style={{padding:'8px 8px 4px'}}>
+                    <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
+                    <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title}</div>
+                    <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginBottom:6}}>{r._artist}</div>
+                    <input
+                      placeholder="Paste image URL to override…"
+                      defaultValue={overrides[i] || ''}
+                      onChange={e => setOverrides(o => ({...o, [i]: e.target.value}))}
+                      style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 6px',fontSize:9,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
         </div>
       )}
     </div>
