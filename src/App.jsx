@@ -497,16 +497,17 @@ function EditModal({ record, onSave, onClose }) {
 // ── AUDIO BATCH UPLOADER ───────────────────────────────────────
 
 // ── CSV ENRICHER ───────────────────────────────────────────────
-// Discogs proxy via Cloudflare Worker (bypasses CORS)
+// Cover art via Cloudflare Worker — Deezer UPC → Spotify → Deezer search
 const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
 
 async function fetchCoverArt(title, artist, ean) {
   try {
     const params = new URLSearchParams();
-    if (ean) params.set('ean', String(ean).replace(/\.0$/, '').trim());
+    if (ean) params.set('ean', String(ean).trim());
     if (title) params.set('title', title);
     if (artist) params.set('artist', artist);
     const r = await fetch(`${WORKER_URL}?${params.toString()}`);
+    if (!r.ok) return '';
     const d = await r.json();
     return d.imageUrl || '';
   } catch { return ''; }
@@ -605,7 +606,7 @@ function CsvEnricher() {
         'Cost per item': '',
         'Status': 'active',
       });
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 500));
     }
     setProgress({ done:rows.length, total:rows.length, current:'' });
     setEnriched(result);
