@@ -740,15 +740,27 @@ function AudioBatchUploader({ records, onMatch }) {
 }
 
 // ── ADMIN PANEL ────────────────────────────────────────────────
-function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
-  const [tab,setTab]=useState('bulk'); const [editing,setEditing]=useState(null);
+function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
+  const [tab,setTab]=useState('bulk');
+  const [editing,setEditing]=useState(null);
+  const [invPage,setInvPage]=useState(1);
+  const [invSearch,setInvSearch]=useState('');
+  const PAGE_SIZE = 20;
+
   const adj=(id,d)=>{const r=records.find(r=>r.id===id);onUpdate(id,{stock:Math.max(0,(r?.stock||0)+d)});};
   const tabBtn=(key,label)=><button onClick={()=>setTab(key)} style={{background:tab===key?S.accent:S.border,color:tab===key?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:tab===key?700:400,letterSpacing:1.5,textTransform:'uppercase',padding:'7px 16px'}}>{label}</button>;
+
+  const filtered = records.filter(r =>
+    !invSearch || `${r.title} ${r.artist} ${r.label} ${r.catalog}`.toLowerCase().includes(invSearch.toLowerCase())
+  );
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const pageRecords = filtered.slice((invPage-1)*PAGE_SIZE, invPage*PAGE_SIZE);
+
   return (
     <div style={{maxWidth:860,margin:'0 auto',padding:'36px 20px'}}>
       {editing&&<EditModal record={editing} onSave={updated=>onUpdate(updated.id,updated)} onClose={()=>setEditing(null)} />}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:28}}>
-        <div><h1 style={{margin:0,fontSize:18,fontWeight:800}}>Admin Panel</h1><div style={{fontSize:10,color:S.muted,marginTop:4}}>{records.length} records · {records.reduce((s,r)=>s+r.stock,0)} units in stock</div></div>
+        <div><h1 style={{margin:0,fontSize:18,fontWeight:800}}>Admin Panel</h1><div style={{fontSize:10,color:S.muted,marginTop:4}}>{records.length} records loaded · {records.reduce((s,r)=>s+r.stock,0)} units in stock{hasMore?' · more in Shopify':''}</div></div>
         <Btn ch="Logout" variant="ghost" onClick={onLogout} />
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
@@ -760,9 +772,21 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
         {tab==='csv'&&<CsvEnricher />}
       </div>
       <AudioBatchUploader records={records} onMatch={updates=>Object.entries(updates).forEach(([id,url])=>onUpdate(Number(id),{audio:url}))} />
-      <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>Inventory</div>
+
+      {/* Inventory header + search + load all */}
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
+        <input
+          value={invSearch} onChange={e=>{setInvSearch(e.target.value);setInvPage(1);}}
+          placeholder="Search inventory…"
+          style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 10px',fontSize:11,fontFamily:'inherit',outline:'none',flex:1,minWidth:120,maxWidth:220}}
+        />
+        <span style={{fontSize:9,color:S.muted}}>{filtered.length} records</span>
+        {hasMore&&<button onClick={onLoadMore} disabled={loadingMore} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{loadingMore?'Loading…':'Load All from Shopify'}</button>}
+      </div>
+
       <div style={{display:'flex',flexDirection:'column',gap:1}}>
-        {records.map(r=>(
+        {pageRecords.map(r=>(
           <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,background:S.surf,padding:'10px 14px',borderRadius:2,flexWrap:'wrap'}}>
             <div style={{width:40,height:40,borderRadius:2,background:`linear-gradient(${r.g})`,backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none',backgroundSize:'cover',flexShrink:0}} />
             <div style={{flex:1,minWidth:120}}><div style={{fontSize:12,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}</div><div style={{fontSize:9,color:S.muted}}>{r.artist} · {r.label}</div></div>
@@ -777,6 +801,15 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout }) {
           </div>
         ))}
       </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginTop:16}}>
+          <button onClick={()=>setInvPage(p=>Math.max(1,p-1))} disabled={invPage===1} style={{background:S.border,border:'none',color:invPage===1?S.muted:S.text,cursor:invPage===1?'not-allowed':'pointer',borderRadius:2,padding:'5px 12px',fontSize:10}}>← Prev</button>
+          <span style={{fontSize:10,color:S.muted}}>{invPage} / {totalPages} · {filtered.length} records</span>
+          <button onClick={()=>setInvPage(p=>Math.min(totalPages,p+1))} disabled={invPage===totalPages} style={{background:S.border,border:'none',color:invPage===totalPages?S.muted:S.text,cursor:invPage===totalPages?'not-allowed':'pointer',borderRadius:2,padding:'5px 12px',fontSize:10}}>Next →</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -864,7 +897,7 @@ export default function App() {
   if(page==='admin') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
-      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setPage('shop');}} />
+      <AdminPanel records={records} onUpdate={(id,p)=>setRecords(rs=>rs.map(r=>r.id===id?{...r,...p}:r))} onAdd={rec=>setRecords(rs=>[...rs,rec])} onDelete={id=>setRecords(rs=>rs.filter(r=>r.id!==id))} onLogout={()=>{setPage('shop');}} onLoadMore={loadMore} hasMore={hasMore} loadingMore={loadingMore} />
     </div>
   );
 

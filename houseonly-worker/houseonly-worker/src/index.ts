@@ -57,21 +57,30 @@ export default {
         // Build query: title + artist + label + year for precision
         const label = url.searchParams.get('label') || '';
         const year  = url.searchParams.get('year')  || '';
-        // catno alone is the most precise — try it first
-        let q = catno ? catno : `${clean(title)} ${clean(artist)}`;
-        if (!catno && label) q += ` ${clean(label)}`;
-        if (!catno && year)  q += ` year:${year}`;
+        // Build precise query: title + artist + label + year
+        let q = `${clean(title)} ${clean(artist)}`;
+        if (label) q += ` ${clean(label)}`;
+        if (year)  q += ` year:${year}`;
+
         const searchRes = await fetch(
-          `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album&limit=3`,
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album&limit=5`,
           { headers: { 'Authorization': `Bearer ${token}` } }
         );
         const searchData = await searchRes.json() as any;
         const items = searchData?.albums?.items || [];
-        // Prefer exact title match if multiple results
-        const match = items.find((i: any) =>
-          i.name?.toLowerCase().includes(clean(title).toLowerCase())
-        ) || items[0];
-        const img = match?.images?.[0]?.url;
+
+        // Score results: prefer exact title match + year match
+        const scored = items.map((item: any) => {
+          let score = 0;
+          const itemTitle = item.name?.toLowerCase() || '';
+          const itemYear = item.release_date?.slice(0,4) || '';
+          if (itemTitle.includes(clean(title).toLowerCase())) score += 3;
+          if (year && itemYear === String(year)) score += 2;
+          if (item.artists?.[0]?.name?.toLowerCase().includes(clean(artist).toLowerCase())) score += 1;
+          return { item, score };
+        });
+        scored.sort((a: any, b: any) => b.score - a.score);
+        const img = scored[0]?.item?.images?.[0]?.url;
         if (img) return json(img);
       }
     } catch {}
