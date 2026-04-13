@@ -8,7 +8,7 @@ const S = {
 // ── SHOPIFY ────────────────────────────────────────────────────
 const SHOPIFY = {
   domain: 'house-only-2.myshopify.com',
-  token:  '3edf470af24f9bd4b81bca274121eec4',
+  token:  import.meta.env.VITE_SHOPIFY_TOKEN || '3edf470af24f9bd4b81bca274121eec4',
   api:    '2024-01',
 };
 
@@ -34,18 +34,12 @@ function parseProduct({ node }) {
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
     || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
   const bodyHtml = node.descriptionHtml || '';
-  // Strip script tags first so JSON doesn't bleed into description
   const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
   const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
   const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
-
-  // Parse audio tracks from body HTML (injected by ZIP importer)
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
-  if (tracksMatch) {
-    try { tracks = JSON.parse(tracksMatch[1]); } catch {}
-  }
-
+  if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
   return {
     id: node.id, shopifyVariantId: v?.id,
     title: node.title||'', artist, label,
@@ -95,6 +89,116 @@ async function shopifyCheckout(cartItems) {
   const rawUrl = data.cartCreate?.cart?.checkoutUrl;
   if (!rawUrl) throw new Error('No checkoutUrl in response: ' + JSON.stringify(data));
   window.open(rawUrl.replace('houseonly.store', 'checkout.houseonly.store'), '_blank');
+}
+
+// ── CUSTOMER AUTH ──────────────────────────────────────────────
+async function customerLogin(email, password) {
+  const data = await shopifyQuery(`
+    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+      customerAccessTokenCreate(input: $input) {
+        customerAccessToken { accessToken expiresAt }
+        customerUserErrors { code message }
+      }
+    }`, { input: { email, password } });
+  const errs = data.customerAccessTokenCreate?.customerUserErrors;
+  if (errs?.length) throw new Error(errs[0].message);
+  return data.customerAccessTokenCreate?.customerAccessToken?.accessToken;
+}
+
+async function customerRegister(firstName, lastName, email, password) {
+  const data = await shopifyQuery(`
+    mutation customerCreate($input: CustomerCreateInput!) {
+      customerCreate(input: $input) {
+        customer { id }
+        customerUserErrors { code message }
+      }
+    }`, { input: { firstName, lastName, email, password, acceptsMarketing: false } });
+  const errs = data.customerCreate?.customerUserErrors;
+  if (errs?.length) throw new Error(errs[0].message);
+  return customerLogin(email, password);
+}
+
+async function customerLogout(token) {
+  await shopifyQuery(`
+    mutation customerAccessTokenDelete($customerAccessToken: String!) {
+      customerAccessTokenDelete(customerAccessToken: $customerAccessToken) { deletedAccessToken }
+    }`, { customerAccessToken: token }).catch(()=>{});
+}
+
+async function fetchCustomer(token) {
+  const data = await shopifyQuery(`
+    query customer($token: String!) {
+      customer(customerAccessToken: $token) {
+        firstName lastName email phone
+        orders(first: 20, sortKey: PROCESSED_AT, reverse: true) {
+          edges { node {
+            id name processedAt financialStatus fulfillmentStatus
+            totalPrice { amount currencyCode }
+            lineItems(first: 10) { edges { node {
+              title quantity
+              variant { image { url } price { amount } }
+            }}}
+          }}
+        }
+      }
+    }`, { token });
+  return data.customer;
+}
+
+// ── CUSTOMER AUTH ──────────────────────────────────────────────
+async function customerLogin(email, password) {
+  const data = await shopifyQuery(`
+    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+      customerAccessTokenCreate(input: $input) {
+        customerAccessToken { accessToken expiresAt }
+        customerUserErrors { code message }
+      }
+    }`, { input: { email, password } });
+  const errs = data.customerAccessTokenCreate?.customerUserErrors;
+  if (errs?.length) throw new Error(errs[0].message);
+  return data.customerAccessTokenCreate?.customerAccessToken?.accessToken;
+}
+
+async function customerRegister(firstName, lastName, email, password) {
+  const data = await shopifyQuery(`
+    mutation customerCreate($input: CustomerCreateInput!) {
+      customerCreate(input: $input) {
+        customer { id }
+        customerUserErrors { code message }
+      }
+    }`, { input: { firstName, lastName, email, password, acceptsMarketing: false } });
+  const errs = data.customerCreate?.customerUserErrors;
+  if (errs?.length) throw new Error(errs[0].message);
+  return customerLogin(email, password);
+}
+
+async function customerLogout(token) {
+  await shopifyQuery(`
+    mutation customerAccessTokenDelete($customerAccessToken: String!) {
+      customerAccessTokenDelete(customerAccessToken: $customerAccessToken) {
+        deletedAccessToken
+      }
+    }`, { customerAccessToken: token }).catch(()=>{});
+}
+
+async function fetchCustomer(token) {
+  const data = await shopifyQuery(`
+    query customer($token: String!) {
+      customer(customerAccessToken: $token) {
+        firstName lastName email phone
+        orders(first: 20, sortKey: PROCESSED_AT, reverse: true) {
+          edges { node {
+            id name processedAt financialStatus fulfillmentStatus
+            totalPrice { amount currencyCode }
+            lineItems(first: 10) { edges { node {
+              title quantity
+              variant { image { url } price { amount } }
+            }}}
+          }}
+        }
+      }
+    }`, { token });
+  return data.customer;
 }
 
 // ── WORKER / R2 ────────────────────────────────────────────────
@@ -212,16 +316,13 @@ function RecordCard({ r, onOpen, onAdd }) {
 
 // ── MODAL ──────────────────────────────────────────────────────
 function cleanTrackName(name) {
-  // "1_1_Various Artists - A1. Dez Andres - The World" → "A1. Dez Andres - The World"
-  // Strip leading N_N_ prefix
   return name.replace(/^\d+_\d+_/, '').trim();
 }
 
 function TrackPlayer({ tracks }) {
-  const [playing, setPlaying] = useState(null); // index of playing track
+  const [playing, setPlaying] = useState(null);
   const [prog, setProg] = useState(0);
   const audioRef = useRef(null);
-
   const play = (i) => {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
     if (playing === i) { setPlaying(null); setProg(0); return; }
@@ -232,9 +333,7 @@ function TrackPlayer({ tracks }) {
     a.ontimeupdate = () => setProg((a.currentTime / a.duration) * 100 || 0);
     a.onended = () => { setPlaying(null); setProg(0); };
   };
-
   useEffect(() => () => audioRef.current?.pause(), []);
-
   return (
     <div style={{ marginBottom:14 }}>
       {tracks.map((t, i) => (
@@ -261,7 +360,6 @@ function Modal({ r, onClose, onAdd }) {
     <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:20, backdropFilter:'blur(4px)' }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, maxWidth:680, width:'100%', maxHeight:'90vh', overflow:'auto' }}>
         <div style={{ display:'flex', flexWrap:'wrap' }}>
-          {/* Square cover image */}
           <div style={{ width:240, flexShrink:0, position:'relative' }}>
             <div style={{ paddingBottom:'100%', position:'relative', background:`linear-gradient(${r.g})` }}>
               {coverSrc(r.coverUrl) && <img src={coverSrc(r.coverUrl)} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
@@ -431,8 +529,6 @@ async function loadXLSX() {
 }
 
 function catnoFromFilename(name) {
-  // "166560-FAT072.zip" → "FAT072"
-  // "166560-FAT072 (2).zip" → "FAT072"
   const base = name.replace(/\.zip$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
   const m = base.match(/^\d+-(.+)$/);
   return (m ? m[1] : base).toUpperCase().trim();
@@ -464,19 +560,12 @@ async function extractSalesPaperText(pdfBlob) {
       const content = await page.getTextContent();
       fullText += content.items.map(i => i.str).join(' ') + '\n';
     }
-
-    // Helper: extract value after a label keyword
     const extract = (pattern) => {
       const m = fullText.match(pattern);
       return m ? m[1].trim().split(/\s{2,}|\n/)[0].trim() : '';
     };
-
-    // Extract label name
     const label = extract(/Label[:\s]+([^\n\r]+)/i);
-
-    // Extract genre — look for Genre/Style field
     const genreRaw = extract(/(?:Genre|Style)[:\s]+([^\n\r]+)/i);
-    // Map to our genre list
     const GENRE_MAP = {
       'deep house': 'Deep House', 'tech house': 'Tech House',
       'afro house': 'Afro House', 'chicago house': 'Chicago House',
@@ -486,8 +575,6 @@ async function extractSalesPaperText(pdfBlob) {
     };
     const genreLower = genreRaw.toLowerCase();
     const genre = Object.entries(GENRE_MAP).find(([k]) => genreLower.includes(k))?.[1] || '';
-
-    // Extract description after Releasetext:
     const descMatch = fullText.match(/Releasetext:\s*([\s\S]+)/i);
     let desc = '';
     if (descMatch) {
@@ -496,7 +583,6 @@ async function extractSalesPaperText(pdfBlob) {
       desc = desc.replace(/\bwordandsound\.net[\s\S]*/i, '').trim();
       desc = desc.replace(/\s{3,}/g, '\n\n').trim();
     }
-
     return { desc, label, genre };
   } catch { return { desc: '', label: '', genre: '' }; }
 }
@@ -504,7 +590,7 @@ async function extractSalesPaperText(pdfBlob) {
 function ZipImporter() {
   const [excelFile, setExcelFile] = useState(null);
   const [zipFiles, setZipFiles]   = useState([]);
-  const [status, setStatus]       = useState('idle'); // idle | processing | review
+  const [status, setStatus]       = useState('idle');
   const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
   const [results, setResults]     = useState([]);
   const [skippedCount, setSkippedCount] = useState(0);
@@ -525,93 +611,55 @@ function ZipImporter() {
   const process = async () => {
     if (!excelFile || !zipFiles.length) return;
     setError(''); setStatus('processing'); setResults([]);
-
     try {
       setProgress({ done:0, total:0, current:'Loading libraries…' });
       const [JSZip, XLSX] = await Promise.all([loadJSZip(), loadXLSX()]);
-
-      // Parse Excel
       setProgress({ done:0, total:0, current:'Parsing Excel…' });
       const buf = await excelFile.arrayBuffer();
       const wb  = XLSX.read(buf);
       const ws  = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { defval:'' });
-
-      // Build catalog → row map
       const rowMap = {};
       rows.forEach(r => {
         const catno = String(r.ArtNo || '').toUpperCase().trim();
         if (catno) rowMap[catno] = r;
       });
-
-      // Only process ZIPs that match an Excel row
       const matchedZips = zipFiles.filter(f => rowMap[catnoFromFilename(f.name)]);
-      const skipped = zipFiles.length - matchedZips.length;
       const total = matchedZips.length;
       const processed = [];
-
       for (let i = 0; i < matchedZips.length; i++) {
         const zipFile = matchedZips[i];
         const catno   = catnoFromFilename(zipFile.name);
         const row     = rowMap[catno];
-
         setProgress({ done:i, total, current:`${catno} — extracting…` });
-
-        let coverUrl  = '';
-        let tracks    = [];
-        let desc      = '';
-        let pdfLabel  = '';
-        let pdfGenre  = '';
-        let itemError = '';
-
+        let coverUrl='', tracks=[], desc='', pdfLabel='', pdfGenre='', itemError='';
         try {
           const zip   = await JSZip.loadAsync(zipFile);
           const files = Object.values(zip.files).filter(f => !f.dir);
-
-          // Find cover image
           const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
           const coverFile = imgFiles.find(f => /front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
-
-          // Find PDF salespaper
           const pdfFile = files.find(f => /SALESPAPER\.pdf$/i.test(f.name));
-
-          // Find all audio files sorted by name
-          const audioFiles = files
-            .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
-            .sort((a, b) => a.name.localeCompare(b.name));
-
-          // Upload cover
+          const audioFiles = files.filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a, b) => a.name.localeCompare(b.name));
           if (coverFile) {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
             const blob = await coverFile.async('blob');
             const ext  = coverFile.name.split('.').pop().toLowerCase();
-            const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, mime);
+            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
           }
-
-          // Extract PDF description, label, genre
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
             const blob = await pdfFile.async('blob');
             const extracted = await extractSalesPaperText(blob);
-            desc       = extracted.desc;
-            pdfLabel   = extracted.label;
-            pdfGenre   = extracted.genre;
+            desc=extracted.desc; pdfLabel=extracted.label; pdfGenre=extracted.genre;
           }
-
-          // Upload audio tracks
           for (const af of audioFiles) {
             const filename = af.name.split('/').pop();
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
             const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
-            // Store raw filename as name (cleaned on display side)
             tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
           }
-        } catch (e) {
-          itemError = e.message;
-        }
-
+        } catch (e) { itemError = e.message; }
         const title  = String(row.Title  || '');
         const artist = String(row.Artist || '');
         const ean    = row.EAN ? String(Math.round(Number(row.EAN))) : '';
@@ -621,165 +669,97 @@ function ZipImporter() {
         const price  = String((parseFloat(row.UnitPrice || 18.99) * 1.60).toFixed(2));
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-
         const descHtml  = desc ? `<p>${desc.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>` : '<p></p>';
-        const audioHtml = tracks.length
-          ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>`
-          : '';
-
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         processed.push({
-          _catno: catno, _title: title, _artist: artist,
-          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          'Handle': handle,
-          'Title': title || catno,
-          'Body (HTML)': `${descHtml}${audioHtml}`,
-          'Vendor': artist,
-          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
-          'Type': '',
+          _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': ['vinyl', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
-          'Published': 'TRUE',
-          'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
+          'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
           'Variant SKU': catno, 'Variant Grams': '180', 'Variant Inventory Tracker': '',
           'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'deny',
           'Variant Fulfillment Service': 'manual', 'Variant Price': price,
-          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE',
-          'Variant Taxable': 'FALSE',
+          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'FALSE',
           'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
           'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
-          'Variant Barcode': ean,
-          'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
+          'Variant Barcode': ean, 'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
           'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
           'Gift Card': 'FALSE', 'SEO Title': '', 'SEO Description': '',
-          'Variant Image': '', 'Variant Weight Unit': 'kg',
-          'Variant Tax Code': '', 'Cost per item': '', 'Status': 'active',
+          'Variant Image': '', 'Variant Weight Unit': 'kg', 'Variant Tax Code': '', 'Cost per item': '', 'Status': 'active',
         });
-
         setProgress({ done:i+1, total, current:'' });
       }
-
       setResults(processed);
       setSkippedCount(zipFiles.length - matchedZips.length);
       setStatus('review');
-    } catch (e) {
-      setError(e.message);
-      setStatus('idle');
-    }
+    } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
   const downloadCSV = () => {
     const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [
-      CSV_KEYS.join(','),
-      ...results.map(row =>
-        CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(',')
-      ),
-    ];
+    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'shopify_import_ws.csv';
-    a.click();
+    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_ws.csv'; a.click();
   };
 
-  const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
-  const covered   = results.filter(r => r._coverUrl).length;
-  const withAudio = results.filter(r => r._tracks?.length > 0).length;
-  const errors    = results.filter(r => r._error).length;
+  const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
+  const covered=results.filter(r=>r._coverUrl).length;
+  const withAudio=results.filter(r=>r._tracks?.length>0).length;
+  const errors=results.filter(r=>r._error).length;
 
   return (
     <div>
-      <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
-        Upload your Word & Sound Excel + all ZIP files together. Covers and audio are uploaded to R2 automatically, then download the Shopify CSV.
-      </p>
-
-      {/* Drop zone */}
-      <div
-        onDragOver={e => e.preventDefault()}
-        onDrop={e => { e.preventDefault(); assignFiles([...e.dataTransfer.files]); }}
-        style={{ border:`2px dashed ${(excelFile||zipFiles.length)?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}
-      >
+      <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>Upload your Word & Sound Excel + all ZIP files together. Covers and audio are uploaded to R2 automatically, then download the Shopify CSV.</p>
+      <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${(excelFile||zipFiles.length)?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
         <div style={{ fontSize:28, marginBottom:6 }}>📦</div>
-        <div style={{ fontSize:11, color:(excelFile||zipFiles.length)?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>
-          Drag Excel + ZIPs here, or use buttons below
-        </div>
+        <div style={{ fontSize:11, color:(excelFile||zipFiles.length)?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag Excel + ZIPs here, or use buttons below</div>
         <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
           <input ref={excelRef} type="file" accept=".xlsx,.xls" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
           <input ref={zipRef}   type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
-          <button onClick={()=>excelRef.current.click()} style={{ background:excelFile?S.accent:S.border, border:'none', color:excelFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>
-            {excelFile ? `✓ ${excelFile.name}` : '+ Excel'}
-          </button>
-          <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>
-            {zipFiles.length ? `✓ ${zipFiles.length} ZIPs` : '+ ZIPs'}
-          </button>
-          {zipFiles.length>0 && <button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear</button>}
+          <button onClick={()=>excelRef.current.click()} style={{ background:excelFile?S.accent:S.border, border:'none', color:excelFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{excelFile?`✓ ${excelFile.name}`:'+ Excel'}</button>
+          <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}</button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear</button>}
         </div>
       </div>
-
-      {/* ZIP list preview */}
-      {zipFiles.length > 0 && (
-        <div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>
-          {zipFiles.map((f,i) => (
-            <span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>
-          ))}
-        </div>
-      )}
-
-      {status==='idle' && excelFile && zipFiles.length>0 && (
-        <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
-      )}
-
-      {status==='processing' && (
+      {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>)}</div>}
+      {status==='idle'&&excelFile&&zipFiles.length>0&&<Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />}
+      {status==='processing'&&(
         <div style={{ padding:14, background:S.bg, borderRadius:2, border:`1px solid ${S.border}` }}>
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
-            <span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span>
-            <span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span>
-          </div>
-          <div style={{ height:3, background:S.border, borderRadius:2, overflow:'hidden', marginBottom:8 }}>
-            <div style={{ height:'100%', background:S.accent, width:`${pct}%`, transition:'width 0.3s' }} />
-          </div>
-          {progress.current && <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>→ {progress.current}</div>}
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}><span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span><span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span></div>
+          <div style={{ height:3, background:S.border, borderRadius:2, overflow:'hidden', marginBottom:8 }}><div style={{ height:'100%', background:S.accent, width:`${pct}%`, transition:'width 0.3s' }} /></div>
+          {progress.current&&<div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>→ {progress.current}</div>}
         </div>
       )}
-
-      {error && <div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
-
-      {status==='review' && results.length>0 && (
+      {error&&<div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
+      {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
-            <div>
-              <span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span>
-              <span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span>
-            </div>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span></div>
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
-
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
-            {results.map((r,i) => (
-              <div key={i} style={{ background:S.surf, border:`1px solid ${r._error ? S.danger : r._coverUrl ? S.border : '#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
+            {results.map((r,i)=>(
+              <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
                 <div style={{ position:'relative', paddingBottom:'100%', background:'#1a1a2e' }}>
-                  {r._coverUrl
-                    ? <img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />
-                    : <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🎵</div>
-                  }
-                  {r._error && <div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
-                  {r._tracks?.length>0 && <div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
-                  {!r._coverUrl && !r._error && <div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
+                  {r._coverUrl?<img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />:<div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🎵</div>}
+                  {r._error&&<div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
+                  {r._tracks?.length>0&&<div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
                 </div>
                 <div style={{ padding:'8px 8px 6px' }}>
                   <div style={{ fontSize:9, color:S.muted, fontFamily:'monospace', marginBottom:2 }}>{r._catno}</div>
-                  <div style={{ fontSize:10, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._title || r._catno}</div>
+                  <div style={{ fontSize:10, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._title||r._catno}</div>
                   <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._artist}</div>
-                  {r._error && <div style={{ fontSize:8, color:S.danger, marginTop:4, lineHeight:1.4 }}>{r._error}</div>}
+                  {r._error&&<div style={{ fontSize:8, color:S.danger, marginTop:4, lineHeight:1.4 }}>{r._error}</div>}
                 </div>
               </div>
             ))}
           </div>
-
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
-          </div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -1091,16 +1071,11 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
   const [invPage,setInvPage]=useState(1);
   const [invSearch,setInvSearch]=useState('');
   const PAGE_SIZE = 20;
-
   const adj=(id,d)=>{const r=records.find(r=>r.id===id);onUpdate(id,{stock:Math.max(0,(r?.stock||0)+d)});};
   const tabBtn=(key,label)=><button onClick={()=>setTab(key)} style={{background:tab===key?S.accent:S.border,color:tab===key?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:tab===key?700:400,letterSpacing:1.5,textTransform:'uppercase',padding:'7px 16px'}}>{label}</button>;
-
-  const filtered = records.filter(r =>
-    !invSearch || `${r.title} ${r.artist} ${r.label} ${r.catalog}`.toLowerCase().includes(invSearch.toLowerCase())
-  );
+  const filtered = records.filter(r => !invSearch || `${r.title} ${r.artist} ${r.label} ${r.catalog}`.toLowerCase().includes(invSearch.toLowerCase()));
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageRecords = filtered.slice((invPage-1)*PAGE_SIZE, invPage*PAGE_SIZE);
-
   return (
     <div style={{maxWidth:860,margin:'0 auto',padding:'36px 20px'}}>
       {editing&&<EditModal record={editing} onSave={updated=>onUpdate(updated.id,updated)} onClose={()=>setEditing(null)} />}
@@ -1111,11 +1086,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
         <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
-          {tabBtn('zip','📦 ZIP Import')}
-          {tabBtn('bulk','⬇ Bulk Search')}
-          {tabBtn('barcode','▥ Barcode')}
-          {tabBtn('url','🔗 Single URL')}
-          {tabBtn('csv','📄 CSV + Covers')}
+          {tabBtn('zip','📦 ZIP Import')}{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}{tabBtn('csv','📄 CSV + Covers')}
         </div>
         {tab==='zip'     && <ZipImporter />}
         {tab==='bulk'    && <BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
@@ -1123,14 +1094,12 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='url'     && <UrlImporter onImport={onAdd} />}
         {tab==='csv'     && <CsvEnricher />}
       </div>
-
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
         <input value={invSearch} onChange={e=>{setInvSearch(e.target.value);setInvPage(1);}} placeholder="Search inventory…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 10px',fontSize:11,fontFamily:'inherit',outline:'none',flex:1,minWidth:120,maxWidth:220}} />
         <span style={{fontSize:9,color:S.muted}}>{filtered.length} records</span>
         {hasMore&&<button onClick={onLoadMore} disabled={loadingMore} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{loadingMore?'Loading…':'Load All from Shopify'}</button>}
       </div>
-
       <div style={{display:'flex',flexDirection:'column',gap:1}}>
         {pageRecords.map(r=>(
           <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,background:S.surf,padding:'10px 14px',borderRadius:2,flexWrap:'wrap'}}>
@@ -1147,7 +1116,6 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           </div>
         ))}
       </div>
-
       {totalPages > 1 && (
         <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginTop:16}}>
           <button onClick={()=>setInvPage(p=>Math.max(1,p-1))} disabled={invPage===1} style={{background:S.border,border:'none',color:invPage===1?S.muted:S.text,cursor:invPage===1?'not-allowed':'pointer',borderRadius:2,padding:'5px 12px',fontSize:10}}>← Prev</button>
@@ -1175,6 +1143,295 @@ function LoginScreen({ onLogin }) {
   );
 }
 
+// ── CUSTOMER ACCOUNT ───────────────────────────────────────────
+function CustomerAccount({ token, onLogin, onLogout }) {
+  const [mode, setMode]           = useState('login');
+  const [email, setEmail]         = useState('');
+  const [password, setPassword]   = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName]   = useState('');
+  const [loading, setLoading]     = useState(false);
+  const [err, setErr]             = useState('');
+  const [customer, setCustomer]   = useState(null);
+
+  useEffect(() => {
+    if (token) {
+      setMode('account'); setLoading(true);
+      fetchCustomer(token)
+        .then(c => { setCustomer(c); setLoading(false); })
+        .catch(() => { onLogout(); setLoading(false); });
+    }
+  }, [token]);
+
+  const handleLogin = async () => {
+    if (!email.trim() || !password.trim()) return;
+    setErr(''); setLoading(true);
+    try { onLogin(await customerLogin(email, password)); }
+    catch(e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  const handleRegister = async () => {
+    if (!firstName.trim() || !email.trim() || !password.trim()) return;
+    setErr(''); setLoading(true);
+    try { onLogin(await customerRegister(firstName, lastName, email, password)); }
+    catch(e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  const handleLogout = async () => {
+    await customerLogout(token);
+    onLogout();
+    setCustomer(null); setMode('login');
+    setEmail(''); setPassword(''); setFirstName(''); setLastName('');
+  };
+
+  const switchMode = (m) => { setMode(m); setErr(''); };
+
+  const inp = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
+  const tabBtn = (m, label) => (
+    <button onClick={()=>switchMode(m)} style={{flex:1,background:'none',border:'none',borderBottom:`2px solid ${mode===m?S.accent:'transparent'}`,color:mode===m?S.accent:S.muted,cursor:'pointer',fontFamily:'inherit',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'10px 0',transition:'all 0.15s'}}>
+      {label}
+    </button>
+  );
+
+  if (mode === 'login' || mode === 'register') return (
+    <div style={{padding:'0 28px 32px'}}>
+      <div style={{display:'flex',borderBottom:`1px solid ${S.border}`,marginBottom:24}}>
+        {tabBtn('login','Sign In')}
+        {tabBtn('register','Create Account')}
+      </div>
+      {mode === 'login' && <>
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="your@email.com" style={inp} autoComplete="email" />
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="••••••••" style={inp} autoComplete="current-password" />
+        </div>
+        {err&&<div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
+        <Btn ch={loading?'Signing in…':'Sign In'} onClick={handleLogin} disabled={loading||!email||!password} full />
+      </>}
+      {mode === 'register' && <>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+          <div>
+            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>First Name</div>
+            <input value={firstName} onChange={e=>setFirstName(e.target.value)} placeholder="Jane" style={inp} autoComplete="given-name" />
+          </div>
+          <div>
+            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Last Name</div>
+            <input value={lastName} onChange={e=>setLastName(e.target.value)} placeholder="Smith" style={inp} autoComplete="family-name" />
+          </div>
+        </div>
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="your@email.com" style={inp} autoComplete="email" />
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleRegister()} placeholder="Min. 5 characters" style={inp} autoComplete="new-password" />
+        </div>
+        {err&&<div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
+        <Btn ch={loading?'Creating account…':'Create Account'} onClick={handleRegister} disabled={loading||!firstName||!email||!password} full />
+      </>}
+    </div>
+  );
+
+  if (loading) return <div style={{padding:40,textAlign:'center',color:S.muted,fontSize:11}}>Loading…</div>;
+
+  const orders = customer?.orders?.edges || [];
+  return (
+    <div style={{padding:'28px 28px 24px',overflowY:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:24}}>
+        <div>
+          <div style={{fontSize:15,fontWeight:800,color:S.text}}>{customer?.firstName} {customer?.lastName}</div>
+          <div style={{fontSize:11,color:S.muted,marginTop:2}}>{customer?.email}</div>
+        </div>
+        <button onClick={handleLogout} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2}}>Sign Out</button>
+      </div>
+      <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Order History</div>
+      {orders.length===0&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'30px 0'}}>No orders yet.</div>}
+      {orders.map(({node:o})=>(
+        <div key={o.id} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:'14px 16px',marginBottom:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <div>
+              <span style={{fontSize:12,fontWeight:700,color:S.text}}>{o.name}</span>
+              <span style={{fontSize:10,color:S.muted,marginLeft:10}}>{new Date(o.processedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:13,fontWeight:800,color:S.accent}}>€{parseFloat(o.totalPrice.amount).toFixed(2)}</div>
+              <div style={{fontSize:8,letterSpacing:1,textTransform:'uppercase',color:o.fulfillmentStatus==='FULFILLED'?'#44cc77':S.muted,marginTop:2}}>{o.fulfillmentStatus?.replace('_',' ')}</div>
+            </div>
+          </div>
+          {o.lineItems.edges.map(({node:li},i)=>(
+            <div key={i} style={{display:'flex',alignItems:'center',gap:10,paddingTop:8,borderTop:`1px solid ${S.border}`}}>
+              {li.variant?.image?.url
+                ?<img src={li.variant.image.url} alt="" style={{width:36,height:36,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                :<div style={{width:36,height:36,borderRadius:2,background:'#1a1a2e',flexShrink:0}} />
+              }
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:11,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{li.title}</div>
+                <div style={{fontSize:10,color:S.muted}}>Qty: {li.quantity}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── CUSTOMER ACCOUNT ───────────────────────────────────────────
+function CustomerAccount({ token, onLogin, onLogout }) {
+  const [mode, setMode]           = useState('login'); // login | register | account
+  const [email, setEmail]         = useState('');
+  const [password, setPassword]   = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName]   = useState('');
+  const [loading, setLoading]     = useState(false);
+  const [err, setErr]             = useState('');
+  const [customer, setCustomer]   = useState(null);
+
+  useEffect(() => {
+    if (token) {
+      setMode('account');
+      setLoading(true);
+      fetchCustomer(token)
+        .then(c => { setCustomer(c); setLoading(false); })
+        .catch(() => { onLogout(); setLoading(false); });
+    }
+  }, [token]);
+
+  const handleLogin = async () => {
+    if (!email.trim() || !password.trim()) return;
+    setErr(''); setLoading(true);
+    try { onLogin(await customerLogin(email, password)); }
+    catch(e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  const handleRegister = async () => {
+    if (!firstName.trim() || !email.trim() || !password.trim()) return;
+    setErr(''); setLoading(true);
+    try { onLogin(await customerRegister(firstName, lastName, email, password)); }
+    catch(e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  const handleLogout = async () => {
+    await customerLogout(token);
+    onLogout();
+    setCustomer(null); setMode('login');
+    setEmail(''); setPassword(''); setFirstName(''); setLastName('');
+  };
+
+  const switchMode = (m) => { setMode(m); setErr(''); };
+
+  const inp = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
+  const tab = (m, label) => (
+    <button onClick={()=>switchMode(m)} style={{flex:1,background:'none',border:'none',borderBottom:`2px solid ${mode===m?S.accent:'transparent'}`,color:mode===m?S.accent:S.muted,cursor:'pointer',fontFamily:'inherit',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'10px 0',transition:'all 0.15s'}}>
+      {label}
+    </button>
+  );
+
+  if (mode === 'login' || mode === 'register') return (
+    <div style={{padding:'0 28px 32px'}}>
+      <div style={{display:'flex',borderBottom:`1px solid ${S.border}`,marginBottom:24}}>
+        {tab('login','Sign In')}
+        {tab('register','Create Account')}
+      </div>
+
+      {mode === 'login' && <>
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="your@email.com" style={inp} autoComplete="email" />
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="••••••••" style={inp} autoComplete="current-password" />
+        </div>
+        {err && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
+        <Btn ch={loading?'Signing in…':'Sign In'} onClick={handleLogin} disabled={loading||!email||!password} full />
+      </>}
+
+      {mode === 'register' && <>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+          <div>
+            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>First Name</div>
+            <input value={firstName} onChange={e=>setFirstName(e.target.value)} placeholder="Jane" style={inp} autoComplete="given-name" />
+          </div>
+          <div>
+            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Last Name</div>
+            <input value={lastName} onChange={e=>setLastName(e.target.value)} placeholder="Smith" style={inp} autoComplete="family-name" />
+          </div>
+        </div>
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="your@email.com" style={inp} autoComplete="email" />
+        </div>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleRegister()} placeholder="Min. 5 characters" style={inp} autoComplete="new-password" />
+        </div>
+        {err && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
+        <Btn ch={loading?'Creating account…':'Create Account'} onClick={handleRegister} disabled={loading||!firstName||!email||!password} full />
+      </>}
+    </div>
+  );
+
+  if (loading) return (
+    <div style={{padding:40,textAlign:'center',color:S.muted,fontSize:11}}>Loading…</div>
+  );
+
+  const orders = customer?.orders?.edges || [];
+
+  return (
+    <div style={{padding:'28px 28px 24px',overflowY:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:24}}>
+        <div>
+          <div style={{fontSize:15,fontWeight:800,color:S.text}}>{customer?.firstName} {customer?.lastName}</div>
+          <div style={{fontSize:11,color:S.muted,marginTop:2}}>{customer?.email}</div>
+        </div>
+        <button onClick={handleLogout} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2}}>Sign Out</button>
+      </div>
+
+      <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Order History</div>
+
+      {orders.length === 0 && (
+        <div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'30px 0'}}>No orders yet.</div>
+      )}
+
+      {orders.map(({node:o}) => (
+        <div key={o.id} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:'14px 16px',marginBottom:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <div>
+              <span style={{fontSize:12,fontWeight:700,color:S.text}}>{o.name}</span>
+              <span style={{fontSize:10,color:S.muted,marginLeft:10}}>{new Date(o.processedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:13,fontWeight:800,color:S.accent}}>€{parseFloat(o.totalPrice.amount).toFixed(2)}</div>
+              <div style={{fontSize:8,letterSpacing:1,textTransform:'uppercase',color:o.fulfillmentStatus==='FULFILLED'?'#44cc77':S.muted,marginTop:2}}>{o.fulfillmentStatus?.replace('_',' ')}</div>
+            </div>
+          </div>
+          {o.lineItems.edges.map(({node:li},i) => (
+            <div key={i} style={{display:'flex',alignItems:'center',gap:10,paddingTop:8,borderTop:`1px solid ${S.border}`}}>
+              {li.variant?.image?.url
+                ? <img src={li.variant.image.url} alt="" style={{width:36,height:36,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                : <div style={{width:36,height:36,borderRadius:2,background:'#1a1a2e',flexShrink:0}} />
+              }
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:11,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{li.title}</div>
+                <div style={{fontSize:10,color:S.muted}}>Qty: {li.quantity}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── NAV ────────────────────────────────────────────────────────
 function Nav({ onLogo, children }) {
   return (
@@ -1195,8 +1452,12 @@ export default function App() {
   const [loadingMore,setLoadingMore]     = useState(false);
   const [cart,setCart]                   = useState([]);
   const [cartOpen,setCartOpen]           = useState(false);
+  const [accountOpen,setAccountOpen]     = useState(false);
+  const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
+  const [accountOpen,setAccountOpen]     = useState(false);
+  const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters] = useState({genre:null,label:null,year:null});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null});
   const [search,setSearch]               = useState('');
   const [page,setPage]                   = useState('shop');
 
@@ -1236,6 +1497,9 @@ export default function App() {
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
+  const handleLogin  = (t) => { localStorage.setItem('ho_ctoken',t); setCustomerToken(t); };
+  const handleLogout = ()  => { localStorage.removeItem('ho_ctoken'); setCustomerToken(null); };
+
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
       <Nav onLogo={()=>setPage('shop')}><button onClick={()=>setPage('shop')} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button></Nav>
@@ -1255,7 +1519,10 @@ export default function App() {
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
-          <button onClick={()=>setCartOpen(true)} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
+          <button onClick={()=>{setAccountOpen(o=>!o);setCartOpen(false);}} title="Account" style={{background:customerToken?S.accent:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={customerToken?'#080808':S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </button>
+          <button onClick={()=>{setCartOpen(true);setAccountOpen(false);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
         </div>
@@ -1289,6 +1556,20 @@ export default function App() {
       <div style={{borderTop:`1px solid ${S.border}`,padding:24,textAlign:'center',marginTop:40}}>
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
       </div>
+
+      {/* Account drawer */}
+      <>
+        {accountOpen&&<div onClick={()=>setAccountOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:900}} />}
+        <div style={{position:'fixed',top:0,right:0,bottom:0,width:Math.min(380,window.innerWidth),background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:accountOpen?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column'}}>
+          <div style={{padding:'18px 22px',borderBottom:`1px solid ${S.border}`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontWeight:800,fontSize:11,letterSpacing:2,textTransform:'uppercase'}}>My Account</span>
+            <button onClick={()=>setAccountOpen(false)} style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:20}}>×</button>
+          </div>
+          <div style={{flex:1,overflowY:'auto'}}>
+            <CustomerAccount token={customerToken} onLogin={handleLogin} onLogout={handleLogout} />
+          </div>
+        </div>
+      </>
 
       <Modal r={selected} onClose={()=>setSelected(null)} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={()=>shopifyCheckout(cart)} />
