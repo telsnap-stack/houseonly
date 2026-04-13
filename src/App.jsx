@@ -1454,8 +1454,6 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [accountOpen,setAccountOpen]     = useState(false);
   const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
-  const [accountOpen,setAccountOpen]     = useState(false);
-  const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,label:null,year:null});
   const [search,setSearch]               = useState('');
