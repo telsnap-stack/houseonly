@@ -98,7 +98,7 @@ async function shopifyCheckout(cartItems) {
 }
 
 // ── WORKER / R2 ────────────────────────────────────────────────
-const WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
 
 async function uploadToR2(blob, key, mimeType) {
   const fd = new FormData();
