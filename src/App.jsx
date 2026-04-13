@@ -145,67 +145,6 @@ async function fetchCustomer(token) {
   return data.customer;
 }
 
-// ── CUSTOMER AUTH ──────────────────────────────────────────────
-async function customerLogin(email, password) {
-  const data = await shopifyQuery(`
-    mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
-      customerAccessTokenCreate(input: $input) {
-        customerAccessToken { accessToken expiresAt }
-        customerUserErrors { code message }
-      }
-    }`, { input: { email, password } });
-  const errs = data.customerAccessTokenCreate?.customerUserErrors;
-  if (errs?.length) throw new Error(errs[0].message);
-  return data.customerAccessTokenCreate?.customerAccessToken?.accessToken;
-}
-
-async function customerRegister(firstName, lastName, email, password) {
-  const data = await shopifyQuery(`
-    mutation customerCreate($input: CustomerCreateInput!) {
-      customerCreate(input: $input) {
-        customer { id }
-        customerUserErrors { code message }
-      }
-    }`, { input: { firstName, lastName, email, password, acceptsMarketing: false } });
-  const errs = data.customerCreate?.customerUserErrors;
-  if (errs?.length) throw new Error(errs[0].message);
-  return customerLogin(email, password);
-}
-
-async function customerLogout(token) {
-  await shopifyQuery(`
-    mutation customerAccessTokenDelete($customerAccessToken: String!) {
-      customerAccessTokenDelete(customerAccessToken: $customerAccessToken) {
-        deletedAccessToken
-      }
-    }`, { customerAccessToken: token }).catch(()=>{});
-}
-
-async function fetchCustomer(token) {
-  const data = await shopifyQuery(`
-    query customer($token: String!) {
-      customer(customerAccessToken: $token) {
-        firstName lastName email phone
-        orders(first: 20, sortKey: PROCESSED_AT, reverse: true) {
-          edges { node {
-            id name processedAt financialStatus fulfillmentStatus
-            totalPrice { amount currencyCode }
-            lineItems(first: 10) { edges { node {
-              title quantity
-              variant { image { url } price { amount } }
-            }}}
-          }}
-        }
-      }
-    }`, { token });
-  return data.customer;
-}
-
-// ── WORKER / R2 ────────────────────────────────────────────────
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
-
-async function uploadToR2(blob, key, mimeType) {
-  const fd = new FormData();
   fd.append('file', new File([blob], key.split('/').pop(), { type: mimeType }));
   fd.append('key', key);
   const r = await fetch(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
