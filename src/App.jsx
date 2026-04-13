@@ -145,6 +145,11 @@ async function fetchCustomer(token) {
   return data.customer;
 }
 
+// ── WORKER / R2 ────────────────────────────────────────────────
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
+
+async function uploadToR2(blob, key, mimeType) {
+  const fd = new FormData();
   fd.append('file', new File([blob], key.split('/').pop(), { type: mimeType }));
   fd.append('key', key);
   const r = await fetch(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
@@ -1084,145 +1089,6 @@ function LoginScreen({ onLogin }) {
 
 // ── CUSTOMER ACCOUNT ───────────────────────────────────────────
 function CustomerAccount({ token, onLogin, onLogout }) {
-  const [mode, setMode]           = useState('login');
-  const [email, setEmail]         = useState('');
-  const [password, setPassword]   = useState('');
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName]   = useState('');
-  const [loading, setLoading]     = useState(false);
-  const [err, setErr]             = useState('');
-  const [customer, setCustomer]   = useState(null);
-
-  useEffect(() => {
-    if (token) {
-      setMode('account'); setLoading(true);
-      fetchCustomer(token)
-        .then(c => { setCustomer(c); setLoading(false); })
-        .catch(() => { onLogout(); setLoading(false); });
-    }
-  }, [token]);
-
-  const handleLogin = async () => {
-    if (!email.trim() || !password.trim()) return;
-    setErr(''); setLoading(true);
-    try { onLogin(await customerLogin(email, password)); }
-    catch(e) { setErr(e.message); }
-    setLoading(false);
-  };
-
-  const handleRegister = async () => {
-    if (!firstName.trim() || !email.trim() || !password.trim()) return;
-    setErr(''); setLoading(true);
-    try { onLogin(await customerRegister(firstName, lastName, email, password)); }
-    catch(e) { setErr(e.message); }
-    setLoading(false);
-  };
-
-  const handleLogout = async () => {
-    await customerLogout(token);
-    onLogout();
-    setCustomer(null); setMode('login');
-    setEmail(''); setPassword(''); setFirstName(''); setLastName('');
-  };
-
-  const switchMode = (m) => { setMode(m); setErr(''); };
-
-  const inp = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
-  const tabBtn = (m, label) => (
-    <button onClick={()=>switchMode(m)} style={{flex:1,background:'none',border:'none',borderBottom:`2px solid ${mode===m?S.accent:'transparent'}`,color:mode===m?S.accent:S.muted,cursor:'pointer',fontFamily:'inherit',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'10px 0',transition:'all 0.15s'}}>
-      {label}
-    </button>
-  );
-
-  if (mode === 'login' || mode === 'register') return (
-    <div style={{padding:'0 28px 32px'}}>
-      <div style={{display:'flex',borderBottom:`1px solid ${S.border}`,marginBottom:24}}>
-        {tabBtn('login','Sign In')}
-        {tabBtn('register','Create Account')}
-      </div>
-      {mode === 'login' && <>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
-          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="your@email.com" style={inp} autoComplete="email" />
-        </div>
-        <div style={{marginBottom:16}}>
-          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
-          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleLogin()} placeholder="••••••••" style={inp} autoComplete="current-password" />
-        </div>
-        {err&&<div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
-        <Btn ch={loading?'Signing in…':'Sign In'} onClick={handleLogin} disabled={loading||!email||!password} full />
-      </>}
-      {mode === 'register' && <>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-          <div>
-            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>First Name</div>
-            <input value={firstName} onChange={e=>setFirstName(e.target.value)} placeholder="Jane" style={inp} autoComplete="given-name" />
-          </div>
-          <div>
-            <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Last Name</div>
-            <input value={lastName} onChange={e=>setLastName(e.target.value)} placeholder="Smith" style={inp} autoComplete="family-name" />
-          </div>
-        </div>
-        <div style={{marginBottom:12}}>
-          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Email</div>
-          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="your@email.com" style={inp} autoComplete="email" />
-        </div>
-        <div style={{marginBottom:16}}>
-          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Password</div>
-          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleRegister()} placeholder="Min. 5 characters" style={inp} autoComplete="new-password" />
-        </div>
-        {err&&<div style={{fontSize:10,color:S.danger,marginBottom:12}}>{err}</div>}
-        <Btn ch={loading?'Creating account…':'Create Account'} onClick={handleRegister} disabled={loading||!firstName||!email||!password} full />
-      </>}
-    </div>
-  );
-
-  if (loading) return <div style={{padding:40,textAlign:'center',color:S.muted,fontSize:11}}>Loading…</div>;
-
-  const orders = customer?.orders?.edges || [];
-  return (
-    <div style={{padding:'28px 28px 24px',overflowY:'auto'}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:24}}>
-        <div>
-          <div style={{fontSize:15,fontWeight:800,color:S.text}}>{customer?.firstName} {customer?.lastName}</div>
-          <div style={{fontSize:11,color:S.muted,marginTop:2}}>{customer?.email}</div>
-        </div>
-        <button onClick={handleLogout} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2}}>Sign Out</button>
-      </div>
-      <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Order History</div>
-      {orders.length===0&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'30px 0'}}>No orders yet.</div>}
-      {orders.map(({node:o})=>(
-        <div key={o.id} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:'14px 16px',marginBottom:10}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-            <div>
-              <span style={{fontSize:12,fontWeight:700,color:S.text}}>{o.name}</span>
-              <span style={{fontSize:10,color:S.muted,marginLeft:10}}>{new Date(o.processedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</span>
-            </div>
-            <div style={{textAlign:'right'}}>
-              <div style={{fontSize:13,fontWeight:800,color:S.accent}}>€{parseFloat(o.totalPrice.amount).toFixed(2)}</div>
-              <div style={{fontSize:8,letterSpacing:1,textTransform:'uppercase',color:o.fulfillmentStatus==='FULFILLED'?'#44cc77':S.muted,marginTop:2}}>{o.fulfillmentStatus?.replace('_',' ')}</div>
-            </div>
-          </div>
-          {o.lineItems.edges.map(({node:li},i)=>(
-            <div key={i} style={{display:'flex',alignItems:'center',gap:10,paddingTop:8,borderTop:`1px solid ${S.border}`}}>
-              {li.variant?.image?.url
-                ?<img src={li.variant.image.url} alt="" style={{width:36,height:36,objectFit:'cover',borderRadius:2,flexShrink:0}} />
-                :<div style={{width:36,height:36,borderRadius:2,background:'#1a1a2e',flexShrink:0}} />
-              }
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:11,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{li.title}</div>
-                <div style={{fontSize:10,color:S.muted}}>Qty: {li.quantity}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── CUSTOMER ACCOUNT ───────────────────────────────────────────
-function CustomerAccount({ token, onLogin, onLogout }) {
   const [mode, setMode]           = useState('login'); // login | register | account
   const [email, setEmail]         = useState('');
   const [password, setPassword]   = useState('');
@@ -1391,6 +1257,8 @@ export default function App() {
   const [loadingMore,setLoadingMore]     = useState(false);
   const [cart,setCart]                   = useState([]);
   const [cartOpen,setCartOpen]           = useState(false);
+  const [accountOpen,setAccountOpen]     = useState(false);
+  const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
   const [accountOpen,setAccountOpen]     = useState(false);
   const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
   const [selected,setSelected]           = useState(null);
