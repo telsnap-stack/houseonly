@@ -610,7 +610,10 @@ function ZipImporter() {
         const label  = pdfLabel || String(row.Label || row.label || '');
         const genre  = pdfGenre || 'Deep House';
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
-        const price  = String((parseFloat(row.UnitPrice || 18.99) * 1.60).toFixed(2));
+        const rawPrice = parseFloat(row.UnitPrice || 18.99) * 1.60;
+        const price  = String((Math.ceil(rawPrice) - 0.01).toFixed(2));
+        const is2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
+        const grams  = is2LP ? '900' : '500';
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
         const descHtml  = desc ? `<p>${desc.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>` : '<p></p>';
@@ -623,7 +626,7 @@ function ZipImporter() {
           'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
-          'Variant SKU': catno, 'Variant Grams': '180', 'Variant Inventory Tracker': '',
+          'Variant SKU': catno, 'Variant Grams': grams, 'Variant Inventory Tracker': '',
           'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'deny',
           'Variant Fulfillment Service': 'manual', 'Variant Price': price,
           'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'FALSE',
@@ -893,6 +896,10 @@ function CsvEnricher() {
       setProgress({ done:i, total:rows.length, current:`${catno} — ${title}` });
       const imageUrl = await fetchCoverArt(title, artist, ean, label, year, catno);
       const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+      const rawPrice2 = parseFloat(row.UnitPrice||18.99) * 1.60;
+      const csvPrice  = String((Math.ceil(rawPrice2) - 0.01).toFixed(2));
+      const csvIs2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
+      const csvGrams  = csvIs2LP ? '900' : '500';
       result.push({
         _title:title, _artist:artist, _catno:catno, _imageUrl:imageUrl,
         'Handle':handle,'Title':title,'Body (HTML)':'<p></p>','Vendor':artist,
@@ -901,9 +908,9 @@ function CsvEnricher() {
         'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
         'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
         'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
-        'Variant SKU':catno,'Variant Grams':'180','Variant Inventory Tracker':'',
+        'Variant SKU':catno,'Variant Grams':csvGrams,'Variant Inventory Tracker':'',
         'Variant Inventory Qty':String(row.Qty||'1'),'Variant Inventory Policy':'deny',
-        'Variant Fulfillment Service':'manual','Variant Price':String((parseFloat(row.UnitPrice||18.99)*1.60).toFixed(2)),
+        'Variant Fulfillment Service':'manual','Variant Price':csvPrice,
         'Variant Compare At Price':'','Variant Requires Shipping':'TRUE','Variant Taxable':'FALSE',
         'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
         'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
