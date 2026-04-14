@@ -1356,9 +1356,14 @@ export default function App() {
         )}
       </div>
 
-      <div style={{borderTop:`1px solid ${S.border}`,padding:24,textAlign:'center',marginTop:40}}>
-        <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
-      </div>
+      <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
+  <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
+  <div style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
+    {[['Privacy Policy','privacy-policy'],['Terms of Service','terms-of-service'],['Returns & Refunds','refund-policy'],['Shipping Policy','shipping-policy'],['Legal Notice','legal-notice'],['Contact','contact-information']].map(([label,slug])=>(
+      <a key={slug} href={`https://checkout.houseonly.store/policies/${slug}`} target="_blank" rel="noreferrer" style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',textDecoration:'none'}} onMouseEnter={e=>e.target.style.color='#c8ff00'} onMouseLeave={e=>e.target.style.color='#585858'}>{label}</a>
+    ))}
+  </div>
+</div>
 
       {/* Account drawer */}
       <>
