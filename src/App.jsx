@@ -1239,12 +1239,36 @@ function CustomerAccount({ token, onLogin, onLogout }) {
 
 // ── POLICY DRAWER ──────────────────────────────────────────────
 const POLICY_SLUGS = {
-  'privacy-policy':     'privacyPolicy',
-  'terms-of-service':   'termsOfService',
-  'refund-policy':      'refundPolicy',
-  'shipping-policy':    'shippingPolicy',
-  'legal-notice':       'legalNotice',
-  'contact-information': null, // handled separately
+  'privacy-policy':      'privacyPolicy',
+  'terms-of-service':    'termsOfService',
+  'refund-policy':       'refundPolicy',
+  'shipping-policy':     'shippingPolicy',
+  'legal-notice':        'hardcoded',
+  'contact-information': 'hardcoded',
+};
+
+const HARDCODED_POLICIES = {
+  'legal-notice': {
+    title: 'Legal Notice',
+    body: `
+      <p><strong>HOUSEONLY</strong> is operated by:</p>
+      <p><strong>Telsnap S.L.</strong><br/>
+      NIF: B75303990<br/>
+      Registered in Spain</p>
+      <p><strong>Contact:</strong> <a href="mailto:info@houseonly.store">info@houseonly.store</a></p>
+      <p>The European Commission provides a platform for online dispute resolution (ODR) accessible at <a href="https://ec.europa.eu/consumers/odr" target="_blank" rel="noreferrer">ec.europa.eu/consumers/odr</a>.</p>
+      <p>All content on this website is the property of Telsnap S.L. or its content suppliers and is protected by applicable intellectual property laws.</p>
+    `,
+  },
+  'contact-information': {
+    title: 'Contact',
+    body: `
+      <p>For any questions about your order, shipping, or general enquiries:</p>
+      <p><strong>General:</strong> <a href="mailto:info@houseonly.store">info@houseonly.store</a><br/>
+      <strong>Orders:</strong> <a href="mailto:orders@houseonly.store">orders@houseonly.store</a></p>
+      <p>We aim to respond within 24–48 hours on business days.</p>
+    `,
+  },
 };
 
 async function fetchPolicy(field) {
@@ -1262,8 +1286,8 @@ function PolicyDrawer({ slug, onClose }) {
     setContent(null);
     setLoading(true);
     const field = POLICY_SLUGS[slug];
-    if (!field) {
-      setContent({ title: 'Contact', body: '<p>For any questions, please email us at <a href="mailto:info@houseonly.store">info@houseonly.store</a></p>' });
+    if (field === 'hardcoded') {
+      setContent(HARDCODED_POLICIES[slug] || { title: 'Not found', body: '<p>Content not available.</p>' });
       setLoading(false);
       return;
     }
