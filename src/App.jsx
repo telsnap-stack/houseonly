@@ -1237,7 +1237,74 @@ function CustomerAccount({ token, onLogin, onLogout }) {
   );
 }
 
-// ── NAV ────────────────────────────────────────────────────────
+// ── POLICY DRAWER ──────────────────────────────────────────────
+const POLICY_SLUGS = {
+  'privacy-policy':     'privacyPolicy',
+  'terms-of-service':   'termsOfService',
+  'refund-policy':      'refundPolicy',
+  'shipping-policy':    'shippingPolicy',
+  'legal-notice':       'legalNotice',
+  'contact-information': null, // handled separately
+};
+
+async function fetchPolicy(field) {
+  if (!field) return null;
+  const data = await shopifyQuery(`{ shop { ${field} { title body } } }`);
+  return data?.shop?.[field] || null;
+}
+
+function PolicyDrawer({ slug, onClose }) {
+  const [content, setContent] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!slug) return;
+    setContent(null);
+    setLoading(true);
+    const field = POLICY_SLUGS[slug];
+    if (!field) {
+      setContent({ title: 'Contact', body: '<p>For any questions, please email us at <a href="mailto:info@houseonly.store">info@houseonly.store</a></p>' });
+      setLoading(false);
+      return;
+    }
+    fetchPolicy(field)
+      .then(p => { setContent(p); setLoading(false); })
+      .catch(() => { setContent({ title: 'Error', body: '<p>Could not load policy.</p>' }); setLoading(false); });
+  }, [slug]);
+
+  const open = !!slug;
+
+  return (
+    <>
+      {open && <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:900}} />}
+      <div style={{position:'fixed',top:0,right:0,bottom:0,width:Math.min(560,window.innerWidth),background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column'}}>
+        <div style={{padding:'18px 22px',borderBottom:`1px solid ${S.border}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
+          <span style={{fontWeight:800,fontSize:11,letterSpacing:2,textTransform:'uppercase',color:S.text}}>{content?.title || '…'}</span>
+          <button onClick={onClose} style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:20}}>×</button>
+        </div>
+        <div style={{flex:1,overflowY:'auto',padding:'24px 28px'}}>
+          {loading && <div style={{color:S.muted,fontSize:12,textAlign:'center',paddingTop:40}}>Loading…</div>}
+          {content && !loading && (
+            <>
+              <style>{`
+                .policy-body { color: ${S.muted}; font-size: 13px; line-height: 1.8; }
+                .policy-body h1, .policy-body h2, .policy-body h3 { color: ${S.text}; font-size: 13px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin: 24px 0 10px; }
+                .policy-body h1:first-child { margin-top: 0; }
+                .policy-body p { margin: 0 0 14px; }
+                .policy-body a { color: ${S.accent}; text-decoration: none; }
+                .policy-body a:hover { text-decoration: underline; }
+                .policy-body ul, .policy-body ol { padding-left: 20px; margin: 0 0 14px; }
+                .policy-body li { margin-bottom: 6px; }
+                .policy-body strong { color: ${S.text}; font-weight: 600; }
+              `}</style>
+              <div className="policy-body" dangerouslySetInnerHTML={{__html: content.body}} />
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
 function Nav({ onLogo, children }) {
   return (
     <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
@@ -1259,6 +1326,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [accountOpen,setAccountOpen]     = useState(false);
   const [customerToken,setCustomerToken] = useState(()=>localStorage.getItem('ho_ctoken')||null);
+  const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,label:null,year:null});
   const [search,setSearch]               = useState('');
@@ -1357,13 +1425,15 @@ export default function App() {
       </div>
 
       <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
-  <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
-  <div style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
-    {[['Privacy Policy','privacy-policy'],['Terms of Service','terms-of-service'],['Returns & Refunds','refund-policy'],['Shipping Policy','shipping-policy'],['Legal Notice','legal-notice'],['Contact','contact-information']].map(([label,slug])=>(
-      <a key={slug} href={`https://checkout.houseonly.store/policies/${slug}`} target="_blank" rel="noreferrer" style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',textDecoration:'none'}} onMouseEnter={e=>e.target.style.color='#c8ff00'} onMouseLeave={e=>e.target.style.color='#585858'}>{label}</a>
-    ))}
-  </div>
-</div>
+        <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
+        <div style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
+          {[['Privacy Policy','privacy-policy'],['Terms of Service','terms-of-service'],['Returns & Refunds','refund-policy'],['Shipping Policy','shipping-policy'],['Legal Notice','legal-notice'],['Contact','contact-information']].map(([label,slug])=>(
+            <button key={slug} onClick={()=>{setPolicySlug(slug);setCartOpen(false);setAccountOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
       {/* Account drawer */}
       <>
