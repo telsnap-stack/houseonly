@@ -723,94 +723,6 @@ function ZipImporter() {
   );
 }
 
-// ── BULK IMPORTER ──────────────────────────────────────────────
-function BulkImporter({ onImportMany }) {
-  const [q,setQ]=useState(''); const [st,setSt]=useState('idle'); const [res,setRes]=useState([]); const [sel,setSel]=useState({}); const [err,setErr]=useState(''); const [done,setDone]=useState(0);
-  const SUGG=['Quintessentials','Defected','Nervous Records','Trax Records','KDJ','Running Back','Kompakt','Larry Heard'];
-  const search=async()=>{
-    if(!q.trim()) return; setSt('loading'); setRes([]); setSel({}); setErr(''); setDone(0);
-    try {
-      const list=await claudeJSON(`You are a vinyl record data extractor. Do MAX 2 web searches.\nSearch: "${q}" discogs vinyl releases\nExtract up to 8 real releases. Do NOT invent data.\nReturn ONLY one JSON array: [${SCHEMA}]\ncoverUrl: publicly accessible image URL (not discogs CDN).\ngenre: one of ${GLIST}. price: 18.99 default.`,`Find real vinyl releases for: "${q}". Return ONE JSON array only.`,true);
-      const arr=Array.isArray(list)?list:[list]; if(!arr.length) throw new Error('No releases found.');
-      setRes(arr); const s={};arr.forEach((_,i)=>s[i]=true); setSel(s); setSt('done');
-    } catch(e){setErr(e.message||'Error'); setSt('error');}
-  };
-  const toggleAll=()=>{const on=res.every((_,i)=>sel[i]);const n={};if(!on) res.forEach((_,i)=>n[i]=true);setSel(n);};
-  const add=()=>{const t=res.filter((_,i)=>sel[i]).map(r=>({id:Date.now()+Math.random(),...r,audio:r.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'}));onImportMany(t);setDone(t.length);setRes([]);setSel({});setQ('');setSt('idle');};
-  const sc=Object.values(sel).filter(Boolean).length;
-  return (
-    <div>
-      <p style={{fontSize:10,color:S.muted,margin:'0 0 12px'}}>Search by label or artist. AI finds real releases from Discogs.</p>
-      <div style={{display:'flex',gap:8,marginBottom:10}}>
-        <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==='Enter'&&search()} placeholder='e.g. "Quintessentials", "Defected"…' style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
-        <Btn ch={st==='loading'?'…':'Search'} onClick={search} disabled={st==='loading'||!q.trim()} />
-      </div>
-      {st==='idle'&&!done&&<div style={{display:'flex',flexWrap:'wrap',gap:5}}>{SUGG.map(s=><button key={s} onClick={()=>setQ(s)} style={{background:S.border,color:S.muted,border:'none',borderRadius:20,cursor:'pointer',fontSize:9,letterSpacing:1,padding:'3px 10px',textTransform:'uppercase'}}>{s}</button>)}</div>}
-      {st==='loading'&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`}}><div style={{fontSize:10,color:S.muted,marginBottom:8}}>Searching…</div><div style={{height:2,background:S.border,borderRadius:1,overflow:'hidden'}}><div style={{height:'100%',background:S.accent,animation:'kf 1.2s ease-in-out infinite'}} /></div><style>{`@keyframes kf{0%,100%{opacity:.4;width:20%}50%{opacity:1;width:85%}}`}</style></div>}
-      {st==='error'&&<div style={{marginTop:10,padding:12,background:'#1a0000',border:`1px solid ${S.danger}33`,borderRadius:2}}><div style={{fontSize:10,color:S.danger,fontWeight:700,marginBottom:4}}>Search failed</div><div style={{fontSize:10,color:'#ff8080'}}>{err}</div></div>}
-      {done>0&&st==='idle'&&<div style={{marginTop:10,fontSize:11,color:S.accent}}>✓ {done} record{done!==1?'s':''} added.</div>}
-      {st==='done'&&res.length>0&&(
-        <div style={{marginTop:14}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
-            <span style={{fontSize:10,color:S.muted}}>Found <b style={{color:S.text}}>{res.length}</b> · <b style={{color:S.accent}}>{sc}</b> selected</span>
-            <div style={{display:'flex',gap:6}}><button onClick={toggleAll} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'4px 10px',borderRadius:2}}>{res.every((_,i)=>sel[i])?'Deselect All':'Select All'}</button><Btn ch={`Add ${sc}`} onClick={add} disabled={!sc} /></div>
-          </div>
-          <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:380,overflowY:'auto',borderRadius:2,border:`1px solid ${S.border}`}}>
-            {res.map((r,i)=>(
-              <label key={i} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',background:sel[i]?'#141400':S.surf,cursor:'pointer'}}>
-                <input type="checkbox" checked={!!sel[i]} onChange={()=>setSel(s=>({...s,[i]:!s[i]}))} style={{accentColor:S.accent,width:14,height:14,flexShrink:0}} />
-                {r.coverUrl?<img src={coverSrc(r.coverUrl)} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} onError={e=>e.target.style.display='none'} />:<div style={{width:40,height:40,borderRadius:2,flexShrink:0,background:'linear-gradient(135deg,#1a1a2e,#16213e)'}} />}
-                <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:700,color:sel[i]?S.text:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}{r.artist?` — ${r.artist}`:''}</div><div style={{fontSize:9,color:S.muted,marginTop:1}}>{r.label} · {r.catalog} · {r.year||'—'}</div></div>
-                <span style={{fontSize:11,fontWeight:700,color:sel[i]?S.accent:S.muted,flexShrink:0}}>€{Number(r.price||18.99).toFixed(2)}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── URL IMPORTER ───────────────────────────────────────────────
-function UrlImporter({ onImport }) {
-  const [url,setUrl]=useState(''); const [loading,setLoading]=useState(false); const [result,setResult]=useState(null); const [err,setErr]=useState('');
-  const run=async()=>{if(!url.trim()) return;setLoading(true);setErr('');setResult(null);try{const r=await claudeJSON(`Extract vinyl record data from a URL. Return ONLY JSON: ${SCHEMA}. genre: ${GLIST}.`,`Extract from: ${url}`,true);setResult(r);}catch(e){setErr(e.message);}setLoading(false);};
-  const confirm=()=>{onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'});setResult(null);setUrl('');};
-  return (
-    <div>
-      <div style={{display:'flex',gap:8}}><input value={url} onChange={e=>setUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&run()} placeholder="Paste product URL…" style={{flex:1,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px',fontSize:11,fontFamily:'inherit',outline:'none'}} /><Btn ch={loading?'…':'Import'} onClick={run} disabled={loading||!url.trim()} /></div>
-      {err&&<div style={{fontSize:10,color:S.danger,marginTop:8}}>{err}</div>}
-      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
-    </div>
-  );
-}
-
-// ── BARCODE IMPORTER ───────────────────────────────────────────
-function BarcodeImporter({ onImport }) {
-  const [bc,setBc]=useState(''); const [cam,setCam]=useState(false); const [loading,setLoading]=useState(false); const [result,setResult]=useState(null); const [err,setErr]=useState(''); const [camErr,setCamErr]=useState('');
-  const vRef=useRef(null); const sRef=useRef(null); const aRef=useRef(false);
-  const lookup=async(code)=>{setLoading(true);setErr('');setResult(null);try{const r=await claudeJSON(`Find vinyl by barcode. Return ONLY JSON: ${SCHEMA}. genre: ${GLIST}.`,`Find vinyl with barcode: ${code}`,true);setResult({...r,barcode:code});}catch(e){setErr(e.message);}setLoading(false);};
-  const startCam=async()=>{setCamErr('');if(!('BarcodeDetector'in window)){setCamErr('Needs Chrome/Edge/Safari 17+.');return;}try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});sRef.current=s;setCam(true);aRef.current=true;setTimeout(async()=>{if(!vRef.current) return;vRef.current.srcObject=s;await vRef.current.play().catch(()=>{});const d=new window.BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128']});const scan=async()=>{if(!aRef.current) return;try{const c=await d.detect(vRef.current);if(c.length){stopCam();setBc(c[0].rawValue);lookup(c[0].rawValue);return;}}catch{}requestAnimationFrame(scan);};requestAnimationFrame(scan);},300);}catch{setCamErr('Could not access camera.');}};
-  const stopCam=()=>{aRef.current=false;setCam(false);if(sRef.current){sRef.current.getTracks().forEach(t=>t.stop());sRef.current=null;}};
-  useEffect(()=>()=>stopCam(),[]);
-  const confirm=()=>{onImport({id:Date.now(),...result,audio:result.audioUrl||null,month:new Date().getMonth()+1,stock:10,g:'135deg,#1a1a2e,#16213e'});setResult(null);setBc('');};
-  return (
-    <div>
-      <div style={{display:'flex',gap:8}}>
-        <div style={{position:'relative',flex:1}}><span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',color:S.muted,pointerEvents:'none'}}>▥</span><input value={bc} onChange={e=>setBc(e.target.value)} onKeyDown={e=>e.key==='Enter'&&bc.trim()&&lookup(bc.trim())} placeholder="Scan or type EAN/UPC…" style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 12px 8px 28px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} /></div>
-        <Btn ch={loading?'…':'Lookup'} onClick={()=>bc.trim()&&lookup(bc.trim())} disabled={loading||!bc.trim()} />
-        <Btn ch="📷" variant="ghost" onClick={cam?stopCam:startCam} />
-      </div>
-      {cam&&<div style={{marginTop:10,position:'relative',borderRadius:3,overflow:'hidden',border:`1px solid ${S.border}`}}><video ref={vRef} style={{width:'100%',maxHeight:220,objectFit:'cover',display:'block'}} muted playsInline /><div style={{position:'absolute',inset:0,pointerEvents:'none'}}><div style={{position:'absolute',left:'10%',right:'10%',top:'50%',height:2,background:`${S.accent}88`,animation:'scan 1.6s ease-in-out infinite'}} /></div><div style={{position:'absolute',bottom:0,left:0,right:0,padding:'8px 12px',background:'rgba(0,0,0,0.7)',display:'flex',justifyContent:'space-between'}}><span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Scanning…</span><button onClick={stopCam} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 8px',borderRadius:2}}>Cancel</button></div><style>{`@keyframes scan{0%,100%{top:25%}50%{top:70%}}`}</style></div>}
-      {camErr&&<div style={{fontSize:10,color:S.danger,marginTop:6}}>{camErr}</div>}
-      <div style={{marginTop:6,fontSize:9,color:S.muted}}>💡 USB scanner? Click input and scan.</div>
-      {err&&<div style={{fontSize:10,color:S.danger,marginTop:8}}>{err}</div>}
-      {loading&&<div style={{fontSize:10,color:S.muted,marginTop:8}}>Looking up…</div>}
-      {result&&<div style={{marginTop:12,padding:14,background:S.bg,borderRadius:2}}><div style={{fontSize:13,fontWeight:700,color:S.text}}>{result.title} — {result.artist}</div><div style={{fontSize:10,color:S.muted,marginTop:3}}>{result.label} · {result.year}</div><div style={{marginTop:10,display:'flex',gap:8}}><Btn ch="Add to Store" onClick={confirm} /><Btn ch="Discard" variant="ghost" onClick={()=>setResult(null)} /></div></div>}
-    </div>
-  );
-}
-
 // ── EDIT MODAL ─────────────────────────────────────────────────
 const GENRE_OPTS=['Deep House','Tech House','Afro House','Chicago House','Soulful House','Acid House','Detroit House','Disco House'];
 function EditModal({ record, onSave, onClose }) {
@@ -1046,12 +958,9 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
         <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
-          {tabBtn('zip','📦 ZIP Import')}{tabBtn('bulk','⬇ Bulk Search')}{tabBtn('barcode','▥ Barcode')}{tabBtn('url','🔗 Single URL')}{tabBtn('csv','📄 CSV + Covers')}
+          {tabBtn('zip','📦 ZIP Import')}{tabBtn('csv','📄 CSV + Covers')}
         </div>
         {tab==='zip'     && <ZipImporter />}
-        {tab==='bulk'    && <BulkImporter onImportMany={recs=>recs.forEach(r=>onAdd(r))} />}
-        {tab==='barcode' && <BarcodeImporter onImport={onAdd} />}
-        {tab==='url'     && <UrlImporter onImport={onAdd} />}
         {tab==='csv'     && <CsvEnricher />}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
