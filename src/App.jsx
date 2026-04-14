@@ -539,6 +539,7 @@ function ZipImporter() {
   const [results, setResults]     = useState([]);
   const [skippedCount, setSkippedCount] = useState(0);
   const [error, setError]         = useState('');
+  const [margin, setMargin]       = useState(60);
   const excelRef = useRef(null);
   const zipRef   = useRef(null);
 
@@ -610,8 +611,8 @@ function ZipImporter() {
         const label  = pdfLabel || String(row.Label || row.label || '');
         const genre  = pdfGenre || 'Deep House';
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
-        const rawPrice = parseFloat(row.UnitPrice || 18.99) * 1.60;
-        const price  = String((Math.ceil(rawPrice) - 0.01).toFixed(2));
+        const rawPrice = parseFloat(row.UnitPrice || 18.99) * (1 + margin / 100);
+        const price  = String(rawPrice.toFixed(2));
         const is2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
         const grams  = is2LP ? '900' : '500';
         const qty    = String(row.Qty || '1');
@@ -673,7 +674,16 @@ function ZipImporter() {
         </div>
       </div>
       {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>)}</div>}
-      {status==='idle'&&excelFile&&zipFiles.length>0&&<Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />}
+      {status==='idle'&&excelFile&&zipFiles.length>0&&(
+        <div style={{marginBottom:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
+            <span style={{fontSize:9,color:S.muted}}>→ e.g. €11 × {(1+margin/100).toFixed(2)} = €{(11*(1+margin/100)).toFixed(2)}</span>
+          </div>
+          <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
+        </div>
+      )}
       {status==='processing'&&(
         <div style={{ padding:14, background:S.bg, borderRadius:2, border:`1px solid ${S.border}` }}>
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}><span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span><span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span></div>
@@ -896,8 +906,7 @@ function CsvEnricher() {
       setProgress({ done:i, total:rows.length, current:`${catno} — ${title}` });
       const imageUrl = await fetchCoverArt(title, artist, ean, label, year, catno);
       const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-      const rawPrice2 = parseFloat(row.UnitPrice||18.99) * 1.60;
-      const csvPrice  = String((Math.ceil(rawPrice2) - 0.01).toFixed(2));
+      const csvPrice  = String((parseFloat(row.UnitPrice||18.99) * 1.60).toFixed(2));
       const csvIs2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
       const csvGrams  = csvIs2LP ? '900' : '500';
       result.push({
