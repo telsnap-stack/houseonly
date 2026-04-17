@@ -30,9 +30,8 @@ function parseProduct({ node }) {
   const img  = node.images.edges[0]?.node;
   const tags = node.tags || [];
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
-    || GENRE_TAGS.find(g => tags.some(t => t.toLowerCase().includes(g.toLowerCase())))
     || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
-    || 'Deep House';
+    || '';
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
     || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
