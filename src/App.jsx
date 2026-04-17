@@ -22,8 +22,8 @@ async function shopifyQuery(query, variables={}) {
   return data.data;
 }
 
-const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic'];
-const SKIP_TAGS  = [...GENRE_TAGS,'vinyl','house'];
+const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic','Nu-Disco','Funk','Soul','Jazz','Electronica','Ambient','Techno','Drum & Bass','Breakbeat','Reggae','Dub','Hip Hop','R&B'];
+const SKIP_TAGS  = ['vinyl','house','kudos'];
 
 function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
@@ -31,7 +31,8 @@ function parseProduct({ node }) {
   const tags = node.tags || [];
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
     || GENRE_TAGS.find(g => tags.some(t => t.toLowerCase().includes(g.toLowerCase())))
-    || (tags.some(t => /house/i.test(t)) ? 'Deep House' : 'Electronic');
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
+    || 'Deep House';
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
     || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
