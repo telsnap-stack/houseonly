@@ -558,7 +558,7 @@ function ZipImporter() {
         const genre  = pdfGenre || 'Deep House';
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
         const rawPrice = parseFloat(row.UnitPrice || 18.99) * (1 + margin / 100);
-        const price  = String(rawPrice.toFixed(2));
+        const price  = String((Math.ceil(rawPrice) - 0.01).toFixed(2));
         const is2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
         const grams  = is2LP ? '900' : '500';
         const qty    = String(row.Qty || '1');
@@ -719,6 +719,222 @@ function EditModal({ record, onSave, onClose }) {
   );
 }
 
+// ── KUDOS IMPORTER ─────────────────────────────────────────────
+function KudosImporter() {
+  const [pickingRows, setPickingRows] = useState([]);
+  const [enrichment, setEnrichment]   = useState({});
+  const [pickFile, setPickFile]       = useState(null);
+  const [jsonFile, setJsonFile]       = useState(null);
+  const [step2Ready, setStep2Ready]   = useState(false);
+  const [scriptCopied, setScriptCopied] = useState(false);
+  const [fx, setFx]         = useState(1.15);
+  const [margin, setMargin] = useState(60);
+  const [stdW, setStdW]     = useState(500);
+  const [dblW, setDblW]     = useState(900);
+  const pickRef = useRef(null);
+  const jsonRef = useRef(null);
+
+  function parseCSV(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const rows=[]; let cur=[],field='',inQ=false,i=0; const len=text.length;
+    while(i<len){const ch=text[i];if(inQ){if(ch==='"'){if(text[i+1]==='"'){field+='"';i+=2;continue;}inQ=false;i++;continue;}field+=ch;i++;continue;}if(ch==='"'){inQ=true;i++;continue;}if(ch===','){cur.push(field);field='';i++;continue;}if(ch==='\r'){i++;continue;}if(ch==='\n'){cur.push(field);rows.push(cur);cur=[];field='';i++;continue;}field+=ch;i++;}
+    if(field.length>0||cur.length>0){cur.push(field);rows.push(cur);}
+    return rows;
+  }
+
+  function decodeHtml(s){if(!s)return'';const t=document.createElement('textarea');t.innerHTML=s;return t.value;}
+
+  function loadPicking(text, filename) {
+    const rows = parseCSV(text);
+    if (rows.length < 2) return;
+    const h = rows[0].map(c=>c.trim().toUpperCase());
+    const g = (names) => { for(const n of names){const i=h.indexOf(n);if(i>=0)return i;} return -1; };
+    const ci = { sku:g(['SKU']), upc:g(['UPC']), format:g(['FORMAT']), title:g(['DESCRIPTION/TITLE','TITLE']), artist:g(['DESCRIPTION/ARTIST','ARTIST']), requested:g(['REQUESTED']), fulfilled:g(['FULFILLED']) };
+    if (ci.sku < 0 || ci.upc < 0) { alert('Missing SKU/UPC columns'); return; }
+    const parsed = [];
+    for (let r=1;r<rows.length;r++) {
+      const row=rows[r]; const sku=(row[ci.sku]||'').trim(); if(!sku) continue;
+      parsed.push({ sku, upc:(row[ci.upc]||'').trim(), format:ci.format>=0?(row[ci.format]||'').trim():'', title:ci.title>=0?(row[ci.title]||'').trim():'', artist:ci.artist>=0?(row[ci.artist]||'').trim():'', requested:ci.requested>=0?parseInt(row[ci.requested])||0:1, fulfilled:ci.fulfilled>=0?parseInt(row[ci.fulfilled])||0:1, isBlack:/BLACK/i.test(row[ci.sku]||'') });
+    }
+    setPickingRows(parsed); setPickFile(filename); setStep2Ready(true);
+  }
+
+  function loadEnrichment(text, filename) {
+    try { setEnrichment(JSON.parse(text)); setJsonFile(filename); }
+    catch(e) { alert('Invalid JSON: '+e.message); }
+  }
+
+  function generateScript() {
+    const upcs = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).map(r=>r.upc).filter(Boolean);
+    return `(async()=>{const upcs=${JSON.stringify(upcs)};const results={};let done=0;for(const upc of upcs){done++;console.log(\`[\${done}/\${upcs.length}] \${upc}\`);try{const r=await fetch('/api/kudos_lookup.json?upc='+upc);const d=await r.json();if(d.results&&d.results[0])results[upc]=d.results[0];else console.warn('No result '+upc);}catch(e){console.error(e)}if(done<upcs.length)await new Promise(r=>setTimeout(r,300));}const blob=new Blob([JSON.stringify(results,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='kudos-enrichment.json';document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);console.log('Done! '+Object.keys(results).length+'/'+upcs.length);})();`;
+  }
+
+  function copyScript() {
+    const script = generateScript();
+    navigator.clipboard.writeText(script).then(()=>setScriptCopied(true)).catch(()=>{
+      const ta=document.createElement('textarea');ta.value=script;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);setScriptCopied(true);
+    });
+  }
+
+  function getEnriched(r) {
+    const e=enrichment[r.upc]; if(!e) return null;
+    const fmt=e.formats?(e.formats[r.sku]||Object.values(e.formats)[0]):null;
+    return {api:e,fmt};
+  }
+
+  function exportShopify() {
+    const m=margin/100;
+    const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
+    const csvRows=[cols];
+    pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).forEach(r=>{
+      const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
+      const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
+      const label=api?decodeHtml(api.label):''; const genre=api?api.genre:''; const subgenre=api?api.subgenre:'';
+      const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+      const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
+      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0; const retailP=rawRetail>0?(Math.ceil(rawRetail)-0.01).toFixed(2):'';
+      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
+      const formatDisplay=fmt?fmt.display:r.format;
+      const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
+      const grams=is2LP?String(dblW):String(stdW);
+      let bodyHtml='';
+      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';}}
+      const tags=['vinyl','kudos'];if(label)tags.push(label);if(genre)tags.push(genre);if(subgenre)tags.push(subgenre);
+      const imgUrl=api?api.img_url:'';
+      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
+    });
+    const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
+    const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download='shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv';
+    document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+  }
+
+  const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
+  const excluded    = pickingRows.filter(r=>r.isBlack).length;
+  const unfulfilled = pickingRows.filter(r=>!r.isBlack&&r.fulfilled<=0).length;
+  const enrichedCount = importable.filter(r=>getEnriched(r)).length;
+
+  const baseStep = { borderRadius:6, padding:'18px 14px', textAlign:'center', transition:'all 0.2s', flex:1, minWidth:160 };
+  const stepDone = { ...baseStep, border:`2px solid ${S.accent}`, background:'rgba(200,255,0,0.03)', cursor:'pointer' };
+  const stepIdle = { ...baseStep, border:`2px dashed ${S.border}`, background:S.bg, cursor:'pointer' };
+  const stepOff  = { ...baseStep, border:`2px dashed ${S.border}`, background:S.bg, cursor:'not-allowed', opacity:0.4 };
+
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 16px',lineHeight:1.6}}>
+        3-step: upload Kudos picking CSV → run enrichment script on b2b.kudosdistribution.co.uk → upload JSON → export Shopify CSV.
+      </p>
+
+      <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+        {/* Step 1 */}
+        <div style={pickFile?stepDone:stepIdle} onClick={()=>pickRef.current.click()}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:6}}>Step 1</div>
+          <div style={{fontSize:22,marginBottom:6}}>📋</div>
+          <div style={{fontSize:11,fontWeight:700,color:pickFile?S.accent:S.text,marginBottom:4}}>Picking Summary CSV</div>
+          <div style={{fontSize:9,color:S.muted}}>{pickFile||'K######_Picking_Summary.csv'}</div>
+          <input ref={pickRef} type="file" accept=".csv" style={{display:'none'}} onChange={e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>loadPicking(rd.result,f.name);rd.readAsText(f,'UTF-8');e.target.value='';}} />
+        </div>
+
+        {/* Step 2 */}
+        <div style={scriptCopied?stepDone:(step2Ready?stepIdle:stepOff)}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:6}}>Step 2</div>
+          <div style={{fontSize:22,marginBottom:6}}>💻</div>
+          <div style={{fontSize:11,fontWeight:700,color:S.text,marginBottom:4}}>Run Enrichment Script</div>
+          <div style={{fontSize:9,color:S.muted,marginBottom:10}}>Paste in Kudos B2B console</div>
+          <button disabled={!step2Ready} onClick={e=>{e.stopPropagation();copyScript();}} style={{background:scriptCopied?S.accent:S.border,border:'none',color:scriptCopied?'#080808':S.muted,cursor:step2Ready?'pointer':'not-allowed',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {scriptCopied?'✓ Copied!':'Copy Script'}
+          </button>
+        </div>
+
+        {/* Step 3 */}
+        <div style={jsonFile?stepDone:(step2Ready?stepIdle:stepOff)} onClick={()=>step2Ready&&jsonRef.current.click()}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:6}}>Step 3</div>
+          <div style={{fontSize:22,marginBottom:6}}>📤</div>
+          <div style={{fontSize:11,fontWeight:700,color:jsonFile?S.accent:S.text,marginBottom:4}}>Upload Enrichment JSON</div>
+          <div style={{fontSize:9,color:S.muted}}>{jsonFile||'kudos-enrichment.json'}</div>
+          <input ref={jsonRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>loadEnrichment(rd.result,f.name);rd.readAsText(f,'UTF-8');e.target.value='';}} />
+        </div>
+      </div>
+
+      {/* Controls */}
+      {pickFile && (
+        <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',padding:'12px 16px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
+          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
+            <div key={label} style={{display:'flex',alignItems:'center',gap:6}}>
+              <span style={{fontSize:10,color:S.muted,whiteSpace:'nowrap'}}>{label}</span>
+              <input type="number" value={val} step={step} onChange={e=>setter(parseFloat(e.target.value)||val)} style={{width:72,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
+            </div>
+          ))}
+          <div style={{flex:1}} />
+          <Btn ch="⬇ Export Shopify CSV" onClick={exportShopify} disabled={importable.length===0} />
+        </div>
+      )}
+
+      {/* Stats */}
+      {pickFile && (
+        <div style={{display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:12,fontSize:10,fontFamily:'monospace'}}>
+          <span>Total: <b style={{color:S.text}}>{pickingRows.length}</b></span>
+          <span>Import: <b style={{color:S.accent}}>{importable.length}</b></span>
+          <span>2000Black: <b style={{color:S.danger}}>{excluded}</b></span>
+          <span>Unfulfilled: <b style={{color:'#ff8800'}}>{unfulfilled}</b></span>
+          <span>Enriched: <b style={{color:S.accent}}>{enrichedCount}/{importable.length}</b></span>
+        </div>
+      )}
+
+      {/* Table */}
+      {pickingRows.length > 0 && (
+        <div style={{overflowX:'auto',border:`1px solid ${S.border}`,borderRadius:4}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead>
+              <tr>{['','SKU','Artist','Title','Label','Fmt','Qty','Dealer €','Retail €','Tracks','Status'].map(h=>(
+                <th key={h} style={{textAlign:'left',padding:'8px 10px',fontSize:9,textTransform:'uppercase',letterSpacing:0.5,color:S.muted,borderBottom:`1px solid ${S.border}`,whiteSpace:'nowrap',background:S.surf}}>{h}</th>
+              ))}</tr>
+            </thead>
+            <tbody>
+              {pickingRows.map((r,i)=>{
+                const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
+                const artist=api?(api.main_artist||r.artist):r.artist;
+                const title=api?(api.title||r.title):r.title;
+                const label=api?api.label:'';
+                const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0;
+                const dealerEUR=dealerGBP>0?(dealerGBP*fx).toFixed(2):'—';
+                const rawR=dealerGBP>0?dealerGBP*fx*(1+margin/100):0;
+                const retail=rawR>0?'€'+(Math.ceil(rawR)-0.01).toFixed(2):'—';
+                const trackCount=api&&api.tracks?Object.keys(api.tracks).length:0;
+                const imgUrl=api?api.img_url:'';
+                const opacity=r.isBlack||r.fulfilled<=0?0.35:1;
+                let statusEl;
+                if(r.isBlack) statusEl=<span style={{fontSize:9,padding:'2px 6px',borderRadius:2,background:'#2a1a1a',color:S.danger}}>2000Black</span>;
+                else if(r.fulfilled<=0) statusEl=<span style={{fontSize:9,padding:'2px 6px',borderRadius:2,background:'#2a2218',color:'#e8c840'}}>Unfulfilled</span>;
+                else if(api) statusEl=<span style={{fontSize:9,padding:'2px 6px',borderRadius:2,background:'#1a2a1e',color:'#3ecf7a'}}>Enriched</span>;
+                else statusEl=<span style={{fontSize:9,padding:'2px 6px',borderRadius:2,background:S.border,color:S.muted}}>Pending</span>;
+                return (
+                  <tr key={i} style={{opacity,borderBottom:`1px solid ${S.border}`}}>
+                    <td style={{padding:'4px 8px',width:44}}>
+                      {imgUrl?<img src={imgUrl} alt="" style={{width:36,height:36,objectFit:'cover',borderRadius:3,display:'block'}} onError={e=>e.target.style.display='none'} />:<div style={{width:36,height:36,borderRadius:3,background:S.border,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🎵</div>}
+                    </td>
+                    <td style={{padding:'4px 10px',fontFamily:'monospace',fontSize:10,color:S.muted}}>{r.sku}</td>
+                    <td style={{padding:'4px 10px',maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:600,color:S.text}}>{artist}</td>
+                    <td style={{padding:'4px 10px',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:S.muted}}>{title}</td>
+                    <td style={{padding:'4px 10px',fontSize:10,color:'#e8c840',maxWidth:100,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{label}</td>
+                    <td style={{padding:'4px 10px',fontSize:10,color:S.muted}}>{fmt?fmt.display:r.format}</td>
+                    <td style={{padding:'4px 10px',fontFamily:'monospace',fontSize:11,color:r.fulfilled>0?'#3ecf7a':S.danger}}>{r.fulfilled}/{r.requested}</td>
+                    <td style={{padding:'4px 10px',fontFamily:'monospace',fontSize:11,color:S.muted}}>{dealerEUR!=='—'?'€'+dealerEUR:dealerEUR}</td>
+                    <td style={{padding:'4px 10px',fontFamily:'monospace',fontSize:11,color:S.accent}}>{retail}</td>
+                    <td style={{padding:'4px 10px',fontSize:10,color:S.muted}}>{trackCount>0?trackCount+' tracks':''}</td>
+                    <td style={{padding:'4px 10px'}}>{statusEl}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
@@ -742,8 +958,10 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
         <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
           {tabBtn('zip','📦 ZIP Import')}
+          {tabBtn('kudos','🎵 Kudos Import')}
         </div>
-        {tab==='zip' && <ZipImporter />}
+        {tab==='zip'   && <ZipImporter />}
+        {tab==='kudos' && <KudosImporter />}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
