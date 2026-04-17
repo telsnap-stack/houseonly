@@ -29,7 +29,9 @@ function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
   const tags = node.tags || [];
-  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase())) || 'Deep House';
+  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
+    || GENRE_TAGS.find(g => tags.some(t => t.toLowerCase().includes(g.toLowerCase())))
+    || (tags.some(t => /house/i.test(t)) ? 'Deep House' : 'Electronic');
   const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
     || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
@@ -799,7 +801,7 @@ function KudosImporter() {
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
       if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';const audioTracks=ta.filter(t=>t.audio_clip).map(t=>({name:t.title,url:t.audio_clip.replace(/\.ka$/,".mp3")}));if(audioTracks.length)bodyHtml+='<script type="application/json" id="tracks">'+JSON.stringify(audioTracks)+'<\/script>';}}
-      const tags=['vinyl','kudos'];if(label)tags.push(label);if(genre)tags.push(genre);if(subgenre)tags.push(subgenre);
+      const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);if(genre)tags.push(genre);if(subgenre)tags.push(subgenre);
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
