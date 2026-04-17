@@ -798,9 +798,9 @@ function KudosImporter() {
       const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
-      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';const audioTracks=ta.filter(t=>t.audio_clip).map(t=>({name:t.title,url:t.audio_clip}));if(audioTracks.length)bodyHtml+='<script type="application/json" id="tracks">'+JSON.stringify(audioTracks)+'<\/script>';}}
+      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';const audioTracks=ta.filter(t=>t.audio_clip).map(t=>({name:t.title,url:t.audio_clip.replace(/\.ka$/,".mp3")}));if(audioTracks.length)bodyHtml+='<script type="application/json" id="tracks">'+JSON.stringify(audioTracks)+'<\/script>';}}
       const tags=['vinyl','kudos'];if(label)tags.push(label);if(genre)tags.push(genre);if(subgenre)tags.push(subgenre);
-      const imgUrl=api?api.img_url:'';
+      const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
     const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
@@ -902,7 +902,7 @@ function KudosImporter() {
                 const rawR=dealerGBP>0?dealerGBP*fx*(1+margin/100):0;
                 const retail=rawR>0?'€'+(Math.ceil(rawR)-0.01).toFixed(2):'—';
                 const trackCount=api&&api.tracks?Object.keys(api.tracks).length:0;
-                const imgUrl=api?api.img_url:'';
+                const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
                 const opacity=r.isBlack||r.fulfilled<=0?0.35:1;
                 let statusEl;
                 if(r.isBlack) statusEl=<span style={{fontSize:9,padding:'2px 6px',borderRadius:2,background:'#2a1a1a',color:S.danger}}>2000Black</span>;
