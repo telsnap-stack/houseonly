@@ -798,7 +798,7 @@ function KudosImporter() {
       const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
-      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';}}
+      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';const audioTracks=ta.filter(t=>t.audio_clip).map(t=>({name:t.title,url:t.audio_clip}));if(audioTracks.length)bodyHtml+='<script type="application/json" id="tracks">'+JSON.stringify(audioTracks)+'<\/script>';}}
       const tags=['vinyl','kudos'];if(label)tags.push(label);if(genre)tags.push(genre);if(subgenre)tags.push(subgenre);
       const imgUrl=api?api.img_url:'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
