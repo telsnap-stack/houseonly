@@ -524,6 +524,7 @@ function ZipImporter() {
         const zipFile = matchedZips[i];
         const catno   = catnoFromFilename(zipFile.name);
         const row     = rowMap[catno];
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
         setProgress({ done:i, total, current:`${catno} — extracting…` });
         let coverUrl='', tracks=[], desc='', pdfLabel='', pdfGenre='', itemError='';
         try {
@@ -537,7 +538,7 @@ function ZipImporter() {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
             const blob = await coverFile.async('blob');
             const ext  = coverFile.name.split('.').pop().toLowerCase();
-            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
           }
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
@@ -547,9 +548,10 @@ function ZipImporter() {
           }
           for (const af of audioFiles) {
             const filename = af.name.split('/').pop();
+            const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
-            const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+            const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
             tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
           }
         } catch (e) { itemError = e.message; }
@@ -1064,6 +1066,10 @@ function DBHImporter() {
           return zcat.includes(catno) || catno.includes(zcat);
         });
 
+        // Sanitize catno for use in URLs/R2 keys: replace any char that's not
+        // alphanumeric/dash/underscore with '-'. Keeps SKU/handle untouched.
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+
         if (zipFile) {
           try {
             setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
@@ -1077,16 +1083,17 @@ function DBHImporter() {
               setProgress({ done:i, total, current:`${catno} — uploading cover…` });
               const blob = await coverFile.async('blob');
               const ext  = coverFile.name.split('.').pop().toLowerCase();
-              coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+              coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
             }
 
             // Audio
             const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
             for (const af of audioFiles) {
               const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
               setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
               const blob = await af.async('blob');
-              const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
               tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
             }
           } catch(e) { itemError = e.message; }
@@ -1102,7 +1109,7 @@ function DBHImporter() {
         processed.push({
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _zipFound: !!zipFile,
+          _isPresale: isPresale, _zipFound: !!zipFile,
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -1255,6 +1262,7 @@ function DBHImporter() {
                     :<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
                   }
                   {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
+                  {r._isPresale&&<div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRESALE</div>}
                   {r._error&&<div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
                   {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
                 </div>
