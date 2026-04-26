@@ -1037,6 +1037,7 @@ function DBHImporter() {
         const row = csvRows[i];
         const qtyShipped = parseInt(row['QTY Shipped'] || 0);
         if (qtyShipped === 0) { setProgress({ done:i+1, total, current:'' }); continue; } // skip presale
+        const isPresale = false;
         const catno   = row['Catalog'].toUpperCase().trim();
         const title   = decodeHtml(row['Title'] || '');
         const artist  = decodeHtml(row['Artist'] || '');
