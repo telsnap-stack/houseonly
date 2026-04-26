@@ -952,26 +952,27 @@ function DBHImporter() {
 
   function parseDBHCsv(text) {
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    if (lines.length < 2) return [];
-    // semicolon delimited with quoted fields
-    function parseLine(line) {
-      const fields = []; let field = '', inQ = false, i = 0;
-      while (i < line.length) {
-        const ch = line[i];
-        if (inQ) { if (ch==='"' && line[i+1]==='"') { field+='"'; i+=2; continue; } if (ch==='"') { inQ=false; i++; continue; } field+=ch; i++; continue; }
-        if (ch==='"') { inQ=true; i++; continue; }
-        if (ch===';') { fields.push(field); field=''; i++; continue; }
-        field+=ch; i++;
+    // Parse CSV with semicolon delimiter, handling quoted multiline fields
+    const rows = []; let cur = [], field = '', inQ = false, i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"' && text[i+1] === '"') { field += '"'; i += 2; continue; }
+        if (ch === '"') { inQ = false; i++; continue; }
+        field += ch; i++; continue;
       }
-      fields.push(field);
-      return fields;
+      if (ch === '"') { inQ = true; i++; continue; }
+      if (ch === ';') { cur.push(field); field = ''; i++; continue; }
+      if (ch === '\r') { i++; continue; }
+      if (ch === '\n') { cur.push(field); rows.push(cur); cur = []; field = ''; i++; continue; }
+      field += ch; i++;
     }
-    const headers = parseLine(lines[0]).map(h=>h.trim());
-    return lines.slice(1).map(line => {
-      const vals = parseLine(line);
+    if (field || cur.length) { cur.push(field); rows.push(cur); }
+    if (rows.length < 2) return [];
+    const headers = rows[0].map(h => h.trim());
+    return rows.slice(1).map(vals => {
       const obj = {};
-      headers.forEach((h,i) => obj[h] = (vals[i]||'').trim());
+      headers.forEach((h, i) => obj[h] = (vals[i] || '').trim());
       return obj;
     }).filter(r => r['Catalog']);
   }
@@ -1032,6 +1033,8 @@ function DBHImporter() {
 
       for (let i = 0; i < csvRows.length; i++) {
         const row = csvRows[i];
+        const qtyShipped = parseInt(row['QTY Shipped'] || 0);
+        if (qtyShipped === 0) { setProgress({ done:i+1, total, current:'' }); continue; } // skip presale
         const catno   = row['Catalog'].toUpperCase().trim();
         const title   = decodeHtml(row['Title'] || '');
         const artist  = decodeHtml(row['Artist'] || '');
@@ -1041,9 +1044,7 @@ function DBHImporter() {
         const ppu     = parseFloat(row['PPU'] || 0);
         const rawPrice = ppu * (1 + margin / 100);
         const price   = (Math.ceil(rawPrice) - 0.01).toFixed(2);
-        const qtyShipped = parseInt(row['QTY Shipped'] || 0);
         const qtyOrdered = parseInt(row['QTY Ordered'] || 1);
-        const isPresale  = qtyShipped === 0;
         const format  = row['Format'] || '';
         const is2LP   = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
         const grams   = is2LP ? '900' : '500';
@@ -1116,8 +1117,8 @@ function DBHImporter() {
           'Variant SKU': catno,
           'Variant Grams': grams,
           'Variant Inventory Tracker': '',
-          'Variant Inventory Qty': String(qtyShipped || qtyOrdered),
-          'Variant Inventory Policy': isPresale ? 'continue' : 'deny',
+          'Variant Inventory Qty': String(qtyOrdered),
+          'Variant Inventory Policy': 'deny',
           'Variant Fulfillment Service': 'manual',
           'Variant Price': price,
           'Variant Compare At Price': '',
@@ -1158,7 +1159,7 @@ function DBHImporter() {
   const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
   const covered   = results.filter(r=>r._coverUrl).length;
   const withAudio = results.filter(r=>r._tracks?.length>0).length;
-  const presales  = results.filter(r=>r._isPresale).length;
+  const presales  = csvRows.filter(r=>parseInt(r['QTY Shipped']||0)===0).length;
   const noZip     = results.filter(r=>!r._zipFound).length;
   const errors    = results.filter(r=>r._error).length;
 
