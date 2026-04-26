@@ -937,6 +937,347 @@ function KudosImporter() {
   );
 }
 
+// ── DBH IMPORTER ───────────────────────────────────────────────
+function DBHImporter() {
+  const [csvFile, setCsvFile]   = useState(null);
+  const [zipFiles, setZipFiles] = useState([]);
+  const [csvRows, setCsvRows]   = useState([]);
+  const [status, setStatus]     = useState('idle');
+  const [progress, setProgress] = useState({ done:0, total:0, current:'' });
+  const [results, setResults]   = useState([]);
+  const [error, setError]       = useState('');
+  const [margin, setMargin]     = useState(60);
+  const csvRef = useRef(null);
+  const zipRef = useRef(null);
+
+  function parseDBHCsv(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length < 2) return [];
+    // semicolon delimited with quoted fields
+    function parseLine(line) {
+      const fields = []; let field = '', inQ = false, i = 0;
+      while (i < line.length) {
+        const ch = line[i];
+        if (inQ) { if (ch==='"' && line[i+1]==='"') { field+='"'; i+=2; continue; } if (ch==='"') { inQ=false; i++; continue; } field+=ch; i++; continue; }
+        if (ch==='"') { inQ=true; i++; continue; }
+        if (ch===';') { fields.push(field); field=''; i++; continue; }
+        field+=ch; i++;
+      }
+      fields.push(field);
+      return fields;
+    }
+    const headers = parseLine(lines[0]).map(h=>h.trim());
+    return lines.slice(1).map(line => {
+      const vals = parseLine(line);
+      const obj = {};
+      headers.forEach((h,i) => obj[h] = (vals[i]||'').trim());
+      return obj;
+    }).filter(r => r['Catalog']);
+  }
+
+  function decodeHtml(s) {
+    if (!s) return '';
+    return s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&rsquo;/g,"'").replace(/&lsquo;/g,"'").replace(/&ndash;/g,'–').replace(/&mdash;/g,'—').replace(/&hellip;/g,'…').replace(/&nbsp;/g,' ').replace(/&ldquo;/g,'"').replace(/&rdquo;/g,'"').replace(/&bdquo;/g,'„').replace(/&euro;/g,'€');
+  }
+
+  function mapGenre(genreStr) {
+    const g = genreStr.toLowerCase();
+    if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
+    if (g.includes('tech house')) return 'Tech House';
+    if (g.includes('afro')) return 'Afro House';
+    if (g.includes('chicago')) return 'Chicago House';
+    if (g.includes('soulful')) return 'Soulful House';
+    if (g.includes('acid')) return 'Acid House';
+    if (g.includes('detroit')) return 'Detroit House';
+    if (g.includes('disco')) return 'Disco House';
+    if (g.includes('house')) return 'Deep House';
+    return genreStr || 'Deep House';
+  }
+
+  function catnoFromZip(name) {
+    return name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,'').trim().toUpperCase();
+  }
+
+  const loadCsv = (file) => {
+    const rd = new FileReader();
+    rd.onload = () => {
+      const rows = parseDBHCsv(rd.result);
+      setCsvRows(rows);
+      setCsvFile(file.name);
+    };
+    rd.readAsText(file, 'UTF-8');
+  };
+
+  const assignZips = (files) => {
+    const zips = [...files].filter(f => /\.zip$/i.test(f.name));
+    setZipFiles(prev => {
+      const existing = new Set(prev.map(f=>f.name));
+      return [...prev, ...zips.filter(f=>!existing.has(f.name))];
+    });
+  };
+
+  const process = async () => {
+    if (!csvRows.length) return;
+    setError(''); setStatus('processing'); setResults([]);
+
+    try {
+      const JSZip = await loadJSZip();
+      const total = csvRows.length;
+      const processed = [];
+
+      // Build zip map by catalog number
+      const zipMap = {};
+      zipFiles.forEach(f => { zipMap[catnoFromZip(f.name)] = f; });
+
+      for (let i = 0; i < csvRows.length; i++) {
+        const row = csvRows[i];
+        const catno   = row['Catalog'].toUpperCase().trim();
+        const title   = decodeHtml(row['Title'] || '');
+        const artist  = decodeHtml(row['Artist'] || '');
+        const label   = decodeHtml(row['Label'] || '');
+        const genre   = mapGenre(row['Genre'] || '');
+        const year    = row['Release Date'] ? new Date(row['Release Date']).getFullYear() : '';
+        const ppu     = parseFloat(row['PPU'] || 0);
+        const rawPrice = ppu * (1 + margin / 100);
+        const price   = (Math.ceil(rawPrice) - 0.01).toFixed(2);
+        const qtyShipped = parseInt(row['QTY Shipped'] || 0);
+        const qtyOrdered = parseInt(row['QTY Ordered'] || 1);
+        const isPresale  = qtyShipped === 0;
+        const format  = row['Format'] || '';
+        const is2LP   = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
+        const grams   = is2LP ? '900' : '500';
+        const tags    = row['Tags'] || '';
+        const desc    = decodeHtml(row['Description'] || '');
+        const handle  = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+
+        setProgress({ done:i, total, current:`${catno} — processing…` });
+
+        let coverUrl = '';
+        let tracks   = [];
+        let itemError = '';
+
+        // Try to find matching ZIP
+        const zipFile = zipMap[catno] || zipFiles.find(f => {
+          const zcat = catnoFromZip(f.name);
+          return zcat.includes(catno) || catno.includes(zcat);
+        });
+
+        if (zipFile) {
+          try {
+            setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f=>!f.dir);
+
+            // Cover image
+            const imgFiles  = files.filter(f=>/\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile = imgFiles.find(f=>/front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${catno} — uploading cover…` });
+              const blob = await coverFile.async('blob');
+              const ext  = coverFile.name.split('.').pop().toLowerCase();
+              coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            }
+
+            // Audio
+            const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+              tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
+            }
+          } catch(e) { itemError = e.message; }
+        }
+
+        // Build description HTML from CSV description
+        const cleanDesc = desc.replace(/\r\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+        const descHtml  = cleanDesc ? `<p>${cleanDesc.replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br/>')}</p>` : '<p></p>';
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
+
+        const shopifyTags = ['vinyl','dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
+
+        processed.push({
+          _catno: catno, _title: title, _artist: artist,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _isPresale: isPresale, _zipFound: !!zipFile,
+          'Handle': handle,
+          'Title': title || catno,
+          'Body (HTML)': `${descHtml}${audioHtml}`,
+          'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+          'Type': '',
+          'Tags': shopifyTags,
+          'Published': 'TRUE',
+          'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
+          'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
+          'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
+          'Variant SKU': catno,
+          'Variant Grams': grams,
+          'Variant Inventory Tracker': '',
+          'Variant Inventory Qty': String(qtyShipped || qtyOrdered),
+          'Variant Inventory Policy': isPresale ? 'continue' : 'deny',
+          'Variant Fulfillment Service': 'manual',
+          'Variant Price': price,
+          'Variant Compare At Price': '',
+          'Variant Requires Shipping': 'TRUE',
+          'Variant Taxable': 'FALSE',
+          'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
+          'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
+          'Variant Barcode': '',
+          'Image Src': coverUrl,
+          'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
+          'Variant Image':'','Variant Weight Unit':'kg',
+          'Variant Tax Code':'','Cost per item': ppu ? ppu.toFixed(2) : '','Status':'active',
+        });
+
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch(e) {
+      setError(e.message);
+      setStatus('idle');
+    }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k=>!k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...results.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'dbh_shopify_import.csv';
+    a.click();
+  };
+
+  const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+  const covered   = results.filter(r=>r._coverUrl).length;
+  const withAudio = results.filter(r=>r._tracks?.length>0).length;
+  const presales  = results.filter(r=>r._isPresale).length;
+  const noZip     = results.filter(r=>!r._zipFound).length;
+  const errors    = results.filter(r=>r._error).length;
+
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
+        Upload your DBH order CSV + ZIP files. Description and price come from the CSV. ZIPs provide cover art and audio snippets.
+      </p>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e=>e.preventDefault()}
+        onDrop={e=>{e.preventDefault();const files=[...e.dataTransfer.files];const csv=files.find(f=>/\.csv$/i.test(f.name));if(csv)loadCsv(csv);assignZips(files);}}
+        style={{border:`2px dashed ${(csvFile||zipFiles.length)?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',marginBottom:14,transition:'border 0.15s'}}
+      >
+        <div style={{fontSize:28,marginBottom:6}}>🏠</div>
+        <div style={{fontSize:11,color:(csvFile||zipFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
+          Drag DBH order CSV + ZIPs here
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'center'}}>
+          <input ref={csvRef} type="file" accept=".csv" style={{display:'none'}} onChange={e=>{if(e.target.files[0])loadCsv(e.target.files[0]);e.target.value='';}} />
+          <input ref={zipRef} type="file" accept=".zip" multiple style={{display:'none'}} onChange={e=>{assignZips(e.target.files);e.target.value='';}} />
+          <button onClick={()=>csvRef.current.click()} style={{background:csvFile?S.accent:S.border,border:'none',color:csvFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {csvFile?`✓ ${csvFile}`:'+ Order CSV'}
+          </button>
+          <button onClick={()=>zipRef.current.click()} style={{background:zipFiles.length?S.accent:S.border,border:'none',color:zipFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}
+          </button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear</button>}
+        </div>
+      </div>
+
+      {/* CSV preview */}
+      {csvRows.length>0&&status==='idle'&&(
+        <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
+          <span>Releases: <b style={{color:S.text}}>{csvRows.length}</b></span>
+          <span>ZIPs matched: <b style={{color:S.accent}}>{csvRows.filter(r=>zipFiles.some(f=>catnoFromZip(f.name).includes(r['Catalog'].toUpperCase())||r['Catalog'].toUpperCase().includes(catnoFromZip(f.name)))).length}/{csvRows.length}</b></span>
+          <span>Presale (QTY=0): <b style={{color:'#ff8800'}}>{csvRows.filter(r=>parseInt(r['QTY Shipped']||0)===0).length}</b></span>
+        </div>
+      )}
+
+      {/* Margin + process */}
+      {csvRows.length>0&&status==='idle'&&(
+        <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <span style={{fontSize:10,color:S.muted}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)} style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
+          </div>
+          <span style={{fontSize:9,color:S.muted}}>e.g. €8.80 × {(1+margin/100).toFixed(2)} = €{(8.80*(1+margin/100)).toFixed(2)} → €{(Math.ceil(8.80*(1+margin/100))-0.01).toFixed(2)}</span>
+          <div style={{flex:1}}/>
+          <Btn ch={`🚀 Process ${csvRows.length} releases`} onClick={process} full />
+        </div>
+      )}
+
+      {/* Progress */}
+      {status==='processing'&&(
+        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>PROCESSING…</span>
+            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
+            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
+          </div>
+          {progress.current&&<div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {error&&<div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>}
+
+      {/* Results */}
+      {status==='review'&&results.length>0&&(
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} releases</span>
+              <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
+                {covered} covers · {withAudio} audio
+                {presales>0?` · ${presales} presale`:''}
+                {noZip>0?` · ${noZip} no ZIP`:''}
+                {errors>0?` · ${errors} errors`:''}
+              </span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
+            {results.map((r,i)=>(
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
+                <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
+                  {r._coverUrl
+                    ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
+                    :<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
+                  }
+                  {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
+                  {r._isPresale&&<div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRESALE</div>}
+                  {r._error&&<div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
+                </div>
+                <div style={{padding:'8px 8px 6px'}}>
+                  <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
+                  <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
+                  <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
+                  <div style={{fontSize:10,color:S.accent,marginTop:3,fontWeight:700}}>€{r['Variant Price']}</div>
+                  {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
@@ -959,11 +1300,13 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>Add New Record</div>
         <div style={{display:'flex',gap:6,marginBottom:18,flexWrap:'wrap'}}>
-          {tabBtn('zip','📦 ZIP Import')}
+          {tabBtn('zip','📦 W&S Import')}
           {tabBtn('kudos','🎵 Kudos Import')}
+          {tabBtn('dbh','🏠 DBH Import')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
+        {tab==='dbh'   && <DBHImporter />}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
