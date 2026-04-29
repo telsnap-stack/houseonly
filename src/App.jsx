@@ -25,6 +25,23 @@ async function shopifyQuery(query, variables={}) {
 const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic','Nu-Disco','Funk','Soul','Jazz','Electronica','Ambient','Techno','Drum & Bass','Breakbeat','Reggae','Dub','Hip Hop','R&B'];
 const SKIP_TAGS  = ['vinyl','house','kudos',...GENRE_TAGS.map(g=>g.toLowerCase())];
 
+// ── SLUG (industry-standard SEO-friendly URLs: artist-title) ───
+function slugify(str) {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip accents
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+}
+function makeSlug(artist, title, catalog) {
+  const base = [artist, title].filter(Boolean).join(' ');
+  const s = slugify(base);
+  if (s) return s;
+  return slugify(catalog) || 'release';
+}
+
 function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
@@ -42,10 +59,13 @@ function parseProduct({ node }) {
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
+  const catalog = v?.sku||'';
+  const title = node.title||'';
   return {
     id: node.id, shopifyVariantId: v?.id,
-    title: node.title||'', artist, label,
-    catalog: v?.sku||'', genre, year,
+    title, artist, label,
+    catalog, genre, year,
+    slug: makeSlug(artist, title, catalog),
     month: new Date().getMonth()+1,
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
@@ -524,7 +544,6 @@ function ZipImporter() {
         const zipFile = matchedZips[i];
         const catno   = catnoFromFilename(zipFile.name);
         const row     = rowMap[catno];
-        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
         setProgress({ done:i, total, current:`${catno} — extracting…` });
         let coverUrl='', tracks=[], desc='', pdfLabel='', pdfGenre='', itemError='';
         try {
@@ -538,7 +557,7 @@ function ZipImporter() {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
             const blob = await coverFile.async('blob');
             const ext  = coverFile.name.split('.').pop().toLowerCase();
-            coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
           }
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
@@ -548,10 +567,9 @@ function ZipImporter() {
           }
           for (const af of audioFiles) {
             const filename = af.name.split('/').pop();
-            const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
-            const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+            const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
             tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
           }
         } catch (e) { itemError = e.message; }
@@ -1037,7 +1055,6 @@ function DBHImporter() {
         const row = csvRows[i];
         const qtyShipped = parseInt(row['QTY Shipped'] || 0);
         if (qtyShipped === 0) { setProgress({ done:i+1, total, current:'' }); continue; } // skip presale
-        const isPresale = false;
         const catno   = row['Catalog'].toUpperCase().trim();
         const title   = decodeHtml(row['Title'] || '');
         const artist  = decodeHtml(row['Artist'] || '');
@@ -1067,10 +1084,6 @@ function DBHImporter() {
           return zcat.includes(catno) || catno.includes(zcat);
         });
 
-        // Sanitize catno for use in URLs/R2 keys: replace any char that's not
-        // alphanumeric/dash/underscore with '-'. Keeps SKU/handle untouched.
-        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
-
         if (zipFile) {
           try {
             setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
@@ -1084,17 +1097,16 @@ function DBHImporter() {
               setProgress({ done:i, total, current:`${catno} — uploading cover…` });
               const blob = await coverFile.async('blob');
               const ext  = coverFile.name.split('.').pop().toLowerCase();
-              coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+              coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
             }
 
             // Audio
             const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
             for (const af of audioFiles) {
               const filename = af.name.split('/').pop();
-              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
               setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
               const blob = await af.async('blob');
-              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
               tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
             }
           } catch(e) { itemError = e.message; }
@@ -1482,6 +1494,39 @@ export default function App() {
   const [filters,setFilters]             = useState({genre:null,label:null,year:null});
   const [search,setSearch]               = useState('');
   const [page,setPage]                   = useState('shop');
+  const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
+
+  // Keep `path` in sync with browser back/forward
+  useEffect(()=>{
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  },[]);
+
+  // Open modal automatically when URL is /products/<slug> and that record is loaded
+  useEffect(()=>{
+    const m = path.match(/^\/products\/([^/]+)\/?$/);
+    if (!m) { if (selected) setSelected(null); return; }
+    const slug = m[1];
+    if (selected && selected.slug === slug) return;
+    const found = records.find(r => r.slug === slug);
+    if (found) setSelected(found);
+  },[path, records]);
+
+  // Navigation helpers — push URL + update state in one call
+  const navigate = (newPath) => {
+    if (window.location.pathname === newPath) return;
+    window.history.pushState({}, '', newPath);
+    setPath(newPath);
+  };
+  const openProduct = (r) => {
+    setSelected(r);
+    navigate(`/products/${r.slug}`);
+  };
+  const closeProduct = () => {
+    setSelected(null);
+    if (path.startsWith('/products/')) navigate('/');
+  };
 
   useEffect(()=>{
     if (window.location.hash==='#admin') setPage('login');
@@ -1541,7 +1586,7 @@ export default function App() {
           <a href="https://account.houseonly.store" title="My Account" style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,textDecoration:'none'}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </a>
-          <button onClick={()=>{setCartOpen(true);setAccountOpen(false);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
+          <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
         </div>
@@ -1560,7 +1605,7 @@ export default function App() {
           {shopifyErr&&<span style={{color:S.danger}}>● {shopifyErr}</span>}
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={setSelected} onAdd={addToCart} />)}
+          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} />)}
         </div>
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
@@ -1576,14 +1621,14 @@ export default function App() {
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
         <div style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
           {[['Privacy Policy','privacy-policy'],['Terms of Service','terms-of-service'],['Returns & Refunds','refund-policy'],['Shipping Policy','shipping-policy'],['Legal Notice','legal-notice'],['Contact','contact-information']].map(([label,slug])=>(
-            <button key={slug} onClick={()=>{setPolicySlug(slug);setCartOpen(false);setAccountOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>{label}</button>
+            <button key={slug} onClick={()=>{setPolicySlug(slug);setCartOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>{label}</button>
           ))}
         </div>
       </div>
 
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
-      <Modal r={selected} onClose={()=>setSelected(null)} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
+      <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={()=>shopifyCheckout(cart)} />
     </div>
   );
