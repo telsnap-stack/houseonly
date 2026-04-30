@@ -500,6 +500,14 @@ function cleanSourceNotes(text) {
     if (t.length < 100 && /^(originally\s+released|distributed\s+by|mastered\s+by|remastered\s+by|cut\s+by|artwork\s+by|produced\s+by|mixed\s+by|written\s+by|licensed\s+from|copyright\s+(?:by\s+|©\s*)?)/i.test(t)) {
       return false;
     }
+    // Standalone "Format. 12"" / "Format: 12"" lines (period or colon variant)
+    if (t.length < 30 && /^format\s*[:.]\s*\d/i.test(t)) return false;
+    // "SC: https://..." preview links (with possibly empty URL)
+    if (/^SC\s*:\s*https?:\/\//i.test(t)) return false;
+    // Stray "info@..." footer junk
+    if (/^info@/i.test(t)) return false;
+    // Worldwide-distributed footer (any spelling, including typos like Wporldwide)
+    if (/^w[a-z]{0,3}orldwide\s+(?:exclusive\s+)?(?:manufacturing|distribut)/i.test(t)) return false;
     return true;
   }).join('\n');
 
@@ -544,8 +552,39 @@ function cleanSourceNotes(text) {
   // (which would need a dictionary to resolve correctly).
   s = s.replace(/([a-zA-Z])\s+(ff[il]?|fi|fl)\s+([a-z])/g, '$1$2$3');
 
-  // 7) Normalize whitespace, collapse runs of blank lines
+  // 7) Normalize whitespace, collapse runs of blank lines (intermediate)
   s = s.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+
+  // 8) Final pass: drop paragraph-level junk that survived line-level filtering.
+  // A paragraph is junk if it's short and matches credit/footer patterns:
+  //   - "Mastering by", "Mixed at", "W+P by", "Vinyl cut by"
+  //   - Format declarations: "Format. 12"" / "Format: 12""
+  //   - Stray "SC: https://", malformed URLs, "info@"
+  //   - "Worldwide ... distributed/manufactured" (any spelling, including typos)
+  //   - "Digital only:" lists
+  const JUNK_PARA = [
+    /\b(?:mastering|mixing|cutting)\s+by\b/i,
+    /\bvinyl\s+cut\s+by\b/i,
+    /\b(?:additional\s+remix|w\+p|w\/p)\s+by\b/i,
+    /\b(?:vocals?|lyrics)\s*\/?\s*(?:lyrics?|vocals?)?\s*by\b/i,
+    /\bmastered\s+(?:at|@)\b/i,
+    /\bmixed\s+(?:at|@)\b/i,
+    /\b(?:w(?:p|porld)?)?worldwide\s+(?:exclusive\s+)?(?:manufacturing|distribut)/i,
+    /^\s*format\s*[:.]\s*\d/im,
+    /\bSC\s*:\s*https?:\/\//i,
+    /\binfo@\b/i,
+    /^\s*Digital\s*only\s*:/im,
+    /\bLhaudio\.com\b/i,
+  ];
+  const paragraphs = s.split(/\n{2,}/);
+  const kept = paragraphs.filter(p => {
+    const t = p.trim();
+    if (!t) return false;
+    // Short paragraphs that match any junk pattern → drop
+    if (t.length < 400 && JUNK_PARA.some(rx => rx.test(t))) return false;
+    return true;
+  });
+  s = kept.join('\n\n').trim();
 
   return s;
 }
