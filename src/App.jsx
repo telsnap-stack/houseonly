@@ -545,8 +545,8 @@ function cleanSourceNotes(text) {
       // Captures: Worldwide, Worldide, Wporldwide, Wordwide, etc — and with typos
       // in "exclusive" too: excusive, excosive.
       if (/^W[a-z]+\s+(?:exc[a-z]+\s+)?(?:with|by|distribut|manufacturing)/i.test(t)) continue;
-      // Standalone "Direct order: info@" / "Direct oder: info@" / "info@..."
-      if (/^direct\s+o[dr]er[\s:.]/i.test(t)) continue;
+      // Standalone "Direct order: ..." / "Direct oder: ..." (with typo)
+      if (/^direct\s+o(?:rd|d|r)er[\s:.]/i.test(t)) continue;
       // Standalone "All tracks written/produced/published by ..." credit lines
       if (t.length < 200 && /^(?:all\s+tracks?\s+)?(?:written|produced|composed|published)(?:\s*[&,]\s*\w+)*\s+by\b/i.test(t)) continue;
       // Meta field — start/continue a meta block.
