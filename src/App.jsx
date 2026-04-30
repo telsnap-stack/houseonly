@@ -437,70 +437,114 @@ function decodeHtmlEntities(s) {
   return out;
 }
 
-// Cleans source notes from PDFs/APIs. Fixes the obvious & safe stuff;
-// leaves ambiguous cases alone (e.g. "She fi nished" vs "Pfei ff er" — they
-// look identical to a regex; only a dictionary can disambiguate).
+// Cleans source notes from PDFs/APIs. Aggressive: prioritises customer-facing
+// prose. Strips B2B junk, metadata blocks, distributor footers, embedded
+// tracklists, teaser links, copyright/credit lines, and PDF ligature damage.
+//
+// Philosophy: when we can't be sure something is real prose, drop it. The
+// fallback (lead paragraph + tracklist + closing) is always presentable; an
+// imperfect description is not.
 function cleanSourceNotes(text) {
   if (!text) return '';
   let s = decodeHtmlEntities(text);
 
-  // Strip HTML tags but preserve paragraph breaks
+  // 1) Strip HTML tags but preserve paragraph breaks
   s = s.replace(/<\/(p|div|li|h[1-6])\s*>/gi, '\n\n');
   s = s.replace(/<br\s*\/?>/gi, '\n');
   s = s.replace(/<[^>]+>/g, '');
 
-  // Strip W&S salespaper footer leakage
+  // 2) Strip well-known footer leakage (W&S salespapers + DBH distributor lines)
   s = s.replace(/\bWord\s+and\s+Sound[\s\S]*$/i, '');
   s = s.replace(/\bwordandsound\.net[\s\S]*$/i, '');
+  s = s.replace(/\bWorldwide\s+(?:exclusive\s+)?distributed\s+by[\s\S]*$/i, '');
+  s = s.replace(/\bdbh-music\.com[^\s]*/gi, '');
+  s = s.replace(/\bsoundcloud\.com\/[^\s]+/gi, '');
+  s = s.replace(/\bbandcamp\.com\/[^\s]+/gi, '');
+  s = s.replace(/\bbit\.ly\/[^\s]+/gi, '');
 
-  // Strip metadata header blocks at the start.
-  // DBH descriptions begin with lines like:
-  //   Artist: X
-  //   Title: Y
-  //   Label: Z
-  //   Collective Cuts          ← continuation of multi-word label value
-  //   Catalogue No: ABC123
-  //   Release Date: July 2025
-  //   Format: Vinyl, Digital
-  // We already render all this in the lead paragraph — drop it from the prose.
-  const META_FIELDS = /^(artist|title|label|catalogue?\s*no\.?|cat\.?\s*no\.?|cat|catalog|release\s*date|format|genre|style|distributor)\s*[:#]/i;
-  const lines = s.split('\n');
-  let firstProseIdx = 0;
-  let inMetaBlock = false;
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (!t) {
-      // Blank line. If we were in a meta block, a blank ends it.
-      if (inMetaBlock) inMetaBlock = false;
-      continue;
+  // 3) Strip embedded tracklists ANYWHERE (we render our own from the tracks array)
+  // Greedy: starts at "Tracklist:" / "Track list:" / "Tracklisting:" and runs to
+  // the next blank line or end of text.
+  s = s.replace(/^[ \t]*track\s*list(?:ing)?[^\n]*[:.][\s\S]*?(?=\n\s*\n|$)/gim, '');
+
+  // 4) Strip metadata + credit blocks anywhere.
+  // We use a comprehensive list of fields that appear in DBH/W&S/Kudos descriptions.
+  // The block detection is greedy: once we enter a meta block, we stay in it
+  // through continuation lines until we see a blank or real prose.
+  const META_FIELDS = new RegExp(
+    '^(' + [
+      // identification
+      'artist', 'title', 'label', 'catalogue?\\s*no\\.?', 'cat\\.?\\s*no\\.?',
+      'cat(?:alog)?', 'release\\s*date', 'rel\\.?\\s*date', 'format', 'genre',
+      'style', 'upc', 'barcode',
+      // credits
+      'distributor', 'distributed', 'press\\s*contact', 'copyright',
+      'mastered(?:\\s*by)?', 'remastered(?:\\s*by)?', 'cut\\s*by',
+      'artwork(?:\\s*by)?', 'originally\\s*released', 'licensed(?:\\s*from)?',
+      'produced(?:\\s*by)?', 'mixed(?:\\s*by)?', 'written(?:\\s*by)?',
+      // promo/preview links
+      'teaser', 'soundcloud(?:[_\\s-]*teaser)?', 'sc[\\s-]*teaser',
+      'shop\\s*teaser', 'bandcamp', 'youtube', 'preview', 'stream',
+      'listen', 'buy', 'direct\\s*order', 'pre\\s*[- ]?order'
+    ].join('|') + ')\\s*[:#]',
+    'i'
+  );
+
+  // 4b) Strip credit-style lines that are formatted as prose, not "Field: value".
+  // Examples: "Distributed by DBH", "Mastered by X", "originally released on Y, 1993.",
+  // "cut by Andreas Kauffelt", "artwork by Z". These are not customer-facing.
+  s = s.split('\n').filter(line => {
+    const t = line.trim();
+    if (!t) return true;
+    // Match short credit-style lines (under 100 chars, contain typical credit verbs)
+    if (t.length < 100 && /^(originally\s+released|distributed\s+by|mastered\s+by|remastered\s+by|cut\s+by|artwork\s+by|produced\s+by|mixed\s+by|written\s+by|licensed\s+from|copyright\s+(?:by\s+|©\s*)?)/i.test(t)) {
+      return false;
     }
-    if (META_FIELDS.test(t)) {
-      inMetaBlock = true;
-      continue;
+    return true;
+  }).join('\n');
+
+  // 5) Drop standalone B2B URL lines and apply meta-block stripping in one pass.
+  //    Also strip orphaned tracklist line items (A1, A2, B1, B2 etc) that survive
+  //    after their "Tracklisting:" header was stripped above.
+  const TRACK_LINE = /^[ \t]*[A-Z][12]?[\s.\-–:)]+\S/;          // A1 ... or A. ... or A: ...
+  {
+    const lines = s.split('\n');
+    const keep = [];
+    let inMetaBlock = false;
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) {
+        if (inMetaBlock) { inMetaBlock = false; continue; }
+        keep.push(line);
+        continue;
+      }
+      // Standalone URL line — drop it.
+      if (/^https?:\/\/\S+$/i.test(t)) continue;
+      // Orphaned tracklist line item (A1 -, B2 –, etc).
+      if (TRACK_LINE.test(t) && t.length < 80) continue;
+      // Meta field — start/continue a meta block.
+      if (META_FIELDS.test(t)) {
+        inMetaBlock = true;
+        while (keep.length && !keep[keep.length-1].trim()) keep.pop();
+        continue;
+      }
+      // Continuation of a meta value: short line, no sentence punctuation,
+      // while we're still inside a meta block.
+      if (inMetaBlock && t.length < 60 && !/[.!?]/.test(t)) continue;
+      // Real prose.
+      inMetaBlock = false;
+      keep.push(line);
     }
-    // Continuation of a meta value: short line, no period, no comma-list,
-    // when the previous non-blank line was part of the meta block.
-    if (inMetaBlock && t.length < 60 && !/[.!?]/.test(t)) {
-      continue;
-    }
-    // First real prose line.
-    firstProseIdx = i;
-    break;
+    s = keep.join('\n');
   }
-  if (firstProseIdx > 0) s = lines.slice(firstProseIdx).join('\n');
 
-  // Strip embedded tracklists at the END (we render our own from the tracks array).
-  // Patterns: "Track list:" / "Tracklist:" / "Tracklisting:" followed by entries.
-  s = s.replace(/\n\s*track\s*list(?:ing)?\s*[:.][\s\S]*$/i, '');
-  s = s.replace(/\n\s*tracklist\s*[:.][\s\S]*$/i, '');
-
-  // Safe ligature fixes — only apply where the join is unambiguous:
+  // 6) Safe ligature fixes — only apply where the join is unambiguous:
   // a letter, then space, then a ligature pair, then space, then a lowercase letter.
-  // This catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
+  // Catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
   // (which would need a dictionary to resolve correctly).
   s = s.replace(/([a-zA-Z])\s+(ff[il]?|fi|fl)\s+([a-z])/g, '$1$2$3');
 
-  // Normalize whitespace, collapse runs of blank lines
+  // 7) Normalize whitespace, collapse runs of blank lines
   s = s.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
 
   return s;
