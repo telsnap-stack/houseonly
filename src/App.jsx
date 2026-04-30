@@ -417,6 +417,113 @@ async function claudeJSON(sys, msg, search=false) {
 const SCHEMA=`{"title":"","artist":"","label":"","genre":"","year":0,"price":18.99,"catalog":"","tracks":[{"t":"","d":""}],"desc":"","coverUrl":"","audioUrl":""}`;
 const GLIST='Deep House, Tech House, Afro House, Chicago House, Soulful House, Acid House, Detroit House, Disco House';
 
+// ── DESCRIPTION BUILDERS (shared by all importers) ─────────────
+// Customer-first: every product gets a consistent, well-formatted, SEO-friendly
+// description. Source notes (from W&S salespapers, Kudos API, DBH CSV) are
+// included only when they pass quality checks. No "Pfei ff er" disasters.
+
+function decodeHtmlEntities(s) {
+  if (!s) return '';
+  let out = String(s);
+  // Multi-pass for double-encoding (e.g. &amp;amp; → &amp; → &)
+  for (let i = 0; i < 3; i++) {
+    out = out
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+      .replace(/&euro;/g, '€').replace(/&ndash;/g, '–').replace(/&mdash;/g, '—')
+      .replace(/&hellip;/g, '…').replace(/&rsquo;/g, "'").replace(/&lsquo;/g, "'")
+      .replace(/&ldquo;/g, '"').replace(/&rdquo;/g, '"').replace(/&bdquo;/g, '„');
+  }
+  return out;
+}
+
+// Cleans source notes from PDFs/APIs. Fixes the obvious & safe stuff;
+// leaves ambiguous cases alone (e.g. "She fi nished" vs "Pfei ff er" — they
+// look identical to a regex; only a dictionary can disambiguate).
+function cleanSourceNotes(text) {
+  if (!text) return '';
+  let s = decodeHtmlEntities(text);
+
+  // Strip HTML tags but preserve paragraph breaks
+  s = s.replace(/<\/(p|div|li|h[1-6])\s*>/gi, '\n\n');
+  s = s.replace(/<br\s*\/?>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, '');
+
+  // Strip W&S salespaper footer leakage
+  s = s.replace(/\bWord\s+and\s+Sound[\s\S]*$/i, '');
+  s = s.replace(/\bwordandsound\.net[\s\S]*$/i, '');
+
+  // Safe ligature fixes — only apply where the join is unambiguous:
+  // a letter, then space, then a ligature pair, then space, then a lowercase letter.
+  // This catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
+  // (which would need a dictionary to resolve correctly).
+  s = s.replace(/([a-zA-Z])\s+(ff[il]?|fi|fl)\s+([a-z])/g, '$1$2$3');
+
+  // Normalize whitespace, collapse runs of blank lines
+  s = s.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+
+  return s;
+}
+
+// Quality check: should we include the source notes at all?
+// We measure damage in the RAW text (before cleaning), because the cleaner
+// fixes some patterns and would mask the original damage level.
+function notesPassQualityCheck(rawText, cleanedText) {
+  if (!cleanedText || cleanedText.length < 50) return false;          // too short = noise
+  // Count "obvious break" patterns in the raw text:
+  //  - "<letter> fi/fl/ff <letter>"  (Pfei ff er)
+  //  - "<letters>fi/fl <space><letter>"  (herfi rst, thefl ipside)
+  const raw = String(rawText || '');
+  const damageA = (raw.match(/[a-z]\s+(ff[il]?|fi|fl)\s+[a-z]/gi) || []).length;
+  const damageB = (raw.match(/[a-z](fi|fl|ff)\s+[a-z]/gi) || []).length;
+  const damage = damageA + damageB;
+  const wordCount = raw.split(/\s+/).filter(Boolean).length;
+  if (wordCount === 0) return false;
+  // If more than 2% of words show ligature damage, the cleaning would leave
+  // residual artifacts that hurt the customer experience. Better to omit.
+  return (damage / wordCount) <= 0.02;
+}
+
+// Build the canonical description HTML for a product. Used by all importers
+// so every product gets the same clean, SEO-friendly format.
+function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes }) {
+  const parts = [];
+
+  // Lead paragraph: facts in prose, with keywords for SEO.
+  const leadBits = [];
+  if (artist && title) leadBits.push(`<strong>${title}</strong> by ${artist}`);
+  else if (title)      leadBits.push(`<strong>${title}</strong>`);
+  if (label)           leadBits.push(`released on ${label}`);
+  if (year)            leadBits.push(`(${year})`);
+  if (leadBits.length) {
+    parts.push(`<p>${leadBits.join(' ')}.</p>`);
+  }
+
+  // Source notes — included only if they pass quality checks
+  const cleaned = cleanSourceNotes(sourceNotes);
+  if (notesPassQualityCheck(sourceNotes, cleaned)) {
+    const paragraphs = cleaned.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    parts.push(...paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`));
+  }
+
+  // Tracklist — formatted as ordered list when we have it
+  if (tracks && tracks.length) {
+    const items = tracks.map(t => {
+      // Track may be {name, url} (from importer ZIP) or {t, d} (legacy)
+      const label = t.name || t.t || '';
+      const dur   = t.d ? ` <span style="opacity:.6">(${t.d})</span>` : '';
+      return `<li>${label}${dur}</li>`;
+    }).join('');
+    parts.push(`<p><strong>Tracklist</strong></p><ol>${items}</ol>`);
+  }
+
+  // Closing line: format + shipping. Universal across the catalogue.
+  parts.push(`<p>12" vinyl. Worldwide shipping from House Only.</p>`);
+
+  return parts.join('');
+}
+
+
 // ── ZIP IMPORTER ───────────────────────────────────────────────
 async function loadJSZip() {
   if (window.JSZip) return window.JSZip;
@@ -544,6 +651,7 @@ function ZipImporter() {
         const zipFile = matchedZips[i];
         const catno   = catnoFromFilename(zipFile.name);
         const row     = rowMap[catno];
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
         setProgress({ done:i, total, current:`${catno} — extracting…` });
         let coverUrl='', tracks=[], desc='', pdfLabel='', pdfGenre='', itemError='';
         try {
@@ -557,7 +665,7 @@ function ZipImporter() {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
             const blob = await coverFile.async('blob');
             const ext  = coverFile.name.split('.').pop().toLowerCase();
-            coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
           }
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
@@ -567,9 +675,10 @@ function ZipImporter() {
           }
           for (const af of audioFiles) {
             const filename = af.name.split('/').pop();
+            const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
-            const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+            const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
             tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
           }
         } catch (e) { itemError = e.message; }
@@ -585,7 +694,7 @@ function ZipImporter() {
         const grams  = is2LP ? '900' : '500';
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-        const descHtml  = desc ? `<p>${desc.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>` : '<p></p>';
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         processed.push({
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
@@ -820,7 +929,38 @@ function KudosImporter() {
       const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
-      if(api){const notes=decodeHtml(api.b2c_notes||api.b2b_notes||'');if(notes)bodyHtml+='<p>'+notes.replace(/\n/g,'<br>')+'</p>';if(api.tracks){const ta=Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence);bodyHtml+='<h3>Tracklist</h3><ol>';ta.forEach(t=>{bodyHtml+='<li>'+decodeHtml(t.title)+' ('+t.duration+')</li>';});bodyHtml+='</ol>';const audioTracks=ta.filter(t=>t.audio_clip).map(t=>({name:t.title,url:t.audio_clip.replace(/\.ka$/,".mp3")}));if(audioTracks.length)bodyHtml+='<script type="application/json" id="tracks">'+JSON.stringify(audioTracks)+'<\/script>';}}
+      let audioTracksJson = '';
+      if(api){
+        // Build tracklist for the helper: include duration in `d` field
+        const tracksForHelper = api.tracks
+          ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).map(t=>({
+              name: decodeHtml(t.title),
+              d: t.duration || ''
+            }))
+          : [];
+        // Build inline audio tracks JSON (separate from description, for the modal player)
+        if(api.tracks){
+          const audioArr = Object.values(api.tracks)
+            .sort((a,b)=>a.sequence-b.sequence)
+            .filter(t=>t.audio_clip)
+            .map(t=>({ name: decodeHtml(t.title), url: t.audio_clip.replace(/\.ka$/,'.mp3') }));
+          if(audioArr.length){
+            audioTracksJson = '<script type="application/json" id="tracks">'+JSON.stringify(audioArr)+'<\/script>';
+          }
+        }
+        // Year — try common API fields
+        const releaseYear = api.release_date ? new Date(api.release_date).getFullYear()
+                          : api.year ? parseInt(api.year)
+                          : undefined;
+        bodyHtml = buildDescriptionHtml({
+          artist, title, label,
+          year: releaseYear,
+          tracks: tracksForHelper,
+          sourceNotes: api.b2c_notes || api.b2b_notes || '',
+        }) + audioTracksJson;
+      } else {
+        bodyHtml = buildDescriptionHtml({ artist, title, label });
+      }
       const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);if(subgenre)tags.push(subgenre);if(genre)tags.push(genre);
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
@@ -1084,6 +1224,10 @@ function DBHImporter() {
           return zcat.includes(catno) || catno.includes(zcat);
         });
 
+        // Sanitize catno for use in URLs/R2 keys: replace any char that's not
+        // alphanumeric/dash/underscore with '-'. Keeps SKU/handle untouched.
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+
         if (zipFile) {
           try {
             setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
@@ -1097,24 +1241,24 @@ function DBHImporter() {
               setProgress({ done:i, total, current:`${catno} — uploading cover…` });
               const blob = await coverFile.async('blob');
               const ext  = coverFile.name.split('.').pop().toLowerCase();
-              coverUrl = await uploadToR2(blob, `covers/${catno}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+              coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
             }
 
             // Audio
             const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
             for (const af of audioFiles) {
               const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
               setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
               const blob = await af.async('blob');
-              const url  = await uploadToR2(blob, `audio/${catno}/${filename}`, 'audio/mpeg');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
               tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
             }
           } catch(e) { itemError = e.message; }
         }
 
-        // Build description HTML from CSV description
-        const cleanDesc = desc.replace(/\r\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
-        const descHtml  = cleanDesc ? `<p>${cleanDesc.replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br/>')}</p>` : '<p></p>';
+        // Build description HTML using shared helper
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         const shopifyTags = ['vinyl','dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
