@@ -475,8 +475,8 @@ function cleanSourceNotes(text) {
   const META_FIELDS = new RegExp(
     '^(' + [
       // identification (English + German + caps variants)
-      'artist', 'title', 'titel', 'label', 'labelname',
-      'catalogue?\\s*(?:no\\.?)?', 'cat\\.?\\s*no\\.?',
+      'artists?', 'title', 'titel', 'label', 'labelname',
+      'catalogue?\\s*(?:no\\.?|number|nr\\.?)?', 'cat\\.?\\s*no\\.?',
       'cat(?:alog)?', 'release\\s*date', 'rel\\.?\\s*date',
       'format', 'genre', 'style', 'upc', 'barcode',
       // credits
@@ -495,7 +495,7 @@ function cleanSourceNotes(text) {
   // Also detect lines that start with an UPPERCASE meta field name without a
   // separator at all — e.g. "LABELNAME Pingouin Musique" / "ARTIST Zied Jouini".
   // Used by some labels. We strip the entire line.
-  const META_FIELDS_CAPS = /^(?:LABELNAME|ARTIST|TITLE|TITEL|LABEL|CATALOGUE|CATNO|CAT\s*NO|FORMAT|GENRE|RELEASE\s*DATE|TRACKLISTING|UPC|BARCODE|DISTRIBUT(?:OR|ED))\b/;
+  const META_FIELDS_CAPS = /^(?:LABELNAME|ARTISTS?|TITLE|TITEL|LABEL|CATALOGUE(?:\s*NUMBER)?|CATNO|CAT\s*NO|FORMAT|GENRE|RELEASE\s*DATE|TRACKLISTING|UPC|BARCODE|DISTRIBUT(?:OR|ED))\b/;
 
   // 4b) Strip credit-style lines that are formatted as prose, not "Field: value".
   // Examples: "Distributed by DBH", "Mastered by X", "originally released on Y, 1993.",
@@ -541,8 +541,10 @@ function cleanSourceNotes(text) {
       if (NUM_TRACK_LINE.test(t) && t.length < 80) continue;
       // Caps-style meta field (e.g. "LABELNAME Pingouin Musique" / "ARTIST Zied Jouini")
       if (META_FIELDS_CAPS.test(t)) { inMetaBlock = true; continue; }
-      // Worldwide-with/by/exclusive footer (with typos: Worldide, Wporldwide, excusive)
-      if (/^w[a-z]{0,3}orldwide\s+(?:exclusive|exc[uo]sive)?\s*(?:with|by|distribut|manufacturing)/i.test(t)) continue;
+      // Worldwide-distributed footer — match any W-word + exclusive variant + distribution verb.
+      // Captures: Worldwide, Worldide, Wporldwide, Wordwide, etc — and with typos
+      // in "exclusive" too: excusive, excosive.
+      if (/^W[a-z]+\s+(?:exc[a-z]+\s+)?(?:with|by|distribut|manufacturing)/i.test(t)) continue;
       // Standalone "Direct order: info@" / "Direct oder: info@" / "info@..."
       if (/^direct\s+o[dr]er[\s:.]/i.test(t)) continue;
       // Standalone "All tracks written/produced/published by ..." credit lines
