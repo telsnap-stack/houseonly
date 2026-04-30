@@ -453,6 +453,47 @@ function cleanSourceNotes(text) {
   s = s.replace(/\bWord\s+and\s+Sound[\s\S]*$/i, '');
   s = s.replace(/\bwordandsound\.net[\s\S]*$/i, '');
 
+  // Strip metadata header blocks at the start.
+  // DBH descriptions begin with lines like:
+  //   Artist: X
+  //   Title: Y
+  //   Label: Z
+  //   Collective Cuts          ← continuation of multi-word label value
+  //   Catalogue No: ABC123
+  //   Release Date: July 2025
+  //   Format: Vinyl, Digital
+  // We already render all this in the lead paragraph — drop it from the prose.
+  const META_FIELDS = /^(artist|title|label|catalogue?\s*no\.?|cat\.?\s*no\.?|cat|catalog|release\s*date|format|genre|style|distributor)\s*[:#]/i;
+  const lines = s.split('\n');
+  let firstProseIdx = 0;
+  let inMetaBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) {
+      // Blank line. If we were in a meta block, a blank ends it.
+      if (inMetaBlock) inMetaBlock = false;
+      continue;
+    }
+    if (META_FIELDS.test(t)) {
+      inMetaBlock = true;
+      continue;
+    }
+    // Continuation of a meta value: short line, no period, no comma-list,
+    // when the previous non-blank line was part of the meta block.
+    if (inMetaBlock && t.length < 60 && !/[.!?]/.test(t)) {
+      continue;
+    }
+    // First real prose line.
+    firstProseIdx = i;
+    break;
+  }
+  if (firstProseIdx > 0) s = lines.slice(firstProseIdx).join('\n');
+
+  // Strip embedded tracklists at the END (we render our own from the tracks array).
+  // Patterns: "Track list:" / "Tracklist:" / "Tracklisting:" followed by entries.
+  s = s.replace(/\n\s*track\s*list(?:ing)?\s*[:.][\s\S]*$/i, '');
+  s = s.replace(/\n\s*tracklist\s*[:.][\s\S]*$/i, '');
+
   // Safe ligature fixes — only apply where the join is unambiguous:
   // a letter, then space, then a ligature pair, then space, then a lowercase letter.
   // This catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
