@@ -471,24 +471,31 @@ function cleanSourceNotes(text) {
   // We use a comprehensive list of fields that appear in DBH/W&S/Kudos descriptions.
   // The block detection is greedy: once we enter a meta block, we stay in it
   // through continuation lines until we see a blank or real prose.
+  // Separator can be ":", "#", or "." (some labels use period instead of colon).
   const META_FIELDS = new RegExp(
     '^(' + [
-      // identification
-      'artist', 'title', 'label', 'catalogue?\\s*no\\.?', 'cat\\.?\\s*no\\.?',
-      'cat(?:alog)?', 'release\\s*date', 'rel\\.?\\s*date', 'format', 'genre',
-      'style', 'upc', 'barcode',
+      // identification (English + German + caps variants)
+      'artist', 'title', 'titel', 'label', 'labelname',
+      'catalogue?\\s*(?:no\\.?)?', 'cat\\.?\\s*no\\.?',
+      'cat(?:alog)?', 'release\\s*date', 'rel\\.?\\s*date',
+      'format', 'genre', 'style', 'upc', 'barcode',
       // credits
       'distributor', 'distributed', 'press\\s*contact', 'copyright',
       'mastered(?:\\s*by)?', 'remastered(?:\\s*by)?', 'cut\\s*by',
       'artwork(?:\\s*by)?', 'originally\\s*released', 'licensed(?:\\s*from)?',
       'produced(?:\\s*by)?', 'mixed(?:\\s*by)?', 'written(?:\\s*by)?',
-      // promo/preview links
+      // promo/preview links (with common typos)
       'teaser', 'soundcloud(?:[_\\s-]*teaser)?', 'sc[\\s-]*teaser',
       'shop\\s*teaser', 'bandcamp', 'youtube', 'preview', 'stream',
-      'listen', 'buy', 'direct\\s*order', 'pre\\s*[- ]?order'
-    ].join('|') + ')\\s*[:#]',
+      'listen', 'buy', 'direct\\s*o[dr]er', 'pre\\s*[- ]?order'
+    ].join('|') + ')\\s*[:#.]',
     'i'
   );
+
+  // Also detect lines that start with an UPPERCASE meta field name without a
+  // separator at all — e.g. "LABELNAME Pingouin Musique" / "ARTIST Zied Jouini".
+  // Used by some labels. We strip the entire line.
+  const META_FIELDS_CAPS = /^(?:LABELNAME|ARTIST|TITLE|TITEL|LABEL|CATALOGUE|CATNO|CAT\s*NO|FORMAT|GENRE|RELEASE\s*DATE|TRACKLISTING|UPC|BARCODE|DISTRIBUT(?:OR|ED))\b/;
 
   // 4b) Strip credit-style lines that are formatted as prose, not "Field: value".
   // Examples: "Distributed by DBH", "Mastered by X", "originally released on Y, 1993.",
@@ -515,6 +522,7 @@ function cleanSourceNotes(text) {
   //    Also strip orphaned tracklist line items (A1, A2, B1, B2 etc) that survive
   //    after their "Tracklisting:" header was stripped above.
   const TRACK_LINE = /^[ \t]*[A-Z][12]?[\s.\-–:)]+\S/;          // A1 ... or A. ... or A: ...
+  const NUM_TRACK_LINE = /^[ \t]*\d{1,2}[\s.\-–:)]+[A-Z]/;       // "1. Artist - Title"
   {
     const lines = s.split('\n');
     const keep = [];
@@ -528,8 +536,17 @@ function cleanSourceNotes(text) {
       }
       // Standalone URL line — drop it.
       if (/^https?:\/\/\S+$/i.test(t)) continue;
-      // Orphaned tracklist line item (A1 -, B2 –, etc).
+      // Orphaned tracklist line items
       if (TRACK_LINE.test(t) && t.length < 80) continue;
+      if (NUM_TRACK_LINE.test(t) && t.length < 80) continue;
+      // Caps-style meta field (e.g. "LABELNAME Pingouin Musique" / "ARTIST Zied Jouini")
+      if (META_FIELDS_CAPS.test(t)) { inMetaBlock = true; continue; }
+      // Worldwide-with/by/exclusive footer (with typos: Worldide, Wporldwide, excusive)
+      if (/^w[a-z]{0,3}orldwide\s+(?:exclusive|exc[uo]sive)?\s*(?:with|by|distribut|manufacturing)/i.test(t)) continue;
+      // Standalone "Direct order: info@" / "Direct oder: info@" / "info@..."
+      if (/^direct\s+o[dr]er[\s:.]/i.test(t)) continue;
+      // Standalone "All tracks written/produced/published by ..." credit lines
+      if (t.length < 200 && /^(?:all\s+tracks?\s+)?(?:written|produced|composed|published)(?:\s*[&,]\s*\w+)*\s+by\b/i.test(t)) continue;
       // Meta field — start/continue a meta block.
       if (META_FIELDS.test(t)) {
         inMetaBlock = true;
