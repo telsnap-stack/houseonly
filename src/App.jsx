@@ -923,6 +923,16 @@ function ZipImporter() {
         </div>
       )}
       {error&&<div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
+      {status==='review'&&results.length===0&&(
+        <div style={{ padding:16, background:'#1a0a00', border:`1px solid #ff8800`, borderRadius:2, fontSize:11, color:'#ff8800', lineHeight:1.6 }}>
+          <div style={{fontWeight:700,marginBottom:6}}>⚠ No releases processed</div>
+          <div style={{color:S.muted}}>
+            None of the {zipFiles.length} ZIP{zipFiles.length!==1?'s':''} matched any catalog number in the Excel invoice.
+            Check that the ZIP filename contains a catalog number that appears in the <code>ArtNo</code> column of your Word & Sound xlsx.
+          </div>
+          <button onClick={()=>{setStatus('idle');setResults([]);}} style={{ marginTop:10, background:'none', border:`1px solid #ff8800`, color:'#ff8800', cursor:'pointer', fontSize:9, letterSpacing:1, textTransform:'uppercase', padding:'5px 12px', borderRadius:2, fontFamily:'inherit' }}>Back</button>
+        </div>
+      )}
       {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
