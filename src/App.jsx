@@ -92,11 +92,15 @@ async function fetchShopifyProducts(cursor=null) {
 }
 
 // ── CHECKOUT ───────────────────────────────────────────────────
-async function shopifyCheckout(cartItems) {
+async function shopifyCheckout(cartItems, customerAccessToken=null) {
   const lines = cartItems
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
   if (!lines.length) throw new Error('No items in cart.');
+  const input = { lines };
+  if (customerAccessToken) {
+    input.buyerIdentity = { customerAccessToken };
+  }
   const data = await shopifyQuery(
     `mutation cartCreate($input: CartInput!) {
       cartCreate(input: $input) {
@@ -104,7 +108,7 @@ async function shopifyCheckout(cartItems) {
         userErrors { field message }
       }
     }`,
-    { input: { lines } }
+    { input }
   );
   const errs = data.cartCreate?.userErrors;
   if (errs?.length) throw new Error(errs.map(e => e.message).join(', '));
@@ -2611,7 +2615,7 @@ export default function App() {
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
       <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
-      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={()=>shopifyCheckout(cart)} />
+      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.token||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
     </div>
