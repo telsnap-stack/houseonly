@@ -91,6 +91,22 @@ async function fetchShopifyProducts(cursor=null) {
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
+// Fetch a single product by handle. Used when adding a wishlisted item to cart
+// where the record may not be in our paginated `records` array yet.
+async function fetchShopifyProductByHandle(handle) {
+  if (!handle) return null;
+  const data = await shopifyQuery(`
+    query($h: String!) {
+      product(handle: $h) {
+        id title vendor descriptionHtml tags
+        variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
+        images(first:1) { edges { node { url } } }
+      }
+    }`, { h: handle });
+  if (!data.product) return null;
+  return parseProduct({ node: data.product });
+}
+
 // ── CHECKOUT ───────────────────────────────────────────────────
 async function shopifyCheckout(cartItems, customerAccessToken=null) {
   const lines = cartItems
@@ -2475,10 +2491,19 @@ export default function App() {
       window.location.href = `/products/${item.handle}/`;
     }
   };
-  // Add a wishlist item to the cart. Match against loaded records to get full data.
-  const addWishlistItemToCart = (item) => {
-    const r = records.find(rec => (rec.slug||'') === item.handle);
-    if (r) addToCart(r);
+  // Add a wishlist item to the cart, then remove from wishlist (standard pattern).
+  // If the record isn't in our loaded list yet (e.g. user is on page 1 but item is from page 5),
+  // fetch it from Shopify directly so we get the shopifyVariantId needed for checkout.
+  const addWishlistItemToCart = async (item) => {
+    let r = records.find(rec => (rec.slug||'') === item.handle);
+    if (!r) {
+      try {
+        r = await fetchShopifyProductByHandle(item.handle);
+      } catch { /* ignore */ }
+    }
+    if (!r) return;
+    addToCart(r);
+    wishlistRemove(item.handle);
   };
 
   // Keep `path` in sync with browser back/forward
