@@ -833,7 +833,44 @@ function ZipImporter() {
             setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
             const blob = await af.async('blob');
             const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
-            tracks.push({ name: filename.replace(/\.[^.]+$/, ''), url });
+            // Clean the track name from W&S filename convention:
+            //   "1_1_Various Artists - A1. Dez Andres - The World.mp3"
+            //   → "A1. Dez Andres - The World"
+            //   "1_1_Taron-Trekka - Black Magic.mp3"
+            //   → "A1 Black Magic" (we use track number to add side label A1/A2/B1/B2)
+            let trackName = filename.replace(/\.[^.]+$/, '');     // strip extension
+            // Strip "{disc}_{track}_" prefix
+            const prefixMatch = trackName.match(/^(\d+)_(\d+)_(.+)$/);
+            let trackIdx = tracks.length + 1;
+            if (prefixMatch) {
+              trackIdx = parseInt(prefixMatch[2], 10) || trackIdx;
+              trackName = prefixMatch[3];
+            }
+            // Strip "{album_artist} - " prefix to leave just the track info
+            // Pattern variants:
+            //   "Various Artists - A1. Dez Andres - The World"  → keep all after first " - "
+            //   "Taron-Trekka - Black Magic"                    → keep just "Black Magic"
+            // Heuristic: if there's "A1." / "B2." style side designator in the rest,
+            // it's a VA — keep everything from the artist name onwards.
+            // Otherwise it's single-artist — strip the artist prefix.
+            const dashIdx = trackName.indexOf(' - ');
+            if (dashIdx > -1) {
+              const after = trackName.slice(dashIdx + 3);
+              if (/^[A-D]\d?\.?\s/.test(after)) {
+                // VA format: "Various Artists - A1. Dez Andres - The World" → "A1. Dez Andres - The World"
+                trackName = after;
+              } else {
+                // Single-artist: "Taron-Trekka - Black Magic" → "Black Magic"
+                trackName = after;
+              }
+            }
+            // Add side designator if missing (single-artist case)
+            if (!/^[A-D]\d?[\s.:)-]/.test(trackName)) {
+              const sideLetter = trackIdx <= 2 ? 'A' : 'B';
+              const sideNum = ((trackIdx - 1) % 2) + 1;
+              trackName = `${sideLetter}${sideNum} ${trackName}`;
+            }
+            tracks.push({ name: trackName.trim(), url });
           }
         } catch (e) { itemError = e.message; }
         const title  = String(row.Title  || '');
