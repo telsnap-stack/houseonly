@@ -454,8 +454,11 @@ function cleanSourceNotes(text) {
   s = s.replace(/<[^>]+>/g, '');
 
   // 2) Strip well-known footer leakage (W&S salespapers + DBH distributor lines)
+  s = s.replace(/\bSicherheits-\s*und\s*Herstellerinformationen[\s\S]*$/i, '');
+  s = s.replace(/\bWAS\s*-\s*Word\s+and\s+Sound[\s\S]*$/i, '');
   s = s.replace(/\bWord\s+and\s+Sound[\s\S]*$/i, '');
   s = s.replace(/\bwordandsound\.net[\s\S]*$/i, '');
+  s = s.replace(/\b\d+\s+of\s+\d+\s+WAS[\s\S]*$/i, '');
   s = s.replace(/\bWorldwide\s+(?:exclusive\s+)?distributed\s+by[\s\S]*$/i, '');
   s = s.replace(/\bdbh-music\.com[^\s]*/gi, '');
   s = s.replace(/\bsoundcloud\.com\/[^\s]+/gi, '');
@@ -741,8 +744,16 @@ async function extractSalesPaperText(pdfBlob) {
     let desc = '';
     if (descMatch) {
       desc = descMatch[1].trim();
+      // Strip GPSR safety block (German "Sicherheits-" intro to manufacturer info)
+      desc = desc.replace(/\bSicherheits-\s*und\s*Herstellerinformationen[\s\S]*/i, '').trim();
+      // Strip WAS abbreviation (Word and Sound)
+      desc = desc.replace(/\bWAS\s*-\s*Word\s+and\s+Sound[\s\S]*/i, '').trim();
       desc = desc.replace(/\bWord\s+and\s+Sound[\s\S]*/i, '').trim();
       desc = desc.replace(/\bwordandsound\.net[\s\S]*/i, '').trim();
+      // Strip trailing "WAS -" dangling abbreviation
+      desc = desc.replace(/\bWAS\s*-\s*$/i, '').trim();
+      // Strip page footer "1 of 1" pattern
+      desc = desc.replace(/\b\d+\s+of\s+\d+\s+WAS[\s\S]*/i, '').trim();
       desc = desc.replace(/\s{3,}/g, '\n\n').trim();
     }
     return { desc, label, genre };
