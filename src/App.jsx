@@ -1887,11 +1887,6 @@ export default function App() {
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} />
-        <div style={{fontSize:9,color:S.muted,letterSpacing:2,marginBottom:16,textTransform:'uppercase',display:'flex',alignItems:'center',gap:10}}>
-          {filtered.length} record{filtered.length!==1?'s':''}
-          {shopifyLoaded&&<span style={{color:S.accent}}>● Live from Shopify</span>}
-          {shopifyErr&&<span style={{color:S.danger}}>● {shopifyErr}</span>}
-        </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
           {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} />)}
         </div>
