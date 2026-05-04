@@ -2385,10 +2385,10 @@ export default function App() {
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
-          <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:auth?S.accent:S.surf,border:`1px solid ${auth?S.accent:S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?'#080808':S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </button>
-          <button onClick={()=>setWishOpen(true)} title="Wishlist" aria-label="Wishlist" style={{background:wishItems.length>0?S.accent:S.surf,border:`1px solid ${wishItems.length>0?S.accent:S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,gap:5,color:wishItems.length>0?'#080808':S.muted}}>
+          <button onClick={()=>setWishOpen(true)} title="Wishlist" aria-label="Wishlist" style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,gap:5,color:wishItems.length>0?S.accent:S.muted}}>
             <HeartIcon wished={wishItems.length>0} size={13} />
             {wishItems.length>0 && <span style={{fontSize:10,fontWeight:700,letterSpacing:1}}>{wishItems.length}</span>}
           </button>
