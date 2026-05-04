@@ -230,6 +230,65 @@ async function customerProfile(token) {
   } catch { return null; }
 }
 
+async function customerOrders(token) {
+  if (!token) return [];
+  try {
+    const d = await shopifyQuery(`
+      query($t: String!) {
+        customer(customerAccessToken: $t) {
+          orders(first: 25, sortKey: PROCESSED_AT, reverse: true) {
+            edges {
+              node {
+                id
+                orderNumber
+                processedAt
+                financialStatus
+                fulfillmentStatus
+                statusUrl
+                totalPrice { amount currencyCode }
+                lineItems(first: 25) {
+                  edges {
+                    node {
+                      title
+                      quantity
+                      variant {
+                        title
+                        image { url(transform: {maxWidth:120, maxHeight:120}) }
+                        product { handle }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`, { t: token });
+    const edges = d?.customer?.orders?.edges || [];
+    return edges.map(e => {
+      const o = e.node;
+      return {
+        id: o.id,
+        number: o.orderNumber,
+        date: o.processedAt,
+        financialStatus: o.financialStatus,
+        fulfillmentStatus: o.fulfillmentStatus,
+        statusUrl: o.statusUrl,
+        total: o.totalPrice ? `${Number(o.totalPrice.amount).toFixed(2)} ${o.totalPrice.currencyCode}` : '',
+        items: (o.lineItems?.edges || []).map(le => ({
+          title: le.node.title,
+          quantity: le.node.quantity,
+          variantTitle: le.node.variant?.title || '',
+          imageUrl: le.node.variant?.image?.url || '',
+          handle: le.node.variant?.product?.handle || '',
+        })),
+      };
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
 // ── WISHLIST ───────────────────────────────────────────────────
 
 function loadLocalWishlist() {
@@ -560,7 +619,34 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
   const [err, setErr] = useState('');
   const [info, setInfo] = useState('');
 
+  // Orders panel state
+  const [view, setView] = useState('home'); // home | orders
+  const [orders, setOrders] = useState(null); // null = not loaded, [] = empty
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersErr, setOrdersErr] = useState('');
+
   useEffect(() => { setErr(''); setInfo(''); }, [mode]);
+  // Reset to home view when drawer closes or auth changes
+  useEffect(() => { if (!open) setView('home'); }, [open]);
+  useEffect(() => { setOrders(null); setView('home'); }, [auth?.token]);
+
+  const loadOrders = async () => {
+    if (!auth?.token) return;
+    setOrdersLoading(true); setOrdersErr('');
+    try {
+      const list = await customerOrders(auth.token);
+      setOrders(list);
+    } catch (e) {
+      setOrdersErr('Could not load orders.');
+    } finally {
+      setOrdersLoading(false);
+    }
+  };
+
+  const goToOrders = () => {
+    setView('orders');
+    if (orders === null) loadOrders();
+  };
 
   const submit = async (e) => {
     e?.preventDefault?.();
@@ -586,21 +672,31 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
   const inputStyle = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
   const tabStyle = (active) => ({ flex:1, background:'none', border:'none', borderBottom:`2px solid ${active?S.accent:'transparent'}`, color:active?S.text:S.muted, padding:'10px 0', fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' });
 
+  // Header text varies by view
+  const headerLabel = !auth ? 'Sign In' : (view === 'orders' ? 'My Orders' : 'My Account');
+
   return (
     <>
       {open && <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1099, backdropFilter:'blur(2px)' }} />}
       <div style={{ position:'fixed', top:0, right:0, height:'100vh', width:360, maxWidth:'100vw', background:S.surf, borderLeft:`1px solid ${S.border}`, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s', zIndex:1100, display:'flex', flexDirection:'column' }}>
-        <div style={{ padding:'18px 20px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-          <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>{auth ? 'My Account' : 'Sign In'}</span>
+        <div style={{ padding:'18px 20px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            {view === 'orders' && (
+              <button onClick={()=>setView('home')} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', padding:0, fontSize:14, fontFamily:'inherit' }} aria-label="Back">←</button>
+            )}
+            <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>{headerLabel}</span>
+          </div>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:22, padding:0, lineHeight:1 }}>×</button>
         </div>
 
         <div style={{ flex:1, overflow:'auto', padding:'20px' }}>
-          {auth ? (
+          {auth && view === 'orders' ? (
+            <OrdersView orders={orders} loading={ordersLoading} err={ordersErr} onRefresh={loadOrders} />
+          ) : auth ? (
             <div>
               <div style={{ fontSize:14, fontWeight:700, color:S.text, marginBottom:6 }}>{profile?.firstName ? `${profile.firstName} ${profile.lastName||''}`.trim() : 'Welcome'}</div>
               <div style={{ fontSize:11, color:S.muted, marginBottom:24 }}>{profile?.email || ''}</div>
-              <a href="https://account.houseonly.store" target="_blank" rel="noopener" style={{ display:'block', textAlign:'center', padding:'10px 14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, color:S.text, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, textDecoration:'none', marginBottom:10 }}>My Orders →</a>
+              <button onClick={goToOrders} style={{ display:'block', width:'100%', textAlign:'center', padding:'10px 14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, color:S.text, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit', marginBottom:10 }}>My Orders →</button>
               <button onClick={onLogout} style={{ width:'100%', padding:'10px 14px', background:'transparent', border:`1px solid ${S.border}`, borderRadius:2, color:S.muted, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>Sign Out</button>
             </div>
           ) : (
@@ -647,6 +743,91 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
         </div>
       </div>
     </>
+  );
+}
+
+// ── ORDERS VIEW ─────────────────────────────────────────────────
+function OrdersView({ orders, loading, err, onRefresh }) {
+  const fmtDate = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric' });
+    } catch { return iso; }
+  };
+
+  // Status pill color
+  const statusStyle = (status) => {
+    const s = (status || '').toLowerCase();
+    if (s === 'paid' || s === 'fulfilled') return { color: S.accent, label: status };
+    if (s === 'pending' || s === 'partially_paid' || s === 'partially_fulfilled') return { color: '#ff8800', label: status };
+    if (s === 'refunded' || s === 'voided' || s === 'cancelled') return { color: S.danger, label: status };
+    return { color: S.muted, label: status || 'Unfulfilled' };
+  };
+
+  if (loading) {
+    return <div style={{ textAlign:'center', color:S.muted, fontSize:11, padding:'40px 0' }}>Loading orders…</div>;
+  }
+  if (err) {
+    return (
+      <div style={{ textAlign:'center', padding:'24px 0' }}>
+        <div style={{ color:S.danger, fontSize:11, marginBottom:14 }}>{err}</div>
+        <button onClick={onRefresh} style={{ background:'transparent', border:`1px solid ${S.border}`, color:S.muted, fontSize:10, padding:'8px 14px', borderRadius:2, cursor:'pointer', letterSpacing:1.5, textTransform:'uppercase', fontFamily:'inherit' }}>Try again</button>
+      </div>
+    );
+  }
+  if (!orders || orders.length === 0) {
+    return (
+      <div style={{ textAlign:'center', color:S.muted, fontSize:11, padding:'40px 20px', lineHeight:1.6 }}>
+        No orders yet.<br/>When you place an order, it will appear here.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+      {orders.map(o => {
+        const finStat = statusStyle(o.financialStatus);
+        const fulStat = statusStyle(o.fulfillmentStatus);
+        return (
+          <div key={o.id} style={{ background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, padding:'14px' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
+              <div>
+                <div style={{ fontSize:12, fontWeight:700, color:S.text }}>Order #{o.number}</div>
+                <div style={{ fontSize:10, color:S.muted, marginTop:2 }}>{fmtDate(o.date)}</div>
+              </div>
+              <div style={{ fontSize:12, fontWeight:800, color:S.accent }}>{o.total}</div>
+            </div>
+
+            <div style={{ display:'flex', gap:6, marginBottom:10, flexWrap:'wrap' }}>
+              {o.financialStatus && <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:finStat.color, padding:'3px 6px', border:`1px solid ${finStat.color}`, borderRadius:2 }}>{finStat.label}</span>}
+              {o.fulfillmentStatus && <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:fulStat.color, padding:'3px 6px', border:`1px solid ${fulStat.color}`, borderRadius:2 }}>{fulStat.label}</span>}
+            </div>
+
+            <div style={{ display:'flex', flexDirection:'column', gap:6, paddingTop:8, borderTop:`1px solid ${S.border}` }}>
+              {o.items.map((it, idx) => (
+                <div key={idx} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  {it.imageUrl ? (
+                    <img src={it.imageUrl} alt="" style={{ width:30, height:30, objectFit:'cover', borderRadius:2, flexShrink:0 }} />
+                  ) : (
+                    <div style={{ width:30, height:30, background:S.border, borderRadius:2, flexShrink:0 }} />
+                  )}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:11, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.title}</div>
+                    {it.variantTitle && it.variantTitle !== 'Default Title' && <div style={{ fontSize:9, color:S.muted }}>{it.variantTitle}</div>}
+                  </div>
+                  <div style={{ fontSize:10, color:S.muted, flexShrink:0 }}>×{it.quantity}</div>
+                </div>
+              ))}
+            </div>
+
+            {o.statusUrl && (
+              <a href={o.statusUrl} target="_blank" rel="noopener" style={{ display:'block', marginTop:10, textAlign:'center', padding:'8px', fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', textDecoration:'none', border:`1px solid ${S.border}`, borderRadius:2 }}>Track order →</a>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
