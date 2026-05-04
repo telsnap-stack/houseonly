@@ -870,7 +870,15 @@ function ZipImporter() {
               const sideNum = ((trackIdx - 1) % 2) + 1;
               trackName = `${sideLetter}${sideNum} ${trackName}`;
             }
-            tracks.push({ name: trackName.trim(), url });
+            // W&S sometimes appends duration as " 06:55" at the end of the filename.
+            // Strip it into a separate field so the tracklist isn't cluttered.
+            let duration = '';
+            const durMatch = trackName.match(/\s+(\d{1,2}:\d{2})\s*$/);
+            if (durMatch) {
+              duration = durMatch[1];
+              trackName = trackName.slice(0, durMatch.index);
+            }
+            tracks.push({ name: trackName.trim(), d: duration, url });
           }
         } catch (e) { itemError = e.message; }
         const title  = String(row.Title  || '');
