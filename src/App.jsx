@@ -864,16 +864,20 @@ function ZipImporter() {
                 trackName = after;
               }
             }
-            // Add side designator if missing (single-artist case)
+            // Add side designator if missing (single-artist case).
+            // For an N-track record, split evenly: half on A, half on B.
+            // (Most W&S vinyl is 4 tracks → A1 A2 B1 B2; some are 6 → A1 A2 A3 B1 B2 B3.)
             if (!/^[A-D]\d?[\s.:)-]/.test(trackName)) {
-              const sideLetter = trackIdx <= 2 ? 'A' : 'B';
-              const sideNum = ((trackIdx - 1) % 2) + 1;
+              const total = audioFiles.length;
+              const halfPoint = Math.ceil(total / 2);
+              const sideLetter = trackIdx <= halfPoint ? 'A' : 'B';
+              const sideNum = trackIdx <= halfPoint ? trackIdx : trackIdx - halfPoint;
               trackName = `${sideLetter}${sideNum} ${trackName}`;
             }
-            // W&S sometimes appends duration as " 06:55" at the end of the filename.
-            // Strip it into a separate field so the tracklist isn't cluttered.
+            // W&S sometimes appends duration as " 06:55" or " (06:55)" at end of filename.
+            // Strip into a separate field so the tracklist isn't cluttered.
             let duration = '';
-            const durMatch = trackName.match(/\s+(\d{1,2}:\d{2})\s*$/);
+            const durMatch = trackName.match(/\s*\(?(\d{1,2}:\d{2})\)?\s*$/);
             if (durMatch) {
               duration = durMatch[1];
               trackName = trackName.slice(0, durMatch.index);
