@@ -143,6 +143,164 @@ async function fetchCoverArt(title, artist, ean, label='', year='', catno='') {
   } catch { return ''; }
 }
 
+// ── CUSTOMER AUTH ──────────────────────────────────────────────
+//
+// Customer accounts use Shopify Storefront API. Access tokens are stored
+// in localStorage. Anonymous users still get a working wishlist via local
+// storage (the useWishlist hook below).
+
+const AUTH_KEY  = 'houseonly_customer_auth';
+const WISH_KEY  = 'houseonly_wishlist';
+
+function loadAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.token || !parsed?.expiresAt) return null;
+    if (new Date(parsed.expiresAt).getTime() < Date.now()) {
+      localStorage.removeItem(AUTH_KEY);
+      return null;
+    }
+    return parsed;
+  } catch { return null; }
+}
+
+function saveAuth(auth) {
+  if (auth) localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+  else localStorage.removeItem(AUTH_KEY);
+}
+
+async function customerLogin(email, password) {
+  const d = await shopifyQuery(`
+    mutation($input: CustomerAccessTokenCreateInput!) {
+      customerAccessTokenCreate(input: $input) {
+        customerAccessToken { accessToken expiresAt }
+        customerUserErrors { code field message }
+      }
+    }`, { input: { email, password } });
+  const result = d.customerAccessTokenCreate;
+  if (result.customerUserErrors?.length) {
+    throw new Error(result.customerUserErrors[0].message);
+  }
+  if (!result.customerAccessToken) {
+    throw new Error('Login failed.');
+  }
+  return result.customerAccessToken;
+}
+
+async function customerSignup(email, password, firstName='', lastName='') {
+  const created = await shopifyQuery(`
+    mutation($input: CustomerCreateInput!) {
+      customerCreate(input: $input) {
+        customer { id }
+        customerUserErrors { code field message }
+      }
+    }`, { input: { email, password, firstName, lastName, acceptsMarketing: false } });
+  const cu = created.customerCreate;
+  if (cu.customerUserErrors?.length) {
+    throw new Error(cu.customerUserErrors[0].message);
+  }
+  // After signup, log in to get a token
+  return customerLogin(email, password);
+}
+
+async function customerRecover(email) {
+  const d = await shopifyQuery(`
+    mutation($email: String!) {
+      customerRecover(email: $email) {
+        customerUserErrors { code field message }
+      }
+    }`, { email });
+  const errs = d.customerRecover.customerUserErrors;
+  if (errs?.length) throw new Error(errs[0].message);
+  return true;
+}
+
+async function customerProfile(token) {
+  if (!token) return null;
+  try {
+    const d = await shopifyQuery(`
+      query($t: String!) {
+        customer(customerAccessToken: $t) {
+          id email firstName lastName
+        }
+      }`, { t: token });
+    return d.customer || null;
+  } catch { return null; }
+}
+
+// ── WISHLIST ───────────────────────────────────────────────────
+
+function loadLocalWishlist() {
+  try {
+    const raw = localStorage.getItem(WISH_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function saveLocalWishlist(items) {
+  localStorage.setItem(WISH_KEY, JSON.stringify(items));
+}
+
+function recordToWishlistItem(r) {
+  return {
+    handle: r.slug || r.handle || (r.id != null ? String(r.id) : ''),
+    title: r.title || '',
+    artist: r.artist || '',
+    label: r.label || '',
+    price: typeof r.price === 'number' ? r.price.toFixed(2) : String(r.price || ''),
+    coverUrl: r.coverUrl || '',
+    addedAt: Date.now(),
+  };
+}
+
+async function fetchServerWishlist(token) {
+  const r = await fetch(`${WORKER_URL}?action=wishlist&token=${encodeURIComponent(token)}`);
+  if (!r.ok) return null;
+  const d = await r.json();
+  if (d.error) return null;
+  return d.items || [];
+}
+
+async function postServerWishlistItem(token, item) {
+  const r = await fetch(`${WORKER_URL}?action=wishlist`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, item }),
+  });
+  if (!r.ok) return null;
+  const d = await r.json();
+  if (d.error) return null;
+  return d.items || null;
+}
+
+async function deleteServerWishlistItem(token, handle) {
+  const r = await fetch(`${WORKER_URL}?action=wishlist`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, handle }),
+  });
+  if (!r.ok) return null;
+  const d = await r.json();
+  if (d.error) return null;
+  return d.items || null;
+}
+
+async function mergeServerWishlist(token, items) {
+  const r = await fetch(`${WORKER_URL}?action=wishlist-merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, items }),
+  });
+  if (!r.ok) return null;
+  const d = await r.json();
+  if (d.error) return null;
+  return d.items || null;
+}
+
 // ── LOGO ──────────────────────────────────────────────────────
 function Logo({ scale=1, onClick }) {
   return (
@@ -201,8 +359,17 @@ function AudioPlayer({ src }) {
 }
 
 // ── RECORD CARD ────────────────────────────────────────────────
-function RecordCard({ r, onOpen, onAdd }) {
+function HeartIcon({ wished, size=14 }) {
+  return wished ? (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={S.accent} stroke={S.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+  ) : (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+  );
+}
+
+function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const [hov, setHov] = useState(false);
+  const wished = isWished ? isWished(r) : false;
   return (
     <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} style={{ background:S.surf, border:`1px solid ${hov?'#2e2e2e':S.border}`, borderRadius:3, overflow:'hidden', transition:'border 0.15s, transform 0.15s', transform:hov?'translateY(-2px)':'none' }}>
       <div style={{ position:'relative', paddingBottom:'100%', cursor:'pointer' }} onClick={()=>onOpen(r)}>
@@ -215,9 +382,20 @@ function RecordCard({ r, onOpen, onAdd }) {
         <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13, fontWeight:700, color:S.text, lineHeight:1.3, marginBottom:2 }}>{r.title}</div>
         <div style={{ fontSize:11, color:S.muted, marginBottom:10 }}>{r.artist}</div>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
           <span style={{ fontSize:15, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
-          <button onClick={e=>{e.stopPropagation();onAdd(r);}} disabled={r.stock===0} style={{ background:hov&&r.stock>0?S.accent:S.border, color:hov&&r.stock>0?'#080808':S.muted, border:'none', borderRadius:2, cursor:r.stock===0?'not-allowed':'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', opacity:r.stock===0?0.4:1 }}>{r.stock===0?'Sold Out':'+ Cart'}</button>
+          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+            {onWishlistToggle && (
+              <button
+                onClick={e=>{e.stopPropagation();onWishlistToggle(r);}}
+                aria-label={wished?'Remove from wishlist':'Add to wishlist'}
+                title={wished?'Remove from wishlist':'Add to wishlist'}
+                style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' }}>
+                <HeartIcon wished={wished} size={12} />
+              </button>
+            )}
+            <button onClick={e=>{e.stopPropagation();onAdd(r);}} disabled={r.stock===0} style={{ background:hov&&r.stock>0?S.accent:S.border, color:hov&&r.stock>0?'#080808':S.muted, border:'none', borderRadius:2, cursor:r.stock===0?'not-allowed':'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', opacity:r.stock===0?0.4:1 }}>{r.stock===0?'Sold Out':'+ Cart'}</button>
+          </div>
         </div>
         {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
         {r.stock===0&&<div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
@@ -265,9 +443,10 @@ function TrackPlayer({ tracks }) {
   );
 }
 
-function Modal({ r, onClose, onAdd }) {
+function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
   if (!r) return null;
   const tracks = r.tracks || [];
+  const wished = isWished ? isWished(r) : false;
   return (
     <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:20, backdropFilter:'blur(4px)' }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, maxWidth:680, width:'100%', maxHeight:'90vh', overflow:'auto' }}>
@@ -299,8 +478,18 @@ function Modal({ r, onClose, onAdd }) {
                 </div>
               )
             }
-            <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:14 }}>
+            <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:10 }}>
               <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+              {onWishlistToggle && (
+                <button
+                  onClick={()=>onWishlistToggle(r)}
+                  aria-label={wished?'Remove from wishlist':'Add to wishlist'}
+                  title={wished?'Remove from wishlist':'Add to wishlist'}
+                  style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 11px', cursor:'pointer', display:'flex', alignItems:'center', gap:6, fontSize:10, fontFamily:'inherit', letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, transition:'all 0.15s' }}>
+                  <HeartIcon wished={wished} size={13} />
+                  <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
+                </button>
+              )}
               <Btn ch={r.stock===0?'Out of Stock':'Add to Cart'} disabled={r.stock===0} onClick={()=>{onAdd(r);onClose();}} full />
             </div>
           </div>
@@ -360,7 +549,159 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   );
 }
 
-// ── FILTERS ────────────────────────────────────────────────────
+// ── ACCOUNT DRAWER ─────────────────────────────────────────────
+function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogout, onRecover }) {
+  const [mode, setMode] = useState('login'); // login | signup | recover
+  const [email, setEmail] = useState('');
+  const [pw, setPw] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [info, setInfo] = useState('');
+
+  useEffect(() => { setErr(''); setInfo(''); }, [mode]);
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    setErr(''); setInfo(''); setBusy(true);
+    try {
+      if (mode === 'login') {
+        await onLogin(email.trim(), pw);
+        setEmail(''); setPw('');
+      } else if (mode === 'signup') {
+        await onSignup(email.trim(), pw, firstName.trim(), lastName.trim());
+        setEmail(''); setPw(''); setFirstName(''); setLastName('');
+      } else if (mode === 'recover') {
+        await onRecover(email.trim());
+        setInfo('Check your email for a reset link.');
+      }
+    } catch (e) {
+      setErr(e?.message || 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputStyle = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
+  const tabStyle = (active) => ({ flex:1, background:'none', border:'none', borderBottom:`2px solid ${active?S.accent:'transparent'}`, color:active?S.text:S.muted, padding:'10px 0', fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' });
+
+  return (
+    <>
+      {open && <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1099, backdropFilter:'blur(2px)' }} />}
+      <div style={{ position:'fixed', top:0, right:0, height:'100vh', width:360, maxWidth:'100vw', background:S.surf, borderLeft:`1px solid ${S.border}`, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s', zIndex:1100, display:'flex', flexDirection:'column' }}>
+        <div style={{ padding:'18px 20px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>{auth ? 'My Account' : 'Sign In'}</span>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:22, padding:0, lineHeight:1 }}>×</button>
+        </div>
+
+        <div style={{ flex:1, overflow:'auto', padding:'20px' }}>
+          {auth ? (
+            <div>
+              <div style={{ fontSize:14, fontWeight:700, color:S.text, marginBottom:6 }}>{profile?.firstName ? `${profile.firstName} ${profile.lastName||''}`.trim() : 'Welcome'}</div>
+              <div style={{ fontSize:11, color:S.muted, marginBottom:24 }}>{profile?.email || ''}</div>
+              <a href="https://account.houseonly.store" target="_blank" rel="noopener" style={{ display:'block', textAlign:'center', padding:'10px 14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, color:S.text, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, textDecoration:'none', marginBottom:10 }}>My Orders →</a>
+              <button onClick={onLogout} style={{ width:'100%', padding:'10px 14px', background:'transparent', border:`1px solid ${S.border}`, borderRadius:2, color:S.muted, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>Sign Out</button>
+            </div>
+          ) : (
+            <>
+              {mode !== 'recover' && (
+                <div style={{ display:'flex', marginBottom:20 }}>
+                  <button style={tabStyle(mode==='login')} onClick={()=>setMode('login')}>Sign In</button>
+                  <button style={tabStyle(mode==='signup')} onClick={()=>setMode('signup')}>Create Account</button>
+                </div>
+              )}
+
+              <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                {mode === 'signup' && (
+                  <>
+                    <input value={firstName} onChange={e=>setFirstName(e.target.value)} placeholder="First name" style={inputStyle} />
+                    <input value={lastName} onChange={e=>setLastName(e.target.value)} placeholder="Last name" style={inputStyle} />
+                  </>
+                )}
+                <input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" autoComplete="email" style={inputStyle} />
+                {mode !== 'recover' && (
+                  <input type="password" required value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password" autoComplete={mode==='signup'?'new-password':'current-password'} style={inputStyle} />
+                )}
+
+                {err && <div style={{ fontSize:10, color:S.danger, padding:'4px 0' }}>{err}</div>}
+                {info && <div style={{ fontSize:10, color:S.accent, padding:'4px 0' }}>{info}</div>}
+
+                <button type="submit" disabled={busy} style={{ marginTop:6, padding:'12px 14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:busy?'wait':'pointer', fontFamily:'inherit', opacity:busy?0.6:1 }}>
+                  {busy ? '…' : (mode==='login' ? 'Sign In' : mode==='signup' ? 'Create Account' : 'Send Reset Link')}
+                </button>
+
+                {mode === 'login' && (
+                  <button type="button" onClick={()=>setMode('recover')} style={{ background:'none', border:'none', color:S.muted, fontSize:10, cursor:'pointer', textAlign:'center', padding:6, fontFamily:'inherit', textDecoration:'underline' }}>Forgot password?</button>
+                )}
+                {mode === 'recover' && (
+                  <button type="button" onClick={()=>setMode('login')} style={{ background:'none', border:'none', color:S.muted, fontSize:10, cursor:'pointer', textAlign:'center', padding:6, fontFamily:'inherit', textDecoration:'underline' }}>← Back to sign in</button>
+                )}
+              </form>
+
+              <div style={{ marginTop:24, padding:'14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
+                Sign in to save your wishlist across devices and view your order history.
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── WISHLIST DRAWER ────────────────────────────────────────────
+function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenItem, isLoggedIn, onSignInClick }) {
+  return (
+    <>
+      {open && <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1099, backdropFilter:'blur(2px)' }} />}
+      <div style={{ position:'fixed', top:0, right:0, height:'100vh', width:360, maxWidth:'100vw', background:S.surf, borderLeft:`1px solid ${S.border}`, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s', zIndex:1100, display:'flex', flexDirection:'column' }}>
+        <div style={{ padding:'18px 20px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+          <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Wishlist {items.length>0 && `(${items.length})`}</span>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:22, padding:0, lineHeight:1 }}>×</button>
+        </div>
+
+        {!isLoggedIn && items.length > 0 && (
+          <div style={{ padding:'10px 20px', background:S.bg, borderBottom:`1px solid ${S.border}`, fontSize:10, color:S.muted, lineHeight:1.5 }}>
+            <button onClick={onSignInClick} style={{ background:'none', border:'none', color:S.accent, padding:0, cursor:'pointer', fontFamily:'inherit', fontSize:10, textDecoration:'underline' }}>Sign in</button>
+            {' '}to sync this wishlist across your devices.
+          </div>
+        )}
+
+        <div style={{ flex:1, overflow:'auto' }}>
+          {items.length === 0 ? (
+            <div style={{ padding:'48px 20px', textAlign:'center', color:S.muted, fontSize:11, lineHeight:1.6 }}>
+              <div style={{ fontSize:28, marginBottom:10, opacity:0.4 }}>♡</div>
+              Your wishlist is empty.<br/>Tap the heart on any record to save it for later.
+            </div>
+          ) : (
+            <div>
+              {items.map(it => (
+                <div key={it.handle} style={{ display:'flex', gap:12, padding:'14px 20px', borderBottom:`1px solid ${S.border}` }}>
+                  <div onClick={()=>onOpenItem(it)} style={{ width:60, height:60, flexShrink:0, background:S.bg, backgroundImage:it.coverUrl?`url(${it.coverUrl})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.label}</div>
+                    <div onClick={()=>onOpenItem(it)} style={{ fontSize:12, fontWeight:700, color:S.text, marginBottom:2, cursor:'pointer', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.title}</div>
+                    <div style={{ fontSize:10, color:S.muted, marginBottom:6, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.artist}</div>
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+                      <span style={{ fontSize:12, fontWeight:800, color:S.accent }}>€{it.price}</span>
+                      <div style={{ display:'flex', gap:5 }}>
+                        <button onClick={()=>onAddToCart(it)} style={{ background:S.accent, color:'#080808', border:'none', borderRadius:2, padding:'4px 9px', fontSize:9, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:'pointer', fontFamily:'inherit' }}>+ Cart</button>
+                        <button onClick={()=>onRemove(it.handle)} aria-label="Remove" title="Remove" style={{ background:'transparent', border:`1px solid ${S.border}`, color:S.muted, borderRadius:2, padding:'4px 8px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>×</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+
 function Filters({ filters, onChange, records }) {
   const labels = [...new Set(records.map(r=>r.label))].sort();
   const genres = [...new Set(records.map(r=>r.genre))].sort();
@@ -1854,6 +2195,107 @@ export default function App() {
   const [page,setPage]                   = useState('shop');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
 
+  // ── AUTH + WISHLIST STATE ────────────────────────────────────
+  const [auth, setAuth]                   = useState(()=>loadAuth());
+  const [profile, setProfile]             = useState(null);
+  const [accountOpen, setAccountOpen]     = useState(false);
+  const [wishItems, setWishItems]         = useState(()=>loadLocalWishlist());
+  const [wishOpen, setWishOpen]           = useState(false);
+
+  // Persist anonymous wishlist to localStorage on every change
+  useEffect(()=>{ saveLocalWishlist(wishItems); }, [wishItems]);
+
+  // When auth changes: load profile, sync wishlist
+  useEffect(()=>{
+    let cancelled = false;
+    if (!auth?.token) { setProfile(null); return; }
+
+    (async () => {
+      const p = await customerProfile(auth.token);
+      if (cancelled) return;
+      if (!p) {
+        // Token rejected → log out
+        saveAuth(null); setAuth(null); setProfile(null);
+        return;
+      }
+      setProfile(p);
+      // Merge local list into server, then pull authoritative list
+      const localItems = loadLocalWishlist();
+      let serverItems = null;
+      if (localItems.length > 0) {
+        serverItems = await mergeServerWishlist(auth.token, localItems);
+      } else {
+        serverItems = await fetchServerWishlist(auth.token);
+      }
+      if (cancelled) return;
+      if (Array.isArray(serverItems)) {
+        setWishItems(serverItems);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [auth?.token]);
+
+  // Auth actions
+  const handleLogin = async (email, password) => {
+    const tk = await customerLogin(email, password);
+    const a = { token: tk.accessToken, expiresAt: tk.expiresAt };
+    saveAuth(a); setAuth(a);
+  };
+  const handleSignup = async (email, password, firstName, lastName) => {
+    const tk = await customerSignup(email, password, firstName, lastName);
+    const a = { token: tk.accessToken, expiresAt: tk.expiresAt };
+    saveAuth(a); setAuth(a);
+  };
+  const handleLogout = () => { saveAuth(null); setAuth(null); setProfile(null); };
+  const handleRecover = async (email) => { await customerRecover(email); };
+
+  // Wishlist actions
+  const isWished = (r) => {
+    const handle = r?.slug || r?.handle || (r?.id != null ? String(r.id) : '');
+    return wishItems.some(it => it.handle === handle);
+  };
+  const wishlistToggle = async (r) => {
+    const item = recordToWishlistItem(r);
+    if (!item.handle) return;
+    const wished = wishItems.some(it => it.handle === item.handle);
+    if (wished) {
+      // Remove
+      setWishItems(items => items.filter(it => it.handle !== item.handle));
+      if (auth?.token) {
+        deleteServerWishlistItem(auth.token, item.handle).catch(()=>{});
+      }
+    } else {
+      // Add (optimistic)
+      setWishItems(items => [item, ...items.filter(it=>it.handle!==item.handle)]);
+      if (auth?.token) {
+        postServerWishlistItem(auth.token, item).catch(()=>{});
+      }
+    }
+  };
+  const wishlistRemove = (handle) => {
+    setWishItems(items => items.filter(it => it.handle !== handle));
+    if (auth?.token) {
+      deleteServerWishlistItem(auth.token, handle).catch(()=>{});
+    }
+  };
+  // When a wishlist item is clicked, find the corresponding record (if loaded) and open it
+  const openWishlistItem = (item) => {
+    const r = records.find(rec => (rec.slug||'') === item.handle);
+    if (r) {
+      setWishOpen(false);
+      openProduct(r);
+    } else {
+      // Not loaded — navigate to product page so the prerendered HTML loads
+      setWishOpen(false);
+      window.location.href = `/products/${item.handle}/`;
+    }
+  };
+  // Add a wishlist item to the cart. Match against loaded records to get full data.
+  const addWishlistItemToCart = (item) => {
+    const r = records.find(rec => (rec.slug||'') === item.handle);
+    if (r) addToCart(r);
+  };
+
   // Keep `path` in sync with browser back/forward
   useEffect(()=>{
     const onPop = () => setPath(window.location.pathname);
@@ -1886,6 +2328,7 @@ export default function App() {
     if (path.startsWith('/products/')) navigate('/');
   };
 
+  // Admin password gate (same as before — Ctrl+Shift+A toggles, #admin opens)
   useEffect(()=>{
     if (window.location.hash==='#admin') setPage('login');
     const handler = (e) => { if (e.shiftKey && e.ctrlKey && e.key==='A') setPage(p=>p==='shop'?'login':'shop'); };
@@ -1893,6 +2336,7 @@ export default function App() {
     return ()=>window.removeEventListener('keydown', handler);
   },[]);
 
+  // Initial Shopify products fetch
   useEffect(()=>{
     fetchShopifyProducts()
       .then(({ products, hasNextPage, endCursor })=>{
@@ -1941,9 +2385,13 @@ export default function App() {
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
-          <a href="https://account.houseonly.store" title="My Account" style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,textDecoration:'none'}}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          </a>
+          <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:auth?S.accent:S.surf,border:`1px solid ${auth?S.accent:S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?'#080808':S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </button>
+          <button onClick={()=>setWishOpen(true)} title="Wishlist" aria-label="Wishlist" style={{background:wishItems.length>0?S.accent:S.surf,border:`1px solid ${wishItems.length>0?S.accent:S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,gap:5,color:wishItems.length>0?'#080808':S.muted}}>
+            <HeartIcon wished={wishItems.length>0} size={13} />
+            {wishItems.length>0 && <span style={{fontSize:10,fontWeight:700,letterSpacing:1}}>{wishItems.length}</span>}
+          </button>
           <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
@@ -1958,7 +2406,7 @@ export default function App() {
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} />
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} />)}
+          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
         </div>
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
@@ -1981,8 +2429,10 @@ export default function App() {
 
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
-      <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} />
+      <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={()=>shopifyCheckout(cart)} />
+      <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
+      <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
     </div>
   );
 }
