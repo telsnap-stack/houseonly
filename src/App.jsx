@@ -1104,7 +1104,7 @@ function BackorderRequestForm({ release }) {
   const labelStyle = { fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:4, display:'block', fontWeight:700 };
 
   return (
-    <div style={{ marginTop:18, paddingTop:18, borderTop:`1px solid ${S.border}` }}>
+    <div style={{ marginTop:14 }}>
       <div style={{ fontSize:11, color:S.accent, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, marginBottom:6 }}>Request this release</div>
       <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:'0 0 14px' }}>
         Out of stock, but recent — we may still be able to source this from our distributor. Submit a request and we'll confirm within 24-48 hours. <strong style={{color:S.text}}>You won't be charged now</strong>; if available, we'll send you a payment link.
@@ -1244,40 +1244,78 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
               {[r.genre,r.year].filter(Boolean).map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
             </div>
-            {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
-            {tracks.length > 0
-              ? <TrackPlayer tracks={tracks} release={r} />
-              : (r.tracks||[]).length > 0 && (
-                <div style={{ marginBottom:14 }}>
-                  {(r.tracks||[]).map((t,i)=>(
-                    <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
-                      <span>{String.fromCharCode(65+i)}. {t.t}</span>
-                      <span style={{ fontFamily:'monospace' }}>{t.d}</span>
-                    </div>
-                  ))}
+            {/*
+              Layout differs for backorder-eligible products. Their action (request form)
+              has to be visible without scrolling past the description, so we render:
+                price/heart row → form → description → tracks
+              For in-stock and truly-OOS products, we keep the original order:
+                description → tracks → price/heart/cart row.
+            */}
+            {r.stock === 0 && isBackorderEligible(r) ? (
+              <>
+                <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
+                  <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+                  {onWishlistToggle && (
+                    <button
+                      onClick={()=>onWishlistToggle(r)}
+                      aria-label={wished?'Remove from wishlist':'Add to wishlist'}
+                      title={wished?'Remove from wishlist':'Add to wishlist'}
+                      style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 11px', cursor:'pointer', display:'flex', alignItems:'center', gap:6, fontSize:10, fontFamily:'inherit', letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, transition:'all 0.15s' }}>
+                      <HeartIcon wished={wished} size={13} />
+                    </button>
+                  )}
                 </div>
-              )
-            }
-            <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:10 }}>
-              <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
-              {onWishlistToggle && (
-                <button
-                  onClick={()=>onWishlistToggle(r)}
-                  aria-label={wished?'Remove from wishlist':'Add to wishlist'}
-                  title={wished?'Remove from wishlist':'Add to wishlist'}
-                  style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 11px', cursor:'pointer', display:'flex', alignItems:'center', gap:6, fontSize:10, fontFamily:'inherit', letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, transition:'all 0.15s' }}>
-                  <HeartIcon wished={wished} size={13} />
-                  <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
-                </button>
-              )}
-              {r.stock > 0
-                ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
-                : isBackorderEligible(r)
-                  ? <span style={{ fontSize:10, color:S.accent, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700 }}>Backorder · See below</span>
-                  : <Btn ch="Out of Stock" disabled full />
-              }
-            </div>
-            {r.stock === 0 && isBackorderEligible(r) && <BackorderRequestForm release={r} />}
+                <BackorderRequestForm release={r} />
+                {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, margin:'20px 0 16px' }}>{r.desc}</p>}
+                {tracks.length > 0
+                  ? <TrackPlayer tracks={tracks} release={r} />
+                  : (r.tracks||[]).length > 0 && (
+                    <div style={{ marginBottom:14 }}>
+                      {(r.tracks||[]).map((t,i)=>(
+                        <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
+                          <span>{String.fromCharCode(65+i)}. {t.t}</span>
+                          <span style={{ fontFamily:'monospace' }}>{t.d}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }
+              </>
+            ) : (
+              <>
+                {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
+                {tracks.length > 0
+                  ? <TrackPlayer tracks={tracks} release={r} />
+                  : (r.tracks||[]).length > 0 && (
+                    <div style={{ marginBottom:14 }}>
+                      {(r.tracks||[]).map((t,i)=>(
+                        <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'5px 0', borderBottom:`1px solid ${S.border}`, fontSize:11, color:S.muted }}>
+                          <span>{String.fromCharCode(65+i)}. {t.t}</span>
+                          <span style={{ fontFamily:'monospace' }}>{t.d}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }
+                <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:10 }}>
+                  <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+                  {onWishlistToggle && (
+                    <button
+                      onClick={()=>onWishlistToggle(r)}
+                      aria-label={wished?'Remove from wishlist':'Add to wishlist'}
+                      title={wished?'Remove from wishlist':'Add to wishlist'}
+                      style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 11px', cursor:'pointer', display:'flex', alignItems:'center', gap:6, fontSize:10, fontFamily:'inherit', letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, transition:'all 0.15s' }}>
+                      <HeartIcon wished={wished} size={13} />
+                      <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
+                    </button>
+                  )}
+                  {r.stock > 0
+                    ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
+                    : <Btn ch="Out of Stock" disabled full />
+                  }
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
