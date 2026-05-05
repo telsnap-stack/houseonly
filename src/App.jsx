@@ -766,29 +766,22 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
           ) : (
             <>
               {mode !== 'recover' && (
-                <div style={{ display:'flex', marginBottom:20 }}>
-                  <button style={tabStyle(mode==='login')} onClick={()=>setMode('login')}>Sign In</button>
-                  <button style={tabStyle(mode==='signup')} onClick={()=>setMode('signup')}>Create Account</button>
+                <div style={{ marginBottom:20, paddingBottom:14, borderBottom:`1px solid ${S.border}` }}>
+                  <div style={{ fontSize:10, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Sign In</div>
                 </div>
               )}
 
               <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:10 }}>
-                {mode === 'signup' && (
-                  <>
-                    <input value={firstName} onChange={e=>setFirstName(e.target.value)} placeholder="First name" style={inputStyle} />
-                    <input value={lastName} onChange={e=>setLastName(e.target.value)} placeholder="Last name" style={inputStyle} />
-                  </>
-                )}
                 <input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" autoComplete="email" style={inputStyle} />
                 {mode !== 'recover' && (
-                  <input type="password" required value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password" autoComplete={mode==='signup'?'new-password':'current-password'} style={inputStyle} />
+                  <input type="password" required value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password" autoComplete="current-password" style={inputStyle} />
                 )}
 
                 {err && <div style={{ fontSize:10, color:S.danger, padding:'4px 0' }}>{err}</div>}
                 {info && <div style={{ fontSize:10, color:S.accent, padding:'4px 0' }}>{info}</div>}
 
                 <button type="submit" disabled={busy} style={{ marginTop:6, padding:'12px 14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:busy?'wait':'pointer', fontFamily:'inherit', opacity:busy?0.6:1 }}>
-                  {busy ? '…' : (mode==='login' ? 'Sign In' : mode==='signup' ? 'Create Account' : 'Send Reset Link')}
+                  {busy ? '…' : (mode==='login' ? 'Sign In' : 'Send Reset Link')}
                 </button>
 
                 {mode === 'login' && (
@@ -800,7 +793,7 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
               </form>
 
               <div style={{ marginTop:24, padding:'14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
-                Sign in to save your wishlist across devices and view your order history.
+                New here? Your account is created automatically when you place your first order. No separate sign-up needed.
               </div>
             </>
           )}
