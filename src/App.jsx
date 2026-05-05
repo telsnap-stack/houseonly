@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -42,16 +42,26 @@ function makeSlug(artist, title, catalog) {
   return slugify(catalog) || 'release';
 }
 
+// Extract genre/year/label from a product's Shopify tags. Used by both the
+// full product parser (for cards) and the lite metadata parser (for filter
+// pills). Keeping the logic in one place ensures filters and cards always
+// agree on what genre/year/label a product belongs to.
+function extractTagMeta(tags) {
+  tags = tags || [];
+  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
+    || '';
+  const year = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
+  const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
+  return { genre, year, label };
+}
+
 function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
   const tags = node.tags || [];
-  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
-    || '';
-  const year  = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
-  const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
+  const { genre, year, label } = extractTagMeta(tags);
   const bodyHtml = node.descriptionHtml || '';
   const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
   const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
@@ -89,6 +99,35 @@ async function fetchShopifyProducts(cursor=null) {
   }`);
   const { edges, pageInfo } = data.products;
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
+}
+
+// Fetch only the lightweight metadata (tags + vendor) for ALL products in the
+// catalog. Used to populate filter pills (genres, years, labels) so customers
+// can see the full range of options on first page load — not just the first
+// 24 products that the paginated card-grid happens to have loaded.
+//
+// This is intentionally a separate query from fetchShopifyProducts: it skips
+// images, variants, descriptionHtml etc. so the response is small and fast
+// even with thousands of products. Paginates with the Storefront API maximum
+// of 250 per page.
+async function fetchAllProductMetadata() {
+  const all = [];
+  let cursor = null;
+  let safety = 25; // up to 25 pages × 250 = 6250 products. Hard-stop if catalog ever balloons past that.
+  while (safety-- > 0) {
+    const after = cursor ? `, after: "${cursor}"` : '';
+    const data = await shopifyQuery(`{
+      products(first: 250${after}) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { tags vendor } }
+      }
+    }`);
+    const { edges, pageInfo } = data.products;
+    for (const e of edges) all.push(e.node);
+    if (!pageInfo.hasNextPage) break;
+    cursor = pageInfo.endCursor;
+  }
+  return all;
 }
 
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
@@ -1048,10 +1087,14 @@ function ResetPasswordPage({ mode, resetUrl, onSuccess, onCancel }) {
 }
 
 
-function Filters({ filters, onChange, records }) {
-  const labels = [...new Set(records.map(r=>r.label))].sort();
-  const genres = [...new Set(records.map(r=>r.genre))].sort();
-  const years  = [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
+function Filters({ filters, onChange, records, allLabels, allGenres, allYears }) {
+  // Prefer the catalog-wide arrays (computed from a separate lightweight Shopify
+  // query that fetches every product's tags, regardless of pagination). Fall
+  // back to deriving from `records` while that fetch is still in flight, so
+  // filters at least show something on first paint.
+  const labels = allLabels?.length ? allLabels : [...new Set(records.map(r=>r.label))].filter(Boolean).sort();
+  const genres = allGenres?.length ? allGenres : [...new Set(records.map(r=>r.genre))].filter(Boolean).sort();
+  const years  = allYears?.length  ? allYears  : [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
   const pill = (key,val,label) => {
     const active = filters[key]===val;
     return <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>;
@@ -2527,6 +2570,7 @@ function Nav({ onLogo, children }) {
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
   const [records,setRecords]             = useState([]);
+  const [catalogMeta,setCatalogMeta]     = useState([]); // lite metadata (tags, vendor) for ALL products — drives filter pills
   const [shopifyLoaded,setShopifyLoaded] = useState(false);
   const [shopifyErr,setShopifyErr]       = useState('');
   const [hasMore,setHasMore]             = useState(false);
@@ -2700,6 +2744,16 @@ export default function App() {
       .catch(e=>setShopifyErr(e.message));
   },[]);
 
+  // Catalog-wide metadata fetch (tags + vendor only, all products). Powers the
+  // filter pills so customers can see every genre, year, and label that exists
+  // in the catalog from the moment the page loads — not just the genres/years
+  // present in the first paginated batch of cards.
+  useEffect(()=>{
+    fetchAllProductMetadata()
+      .then(setCatalogMeta)
+      .catch(()=>{ /* non-fatal — Filters falls back to deriving from records */ });
+  },[]);
+
   const loadMore=async()=>{
     if(!hasMore||loadingMore) return; setLoadingMore(true);
     try { const {products,hasNextPage,endCursor}=await fetchShopifyProducts(cursor); setRecords(r=>[...r,...products]); setHasMore(hasNextPage); setCursor(endCursor); } catch(e){setShopifyErr(e.message);}
@@ -2720,6 +2774,40 @@ export default function App() {
     return true;
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
+
+  // When a filter narrows visible results below a threshold but more products
+  // exist in the catalog, auto-load the next page in the background. This
+  // prevents the "No records found" / nearly-empty state when a customer
+  // filters on, say, 2018 but no 2018 products are in the first 24 loaded.
+  // Stops when threshold is hit or catalog is exhausted.
+  useEffect(()=>{
+    const hasActiveFilter = filters.genre || filters.label || filters.year || search;
+    if (!hasActiveFilter) return;
+    if (loadingMore || !hasMore) return;
+    const visibleMatches = filtered.length;
+    if (visibleMatches < 6) {
+      loadMore();
+    }
+  }, [filters, search, records.length, hasMore, loadingMore]);
+
+  // Derive filter pill values from the catalog-wide metadata (every product's
+  // tags). useMemo so we don't recompute on every render. If catalogMeta hasn't
+  // arrived yet, these are empty arrays — Filters falls back to deriving from
+  // the loaded `records` so something always shows.
+  const { allLabels, allGenres, allYears } = useMemo(()=>{
+    const labelSet = new Set(), genreSet = new Set(), yearSet = new Set();
+    for (const node of catalogMeta) {
+      const { genre, year, label } = extractTagMeta(node.tags);
+      if (label) labelSet.add(label);
+      if (genre) genreSet.add(genre);
+      if (year)  yearSet.add(year);
+    }
+    return {
+      allLabels: [...labelSet].sort(),
+      allGenres: [...genreSet].sort(),
+      allYears:  [...yearSet].sort((a,b)=>b-a),
+    };
+  }, [catalogMeta]);
 
   // Password reset / account activation deep-link from Shopify's emails.
   // URL shapes:
@@ -2785,7 +2873,7 @@ export default function App() {
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
-        <Filters filters={filters} onChange={setFilter} records={records} />
+        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
           {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
         </div>
