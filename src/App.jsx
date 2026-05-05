@@ -259,6 +259,28 @@ async function customerResetByUrl(resetUrl, password) {
   return result.customerAccessToken;
 }
 
+// Activate a new account from the URL Shopify emails to the customer.
+// activationUrl is the full URL the user landed on, e.g.
+//   https://houseonly.store/account/activate/<id>/<token>?syclid=...
+// On success returns { accessToken, expiresAt } — same shape as customerLogin.
+async function customerActivateByUrl(activationUrl, password) {
+  const d = await shopifyQuery(`
+    mutation($url: URL!, $password: String!) {
+      customerActivateByUrl(activationUrl: $url, password: $password) {
+        customerAccessToken { accessToken expiresAt }
+        customerUserErrors { code field message }
+      }
+    }`, { url: activationUrl, password });
+  const result = d.customerActivateByUrl;
+  if (result.customerUserErrors?.length) {
+    throw new Error(result.customerUserErrors[0].message);
+  }
+  if (!result.customerAccessToken) {
+    throw new Error('Account activation failed.');
+  }
+  return result.customerAccessToken;
+}
+
 async function customerProfile(token) {
   if (!token) return null;
   try {
@@ -927,15 +949,32 @@ function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenIte
 }
 
 
-// ── RESET PASSWORD PAGE ─────────────────────────────────────────
-// Standalone page rendered when the user lands on /account/reset/<id>/<token>.
-// Shopify's password-recovery email sends users here. We let them pick a new
-// password, call the Storefront API to apply it, and auto-log-in on success.
-function ResetPasswordPage({ resetUrl, onSuccess, onCancel }) {
+// ── RESET / ACTIVATE PASSWORD PAGE ──────────────────────────────
+// Standalone page rendered when the user lands on:
+//   /account/reset/<id>/<token>     (forgot-password flow)
+//   /account/activate/<id>/<token>  (new-account activation from invitation email)
+// Both flows have the same UI shape — pick a password, auto-login on success —
+// and differ only in copy and which mutation we call.
+function ResetPasswordPage({ mode, resetUrl, onSuccess, onCancel }) {
   const [pw, setPw] = useState('');
   const [pw2, setPw2] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+
+  const isActivate = mode === 'activate';
+  const copy = isActivate ? {
+    label: 'Activate Account',
+    heading: 'Set up your account',
+    intro: "Choose a password to activate your account. You'll be signed in automatically once it's saved.",
+    submit: 'Activate & Sign In',
+    expiredErr: 'This activation link has expired or already been used. Please contact support for a new one.',
+  } : {
+    label: 'Reset Password',
+    heading: 'Choose a new password',
+    intro: "Enter a new password below. You'll be signed in automatically once it's saved.",
+    submit: 'Save Password & Sign In',
+    expiredErr: 'This reset link has expired or already been used. Please request a new one.',
+  };
 
   const submit = async (e) => {
     e?.preventDefault?.();
@@ -944,14 +983,14 @@ function ResetPasswordPage({ resetUrl, onSuccess, onCancel }) {
     if (pw !== pw2) { setErr('Passwords do not match.'); return; }
     setBusy(true);
     try {
-      const tk = await customerResetByUrl(resetUrl, pw);
+      const tk = isActivate
+        ? await customerActivateByUrl(resetUrl, pw)
+        : await customerResetByUrl(resetUrl, pw);
       onSuccess(tk);
     } catch (e) {
-      // Shopify error messages can be cryptic ("Invalid reset URL" when expired);
-      // surface them but soften the obvious ones.
-      const msg = e?.message || 'Could not reset password.';
+      const msg = e?.message || 'Something went wrong.';
       if (/expired|invalid/i.test(msg)) {
-        setErr('This reset link has expired or already been used. Please request a new one.');
+        setErr(copy.expiredErr);
       } else {
         setErr(msg);
       }
@@ -968,9 +1007,9 @@ function ResetPasswordPage({ resetUrl, onSuccess, onCancel }) {
         <button onClick={onCancel} style={{background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2, whiteSpace:'nowrap', fontFamily:'inherit'}}>← Shop</button>
       </Nav>
       <div style={{maxWidth:420, margin:'60px auto', padding:'0 20px'}}>
-        <div style={{fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8}}>Reset Password</div>
-        <h1 style={{fontSize:28, fontWeight:800, color:S.text, margin:'0 0 12px', letterSpacing:-0.5}}>Choose a new password</h1>
-        <p style={{fontSize:13, color:S.muted, lineHeight:1.6, margin:'0 0 28px'}}>Enter a new password below. You'll be signed in automatically once it's saved.</p>
+        <div style={{fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8}}>{copy.label}</div>
+        <h1 style={{fontSize:28, fontWeight:800, color:S.text, margin:'0 0 12px', letterSpacing:-0.5}}>{copy.heading}</h1>
+        <p style={{fontSize:13, color:S.muted, lineHeight:1.6, margin:'0 0 28px'}}>{copy.intro}</p>
 
         <form onSubmit={submit} style={{display:'flex', flexDirection:'column', gap:12}}>
           <input
@@ -999,7 +1038,7 @@ function ResetPasswordPage({ resetUrl, onSuccess, onCancel }) {
             disabled={busy}
             style={{marginTop:6, padding:'14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:busy?'wait':'pointer', fontFamily:'inherit', opacity:busy?0.6:1}}
           >
-            {busy ? '…' : 'Save Password & Sign In'}
+            {busy ? '…' : copy.submit}
           </button>
 
           <button
@@ -2689,14 +2728,18 @@ export default function App() {
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
-  // Password reset deep-link from Shopify's recovery email.
-  // URL shape: /account/reset/<customer-id>/<token>?syclid=...
-  // We pass the full URL (origin + path + query) to the customerResetByUrl mutation;
+  // Password reset / account activation deep-link from Shopify's emails.
+  // URL shapes:
+  //   /account/reset/<customer-id>/<token>?syclid=...     (forgot password)
+  //   /account/activate/<customer-id>/<token>?syclid=...  (new account invitation)
+  // We pass the full URL (origin + path + query) to the relevant mutation;
   // Shopify validates it server-side, so we don't parse the token ourselves.
-  const isResetPage = /^\/account\/reset\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
+  const isResetPage    = /^\/account\/reset\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
+  const isActivatePage = /^\/account\/activate\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
 
-  if(isResetPage) return (
+  if(isResetPage || isActivatePage) return (
     <ResetPasswordPage
+      mode={isActivatePage ? 'activate' : 'reset'}
       resetUrl={typeof window!=='undefined' ? window.location.href : ''}
       onSuccess={(tk)=>{
         setAuth(tk);
