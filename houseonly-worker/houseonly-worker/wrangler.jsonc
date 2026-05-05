@@ -1,31 +1,46 @@
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "houseonly-worker",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-04-11",
-	"compatibility_flags": [
-		"nodejs_compat",
-		"global_fetch_strictly_public"
-	],
-	"observability": {
-		"enabled": true
-	},
-	"upload_source_maps": true,
-	"r2_buckets": [
-		{
-			"binding": "R2",
-			"bucket_name": "houseonly-audio"
-		}
-	],
-	"env": {
-		"staging": {
-			"name": "houseonly-worker-staging",
-			"r2_buckets": [
-				{
-					"binding": "R2",
-					"bucket_name": "houseonly-audio"
-				}
-			]
-		}
-	}
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "houseonly-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-11",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "houseonly-audio"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "WISHLIST",
+      "id": "cc7a1301f8b146768e4c2604c6b3d563"
+    }
+  ],
+  "env": {
+    "staging": {
+      "name": "houseonly-worker-staging",
+      "observability": {
+        "enabled": true
+      },
+      "r2_buckets": [
+        {
+          "binding": "R2",
+          "bucket_name": "houseonly-audio"
+        }
+      ],
+      "kv_namespaces": [
+        {
+          "binding": "WISHLIST",
+          "id": "cc7a1301f8b146768e4c2604c6b3d563"
+        }
+      ]
+    }
+  }
 }
