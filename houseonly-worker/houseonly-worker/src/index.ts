@@ -1,6 +1,8 @@
 interface Env {
   R2: R2Bucket;
   WISHLIST: KVNamespace;
+  SHOPIFY_ADMIN_CLIENT_ID: string;
+  SHOPIFY_ADMIN_CLIENT_SECRET: string;
 }
 
 const R2_PUBLIC         = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -114,6 +116,239 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
   );
 }
 
+// ── SHOPIFY ADMIN API (token management + GraphQL helper) ──────────
+//
+// Uses OAuth 2 client credentials grant. The client_id and client_secret
+// are wrangler secrets (see SHOPIFY_ADMIN_CLIENT_ID / SHOPIFY_ADMIN_CLIENT_SECRET).
+//
+// Token flow:
+//   1. POST to /admin/oauth/access_token with grant_type=client_credentials
+//   2. Response includes access_token (and possibly expires_in for some tokens;
+//      Shopify's docs are inconsistent — we treat the token as valid for 24h
+//      from issue and refresh ~1 hour before expiry)
+//   3. Cache in KV under key `shopify_admin_token` as JSON {token, expiresAt}
+//
+// On any 401 from a subsequent Admin API call, we evict the cached token and
+// retry once with a fresh token (in case the cache has gone stale early).
+//
+// We reuse the existing WISHLIST KV namespace for this — adding a separate
+// namespace just for one key isn't worth the wrangler config churn.
+
+const TOKEN_KV_KEY = 'shopify_admin_token';
+const TOKEN_TTL_MS = 23 * 60 * 60 * 1000;  // refresh after 23h to stay clear of any 24h expiry
+const TOKEN_REFRESH_THRESHOLD_MS = 60 * 60 * 1000;  // refresh if <1h until expiry
+
+interface CachedToken {
+  token: string;
+  expiresAt: number;  // epoch ms
+}
+
+async function fetchFreshAdminToken(env: Env): Promise<string> {
+  if (!env.SHOPIFY_ADMIN_CLIENT_ID || !env.SHOPIFY_ADMIN_CLIENT_SECRET) {
+    throw new Error('Shopify admin credentials not configured');
+  }
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: env.SHOPIFY_ADMIN_CLIENT_ID,
+    client_secret: env.SHOPIFY_ADMIN_CLIENT_SECRET,
+  });
+  const r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Shopify token endpoint returned ${r.status}: ${text}`);
+  }
+  const data: any = await r.json();
+  const token = data?.access_token;
+  if (!token) {
+    throw new Error(`Shopify token response missing access_token: ${JSON.stringify(data)}`);
+  }
+  // Cache it with our own expiry (Shopify doesn't always return expires_in)
+  const cached: CachedToken = { token, expiresAt: Date.now() + TOKEN_TTL_MS };
+  await env.WISHLIST.put(TOKEN_KV_KEY, JSON.stringify(cached));
+  return token;
+}
+
+async function getShopifyAdminToken(env: Env, force = false): Promise<string> {
+  if (!force) {
+    const raw = await env.WISHLIST.get(TOKEN_KV_KEY);
+    if (raw) {
+      try {
+        const cached: CachedToken = JSON.parse(raw);
+        const msUntilExpiry = cached.expiresAt - Date.now();
+        if (msUntilExpiry > TOKEN_REFRESH_THRESHOLD_MS && cached.token) {
+          return cached.token;
+        }
+      } catch {}
+    }
+  }
+  return await fetchFreshAdminToken(env);
+}
+
+async function shopifyAdminGraphQL(env: Env, query: string, variables?: any): Promise<any> {
+  // First attempt with cached token
+  let token = await getShopifyAdminToken(env);
+  let r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2026-04/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': token,
+    },
+    body: JSON.stringify({ query, variables: variables || {} }),
+  });
+  // On 401, refresh token and retry once
+  if (r.status === 401) {
+    token = await getShopifyAdminToken(env, true);
+    r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2026-04/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token,
+      },
+      body: JSON.stringify({ query, variables: variables || {} }),
+    });
+  }
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Shopify Admin API ${r.status}: ${text}`);
+  }
+  const data = await r.json();
+  return data;
+}
+
+// ── BACKORDER REQUEST HANDLER ─────────────────────────────────────
+//
+// Customer-facing: when a release is out of stock but recent (year >= currentYear-1),
+// the storefront shows a "Request" form instead of "+ Cart". On submit, the
+// frontend POSTs here with the variant ID + customer details. We create a
+// Shopify draft order with status "open", which Eduardo can then review in
+// Shopify admin and either send-invoice or cancel.
+//
+// Validation:
+//   - email format (basic)
+//   - required fields: variantId, email, name, address1, city, country, zip
+//   - variantId must be a Shopify GID format (gid://shopify/ProductVariant/...)
+//
+// We tag the draft with `backorder-request` so Eduardo can filter for them
+// in admin, and put the customer's note (if any) in the draft order's note
+// field.
+
+interface BackorderRequest {
+  variantId?: string;
+  productHandle?: string;
+  productTitle?: string;
+  productArtist?: string;
+  productPrice?: number;
+  email?: string;
+  name?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  province?: string;
+  country?: string;
+  zip?: string;
+  phone?: string;
+  note?: string;
+}
+
+function isValidEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+function splitName(full: string): { firstName: string; lastName: string } {
+  const trimmed = (full || '').trim();
+  if (!trimmed) return { firstName: '', lastName: '' };
+  const parts = trimmed.split(/\s+/);
+  if (parts.length === 1) return { firstName: parts[0], lastName: '' };
+  return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
+
+async function handleBackorderRequest(req: BackorderRequest, env: Env): Promise<Response> {
+  // Validate
+  if (!req.variantId || !req.variantId.startsWith('gid://shopify/ProductVariant/')) {
+    return jsonRes({ error: 'invalid variant id' }, 400);
+  }
+  if (!req.email || !isValidEmail(req.email)) {
+    return jsonRes({ error: 'invalid email' }, 400);
+  }
+  if (!req.name || !req.address1 || !req.city || !req.country || !req.zip) {
+    return jsonRes({ error: 'missing required fields' }, 400);
+  }
+
+  const { firstName, lastName } = splitName(req.name);
+
+  // Build the note to attach to the draft order — visible in Shopify admin
+  const noteParts: string[] = ['BACKORDER REQUEST'];
+  if (req.productHandle) noteParts.push(`Product: ${req.productHandle}`);
+  if (req.productTitle)  noteParts.push(`Title: ${req.productTitle}`);
+  if (req.productArtist) noteParts.push(`Artist: ${req.productArtist}`);
+  if (req.note)          noteParts.push(`\nCustomer note: ${req.note}`);
+  const noteText = noteParts.join('\n');
+
+  const mutation = `
+    mutation backorderDraftCreate($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder {
+          id
+          name
+          invoiceUrl
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      email: req.email,
+      note: noteText,
+      tags: ['backorder-request'],
+      lineItems: [
+        {
+          variantId: req.variantId,
+          quantity: 1,
+        },
+      ],
+      shippingAddress: {
+        firstName,
+        lastName,
+        address1: req.address1,
+        address2: req.address2 || '',
+        city: req.city,
+        province: req.province || '',
+        country: req.country,
+        zip: req.zip,
+        phone: req.phone || '',
+      },
+    },
+  };
+
+  try {
+    const result = await shopifyAdminGraphQL(env, mutation, variables);
+    const userErrors = result?.data?.draftOrderCreate?.userErrors || [];
+    if (userErrors.length > 0) {
+      return jsonRes({
+        error: 'shopify rejected request',
+        details: userErrors,
+      }, 400);
+    }
+    const draftOrder = result?.data?.draftOrderCreate?.draftOrder;
+    if (!draftOrder?.id) {
+      return jsonRes({ error: 'unknown shopify response', raw: result }, 500);
+    }
+    return jsonRes({
+      success: true,
+      draftOrderId: draftOrder.id,
+      draftOrderName: draftOrder.name,
+    });
+  } catch (e: any) {
+    return jsonRes({ error: 'shopify call failed', message: e.message }, 502);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
 
@@ -123,6 +358,23 @@ export default {
 
     const url = new URL(request.url);
     const action = url.searchParams.get('action');
+
+    // ── BACKORDER REQUEST ──────────────────────────────────
+    // POST ?action=backorder-request body:{variantId, email, name, address1, ...}
+    //
+    // Creates a Shopify draft order (no payment captured) for an out-of-stock
+    // release. Eduardo confirms availability with the distributor in admin,
+    // then sends an invoice from the draft order — customer pays online via
+    // Shopify checkout, draft converts to a real order.
+    if (action === 'backorder-request' && request.method === 'POST') {
+      let body: BackorderRequest = {};
+      try {
+        body = await request.json();
+      } catch {
+        return jsonRes({ error: 'invalid json' }, 400);
+      }
+      return await handleBackorderRequest(body, env);
+    }
 
     // ── WISHLIST ENDPOINTS ──────────────────────────────────
     // GET    ?action=wishlist&token=...                  → fetch user's wishlist
