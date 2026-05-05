@@ -990,7 +990,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
                 {isCurrentlyPlaying ? <PauseIcon size={12} /> : <PlayIcon size={12} filled />}
               </button>
             )}
-            {hasTracks && player && r.stock > 0 && (
+            {hasTracks && player && (
               <button
                 onClick={e=>{e.stopPropagation(); player.addToQueue(r);}}
                 aria-label="Add to queue"
@@ -1012,7 +1012,6 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
           </div>
         </div>
         {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
-        {r.stock===0 && isBackorderEligible(r) && <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Backorder available</div>}
         {r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
       </div>
     </div>
