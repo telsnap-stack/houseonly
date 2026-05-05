@@ -888,7 +888,9 @@ function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenIte
                       <span style={{ fontSize:12, fontWeight:800, color:S.accent }}>€{it.price}</span>
                       <div style={{ display:'flex', gap:5 }}>
                         <button onClick={()=>onAddToCart(it)} style={{ background:S.accent, color:'#080808', border:'none', borderRadius:2, padding:'4px 9px', fontSize:9, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:'pointer', fontFamily:'inherit' }}>+ Cart</button>
-                        <button onClick={()=>onRemove(it.handle)} aria-label="Remove" title="Remove" style={{ background:'transparent', border:`1px solid ${S.border}`, color:S.muted, borderRadius:2, padding:'4px 8px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>×</button>
+                        <button onClick={()=>onRemove(it.handle)} aria-label="Remove from wishlist" title="Remove from wishlist" style={{ background:'transparent', border:`1px solid ${S.border}`, borderRadius:2, padding:'4px 8px', cursor:'pointer', fontFamily:'inherit', display:'flex', alignItems:'center', justifyContent:'center', color:S.accent }}>
+                          <HeartIcon wished={true} size={12} />
+                        </button>
                       </div>
                     </div>
                   </div>
