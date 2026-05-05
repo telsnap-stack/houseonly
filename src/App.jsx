@@ -237,6 +237,28 @@ async function customerRecover(email) {
   return true;
 }
 
+// Reset password from the URL Shopify emails to the customer.
+// resetUrl is the full URL the user landed on, e.g.
+//   https://houseonly.store/account/reset/<id>/<token>?syclid=...
+// On success returns { accessToken, expiresAt } — same shape as customerLogin.
+async function customerResetByUrl(resetUrl, password) {
+  const d = await shopifyQuery(`
+    mutation($url: URL!, $password: String!) {
+      customerResetByUrl(resetUrl: $url, password: $password) {
+        customerAccessToken { accessToken expiresAt }
+        customerUserErrors { code field message }
+      }
+    }`, { url: resetUrl, password });
+  const result = d.customerResetByUrl;
+  if (result.customerUserErrors?.length) {
+    throw new Error(result.customerUserErrors[0].message);
+  }
+  if (!result.customerAccessToken) {
+    throw new Error('Password reset failed.');
+  }
+  return result.customerAccessToken;
+}
+
 async function customerProfile(token) {
   if (!token) return null;
   try {
@@ -901,6 +923,95 @@ function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenIte
         </div>
       </div>
     </>
+  );
+}
+
+
+// ── RESET PASSWORD PAGE ─────────────────────────────────────────
+// Standalone page rendered when the user lands on /account/reset/<id>/<token>.
+// Shopify's password-recovery email sends users here. We let them pick a new
+// password, call the Storefront API to apply it, and auto-log-in on success.
+function ResetPasswordPage({ resetUrl, onSuccess, onCancel }) {
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async (e) => {
+    e?.preventDefault?.();
+    setErr('');
+    if (pw.length < 8) { setErr('Password must be at least 8 characters.'); return; }
+    if (pw !== pw2) { setErr('Passwords do not match.'); return; }
+    setBusy(true);
+    try {
+      const tk = await customerResetByUrl(resetUrl, pw);
+      onSuccess(tk);
+    } catch (e) {
+      // Shopify error messages can be cryptic ("Invalid reset URL" when expired);
+      // surface them but soften the obvious ones.
+      const msg = e?.message || 'Could not reset password.';
+      if (/expired|invalid/i.test(msg)) {
+        setErr('This reset link has expired or already been used. Please request a new one.');
+      } else {
+        setErr(msg);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputStyle = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'11px 14px', fontSize:16, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
+
+  return (
+    <div style={{background:S.bg, minHeight:'100vh', color:S.text, fontFamily:"'Inter',system-ui,sans-serif"}}>
+      <Nav onLogo={onCancel}>
+        <button onClick={onCancel} style={{background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2, whiteSpace:'nowrap', fontFamily:'inherit'}}>← Shop</button>
+      </Nav>
+      <div style={{maxWidth:420, margin:'60px auto', padding:'0 20px'}}>
+        <div style={{fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8}}>Reset Password</div>
+        <h1 style={{fontSize:28, fontWeight:800, color:S.text, margin:'0 0 12px', letterSpacing:-0.5}}>Choose a new password</h1>
+        <p style={{fontSize:13, color:S.muted, lineHeight:1.6, margin:'0 0 28px'}}>Enter a new password below. You'll be signed in automatically once it's saved.</p>
+
+        <form onSubmit={submit} style={{display:'flex', flexDirection:'column', gap:12}}>
+          <input
+            type="password"
+            required
+            autoComplete="new-password"
+            placeholder="New password (min 8 characters)"
+            value={pw}
+            onChange={e=>setPw(e.target.value)}
+            style={inputStyle}
+          />
+          <input
+            type="password"
+            required
+            autoComplete="new-password"
+            placeholder="Confirm new password"
+            value={pw2}
+            onChange={e=>setPw2(e.target.value)}
+            style={inputStyle}
+          />
+
+          {err && <div style={{fontSize:11, color:S.danger, padding:'4px 0', lineHeight:1.5}}>{err}</div>}
+
+          <button
+            type="submit"
+            disabled={busy}
+            style={{marginTop:6, padding:'14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:busy?'wait':'pointer', fontFamily:'inherit', opacity:busy?0.6:1}}
+          >
+            {busy ? '…' : 'Save Password & Sign In'}
+          </button>
+
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{background:'none', border:'none', color:S.muted, fontSize:10, cursor:'pointer', textAlign:'center', padding:8, fontFamily:'inherit', textDecoration:'underline'}}
+          >
+            Cancel and return to shop
+          </button>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -2577,6 +2688,28 @@ export default function App() {
     return true;
   });
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
+
+  // Password reset deep-link from Shopify's recovery email.
+  // URL shape: /account/reset/<customer-id>/<token>?syclid=...
+  // We pass the full URL (origin + path + query) to the customerResetByUrl mutation;
+  // Shopify validates it server-side, so we don't parse the token ourselves.
+  const isResetPage = /^\/account\/reset\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
+
+  if(isResetPage) return (
+    <ResetPasswordPage
+      resetUrl={typeof window!=='undefined' ? window.location.href : ''}
+      onSuccess={(tk)=>{
+        setAuth(tk);
+        saveAuth(tk);
+        window.history.replaceState({}, '', '/');
+        setPath('/');
+      }}
+      onCancel={()=>{
+        window.history.replaceState({}, '', '/');
+        setPath('/');
+      }}
+    />
+  );
 
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
