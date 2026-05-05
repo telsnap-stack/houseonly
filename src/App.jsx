@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, createContext, useContext, useCallback } from "react";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -520,6 +520,387 @@ function AudioPlayer({ src }) {
   );
 }
 
+// ── GLOBAL MUSIC PLAYER ────────────────────────────────────────
+//
+// Owns a single <audio> element that plays release snippets across the whole
+// site. Customers can:
+//   - Play a release from a card (queues all its tracks, plays from track 1)
+//   - Add a release to the queue (appends all tracks to end of queue)
+//   - Continue listening as they navigate between releases
+//   - See a sticky bottom bar with prev/play/next, scrubber, current track
+//   - Open a queue panel to manage what plays next
+//   - Heart the currently playing release
+//
+// Queue persists in sessionStorage (survives page reloads, dies on tab close).
+//
+// Internal model: the queue is a flat list of "items" where each item is
+// { release, trackIdx, trackUrl, trackName }. When a release with N tracks is
+// queued, N items get appended. Playback advances item-by-item via onended.
+
+const PlayerCtx = createContext(null);
+
+function PlayerProvider({ children }) {
+  const audioRef = useRef(null);
+  const [queue, setQueue]       = useState([]);  // [{releaseId, releaseSnap, trackIdx, url, name}]
+  const [currentIdx, setCurIdx] = useState(-1);  // index within queue, or -1 if nothing
+  const [isPlaying, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);   // 0..1
+  const [duration, setDuration] = useState(0);   // seconds
+  const [position, setPosition] = useState(0);   // seconds
+  const [volume, setVolume]     = useState(1);
+  const [muted, setMuted]       = useState(false);
+
+  // Hydrate queue + current state from sessionStorage on mount (survives reload, clears on tab close)
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('houseonly_player_state');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.queue) && parsed.queue.length) {
+        setQueue(parsed.queue);
+        if (typeof parsed.currentIdx === 'number' && parsed.currentIdx >= 0 && parsed.currentIdx < parsed.queue.length) {
+          setCurIdx(parsed.currentIdx);
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Persist queue + currentIdx to sessionStorage whenever they change
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('houseonly_player_state', JSON.stringify({ queue, currentIdx }));
+    } catch {}
+  }, [queue, currentIdx]);
+
+  // Build queue items from a release
+  const itemsFromRelease = (r) => {
+    const tracks = r?.tracks || [];
+    return tracks.map((t, i) => ({
+      releaseId: r.id,
+      // Snapshot of the fields we need to render the player without re-fetching the full record
+      releaseSnap: { id: r.id, title: r.title, artist: r.artist, label: r.label, catalog: r.catalog, coverUrl: r.coverUrl, slug: r.slug, handle: r.handle, price: r.price, stock: r.stock, g: r.g },
+      trackIdx: i,
+      url: t.url,
+      name: t.name || `Track ${i+1}`,
+    }));
+  };
+
+  const playRelease = useCallback((r) => {
+    const items = itemsFromRelease(r);
+    if (!items.length) return;
+    setQueue(items);
+    setCurIdx(0);
+    setPlaying(true);
+  }, []);
+
+  const addToQueue = useCallback((r) => {
+    const items = itemsFromRelease(r);
+    if (!items.length) return;
+    setQueue(q => {
+      const next = [...q, ...items];
+      // If nothing is currently playing, start on the first newly-added item
+      if (currentIdx < 0) {
+        setCurIdx(q.length);
+        setPlaying(true);
+      }
+      return next;
+    });
+  }, [currentIdx]);
+
+  const removeFromQueue = useCallback((idx) => {
+    setQueue(q => {
+      const next = q.filter((_, i) => i !== idx);
+      if (idx === currentIdx) {
+        // Removed currently-playing item: if there's a next one, play it (same idx since list shifted up)
+        if (idx < next.length) {
+          setCurIdx(idx);
+          setPlaying(true);
+        } else {
+          setCurIdx(-1);
+          setPlaying(false);
+        }
+      } else if (idx < currentIdx) {
+        setCurIdx(c => c - 1);
+      }
+      return next;
+    });
+  }, [currentIdx]);
+
+  const clearQueue = useCallback(() => {
+    setQueue([]);
+    setCurIdx(-1);
+    setPlaying(false);
+  }, []);
+
+  const playNext = useCallback(() => {
+    setCurIdx(c => {
+      const next = c + 1;
+      if (next >= queue.length) { setPlaying(false); return -1; }
+      setPlaying(true);
+      return next;
+    });
+  }, [queue.length]);
+
+  const playPrev = useCallback(() => {
+    // If we're more than 3s into the current track, restart it instead of going to previous
+    if (audioRef.current && audioRef.current.currentTime > 3) {
+      audioRef.current.currentTime = 0;
+      return;
+    }
+    setCurIdx(c => {
+      if (c <= 0) return c; // already at start
+      setPlaying(true);
+      return c - 1;
+    });
+  }, []);
+
+  const jumpToQueueIdx = useCallback((idx) => {
+    if (idx < 0 || idx >= queue.length) return;
+    setCurIdx(idx);
+    setPlaying(true);
+  }, [queue.length]);
+
+  const togglePlayPause = useCallback(() => {
+    if (currentIdx < 0) {
+      // Nothing loaded — pressing play with an existing queue should start at index 0
+      if (queue.length > 0) {
+        setCurIdx(0);
+        setPlaying(true);
+      }
+      return;
+    }
+    setPlaying(p => !p);
+  }, [currentIdx, queue.length]);
+
+  const seek = useCallback((pct) => {
+    const a = audioRef.current;
+    if (!a || !a.duration) return;
+    a.currentTime = pct * a.duration;
+  }, []);
+
+  const setVolPct = useCallback((v) => {
+    setVolume(v);
+    if (audioRef.current) audioRef.current.volume = v;
+    if (v > 0 && muted) setMuted(false);
+  }, [muted]);
+
+  const toggleMute = useCallback(() => {
+    setMuted(m => !m);
+  }, []);
+
+  // Keep <audio> element in sync with state
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    const cur = queue[currentIdx];
+    if (!cur) {
+      a.pause();
+      a.removeAttribute('src');
+      a.load();
+      return;
+    }
+    if (a.src !== cur.url) {
+      a.src = cur.url;
+    }
+    if (isPlaying) {
+      a.play().catch(() => setPlaying(false));
+    } else {
+      a.pause();
+    }
+  }, [queue, currentIdx, isPlaying]);
+
+  // Volume + mute → audio
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.muted = muted;
+  }, [muted]);
+
+  // Audio element event listeners
+  const onTimeUpdate = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    setPosition(a.currentTime || 0);
+    setDuration(a.duration || 0);
+    setProgress(a.duration ? (a.currentTime / a.duration) : 0);
+  };
+  const onEnded = () => {
+    // Auto-advance to next item; stop if queue ends
+    setCurIdx(c => {
+      const next = c + 1;
+      if (next >= queue.length) { setPlaying(false); return -1; }
+      setPlaying(true);
+      return next;
+    });
+  };
+
+  const current = currentIdx >= 0 ? queue[currentIdx] : null;
+  const currentRelease = current?.releaseSnap || null;
+
+  // Helper: is a given release the currently-playing one?
+  const isReleasePlaying = useCallback((r) => {
+    return isPlaying && current && current.releaseId === r?.id;
+  }, [isPlaying, current]);
+
+  // Helper: is a release queued at all (playing or pending)?
+  const isReleaseQueued = useCallback((r) => {
+    return queue.some(item => item.releaseId === r?.id);
+  }, [queue]);
+
+  const value = {
+    queue, currentIdx, current, currentRelease,
+    isPlaying, progress, duration, position, volume, muted,
+    playRelease, addToQueue, removeFromQueue, clearQueue,
+    playNext, playPrev, jumpToQueueIdx, togglePlayPause, seek, setVolPct, toggleMute,
+    isReleasePlaying, isReleaseQueued,
+  };
+
+  return (
+    <PlayerCtx.Provider value={value}>
+      <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onEnded={onEnded} preload="metadata" />
+      {children}
+    </PlayerCtx.Provider>
+  );
+}
+
+function usePlayer() {
+  return useContext(PlayerCtx);
+}
+
+// Format seconds as M:SS
+function fmtTime(s) {
+  if (!s || !isFinite(s)) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+// ── PLAYER BAR (sticky bottom) ──────────────────────────────────
+function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
+  const p = usePlayer();
+  const [queueOpen, setQueueOpen] = useState(false);
+  if (!p) return null;
+  const { current, currentRelease, isPlaying, progress, duration, position, volume, muted, queue, currentIdx,
+          playNext, playPrev, togglePlayPause, seek, setVolPct, toggleMute } = p;
+
+  // Hide entirely if nothing has been played yet
+  if (!current || !currentRelease) return null;
+
+  const wished = isWished && currentRelease ? isWished(currentRelease) : false;
+  const trackName = (current.name || '').replace(/^\d+_\d+_/, '').replace(/\.(mp3|wav|flac|aac|ogg)$/i, '');
+  const onScrub = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    seek(Math.max(0, Math.min(1, pct)));
+  };
+
+  return (
+    <>
+      {queueOpen && <QueuePanel onClose={()=>setQueueOpen(false)} onOpenRelease={onOpenRelease} />}
+      <div style={{ position:'fixed', bottom:0, left:0, right:0, background:S.surf, borderTop:`1px solid ${S.border}`, zIndex:900, padding:'10px 14px', display:'flex', alignItems:'center', gap:14, fontFamily:"'Inter',system-ui,sans-serif" }}>
+        {/* Transport controls */}
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+          <button onClick={playPrev} aria-label="Previous" style={transportBtnStyle(currentIdx > 0)}>⏮</button>
+          <button onClick={togglePlayPause} aria-label={isPlaying?'Pause':'Play'} style={{ ...transportBtnStyle(true), width:34, height:34, background:S.accent, color:'#080808' }}>{isPlaying?'⏸':'▶'}</button>
+          <button onClick={playNext} aria-label="Next" style={transportBtnStyle(currentIdx < queue.length - 1)}>⏭</button>
+        </div>
+
+        {/* Time + scrubber */}
+        <div style={{ display:'flex', alignItems:'center', gap:8, flex:1, minWidth:0 }}>
+          <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(position)}</span>
+          <div onClick={onScrub} style={{ flex:1, height:4, background:S.border, borderRadius:2, cursor:'pointer', position:'relative' }}>
+            <div style={{ width:`${progress*100}%`, height:'100%', background:S.accent, borderRadius:2, transition:'width 0.1s' }} />
+          </div>
+          <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(duration)}</span>
+        </div>
+
+        {/* Volume */}
+        <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
+          <button onClick={toggleMute} aria-label={muted?'Unmute':'Mute'} style={transportBtnStyle(true)}>{muted||volume===0?'🔇':volume<0.5?'🔉':'🔊'}</button>
+          <input type="range" min="0" max="1" step="0.05" value={muted?0:volume} onChange={e=>setVolPct(parseFloat(e.target.value))} style={{ width:60, accentColor:S.accent, cursor:'pointer' }} />
+        </div>
+
+        {/* Cover + track info */}
+        <div onClick={()=>currentRelease && onOpenRelease && onOpenRelease(currentRelease)} style={{ display:'flex', alignItems:'center', gap:10, minWidth:0, maxWidth:280, cursor:'pointer', flexShrink:0 }}>
+          <div style={{ width:36, height:36, flexShrink:0, background:`linear-gradient(${currentRelease.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(currentRelease.coverUrl)?`url(${coverSrc(currentRelease.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2 }} />
+          <div style={{ minWidth:0, lineHeight:1.3 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
+            <div style={{ fontSize:10, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{currentRelease.artist} — {currentRelease.title}</div>
+          </div>
+        </div>
+
+        {/* Heart (wishlist current release) */}
+        {onWishlistToggle && (
+          <button onClick={()=>onWishlistToggle(currentRelease)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', flexShrink:0 }}>
+            <HeartIcon wished={wished} size={12} />
+          </button>
+        )}
+
+        {/* Queue toggle */}
+        <button onClick={()=>setQueueOpen(o=>!o)} aria-label="Queue" title="Queue" style={{ background:queueOpen?S.accent:'transparent', border:`1px solid ${queueOpen?S.accent:S.border}`, color:queueOpen?'#080808':S.muted, borderRadius:2, padding:'5px 9px', cursor:'pointer', flexShrink:0, fontSize:11 }}>
+          ☰ {queue.length}
+        </button>
+      </div>
+    </>
+  );
+}
+
+function transportBtnStyle(enabled) {
+  return { background:'transparent', border:'none', color: enabled?S.text:S.border, fontSize:13, width:28, height:28, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', cursor:enabled?'pointer':'not-allowed', flexShrink:0 };
+}
+
+// ── QUEUE PANEL ────────────────────────────────────────────────
+function QueuePanel({ onClose, onOpenRelease }) {
+  const p = usePlayer();
+  if (!p) return null;
+  const { queue, currentIdx, removeFromQueue, clearQueue } = p;
+
+  return (
+    <div style={{ position:'fixed', bottom:64, right:14, width:340, maxHeight:'60vh', background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, zIndex:899, display:'flex', flexDirection:'column', boxShadow:'0 8px 24px rgba(0,0,0,0.5)', fontFamily:"'Inter',system-ui,sans-serif" }}>
+      <div style={{ padding:'12px 14px', borderBottom:`1px solid ${S.border}`, display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+        <div style={{ fontSize:10, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Queue · {queue.length}</div>
+        <div style={{ display:'flex', gap:6 }}>
+          {queue.length > 0 && <button onClick={clearQueue} style={{ background:'none', border:'none', color:S.muted, fontSize:9, letterSpacing:1.5, textTransform:'uppercase', cursor:'pointer', textDecoration:'underline' }}>Clear</button>}
+          <button onClick={onClose} aria-label="Close queue" style={{ background:'none', border:'none', color:S.muted, fontSize:18, cursor:'pointer', padding:0, lineHeight:1 }}>×</button>
+        </div>
+      </div>
+      <div style={{ overflowY:'auto', flex:1 }}>
+        {queue.length === 0 && <div style={{ padding:'24px 14px', fontSize:11, color:S.muted, textAlign:'center', lineHeight:1.6 }}>Queue is empty.<br/>Tap ▶ on a release to start.</div>}
+        {queue.map((item, i) => {
+          const r = item.releaseSnap;
+          const isCur = i === currentIdx;
+          const trackName = (item.name || '').replace(/^\d+_\d+_/, '').replace(/\.(mp3|wav|flac|aac|ogg)$/i, '');
+          return (
+            <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 14px', borderBottom:`1px solid ${S.border}`, background:isCur?'#141400':'transparent' }}>
+              <div onClick={()=>onOpenRelease && onOpenRelease(r)} style={{ width:32, height:32, flexShrink:0, background:`linear-gradient(${r.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
+              <div style={{ minWidth:0, flex:1, lineHeight:1.3 }}>
+                <div style={{ fontSize:11, fontWeight:700, color:isCur?S.accent:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
+                <div style={{ fontSize:9, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{r.artist} — {r.title}</div>
+              </div>
+              <button onClick={()=>removeFromQueue(i)} aria-label="Remove from queue" title="Remove" style={{ background:'transparent', border:'none', color:S.muted, fontSize:14, cursor:'pointer', padding:'2px 6px', flexShrink:0 }}>×</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Small play/queue icon buttons used on cards
+function PlayIcon({ size=12, filled=false }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={filled?'currentColor':'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+  );
+}
+function PauseIcon({ size=12 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+  );
+}
+function QueuePlusIcon({ size=12 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="14" y2="6"/><line x1="3" y1="12" x2="14" y2="12"/><line x1="3" y1="18" x2="9" y2="18"/><line x1="18" y1="9" x2="18" y2="21"/><line x1="12" y1="15" x2="24" y2="15"/></svg>
+  );
+}
+
 // ── RECORD CARD ────────────────────────────────────────────────
 function HeartIcon({ wished, size=14 }) {
   return wished ? (
@@ -532,6 +913,10 @@ function HeartIcon({ wished, size=14 }) {
 function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const [hov, setHov] = useState(false);
   const wished = isWished ? isWished(r) : false;
+  const player = usePlayer();
+  const hasTracks = (r.tracks || []).length > 0;
+  const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
+  const isQueued = player ? player.isReleaseQueued(r) : false;
   return (
     <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} style={{ background:S.surf, border:`1px solid ${hov?'#2e2e2e':S.border}`, borderRadius:3, overflow:'hidden', transition:'border 0.15s, transform 0.15s', transform:hov?'translateY(-2px)':'none' }}>
       <div style={{ position:'relative', paddingBottom:'100%', cursor:'pointer' }} onClick={()=>onOpen(r)}>
@@ -556,6 +941,24 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
                 <HeartIcon wished={wished} size={12} />
               </button>
             )}
+            {hasTracks && player && (
+              <button
+                onClick={e=>{e.stopPropagation(); isCurrentlyPlaying ? player.togglePlayPause() : player.playRelease(r);}}
+                aria-label={isCurrentlyPlaying?'Pause':'Play preview'}
+                title={isCurrentlyPlaying?'Pause':'Play preview'}
+                style={{ background:'transparent', border:`1px solid ${isCurrentlyPlaying?S.accent:S.border}`, color:isCurrentlyPlaying?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' }}>
+                {isCurrentlyPlaying ? <PauseIcon size={12} /> : <PlayIcon size={12} filled />}
+              </button>
+            )}
+            {hasTracks && player && (
+              <button
+                onClick={e=>{e.stopPropagation(); player.addToQueue(r);}}
+                aria-label="Add to queue"
+                title={isQueued?'Already in queue — add again':'Add to queue'}
+                style={{ background:'transparent', border:`1px solid ${isQueued?S.accent:S.border}`, color:isQueued?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' }}>
+                <QueuePlusIcon size={12} />
+              </button>
+            )}
             <button onClick={e=>{e.stopPropagation();onAdd(r);}} disabled={r.stock===0} style={{ background:hov&&r.stock>0?S.accent:S.border, color:hov&&r.stock>0?'#080808':S.muted, border:'none', borderRadius:2, cursor:r.stock===0?'not-allowed':'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', opacity:r.stock===0?0.4:1 }}>{r.stock===0?'Sold Out':'+ Cart'}</button>
           </div>
         </div>
@@ -571,36 +974,59 @@ function cleanTrackName(name) {
   return name.replace(/^\d+_\d+_/, '').trim();
 }
 
-function TrackPlayer({ tracks }) {
-  const [playing, setPlaying] = useState(null);
-  const [prog, setProg] = useState(0);
-  const audioRef = useRef(null);
-  const play = (i) => {
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
-    if (playing === i) { setPlaying(null); setProg(0); return; }
-    const a = new Audio(tracks[i].url);
-    audioRef.current = a;
-    a.play().catch(()=>{});
-    setPlaying(i);
-    a.ontimeupdate = () => setProg((a.currentTime / a.duration) * 100 || 0);
-    a.onended = () => { setPlaying(null); setProg(0); };
+function TrackPlayer({ tracks, release }) {
+  const player = usePlayer();
+  if (!tracks || !tracks.length) return null;
+
+  // Determine which track (if any) of THIS release is currently playing in the
+  // global player. If the global current item belongs to this release, light up
+  // the matching row; otherwise nothing here is "active" even if something
+  // unrelated is playing.
+  const cur = player?.current;
+  const playingThisRelease = cur && release && cur.releaseId === release.id;
+  const activeTrackIdx = (playingThisRelease && player.isPlaying) ? cur.trackIdx : null;
+  const prog = playingThisRelease ? player.progress * 100 : 0;
+
+  const onClickTrack = (i) => {
+    if (!player || !release) return;
+    if (playingThisRelease && cur.trackIdx === i) {
+      // Toggle pause/resume on the currently-playing track
+      player.togglePlayPause();
+      return;
+    }
+    if (playingThisRelease) {
+      // Same release already queued — just jump to the clicked track
+      // Find the queue index of the clicked track for this release
+      // (simpler: this release's tracks were queued contiguously, so cur.trackIdx -> player.currentIdx maps directly)
+      const offset = i - cur.trackIdx;
+      player.jumpToQueueIdx(player.currentIdx + offset);
+      return;
+    }
+    // Different release (or nothing playing): replace queue with this release and start at clicked track
+    player.playRelease({ ...release, tracks });
+    // playRelease starts at idx 0; jump forward to the clicked track once state has propagated.
+    // Use a microtask to let the queue state apply before jumping.
+    if (i > 0) Promise.resolve().then(() => player.jumpToQueueIdx(i));
   };
-  useEffect(() => () => audioRef.current?.pause(), []);
+
   return (
     <div style={{ marginBottom:14 }}>
-      {tracks.map((t, i) => (
-        <div key={i} onClick={() => play(i)} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 8px', borderBottom:`1px solid ${S.border}`, cursor:'pointer', background: playing===i ? '#141400' : 'transparent', borderRadius:2 }}>
-          <div style={{ width:20, height:20, borderRadius:'50%', background: playing===i ? S.accent : S.border, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:9, color: playing===i ? '#080808' : S.muted }}>
-            {playing===i ? '⏸' : '▶'}
-          </div>
-          <span style={{ fontSize:11, color: playing===i ? S.accent : S.muted, flex:1 }}>{cleanTrackName(t.name)}</span>
-          {playing===i && (
-            <div style={{ width:60, height:2, background:S.border, borderRadius:1, overflow:'hidden', flexShrink:0 }}>
-              <div style={{ width:`${prog}%`, height:'100%', background:S.accent, transition:'width 0.1s' }} />
+      {tracks.map((t, i) => {
+        const isActive = activeTrackIdx === i;
+        return (
+          <div key={i} onClick={() => onClickTrack(i)} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 8px', borderBottom:`1px solid ${S.border}`, cursor:'pointer', background: isActive ? '#141400' : 'transparent', borderRadius:2 }}>
+            <div style={{ width:20, height:20, borderRadius:'50%', background: isActive ? S.accent : S.border, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, fontSize:9, color: isActive ? '#080808' : S.muted }}>
+              {isActive ? '⏸' : '▶'}
             </div>
-          )}
-        </div>
-      ))}
+            <span style={{ fontSize:11, color: isActive ? S.accent : S.muted, flex:1 }}>{cleanTrackName(t.name)}</span>
+            {isActive && (
+              <div style={{ width:60, height:2, background:S.border, borderRadius:1, overflow:'hidden', flexShrink:0 }}>
+                <div style={{ width:`${prog}%`, height:'100%', background:S.accent, transition:'width 0.1s' }} />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -628,7 +1054,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
             </div>
             {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
             {tracks.length > 0
-              ? <TrackPlayer tracks={tracks} />
+              ? <TrackPlayer tracks={tracks} release={r} />
               : (r.tracks||[]).length > 0 && (
                 <div style={{ marginBottom:14 }}>
                   {(r.tracks||[]).map((t,i)=>(
@@ -2850,7 +3276,8 @@ export default function App() {
   );
 
   return (
-    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
+    <PlayerProvider>
+    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:64}}>
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
@@ -2902,6 +3329,8 @@ export default function App() {
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.token||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
+      <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
+    </PlayerProvider>
   );
 }
