@@ -1001,17 +1001,20 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
             )}
             {(() => {
               const eligible = isBackorderEligible(r);
+              // For backorder-eligible cards, the action goes on its own line below
+              // (full-width REQUEST button), so this slot stays empty.
+              if (r.stock === 0 && eligible) return null;
               if (r.stock > 0) {
                 return <button onClick={e=>{e.stopPropagation();onAdd(r);}} style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Cart</button>;
-              }
-              if (eligible) {
-                return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>Request</button>;
               }
               return <button disabled style={{ background:S.border, color:S.muted, border:'none', borderRadius:2, cursor:'not-allowed', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', opacity:0.4, whiteSpace:'nowrap' }}>Sold Out</button>;
             })()}
           </div>
         </div>
         {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
+        {r.stock===0 && isBackorderEligible(r) && (
+          <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ marginTop:8, width:'100%', background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'7px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', fontFamily:'inherit' }}>Request</button>
+        )}
         {r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
       </div>
     </div>
