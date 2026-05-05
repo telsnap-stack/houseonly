@@ -1594,10 +1594,10 @@ function ZipImporter() {
           'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
-          'Variant SKU': catno, 'Variant Grams': grams, 'Variant Inventory Tracker': '',
+          'Variant SKU': catno, 'Variant Grams': grams, 'Variant Inventory Tracker': 'shopify',
           'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'deny',
           'Variant Fulfillment Service': 'manual', 'Variant Price': price,
-          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'FALSE',
+          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'TRUE',
           'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
           'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
           'Variant Barcode': ean, 'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
@@ -1863,7 +1863,7 @@ function KudosImporter() {
       }
       const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);if(subgenre)tags.push(subgenre);if(genre)tags.push(genre);
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
-      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'',String(r.fulfilled),'deny','manual',retailP,'','TRUE','FALSE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
+      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'deny','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
     const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
     const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
@@ -2181,14 +2181,14 @@ function DBHImporter() {
           'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
           'Variant SKU': catno,
           'Variant Grams': grams,
-          'Variant Inventory Tracker': '',
+          'Variant Inventory Tracker': 'shopify',
           'Variant Inventory Qty': String(qtyOrdered),
           'Variant Inventory Policy': 'deny',
           'Variant Fulfillment Service': 'manual',
           'Variant Price': price,
           'Variant Compare At Price': '',
           'Variant Requires Shipping': 'TRUE',
-          'Variant Taxable': 'FALSE',
+          'Variant Taxable': 'TRUE',
           'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
           'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
           'Variant Barcode': '',
