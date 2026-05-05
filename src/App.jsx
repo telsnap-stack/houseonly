@@ -463,6 +463,46 @@ async function mergeServerWishlist(token, items) {
   return d.items || null;
 }
 
+// ── BACKORDER REQUEST ──────────────────────────────────────────
+//
+// For releases that are out of stock but recent (year >= currentYear-1),
+// customers can submit a request rather than getting "Sold Out". This sends
+// the request to the worker, which creates a Shopify draft order. Eduardo
+// confirms availability with the distributor in admin and either:
+//   - Sends an invoice from the draft (customer pays online → real order)
+//   - Cancels the draft (with an apology email, manual)
+//
+// No payment is captured at the request step. Customer is committed to the
+// request but not charged.
+async function submitBackorderRequest(payload) {
+  const r = await fetch(`${WORKER_URL}?action=backorder-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let data = null;
+  try { data = await r.json(); } catch {}
+  if (!r.ok) {
+    const msg = data?.error || `Request failed (HTTP ${r.status})`;
+    const detail = data?.details ? ' — ' + JSON.stringify(data.details) : '';
+    throw new Error(msg + detail);
+  }
+  return data;
+}
+
+// Determine if a release is eligible for the backorder/request flow.
+// Rule: stock=0 AND year >= currentYear - 1.
+// This captures recent releases (last ~12-24 months) where labels might
+// repress, while excluding older releases that are unlikely to come back.
+function isBackorderEligible(r) {
+  if (!r) return false;
+  if ((r.stock ?? 0) > 0) return false;
+  const y = parseInt(r.year || 0, 10);
+  if (!y) return false; // no year tag = treat as truly sold out
+  const currentYear = new Date().getFullYear();
+  return y >= currentYear - 1;
+}
+
 // ── LOGO ──────────────────────────────────────────────────────
 function Logo({ scale=1, onClick }) {
   return (
@@ -959,11 +999,163 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
                 <QueuePlusIcon size={12} />
               </button>
             )}
-            <button onClick={e=>{e.stopPropagation();onAdd(r);}} disabled={r.stock===0} style={{ background:hov&&r.stock>0?S.accent:S.border, color:hov&&r.stock>0?'#080808':S.muted, border:'none', borderRadius:2, cursor:r.stock===0?'not-allowed':'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', opacity:r.stock===0?0.4:1 }}>{r.stock===0?'Sold Out':'+ Cart'}</button>
+            {(() => {
+              const eligible = isBackorderEligible(r);
+              if (r.stock > 0) {
+                return <button onClick={e=>{e.stopPropagation();onAdd(r);}} style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s' }}>+ Cart</button>;
+              }
+              if (eligible) {
+                return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s' }}>Request</button>;
+              }
+              return <button disabled style={{ background:S.border, color:S.muted, border:'none', borderRadius:2, cursor:'not-allowed', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', opacity:0.4 }}>Sold Out</button>;
+            })()}
           </div>
         </div>
         {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
-        {r.stock===0&&<div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
+        {r.stock===0 && isBackorderEligible(r) && <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Backorder available</div>}
+        {r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── BACKORDER REQUEST FORM ─────────────────────────────────────
+//
+// Renders inside the Modal when a release is backorder-eligible (stock=0 AND
+// year >= currentYear-1). Customer fills email + name + shipping address +
+// optional note; on submit, calls submitBackorderRequest() which creates a
+// Shopify draft order. After submit, replaces the form with an inline
+// "request received" confirmation.
+//
+// Customer is NOT charged at this point. Eduardo confirms availability with
+// the distributor in Shopify admin, then sends an invoice from the draft
+// order — customer pays online via the Shopify checkout link.
+function BackorderRequestForm({ release }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [address1, setAddress1] = useState('');
+  const [address2, setAddress2] = useState('');
+  const [city, setCity] = useState('');
+  const [zip, setZip] = useState('');
+  const [country, setCountry] = useState('Spain');
+  const [province, setProvince] = useState('');
+  const [phone, setPhone] = useState('');
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [err, setErr] = useState('');
+
+  const onSubmit = async () => {
+    setErr('');
+    // Basic client-side validation (server validates again)
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setErr('Please enter a valid email address.');
+      return;
+    }
+    if (!name.trim() || !address1.trim() || !city.trim() || !country.trim() || !zip.trim()) {
+      setErr('Name, address, city, country and postal code are required.');
+      return;
+    }
+    if (!release?.shopifyVariantId) {
+      setErr('Sorry, this release cannot be requested right now.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await submitBackorderRequest({
+        variantId: release.shopifyVariantId,
+        productHandle: release.slug,
+        productTitle: release.title,
+        productArtist: release.artist,
+        productPrice: release.price,
+        email: email.trim(),
+        name: name.trim(),
+        address1: address1.trim(),
+        address2: address2.trim(),
+        city: city.trim(),
+        province: province.trim(),
+        country: country.trim(),
+        zip: zip.trim(),
+        phone: phone.trim(),
+        note: note.trim(),
+      });
+      setSubmitted(true);
+    } catch (e) {
+      setErr(e.message || 'Something went wrong. Please try again or contact us.');
+    }
+    setSubmitting(false);
+  };
+
+  if (submitted) {
+    return (
+      <div style={{ marginTop:20, padding:'18px 16px', background:'#0e1a0e', border:`1px solid ${S.accent}`, borderRadius:3 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+          <div style={{ width:24, height:24, borderRadius:'50%', background:S.accent, color:'#080808', display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, fontWeight:900 }}>✓</div>
+          <div style={{ fontSize:12, fontWeight:700, color:S.accent, letterSpacing:1, textTransform:'uppercase' }}>Request Received</div>
+        </div>
+        <p style={{ fontSize:11, color:S.muted, lineHeight:1.7, margin:0 }}>
+          Thanks {name.split(/\s+/)[0] || 'for your request'}. We've recorded your request for <strong style={{color:S.text}}>{release.title}</strong>. We'll check availability with our distributor and email you within 24-48 hours. If we can source it, you'll receive a payment link to complete the order. No payment has been taken at this stage.
+        </p>
+      </div>
+    );
+  }
+
+  const inputStyle = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
+  const labelStyle = { fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:4, display:'block', fontWeight:700 };
+
+  return (
+    <div style={{ marginTop:18, paddingTop:18, borderTop:`1px solid ${S.border}` }}>
+      <div style={{ fontSize:11, color:S.accent, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, marginBottom:6 }}>Request this release</div>
+      <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:'0 0 14px' }}>
+        Out of stock, but recent — we may still be able to source this from our distributor. Submit a request and we'll confirm within 24-48 hours. <strong style={{color:S.text}}>You won't be charged now</strong>; if available, we'll send you a payment link.
+      </p>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Name *</label>
+          <input value={name} onChange={e=>setName(e.target.value)} style={inputStyle} placeholder="Full name" />
+        </div>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Email *</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} style={inputStyle} placeholder="you@example.com" />
+        </div>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Address Line 1 *</label>
+          <input value={address1} onChange={e=>setAddress1(e.target.value)} style={inputStyle} placeholder="Street address" />
+        </div>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Address Line 2</label>
+          <input value={address2} onChange={e=>setAddress2(e.target.value)} style={inputStyle} placeholder="Apt, suite, etc. (optional)" />
+        </div>
+        <div>
+          <label style={labelStyle}>City *</label>
+          <input value={city} onChange={e=>setCity(e.target.value)} style={inputStyle} />
+        </div>
+        <div>
+          <label style={labelStyle}>Postal Code *</label>
+          <input value={zip} onChange={e=>setZip(e.target.value)} style={inputStyle} />
+        </div>
+        <div>
+          <label style={labelStyle}>State / Province</label>
+          <input value={province} onChange={e=>setProvince(e.target.value)} style={inputStyle} placeholder="(optional)" />
+        </div>
+        <div>
+          <label style={labelStyle}>Country *</label>
+          <input value={country} onChange={e=>setCountry(e.target.value)} style={inputStyle} />
+        </div>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Phone</label>
+          <input type="tel" value={phone} onChange={e=>setPhone(e.target.value)} style={inputStyle} placeholder="(optional, helps with shipping)" />
+        </div>
+        <div style={{ gridColumn:'1 / -1' }}>
+          <label style={labelStyle}>Anything we should know?</label>
+          <textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} style={{...inputStyle, resize:'vertical', minHeight:50}} placeholder="(optional — gift, ship together with another order, etc.)" />
+        </div>
+      </div>
+      {err && <div style={{ fontSize:11, color:S.danger, marginTop:10 }}>{err}</div>}
+      <div style={{ marginTop:14 }}>
+        <button onClick={onSubmit} disabled={submitting} style={{ background:submitting?S.border:S.accent, color:submitting?S.muted:'#080808', border:'none', borderRadius:2, cursor:submitting?'wait':'pointer', fontSize:11, fontWeight:800, letterSpacing:1.5, padding:'10px 22px', textTransform:'uppercase', fontFamily:'inherit', transition:'all 0.15s' }}>
+          {submitting ? 'Submitting…' : 'Submit Request'}
+        </button>
       </div>
     </div>
   );
@@ -1078,8 +1270,14 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
                   <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
                 </button>
               )}
-              <Btn ch={r.stock===0?'Out of Stock':'Add to Cart'} disabled={r.stock===0} onClick={()=>{onAdd(r);onClose();}} full />
+              {r.stock > 0
+                ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
+                : isBackorderEligible(r)
+                  ? <span style={{ fontSize:10, color:S.accent, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700 }}>Backorder · See below</span>
+                  : <Btn ch="Out of Stock" disabled full />
+              }
             </div>
+            {r.stock === 0 && isBackorderEligible(r) && <BackorderRequestForm release={r} />}
           </div>
         </div>
       </div>
@@ -2064,7 +2262,7 @@ function ZipImporter() {
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
           'Variant SKU': catno, 'Variant Grams': grams, 'Variant Inventory Tracker': 'shopify',
-          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'deny',
+          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'continue',
           'Variant Fulfillment Service': 'manual', 'Variant Price': price,
           'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'TRUE',
           'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
@@ -2332,7 +2530,7 @@ function KudosImporter() {
       }
       const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);if(subgenre)tags.push(subgenre);if(genre)tags.push(genre);
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
-      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'deny','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
+      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
     const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
     const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
@@ -2652,7 +2850,7 @@ function DBHImporter() {
           'Variant Grams': grams,
           'Variant Inventory Tracker': 'shopify',
           'Variant Inventory Qty': String(qtyOrdered),
-          'Variant Inventory Policy': 'deny',
+          'Variant Inventory Policy': 'continue',
           'Variant Fulfillment Service': 'manual',
           'Variant Price': price,
           'Variant Compare At Price': '',
