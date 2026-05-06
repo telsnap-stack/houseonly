@@ -817,6 +817,30 @@ function fmtTime(s) {
 function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const p = usePlayer();
   const [queueOpen, setQueueOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 720);
+  const barRef = useRef(null);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 720);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  // Sync the rendered player-bar height to a CSS variable so the root container's
+  // bottom padding clears the bar exactly, on any layout (1-row desktop / 2-row mobile).
+  useEffect(() => {
+    if (!barRef.current) {
+      document.documentElement.style.setProperty('--player-h', '0px');
+      return;
+    }
+    const update = () => {
+      if (barRef.current) {
+        document.documentElement.style.setProperty('--player-h', `${barRef.current.offsetHeight}px`);
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(barRef.current);
+    return () => { ro.disconnect(); document.documentElement.style.setProperty('--player-h', '0px'); };
+  });
   if (!p) return null;
   const { current, currentRelease, isPlaying, progress, duration, position, volume, muted, queue, currentIdx,
           playNext, playPrev, togglePlayPause, seek, setVolPct, toggleMute } = p;
@@ -828,56 +852,86 @@ function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const trackName = (current.name || '').replace(/^\d+_\d+_/, '').replace(/\.(mp3|wav|flac|aac|ogg)$/i, '');
   const onScrub = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
+    const clientX = e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+    const pct = (clientX - rect.left) / rect.width;
     seek(Math.max(0, Math.min(1, pct)));
   };
 
+  // Shared building blocks
+  const transport = (
+    <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+      <button onClick={playPrev} aria-label="Previous" style={transportBtnStyle(currentIdx > 0)}>⏮</button>
+      <button onClick={togglePlayPause} aria-label={isPlaying?'Pause':'Play'} style={{ ...transportBtnStyle(true), width:34, height:34, background:S.accent, color:'#080808' }}>{isPlaying?'⏸':'▶'}</button>
+      <button onClick={playNext} aria-label="Next" style={transportBtnStyle(currentIdx < queue.length - 1)}>⏭</button>
+    </div>
+  );
+  const scrubber = (
+    <div style={{ display:'flex', alignItems:'center', gap:8, flex:1, minWidth:0 }}>
+      <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(position)}</span>
+      <div onClick={onScrub} onTouchStart={onScrub} style={{ flex:1, height:4, background:S.border, borderRadius:2, cursor:'pointer', position:'relative' }}>
+        <div style={{ width:`${progress*100}%`, height:'100%', background:S.accent, borderRadius:2, transition:'width 0.1s' }} />
+      </div>
+      <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(duration)}</span>
+    </div>
+  );
+  const coverInfo = (
+    <div onClick={()=>currentRelease && onOpenRelease && onOpenRelease(currentRelease)} style={{ display:'flex', alignItems:'center', gap:10, minWidth:0, flex:isMobile?1:'0 1 auto', maxWidth:isMobile?'none':280, cursor:'pointer' }}>
+      <div style={{ width:36, height:36, flexShrink:0, background:`linear-gradient(${currentRelease.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(currentRelease.coverUrl)?`url(${coverSrc(currentRelease.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2 }} />
+      <div style={{ minWidth:0, lineHeight:1.3, flex:1 }}>
+        <div style={{ fontSize:11, fontWeight:700, color:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
+        <div style={{ fontSize:10, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{currentRelease.artist} — {currentRelease.title}</div>
+      </div>
+    </div>
+  );
+  const heart = onWishlistToggle && (
+    <button onClick={()=>onWishlistToggle(currentRelease)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', flexShrink:0 }}>
+      <HeartIcon wished={wished} size={12} />
+    </button>
+  );
+  const queueBtn = (
+    <button onClick={()=>setQueueOpen(o=>!o)} aria-label="Queue" title="Queue" style={{ background:queueOpen?S.accent:'transparent', border:`1px solid ${queueOpen?S.accent:S.border}`, color:queueOpen?'#080808':S.muted, borderRadius:2, padding:'5px 9px', cursor:'pointer', flexShrink:0, fontSize:11 }}>
+      ☰ {queue.length}
+    </button>
+  );
+  const volumeCtrl = (
+    <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
+      <button onClick={toggleMute} aria-label={muted?'Unmute':'Mute'} style={transportBtnStyle(true)}>{muted||volume===0?'🔇':volume<0.5?'🔉':'🔊'}</button>
+      <input type="range" min="0" max="1" step="0.05" value={muted?0:volume} onChange={e=>setVolPct(parseFloat(e.target.value))} style={{ width:60, accentColor:S.accent, cursor:'pointer' }} />
+    </div>
+  );
+
+  if (isMobile) {
+    return (
+      <>
+        {queueOpen && <QueuePanel onClose={()=>setQueueOpen(false)} onOpenRelease={onOpenRelease} />}
+        <div ref={barRef} style={{ position:'fixed', bottom:0, left:0, right:0, background:S.surf, borderTop:`1px solid ${S.border}`, zIndex:900, padding:'8px 12px', display:'flex', flexDirection:'column', gap:6, fontFamily:"'Inter',system-ui,sans-serif" }}>
+          {/* Row 1: cover + info on left, heart + queue on right */}
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            {coverInfo}
+            {heart}
+            {queueBtn}
+          </div>
+          {/* Row 2: scrubber + transport */}
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            {scrubber}
+            {transport}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // Desktop: single row layout (unchanged)
   return (
     <>
       {queueOpen && <QueuePanel onClose={()=>setQueueOpen(false)} onOpenRelease={onOpenRelease} />}
-      <div style={{ position:'fixed', bottom:0, left:0, right:0, background:S.surf, borderTop:`1px solid ${S.border}`, zIndex:900, padding:'10px 14px', display:'flex', alignItems:'center', gap:14, fontFamily:"'Inter',system-ui,sans-serif" }}>
-        {/* Transport controls */}
-        <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
-          <button onClick={playPrev} aria-label="Previous" style={transportBtnStyle(currentIdx > 0)}>⏮</button>
-          <button onClick={togglePlayPause} aria-label={isPlaying?'Pause':'Play'} style={{ ...transportBtnStyle(true), width:34, height:34, background:S.accent, color:'#080808' }}>{isPlaying?'⏸':'▶'}</button>
-          <button onClick={playNext} aria-label="Next" style={transportBtnStyle(currentIdx < queue.length - 1)}>⏭</button>
-        </div>
-
-        {/* Time + scrubber */}
-        <div style={{ display:'flex', alignItems:'center', gap:8, flex:1, minWidth:0 }}>
-          <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(position)}</span>
-          <div onClick={onScrub} style={{ flex:1, height:4, background:S.border, borderRadius:2, cursor:'pointer', position:'relative' }}>
-            <div style={{ width:`${progress*100}%`, height:'100%', background:S.accent, borderRadius:2, transition:'width 0.1s' }} />
-          </div>
-          <span style={{ fontSize:10, color:S.muted, fontFamily:'monospace', flexShrink:0 }}>{fmtTime(duration)}</span>
-        </div>
-
-        {/* Volume */}
-        <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
-          <button onClick={toggleMute} aria-label={muted?'Unmute':'Mute'} style={transportBtnStyle(true)}>{muted||volume===0?'🔇':volume<0.5?'🔉':'🔊'}</button>
-          <input type="range" min="0" max="1" step="0.05" value={muted?0:volume} onChange={e=>setVolPct(parseFloat(e.target.value))} style={{ width:60, accentColor:S.accent, cursor:'pointer' }} />
-        </div>
-
-        {/* Cover + track info */}
-        <div onClick={()=>currentRelease && onOpenRelease && onOpenRelease(currentRelease)} style={{ display:'flex', alignItems:'center', gap:10, minWidth:0, maxWidth:280, cursor:'pointer', flexShrink:0 }}>
-          <div style={{ width:36, height:36, flexShrink:0, background:`linear-gradient(${currentRelease.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(currentRelease.coverUrl)?`url(${coverSrc(currentRelease.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2 }} />
-          <div style={{ minWidth:0, lineHeight:1.3 }}>
-            <div style={{ fontSize:11, fontWeight:700, color:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
-            <div style={{ fontSize:10, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{currentRelease.artist} — {currentRelease.title}</div>
-          </div>
-        </div>
-
-        {/* Heart (wishlist current release) */}
-        {onWishlistToggle && (
-          <button onClick={()=>onWishlistToggle(currentRelease)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'5px 7px', cursor:'pointer', display:'flex', alignItems:'center', flexShrink:0 }}>
-            <HeartIcon wished={wished} size={12} />
-          </button>
-        )}
-
-        {/* Queue toggle */}
-        <button onClick={()=>setQueueOpen(o=>!o)} aria-label="Queue" title="Queue" style={{ background:queueOpen?S.accent:'transparent', border:`1px solid ${queueOpen?S.accent:S.border}`, color:queueOpen?'#080808':S.muted, borderRadius:2, padding:'5px 9px', cursor:'pointer', flexShrink:0, fontSize:11 }}>
-          ☰ {queue.length}
-        </button>
+      <div ref={barRef} style={{ position:'fixed', bottom:0, left:0, right:0, background:S.surf, borderTop:`1px solid ${S.border}`, zIndex:900, padding:'10px 14px', display:'flex', alignItems:'center', gap:14, fontFamily:"'Inter',system-ui,sans-serif" }}>
+        {transport}
+        {scrubber}
+        {volumeCtrl}
+        {coverInfo}
+        {heart}
+        {queueBtn}
       </div>
     </>
   );
@@ -894,7 +948,7 @@ function QueuePanel({ onClose, onOpenRelease }) {
   const { queue, currentIdx, removeFromQueue, clearQueue } = p;
 
   return (
-    <div style={{ position:'fixed', bottom:64, right:14, width:340, maxHeight:'60vh', background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, zIndex:899, display:'flex', flexDirection:'column', boxShadow:'0 8px 24px rgba(0,0,0,0.5)', fontFamily:"'Inter',system-ui,sans-serif" }}>
+    <div style={{ position:'fixed', bottom:'var(--player-h, 64px)', right:14, left:'auto', width:340, maxWidth:'calc(100vw - 28px)', maxHeight:'60vh', background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, zIndex:899, display:'flex', flexDirection:'column', boxShadow:'0 8px 24px rgba(0,0,0,0.5)', fontFamily:"'Inter',system-ui,sans-serif" }}>
       <div style={{ padding:'12px 14px', borderBottom:`1px solid ${S.border}`, display:'flex', alignItems:'center', justifyContent:'space-between' }}>
         <div style={{ fontSize:10, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Queue · {queue.length}</div>
         <div style={{ display:'flex', gap:6 }}>
@@ -3515,7 +3569,7 @@ export default function App() {
 
   return (
     <PlayerProvider>
-    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:64}}>
+    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
