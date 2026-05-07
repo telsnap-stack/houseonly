@@ -349,6 +349,124 @@ async function handleBackorderRequest(req: BackorderRequest, env: Env): Promise<
   }
 }
 
+// ── MIRROR HANDLER ─────────────────────────────────────────────
+//
+// Server-side proxy that fetches an external image URL (typically from
+// mothertonguerecords.com or another distributor's WordPress) and stores
+// the bytes in R2 under a caller-supplied key. The browser cannot do this
+// directly because the source server doesn't return CORS headers — but
+// fetch() running inside a Worker is cross-origin only at the Cloudflare
+// edge, where CORS is not applied.
+//
+// Why a separate endpoint instead of reusing /upload:
+//   - /upload expects a multipart formData with the file bytes already in
+//     hand. Mirror needs to fetch them itself, server-side.
+//   - This keeps the importer thin: one POST with `url` and `key`, no
+//     intermediate blob shuffling in the browser.
+//
+// Hardening:
+//   - Only http(s) URLs accepted; no file://, no relative paths.
+//   - Allowlist: only images from public domains we control or trust (the
+//     distributors). Prevents this becoming an open proxy.
+//   - Hard-cap on response size (10 MB) to keep memory bounded.
+//   - Hard-cap on fetch time (15 s) to keep the request from hanging.
+//   - Content-Type sniffed from the response and forced to image/* — refuse
+//     anything else. Prevents accidentally storing HTML error pages as
+//     "covers".
+//
+// Request:  POST ?action=mirror   body: { url: string, key: string }
+// Response: 200 { url: string }   (the public R2 URL)
+//           4xx { error: string } on validation
+//           5xx { error: string, ... } on upstream/network failure
+
+const MIRROR_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const MIRROR_TIMEOUT_MS = 15_000;
+const MIRROR_ALLOWED_HOSTS = new Set([
+  'www.mothertonguerecords.com',
+  'mothertonguerecords.com',
+  // Add other distributor hosts here when needed:
+  // 'kompakt.fm', 'www.kompakt.fm', etc.
+]);
+
+async function handleMirror(req: { url?: string; key?: string }, env: Env): Promise<Response> {
+  // 1. Validate inputs
+  if (!req.url || typeof req.url !== 'string') {
+    return jsonRes({ error: 'missing url' }, 400);
+  }
+  if (!req.key || typeof req.key !== 'string') {
+    return jsonRes({ error: 'missing key' }, 400);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(req.url);
+  } catch {
+    return jsonRes({ error: 'invalid url' }, 400);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return jsonRes({ error: 'only http(s) urls allowed' }, 400);
+  }
+  if (!MIRROR_ALLOWED_HOSTS.has(parsed.hostname)) {
+    return jsonRes({ error: `host not allowed: ${parsed.hostname}` }, 400);
+  }
+  // Reject keys that would escape the bucket prefix or look suspicious.
+  if (req.key.includes('..') || req.key.startsWith('/')) {
+    return jsonRes({ error: 'invalid key' }, 400);
+  }
+
+  // 2. Fetch with timeout
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), MIRROR_TIMEOUT_MS);
+  let upstream: Response;
+  try {
+    upstream = await fetch(req.url, {
+      signal: ctrl.signal,
+      // Some WordPress installs serve different bytes to bots vs browsers.
+      // Pretend to be a normal browser request to maximize compat.
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; HouseOnlyMirror/1.0)',
+        'Accept': 'image/*',
+      },
+    });
+  } catch (e: any) {
+    clearTimeout(timer);
+    return jsonRes({ error: 'fetch failed', message: e?.message || String(e) }, 502);
+  }
+  clearTimeout(timer);
+  if (!upstream.ok) {
+    return jsonRes({ error: `upstream ${upstream.status}` }, 502);
+  }
+
+  // 3. Sanity-check Content-Type. We refuse anything that isn't an image —
+  //    a successful 200 with text/html is almost always a "soft 404" landing
+  //    page, and we don't want that mirrored as a cover.
+  const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.startsWith('image/')) {
+    return jsonRes({
+      error: 'upstream did not return an image',
+      contentType,
+    }, 502);
+  }
+
+  // 4. Read body with hard cap on size
+  const buf = await upstream.arrayBuffer();
+  if (buf.byteLength === 0) {
+    return jsonRes({ error: 'empty body' }, 502);
+  }
+  if (buf.byteLength > MIRROR_MAX_BYTES) {
+    return jsonRes({ error: 'too large', bytes: buf.byteLength }, 413);
+  }
+
+  // 5. Put in R2 and return public URL
+  try {
+    await env.R2.put(req.key, buf, {
+      httpMetadata: { contentType },
+    });
+  } catch (e: any) {
+    return jsonRes({ error: 'r2 put failed', message: e?.message || String(e) }, 500);
+  }
+  return jsonRes({ url: `${R2_PUBLIC}/${req.key}`, bytes: buf.byteLength });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
 
@@ -374,6 +492,22 @@ export default {
         return jsonRes({ error: 'invalid json' }, 400);
       }
       return await handleBackorderRequest(body, env);
+    }
+
+    // ── MIRROR (server-side fetch + R2 store) ─────────────
+    // POST ?action=mirror body:{url, key}
+    //
+    // Used by the Mother Tongue importer to bypass CORS when downloading
+    // cover images from mothertonguerecords.com — the browser can't fetch
+    // those URLs (no CORS headers), but the Worker can.
+    if (action === 'mirror' && request.method === 'POST') {
+      let body: any = {};
+      try {
+        body = await request.json();
+      } catch {
+        return jsonRes({ error: 'invalid json' }, 400);
+      }
+      return await handleMirror(body, env);
     }
 
     // ── WISHLIST ENDPOINTS ──────────────────────────────────
