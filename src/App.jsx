@@ -3106,23 +3106,35 @@ function DBHImporter() {
 }
 
 // ── MOTHER TONGUE IMPORTER ─────────────────────────────────────
-// Combines 3 sources:
-//   1. Invoice PDF       → catno, qty, dealer price (with discount)
-//   2. Listener HTML     → artist, title, label, format, description
-//   3. Distribution dir  → cover image + audio snippets (uploaded to R2)
+// Combines 3 sources to build the Shopify CSV:
+//   1. Invoice PDF      → catno, qty, dealer price (with discount detection)
+//   2. Listener HTML    → artist, title, label, format, description, GENRES,
+//                         and a fallback cover URL from mothertonguerecords.com
+//   3. Distributor folder → cover image + audio snippets (uploaded to R2)
 //
-// The folder is dropped via webkitdirectory; we walk every file and index
-// by "normalized catno" (uppercase, alphanumeric only). Tolerates the
-// distributor's chaotic structure: covers can be flat or in subfolders
-// like Artwork/, snippets can live in any of {snippets, Snippets, SNIPPETS,
-// SNIPETS, CLIPS, AUDIO CLIPS, MP3, Audio Snippets, drive-download-...,
-// THIS/THAT split-by-side, Trasforma Snippets, etc.}
+// Folder is dropped via webkitdirectory; we walk every file and index by
+// "normalized catno" (uppercase, alphanumeric only). Tolerates the chaotic
+// distributor structure: covers can be flat or in subfolders (Artwork/,
+// snippets/, CLIPS/, MP3/, THIS/THAT, drive-download-*/, etc.).
+//
+// Five product policy decisions (frozen 2026-05-07):
+//   D1. Tag policy is label-only — no operational `mothertongue` tag exposed
+//       to customers. The `label:` prefix already identifies the imprint.
+//   D2. Releases with no listener metadata (no artist, no title) come out as
+//       Status=draft so customers don't see catno-only placeholders.
+//   D3. If no real sleeve cover is available (folder + listener), accept a
+//       side-label/spindle/promo image as last resort rather than no image.
+//   D4. Genre tags come from the WooCommerce categories scraped per product.
+//       Filter out operational categories (What's New / Distribution / We Dig)
+//       and split slash-separated multi-genres ("House / Electronic" → both).
+//   D5. Cover priority: folder real-sleeve → listener real-sleeve →
+//       folder anything → listener anything → empty.
 function MotherTongueImporter() {
   const [pdfFile, setPdfFile]       = useState(null);
   const [htmlFile, setHtmlFile]     = useState(null);
   const [folderFiles, setFolderFiles] = useState([]); // raw File[] from webkitdirectory
   const [invoiceItems, setInvoiceItems] = useState([]); // [{catno, qty, dealerPrice}]
-  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → {artist,title,label,description,fmt}
+  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → meta object
   const [folderIndex, setFolderIndex]   = useState({}); // catnoNorm → {covers:[File], audio:[File]}
   const [status, setStatus]   = useState('idle');
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
@@ -3163,7 +3175,6 @@ function MotherTongueImporter() {
     const pdfjsLib = await loadPDFJS();
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    // Group text items into lines per page, sorted top-to-bottom then left-to-right.
     const lines = [];
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
@@ -3175,13 +3186,12 @@ function MotherTongueImporter() {
         const y = vp.height - it.transform[5];
         const s = String(it.str || '');
         if (!s) continue;
-        const key = Math.round(y / 4) * 4;     // 4px Y bucket
+        const key = Math.round(y / 4) * 4;
         if (!byY.has(key)) byY.set(key, []);
         byY.get(key).push({ s, x, x1: x + (it.width || 0) });
       }
       for (const [y, toks] of byY.entries()) {
         toks.sort((a, b) => a.x - b.x);
-        // Reconstruct text preserving spaces between far-apart tokens.
         let text = '', lastX = null;
         for (const t of toks) {
           if (lastX !== null && t.x - lastX > 1.0) text += ' ';
@@ -3193,7 +3203,6 @@ function MotherTongueImporter() {
     }
     lines.sort((a, b) => a.page - b.page || a.y - b.y);
 
-    // Headers / footers / decoration / legal text — never treated as items.
     const SKIP_PATTERNS = [
       /^Mother Tongue srl/i, /^Lungadige/i, /^N\.?i\.?f\.?/i,
       /^FACTURA/i, /^Factura/i, /^info@/i, /^tel:/i,
@@ -3205,7 +3214,7 @@ function MotherTongueImporter() {
       /^PLAZOS/i, /^RESUMEN DE IVA/i, /^GRAVABLE/i,
       /^Gravable/i, /^Non\s+imponibile/i,
       /^0%\s*-\s*Non\s+imponibile/i,
-      /^legge\s+\d/i,                    // "legge 331/93" — legal text, not catno
+      /^legge\s+\d/i,
       /^Documento/i, /^SH001\b/i, /^SHIPPING\s*$/i, /^HS CODE/i,
       /^vinyl\s+records\s*$/i, /^N\.I\.F\./i,
     ];
@@ -3222,10 +3231,9 @@ function MotherTongueImporter() {
       const m = CATNO_RX.exec(ln.text);
       if (!m) continue;
       const catno = m[1];
-      if (!/[A-Za-z]/.test(catno)) continue;        // need at least one letter
+      if (!/[A-Za-z]/.test(catno)) continue;
       const rest = ln.text.slice(catno.length);
 
-      // Find all numbers (with positions) and €-prefixed prices separately.
       const allNums = [];
       const numRx = /(\d+(?:[.,]\d+)?)/g;
       let nm;
@@ -3237,7 +3245,6 @@ function MotherTongueImporter() {
           idx: nm.index,
         });
       }
-      // Trailing 0 = % IVA marker. Required to confirm this is an item line.
       if (allNums.length === 0 || allNums[allNums.length - 1].val !== 0) continue;
 
       const euroPrices = [];
@@ -3246,29 +3253,25 @@ function MotherTongueImporter() {
       while ((em = euroRx.exec(rest)) !== null) {
         euroPrices.push({
           val: parseFloat(em[1].replace(',', '.')),
-          idx: em.index + em[0].indexOf(em[1]),  // start of the digit
+          idx: em.index + em[0].indexOf(em[1]),
         });
       }
 
       const discountMatch = rest.match(/(\d{1,2})%/);
       const hasDiscount = !!discountMatch;
-
       let qty = null, dealerPrice = null;
 
       if (hasDiscount) {
-        // Discounted lines have qty + "10%" + trailing 0, but NO prices.
-        // Real discounted unit price (3-decimal) is on a sibling line within ±20px Y.
         const pct = parseInt(discountMatch[1]);
         const pctIdx = allNums.findIndex(n => n.val === pct && !n.decimal);
         if (pctIdx > 0) qty = Math.round(allNums[pctIdx - 1].val);
-
         let bestDy = Infinity, bestPrice = null;
         for (let j = 0; j < lines.length; j++) {
           if (j === i) continue;
           if (lines[j].page !== ln.page) continue;
           const dy = Math.abs(lines[j].y - ln.y);
           if (dy > 20) continue;
-          const pm = lines[j].text.match(/(\d+\.\d{3})/);   // 3-decimal = discounted unit price
+          const pm = lines[j].text.match(/(\d+\.\d{3})/);
           if (pm && dy < bestDy) {
             bestDy = dy;
             bestPrice = parseFloat(pm[1]);
@@ -3276,8 +3279,6 @@ function MotherTongueImporter() {
         }
         dealerPrice = bestPrice;
       } else {
-        // No discount: qty is the LAST non-decimal integer appearing BEFORE the
-        // first €-prefixed price. Defends against "(2024 Reissue)" and similar.
         if (euroPrices.length >= 1) {
           const firstPriceIdx = euroPrices[0].idx;
           const qtyCandidates = allNums.filter(n =>
@@ -3298,7 +3299,8 @@ function MotherTongueImporter() {
   }
 
   // ── HTML LISTENER PARSER ──────────────────────────────────────
-  // Extract `const RELEASES = [...]` from the listener HTML.
+  // Extracts `const RELEASES = [...]` and indexes by normalized catno.
+  // The listener now (post 2026-05-07) carries a `genres` array per release.
   async function parseListenerHTML(file) {
     const text = await file.text();
     const m = text.match(/const\s+RELEASES\s*=\s*(\[[\s\S]*?\]);/);
@@ -3307,10 +3309,10 @@ function MotherTongueImporter() {
     try { data = JSON.parse(m[1]); }
     catch (e) { throw new Error('RELEASES JSON parse failed: ' + e.message); }
 
-    // Index by normalized catno; on duplicates, prefer the entry with most data
-    // (cover present + tracks present + description non-empty).
+    // Index by normalized catno; on duplicates, prefer the entry with most data.
     const score = (r) =>
-      (r.cover ? 4 : 0) + (r.tracks?.length ? 2 : 0) + (r.description ? 1 : 0);
+      (r.cover ? 4 : 0) + (r.tracks?.length ? 2 : 0) +
+      (r.description ? 1 : 0) + (r.genres?.length ? 1 : 0);
     const map = {};
     for (const r of data) {
       const key = normCatno(r.cat);
@@ -3321,15 +3323,11 @@ function MotherTongueImporter() {
   }
 
   // ── FOLDER INDEXER ────────────────────────────────────────────
-  // Receive a flat list of File objects (each with file.webkitRelativePath).
-  // Walk paths, pick a "best matching catno" for each file by checking each
-  // path segment against all known catnos from the invoice. Group accordingly.
   function buildFolderIndex(files, knownCatnos) {
-    const index = {};                      // catnoNorm → { covers:[File], audio:[File] }
+    const index = {};
     const knownSet = new Set(knownCatnos.map(normCatno));
     const SKIP_FILE = (n) =>
-      n.startsWith('._') ||                       // macOS resource forks
-      n === '.DS_Store' || n === 'Thumbs.db';
+      n.startsWith('._') || n === '.DS_Store' || n === 'Thumbs.db';
     const SKIP_DIR  = (seg) => seg === '__MACOSX';
 
     for (const f of files) {
@@ -3339,20 +3337,16 @@ function MotherTongueImporter() {
       if (SKIP_FILE(fname)) continue;
       if (segs.some(SKIP_DIR)) continue;
 
-      // Find the deepest path segment that matches a known catno.
       let matchedKey = null;
       for (const seg of segs) {
         const k = normCatno(seg);
-        if (k && knownSet.has(k)) { matchedKey = k; /* keep walking — deepest wins */ }
+        if (k && knownSet.has(k)) matchedKey = k;
       }
       if (!matchedKey) continue;
 
-      // Classify file by extension.
       const ext = (fname.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
       const isImg   = ['jpg','jpeg','png','webp'].includes(ext);
       const isAudio = ['mp3','wav','flac','aac','ogg','m4a'].includes(ext);
-      // Skip ZIP (e.g. EGLO99 has both AUDIO CLIPS.zip and AUDIO CLIPS/ folder),
-      // PDFs, RTFs, etc.
       if (!isImg && !isAudio) continue;
 
       if (!index[matchedKey]) index[matchedKey] = { covers: [], audio: [] };
@@ -3362,38 +3356,83 @@ function MotherTongueImporter() {
     return index;
   }
 
-  // ── COVER SELECTION ───────────────────────────────────────────
-  // Given a list of image Files for one catno, pick the best front cover.
-  // Priority order tested against real distributor data: explicit "front cover" >
-  // "front" > "side a"/"_a_"/"label a" > "cover"/"artwork" > anything not "back" >
-  // largest file > first.
+  // ── COVER-CANDIDATE CLASSIFIER ────────────────────────────────
+  // Decision D5: pick a real sleeve image first; fall back to label/spindle
+  // only if nothing better exists. These predicates classify a filename or URL
+  // into one of three buckets:
+  //   - "real":  explicit front/sleeve/cover/artwork (use first)
+  //   - "label": center sticker, side-A/B image, promo sheet (use last)
+  //   - "back":  back cover (skip — never use)
+  // Names that match nothing fall through to a "neutral" category and are
+  // treated as "real" by default (better than nothing).
+  const isBack = (s) => /\bback\b|_back\b|-back\b/i.test(s);
+  const isLabel = (s) => {
+    const l = s.toLowerCase();
+    return (
+      // Side-letter markers — A/B/C/D side labels
+      /\bside[-_\s]*[abcd]\b/i.test(l) ||
+      /\b[abcd][-_\s]*side\b/i.test(l) ||
+      /[-_]([abcd])[-_\s]*(?:side|label)?(?:\.|$|[-_\s])/i.test(l) ||
+      // Explicit center-label names
+      /\blabel[\s_-]*[abcd]?\b/i.test(l) ||
+      /\bspindle\b/i.test(l) ||
+      /\bsticker\b/i.test(l) ||
+      /\bcenter[\s_-]*label\b/i.test(l) ||
+      // Promo/press-release/info-sheet (Mother Tongue style)
+      /\bpromo\b/i.test(l) ||
+      /\bpress[\s_-]*release\b/i.test(l) ||
+      /\binfo[\s_-]*sheet\b/i.test(l) ||
+      /\brelease[\s_-]*info\b/i.test(l) ||
+      /\bone[\s_-]*sheet\b/i.test(l) ||
+      // Mother Tongue WordPress slug patterns: -sideA-, _side-a, sideA-scaled
+      /side[-_]?[ab]/i.test(l)
+    );
+  };
+  const isRealSleeve = (s) => {
+    const l = s.toLowerCase();
+    if (isBack(s)) return false;
+    if (isLabel(s)) return false;
+    return /(\bfront\b|\bcover\b|\bsleeve\b|\bartwork\b|\bjacket\b|\bart\b|\bmain\b)/i.test(l);
+  };
+
+  // ── COVER SELECTION FROM FOLDER ───────────────────────────────
+  // Two-pass strategy reflecting D5:
+  //   Pass 1: find a clearly "real" sleeve image. If found, return it.
+  //   Pass 2: nothing real — split images into "neutral" (no marker) vs label.
+  //           Prefer neutral over label (some folders just have generic names
+  //           like "BLACKLP010.jpg" which are usually the front sleeve).
+  //   Pass 3: only labels left → return the largest one (the front-of-vinyl
+  //           shot, if any, tends to be larger). D3 says we accept this.
   function selectCover(images) {
     if (!images || images.length === 0) return null;
-    if (images.length === 1) return images[0];
-    const lc = (f) => f.name.toLowerCase();
-    const tests = [
-      f => /front[\s_-]*cover/i.test(lc(f)),
-      f => /\bfront\b/i.test(lc(f)) && !/\bback\b/i.test(lc(f)),
-      f => /(side[\s_-]*a|\b_a_\b|\ba[\s_-]*side\b|label[\s_-]*a|\(a\)|art[\s_-]*a[\s_-]*side)/i.test(lc(f))
-            && !/\bback\b/i.test(lc(f)),
-      f => /(cover|artwork|art\b|main)/i.test(lc(f)) && !/\bback\b/i.test(lc(f)),
-      f => !/\bback\b/i.test(lc(f)),
-    ];
-    for (const t of tests) {
-      const hit = images.find(t);
-      if (hit) return hit;
+    const usable = images.filter(f => !isBack(f.name));
+    if (usable.length === 0) return null;
+    const real = usable.filter(f => isRealSleeve(f.name));
+    if (real.length > 0) {
+      return real.slice().sort((a,b) => b.size - a.size)[0];
     }
-    // Fallback: largest by size.
-    return images.slice().sort((a,b) => b.size - a.size)[0];
+    const neutral = usable.filter(f => !isLabel(f.name));
+    if (neutral.length > 0) {
+      return neutral.slice().sort((a,b) => b.size - a.size)[0];
+    }
+    // Only labels remain — D3: accept anyway as last resort.
+    return usable.slice().sort((a,b) => b.size - a.size)[0];
   }
 
-  // ── AUDIO SELECTION + ORDERING ────────────────────────────────
-  // If both MP3 and WAV exist for the same track name, prefer MP3.
-  // Sort by side (A,B,C,D) + track number; fall back to "01.","02." style;
-  // then alphabetical. THIS/THAT subfolders signal A/B side respectively.
+  // Listener URL classifier — same predicates applied to the URL string.
+  // mothertonguerecords.com sometimes only hosts side-label photos; if so,
+  // we still try to use them as last resort per D3 / D5.
+  function classifyListenerUrl(url) {
+    if (!url) return 'none';
+    if (isBack(url)) return 'back';
+    if (isRealSleeve(url)) return 'real';
+    if (isLabel(url)) return 'label';
+    return 'neutral';
+  }
+
+  // ── AUDIO ORDERING ────────────────────────────────────────────
   function orderAudio(audioFiles) {
     if (!audioFiles || audioFiles.length === 0) return [];
-    // De-prefer WAV when the same basename exists as MP3.
     const byBase = {};
     for (const f of audioFiles) {
       const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
@@ -3402,13 +3441,11 @@ function MotherTongueImporter() {
       if (!byBase[base] || score > byBase[base].score) byBase[base] = { f, score };
     }
     const filtered = Object.values(byBase).map(x => x.f);
-    // Sort key: (sideRank, trackNum, fallbackName)
     const keyOf = (f) => {
       const path = f.webkitRelativePath || f.name;
-      const inThis = /\/THIS\b/i.test(path) || /\/THIS\//i.test(path);
-      const inThat = /\/THAT\b/i.test(path) || /\/THAT\//i.test(path);
+      const inThis = /\/THIS\//i.test(path);
+      const inThat = /\/THAT\//i.test(path);
       const fname = f.name;
-      // Patterns: "A1", "A1.", "A1 -", "A 1.", "Side A.1", "Side A 1", "01 A1 - ", "01.", "1."
       let side = 99, num = 999;
       let m;
       if ((m = fname.match(/^(?:\d+\s*[-_.]?\s*)?Side\s+([A-D])[.\s]+(\d+)/i))) {
@@ -3421,7 +3458,7 @@ function MotherTongueImporter() {
         side = m[1].toUpperCase().charCodeAt(0) - 65;
         num  = 0;
       } else if ((m = fname.match(/^(\d+)[.\s_-]/))) {
-        side = inThat ? 1 : (inThis ? 0 : 50);   // THIS=A, THAT=B
+        side = inThat ? 1 : (inThis ? 0 : 50);
         num  = parseInt(m[1]);
       } else {
         side = inThat ? 1 : (inThis ? 0 : 99);
@@ -3435,22 +3472,61 @@ function MotherTongueImporter() {
   }
 
   // ── TRACK NAME EXTRACTION ─────────────────────────────────────
-  // Strip prefixes (A1, B2, Side A.1, 01.) and suffixes (Snippet, Clip, Preview,
-  // "60 sec taster", "_snippet"). Leave the actual song title.
-  function trackNameFromFilename(fname) {
-    let n = fname.replace(/\.[^.]+$/, '');                        // ext
-    n = n.replace(/^\d+\s*[-_.]\s*/, '');                          // leading "01 - " / "01_" / "01."
-    n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-_.]?\s*/i, '');    // "Side A.1 "
-    n = n.replace(/^[A-D]\s*\d+\s*[-_.]?\s*/i, '');                // "A1 - "
-    n = n.replace(/^[A-D]\s+(?:Side\s*[-_.]?\s*)?/i, '');          // "A Side - "
-    n = n.replace(/^TRACK\s+\d+[\s_-]*/i, '');                     // "TRACK 1 "
-    // Trailing noise: "(Snippet)", "_snippet", "(Clip)", "(Preview)", "(60 sec taster)"
+  // Strip prefixes (A1, B2, Side A.1, 01., catalog number) and suffixes
+  // (Snippet, Clip, Preview, "60 sec taster", "[1.30MIN SNIPPET]", " - 2000BLACK").
+  // Catno is passed in so we can recognize SKU-prefixed track names like
+  // "DTW082 A1 Don't Forget Your Hiss" or "MT19022- 1-A1 Terra de Luz".
+  function trackNameFromFilename(fname, catno) {
+    let n = fname.replace(/\.[^.]+$/, '');
+    n = n.replace(/_/g, ' ');
+    n = n.replace(/\s*\[\s*\d+\.?\d*\s*MIN\s*SNIPPET\s*\]\s*/i, '');
+
+    const skuRx = catno ? catno.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
+    for (let i = 0; i < 5; i++) {
+      const before = n;
+      n = n.replace(/^[\s\-–]+/, '');
+      if (skuRx) n = n.replace(new RegExp('^' + skuRx + '\\s*', 'i'), '');
+      n = n.replace(/^[AB]\s*[-–]\s+/i, '');
+      n = n.replace(/^\d+\s*[-–]\s*/, '');
+      n = n.replace(/^[AB]\d+\.?\s*[-–]?\s*/i, '');
+      n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-–]?\s*/i, '');
+      n = n.replace(/^TRACK\s+\d+[\s_\-]*/i, '');
+      n = n.replace(/^\d{1,2}[\s_.\-]+/, '');
+      if (n === before) break;
+    }
+    n = n.replace(/[\s_.\-]*\(?\s*(snippet|snip|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
     n = n.replace(/[\s_-]*\(\s*\d+\s*sec\s+taster\s*\)\s*$/i, '');
-    n = n.replace(/[\s_-]*\(?\s*(snippet|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
-    n = n.replace(/[\s_-]+$/, '').trim();
-    n = n.replace(/_/g, ' ');                                      // underscores → spaces
+    n = n.replace(/\s*-\s*2000BLACK\s*$/i, '');
     n = n.replace(/\s{2,}/g, ' ').trim();
     return n || fname.replace(/\.[^.]+$/, '');
+  }
+
+  // ── GENRE TAG NORMALIZATION ───────────────────────────────────
+  // Decision D4: WooCommerce categories include some operational ones
+  // ("What's New", "Distribution (Wholesale)", "We Dig", "International")
+  // that aren't real genres and shouldn't appear as customer-facing tags.
+  // Plus, multi-genre values come slash-separated ("House / Electronic" or
+  // "Soul / Hip Hop / RnB") — split them so customers can filter by atomic
+  // genres.
+  const NON_GENRE_CATEGORIES = new Set([
+    "what's new", 'whats new', 'distribution (wholesale)',
+    'distribution', 'wholesale', 'we dig', 'international',
+    'all releases', 'releases', 'shop', 'mailorder',
+  ]);
+  function normalizeGenres(rawGenres) {
+    if (!Array.isArray(rawGenres)) return [];
+    const out = new Set();
+    for (const raw of rawGenres) {
+      if (!raw) continue;
+      // Split "House / Electronic" → ["House", "Electronic"]
+      for (const piece of String(raw).split(/\s*\/\s*/)) {
+        const trimmed = piece.trim();
+        if (!trimmed) continue;
+        if (NON_GENRE_CATEGORIES.has(trimmed.toLowerCase())) continue;
+        out.add(trimmed);
+      }
+    }
+    return Array.from(out);
   }
 
   // ── DERIVE WEIGHT FROM FORMAT ─────────────────────────────────
@@ -3494,7 +3570,6 @@ function MotherTongueImporter() {
     setFolderFiles(arr);
   };
 
-  // Re-build the folder index whenever inputs change (so user can drop in any order).
   useEffect(() => {
     if (!folderFiles.length || !invoiceItems.length) {
       setFolderIndex({});
@@ -3518,34 +3593,102 @@ function MotherTongueImporter() {
         const assets = folderIndex[key] || { covers: [], audio: [] };
         setProgress({ done:i, total, current:`${item.catno} — preparing…` });
 
-        // Pull metadata from listener JSON (preferred) or fall back to catno only.
-        const artist = meta.artist || '';
-        const title  = meta.title  || item.catno;
-        const label  = meta.label  || '';
-        const fmtNorm = meta.fmt_norm || meta.format || '';
-        const grams  = gramsFromFmt(fmtNorm);
-        const desc   = meta.description || '';
+        // ── METADATA + D1 (no operational tag) + D2 (draft fallback) ──
+        const rawArtist = (meta.artist || '').trim();
+        const rawTitle  = (meta.title  || '').trim();
+        const labelMeta = (meta.label  || '').trim();
+        const fmtNorm   = meta.fmt_norm || meta.format || '';
+        const grams     = gramsFromFmt(fmtNorm);
+
+        // Vendor cleanup: V.A. (Various Artists) doesn't help in the storefront —
+        // substitute the label name when available. Skip the "House Only" fallback;
+        // empty Vendor is fine in Shopify.
+        let artist = rawArtist;
+        if (/^V\.?\s*A\.?$/i.test(artist) || /^V\.?\s*A\.?\s*\(/i.test(artist) || /^Various/i.test(artist)) {
+          artist = labelMeta || 'Various Artists';
+        } else if (artist.length > 50) {
+          // Take first artist before "/", "feat", "ft.", ","
+          const firstArtist = artist.split(/\s*(?:\/|feat\.?|ft\.?|,)\s*/i)[0].trim();
+          if (firstArtist && firstArtist.length >= 3) artist = firstArtist;
+        }
+
+        // Title cleanup: strip "...." artifacts, strip lone "/", fall back to catno.
+        let title = rawTitle.replace(/\s*\.{3,}\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!title || title === '/' || title.length < 2) title = item.catno;
+
+        // Description cleanup: scraper truncates at ~500 chars regardless of
+        // sentence boundary. Append "…" when text doesn't end on punctuation.
+        let desc = (meta.description || '').trim();
+        if (desc.length > 100 && !/[.!?:;)]$/.test(desc)) desc += '…';
+
+        // D2: draft if NO listener metadata was matched at all.
+        const hasMeta = !!(rawArtist || rawTitle);
+        const productStatus = hasMeta ? 'active' : 'draft';
+
+        // Derive label-clean (drop suffix "- (Worldwide except UK)" etc.)
+        const labelClean = labelMeta.replace(/\s*-\s*\(.*?\)\s*$/, '').trim();
+
         const handle = item.catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const safeKey = item.catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
 
-        // Pricing — same formula as DBH/Kudos: dealer × (1+margin%) → ceil − 0.01.
+        // Pricing: dealer × (1+margin%) → ceil − 0.01.
         const rawPrice = item.dealerPrice * (1 + margin / 100);
         const price    = (Math.ceil(rawPrice) - 0.01).toFixed(2);
 
-        // Upload cover (if any) to R2.
+        // ── COVER (D5: folder-real → listener-real → folder-any → listener-any) ──
         let coverUrl = '';
         let itemError = '';
-        const coverFile = selectCover(assets.covers);
-        if (coverFile) {
+        const folderCover = selectCover(assets.covers);
+        const folderCoverIsReal = folderCover && isRealSleeve(folderCover.name);
+        const listenerUrlClass = classifyListenerUrl(meta.cover);
+
+        // Helper: upload a File to R2 and return the public URL.
+        const uploadFolderCover = async (file) => {
+          const ext = (file.name.match(/\.([a-z0-9]+)$/i) || [,'jpg'])[1].toLowerCase();
+          const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+          return await uploadToR2(file, `covers/${safeKey}.${ext}`, mime);
+        };
+        // Helper: fetch a URL, mirror to R2.
+        const mirrorListenerCover = async (url) => {
+          const r = await fetch(url);
+          if (!r.ok) return '';
+          const blob = await r.blob();
+          const urlExt = (url.match(/\.(jpg|jpeg|png|webp)(\?|$)/i) || [,'jpg'])[1].toLowerCase();
+          const ext = urlExt === 'jpeg' ? 'jpg' : urlExt;
+          const mime = blob.type || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+          return await uploadToR2(blob, `covers/${safeKey}.${ext}`, mime);
+        };
+
+        // Pass 1: prefer a real sleeve from the folder.
+        if (folderCoverIsReal) {
           try {
-            setProgress({ done:i, total, current:`${item.catno} — uploading cover…` });
-            const ext = (coverFile.name.match(/\.([a-z0-9]+)$/i) || [,'jpg'])[1].toLowerCase();
-            const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-            coverUrl = await uploadToR2(coverFile, `covers/${safeKey}.${ext}`, mime);
+            setProgress({ done:i, total, current:`${item.catno} — uploading cover (folder real)…` });
+            coverUrl = await uploadFolderCover(folderCover);
           } catch (e) { itemError = 'Cover upload: ' + e.message; }
         }
+        // Pass 2: try a real listener URL.
+        if (!coverUrl && listenerUrlClass === 'real') {
+          try {
+            setProgress({ done:i, total, current:`${item.catno} — fetching listener cover (real)…` });
+            coverUrl = await mirrorListenerCover(meta.cover);
+          } catch (_) { /* CORS or 404 — continue */ }
+        }
+        // Pass 3: folder cover even if it's a label/spindle/promo (D3).
+        if (!coverUrl && folderCover) {
+          try {
+            setProgress({ done:i, total, current:`${item.catno} — uploading cover (folder fallback)…` });
+            coverUrl = await uploadFolderCover(folderCover);
+          } catch (e) { if (!itemError) itemError = 'Cover upload: ' + e.message; }
+        }
+        // Pass 4: listener URL even if it's a label.
+        if (!coverUrl && (listenerUrlClass === 'label' || listenerUrlClass === 'neutral')) {
+          try {
+            setProgress({ done:i, total, current:`${item.catno} — fetching listener cover (fallback)…` });
+            coverUrl = await mirrorListenerCover(meta.cover);
+          } catch (_) { /* swallow */ }
+        }
 
-        // Upload audio snippets (if any) to R2.
+        // ── AUDIO ────────────────────────────────────────────
         const tracks = [];
         const audioOrdered = orderAudio(assets.audio);
         for (let a = 0; a < audioOrdered.length; a++) {
@@ -3554,27 +3697,29 @@ function MotherTongueImporter() {
           try {
             setProgress({ done:i, total, current:`${item.catno} — audio ${a+1}/${audioOrdered.length}…` });
             const url = await uploadToR2(af, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
-            tracks.push({ name: trackNameFromFilename(af.name), url });
-          } catch (e) {
-            // Don't kill the whole import for one bad track; just skip.
+            tracks.push({ name: trackNameFromFilename(af.name, item.catno), url });
+          } catch (_) {
             if (!itemError) itemError = 'Audio upload partial fail';
           }
         }
 
-        // Build description HTML using the shared helper.
-        const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
-        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
+        // ── TAGS (D1 label-only + D4 genres) ────────────────────
+        const genres = normalizeGenres(meta.genres);
+        const tagParts = ['vinyl'];
+        if (labelClean) tagParts.push(`label:${labelClean}`);
+        for (const g of genres) tagParts.push(`genre:${g}`);
+        tagParts.push(String(new Date().getFullYear()));
+        const shopifyTags = tagParts.join(', ');
 
-        const shopifyTags = [
-          'vinyl', 'mothertongue',
-          label ? `label:${label}` : '',
-          String(new Date().getFullYear()),
-        ].filter(Boolean).join(', ');
+        // ── BUILD CSV ROW ────────────────────────────────────
+        const descHtml  = buildDescriptionHtml({ artist, title, label: labelClean, year:'', tracks, sourceNotes: desc });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         processed.push({
           _catno: item.catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _hasMeta: !!meta.artist, _hasAssets: !!(assets.covers.length || assets.audio.length),
+          _hasMeta: hasMeta, _hasAssets: !!(assets.covers.length || assets.audio.length),
+          _draft: productStatus === 'draft',
           'Handle': handle,
           'Title': title || item.catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -3582,7 +3727,7 @@ function MotherTongueImporter() {
           'Product Category': 'Media > Music & Sound Recordings > Vinyl',
           'Type': '',
           'Tags': shopifyTags,
-          'Published': 'TRUE',
+          'Published': productStatus === 'active' ? 'TRUE' : 'FALSE',
           'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
           'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
           'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
@@ -3604,7 +3749,8 @@ function MotherTongueImporter() {
           'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
           'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
           'Variant Image':'','Variant Weight Unit':'kg',
-          'Variant Tax Code':'','Cost per item': item.dealerPrice.toFixed(2), 'Status':'active',
+          'Variant Tax Code':'','Cost per item': item.dealerPrice.toFixed(2),
+          'Status': productStatus,
         });
         setProgress({ done:i+1, total, current:'' });
       }
@@ -3640,17 +3786,20 @@ function MotherTongueImporter() {
     const idx = folderIndex[normCatno(it.catno)];
     return idx && idx.audio.length > 0;
   }).length;
+  const itemsWithGenres = invoiceItems.filter(it => {
+    const m = releaseMeta[normCatno(it.catno)];
+    return m && Array.isArray(m.genres) && normalizeGenres(m.genres).length > 0;
+  }).length;
 
   // ── RENDER ────────────────────────────────────────────────────
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Drop the invoice PDF, the listener HTML (descriptions/artist/title), and the
-        full distributor folder. The importer will match catnos across all three
-        sources and build the Shopify CSV.
+        Drop the invoice PDF, the listener HTML (descriptions/artist/title/genres), and the
+        full distributor folder. The importer matches catnos across all three
+        sources and builds the Shopify CSV.
       </p>
 
-      {/* Drop zone */}
       <div
         onDragOver={e=>e.preventDefault()}
         onDrop={e=>{
@@ -3691,7 +3840,6 @@ function MotherTongueImporter() {
         </div>
       </div>
 
-      {/* Status panel */}
       {(invoiceItems.length>0 || Object.keys(releaseMeta).length>0 || folderFiles.length>0) && status==='idle' && (
         <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
           <span>Invoice items: <b style={{color:S.text}}>{invoiceItems.length}</b></span>
@@ -3700,6 +3848,9 @@ function MotherTongueImporter() {
           )}
           {invoiceItems.length>0 && (
             <span>Meta matched: <b style={{color: matchedMeta===invoiceItems.length ? S.accent : '#ff8800'}}>{matchedMeta}/{invoiceItems.length}</b></span>
+          )}
+          {invoiceItems.length>0 && Object.keys(releaseMeta).length>0 && (
+            <span>With genres: <b style={{color: itemsWithGenres===invoiceItems.length ? S.accent : '#ff8800'}}>{itemsWithGenres}/{invoiceItems.length}</b></span>
           )}
           {invoiceItems.length>0 && folderFiles.length>0 && (
             <>
@@ -3711,7 +3862,6 @@ function MotherTongueImporter() {
         </div>
       )}
 
-      {/* Margin + process */}
       {invoiceItems.length>0 && status==='idle' && (
         <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
           <div style={{display:'flex',alignItems:'center',gap:6}}>
@@ -3727,7 +3877,6 @@ function MotherTongueImporter() {
         </div>
       )}
 
-      {/* Progress */}
       {status==='processing' && (
         <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
           <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
@@ -3745,7 +3894,6 @@ function MotherTongueImporter() {
         <div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>
       )}
 
-      {/* Results grid */}
       {status==='review' && results.length>0 && (
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
@@ -3753,8 +3901,7 @@ function MotherTongueImporter() {
               <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} releases</span>
               <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
                 {results.filter(r=>r._coverUrl).length} covers · {results.filter(r=>r._tracks?.length>0).length} audio
-                {results.filter(r=>!r._hasMeta).length>0 ? ` · ${results.filter(r=>!r._hasMeta).length} no meta` : ''}
-                {results.filter(r=>!r._hasAssets).length>0 ? ` · ${results.filter(r=>!r._hasAssets).length} no assets` : ''}
+                {results.filter(r=>r._draft).length>0 ? ` · ${results.filter(r=>r._draft).length} draft` : ''}
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
@@ -3762,16 +3909,15 @@ function MotherTongueImporter() {
           </div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
-              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
                 <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
                   {r._coverUrl
                     ? <img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
                     : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
                   }
                   {r._tracks?.length>0 && <div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
-                  {!r._hasMeta && <div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO META</div>}
-                  {!r._coverUrl && r._hasAssets && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
-                  {!r._hasAssets && <div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>NO ASSETS</div>}
+                  {r._draft && <div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>DRAFT</div>}
+                  {!r._coverUrl && !r._draft && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
                   {r._error && <div style={{position:'absolute',bottom:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>
