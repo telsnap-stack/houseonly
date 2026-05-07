@@ -3648,15 +3648,24 @@ function MotherTongueImporter() {
           const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
           return await uploadToR2(file, `covers/${safeKey}.${ext}`, mime);
         };
-        // Helper: fetch a URL, mirror to R2.
+        // Helper: ask the Worker to mirror an external image URL to R2.
+        // The browser can't fetch mothertonguerecords.com directly because
+        // their server omits CORS headers; the Worker can, since fetch() at
+        // the edge isn't subject to CORS. The Worker validates the host
+        // against an allowlist, hard-caps size/timeout, and refuses anything
+        // that isn't an image/* response, so we just trust its return URL.
         const mirrorListenerCover = async (url) => {
-          const r = await fetch(url);
-          if (!r.ok) return '';
-          const blob = await r.blob();
+          if (!url) return '';
           const urlExt = (url.match(/\.(jpg|jpeg|png|webp)(\?|$)/i) || [,'jpg'])[1].toLowerCase();
           const ext = urlExt === 'jpeg' ? 'jpg' : urlExt;
-          const mime = blob.type || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
-          return await uploadToR2(blob, `covers/${safeKey}.${ext}`, mime);
+          const r = await fetch(`${WORKER_URL}?action=mirror`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, key: `covers/${safeKey}.${ext}` }),
+          });
+          if (!r.ok) return '';
+          const data = await r.json().catch(() => ({}));
+          return data.url || '';
         };
 
         // Pass 1: prefer a real sleeve from the folder.
