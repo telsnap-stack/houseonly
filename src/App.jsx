@@ -3105,6 +3105,712 @@ function DBHImporter() {
   );
 }
 
+// ── MOTHER TONGUE IMPORTER ─────────────────────────────────────
+// Combines 3 sources:
+//   1. Invoice PDF       → catno, qty, dealer price (with discount)
+//   2. Listener HTML     → artist, title, label, format, description
+//   3. Distribution dir  → cover image + audio snippets (uploaded to R2)
+//
+// The folder is dropped via webkitdirectory; we walk every file and index
+// by "normalized catno" (uppercase, alphanumeric only). Tolerates the
+// distributor's chaotic structure: covers can be flat or in subfolders
+// like Artwork/, snippets can live in any of {snippets, Snippets, SNIPPETS,
+// SNIPETS, CLIPS, AUDIO CLIPS, MP3, Audio Snippets, drive-download-...,
+// THIS/THAT split-by-side, Trasforma Snippets, etc.}
+function MotherTongueImporter() {
+  const [pdfFile, setPdfFile]       = useState(null);
+  const [htmlFile, setHtmlFile]     = useState(null);
+  const [folderFiles, setFolderFiles] = useState([]); // raw File[] from webkitdirectory
+  const [invoiceItems, setInvoiceItems] = useState([]); // [{catno, qty, dealerPrice}]
+  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → {artist,title,label,description,fmt}
+  const [folderIndex, setFolderIndex]   = useState({}); // catnoNorm → {covers:[File], audio:[File]}
+  const [status, setStatus]   = useState('idle');
+  const [progress, setProgress] = useState({ done:0, total:0, current:'' });
+  const [results, setResults] = useState([]);
+  const [error, setError]     = useState('');
+  const [margin, setMargin]   = useState(60);
+  const pdfRef    = useRef(null);
+  const htmlRef   = useRef(null);
+  const folderRef = useRef(null);
+
+  // Normalize catno for matching: uppercase + alphanumeric only.
+  // "BLDT007r" → "BLDT007R"; "MT-NERO-002" → "MTNERO002"; "WW-019" → "WW019".
+  const normCatno = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  // ── PDF PARSER ────────────────────────────────────────────────
+  // Mother Tongue invoices have a 7-column table:
+  //   CÓDIGO | DESCRIPCIÓN | CANTIDAD | DESCUENTO | PRECIO POR UNIDAD | IMPORTE | % IVA
+  // PDF.js streams text positioned by coordinate; we reconstruct lines by Y, then
+  // scan each line for "<catno> <descripcion> <qty> [<discount>%] <unitPrice> <total> 0"
+  // Items with discount show the discounted price in 3 decimals (e.g. "5.931") above
+  // the original (struck-through) "6.59" — we always take the smaller (real) price.
+  async function parseInvoicePDF(file) {
+    const pdfjsLib = await loadPDFJS();
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    // Concatenate all text items from all pages into one stream of words+positions.
+    const tokens = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const c = await page.getTextContent();
+      const vp = page.getViewport({ scale: 1 });
+      for (const it of c.items) {
+        const x = it.transform[4];
+        const y = vp.height - it.transform[5]; // flip Y to top-down
+        const s = String(it.str || '').trim();
+        if (s) tokens.push({ s, x, y, page: p });
+      }
+    }
+    // Group tokens into lines by (page, rounded Y).
+    const lineMap = new Map();
+    for (const t of tokens) {
+      const key = `${t.page}:${Math.round(t.y / 4)}`; // 4px tolerance
+      if (!lineMap.has(key)) lineMap.set(key, []);
+      lineMap.get(key).push(t);
+    }
+    const lines = Array.from(lineMap.values())
+      .map(toks => ({ toks: toks.sort((a,b) => a.x - b.x), page: toks[0].page, y: toks[0].y }))
+      .sort((a,b) => a.page - b.page || a.y - b.y);
+
+    // Skip headers/footers/decoration.
+    const SKIP_PATTERNS = [
+      /^Mother Tongue srl/i,
+      /^Lungadige Galtarossa/i,
+      /^N\.?i\.?f\.?/i,
+      /^FACTURA\s*n/i,
+      /^Factura\s*n.*?\d+\s*\/\s*\d+/i,
+      /^info@mothertonguerecords/i,
+      /^tel:/i,
+      /^OBJETO/i,
+      /^MAILORDER/i,
+      /^CÓDIGO\b/i,
+      /^DESCRIPCIÓN\b/i,
+      /^Ordine\s+n\./i,
+      /^EMAIL\b/i,
+      /^DESTINATARIO\b/i,
+      /^Telsnap/i,
+      /^Avenida/i,
+      /^\d{5}\s+Madrid/i,
+      /^Spain\s*$/i,
+      /^NOTE\s+/i,
+      /^In riferimento/i,
+      /^FORMA DE PAGO/i,
+      /^Bonifico/i,
+      /^IBAN/i,
+      /^SWIFT/i,
+      /^PLAZOS/i,
+      /^RESUMEN DE IVA/i,
+      /^GRAVABLE\b/i,
+      /^IMPUESTOS\b/i,
+      /^Gravable\s+€/i,
+      /^Non\s+imponibile/i,
+      /^Documento\s+generato/i,
+      /^SH001\b/i,                 // shipping line
+      /^SHIPPING\s*$/i,
+      /^HS CODE/i,
+      /^vinyl\s+records\s*$/i,
+    ];
+    const skip = (s) => SKIP_PATTERNS.some(rx => rx.test(s));
+
+    // Reconstruct lines as text strings, but keep structure: leading word is catno.
+    // Mother Tongue lines look like:
+    //   "BLACKLP010 dego - love was never your goal 2 € 12.08 € 24.16 0"
+    //   "mt7003 Tiombé Lockhart - Sexy Suzy on a Sunday (Remixes) 7"  2 10% € 5.931  € 11.86 0"
+    //                                                                            6.59     13.18
+    // (the discounted line spreads "5.931" and "6.59" across two visual rows)
+    const items = [];
+    let pending = null;       // half-parsed item awaiting continuation line
+    const CATNO_RX = /^[A-Za-z0-9][A-Za-z0-9._\-]*$/;
+
+    for (const line of lines) {
+      const text = line.toks.map(t => t.s).join(' ').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      if (skip(text)) continue;
+
+      // Try to identify if this line starts with a catno.
+      // Catno = first whitespace-delimited word, alphanumeric/hyphen/underscore/dot,
+      // length 3..30, and exists somewhere later in the line as a number column.
+      const firstWord = text.split(/\s+/)[0];
+      const looksLikeCatno = firstWord
+        && firstWord.length >= 3 && firstWord.length <= 30
+        && CATNO_RX.test(firstWord)
+        && /[A-Za-z]/.test(firstWord)        // must contain at least one letter
+        && /^[A-Z0-9]/i.test(firstWord);
+
+      // Scan numbers in the line (qty, discount%, unit price, total).
+      // Match "€ 12.08", "€12,08", "12.08" etc. — accept both . and , as decimal.
+      const numRx = /(?:€\s*)?(\d+(?:[.,]\d+)?)/g;
+      const nums = [];
+      let m;
+      while ((m = numRx.exec(text)) !== null) {
+        // Capture position so we can dedupe overlapping matches.
+        nums.push({ raw: m[1], val: parseFloat(m[1].replace(',', '.')), idx: m.index });
+      }
+
+      const discountMatch = text.match(/\b(\d{1,2})%/);
+      const hasDiscount = !!discountMatch;
+
+      if (looksLikeCatno) {
+        // New item starting on this line. Extract numbers AFTER the first word.
+        // Pattern (no discount):  qty, € unitPrice, € totalPrice, 0
+        // Pattern (with disc):    qty, disc%, [discPrice 3dec, origPrice 2dec], [discTotal, origTotal], 0
+        // Strategy:
+        //  - Find the qty: the smallest integer near start (before discount/price).
+        //  - For unit price: prefer the 3-decimal number (e.g. 5.931) if present
+        //    (it's the real discounted price); otherwise the first €-prefixed number.
+
+        // Look for "<qty> <something> ... <unitPrice>". Qty comes right after title.
+        // Title can run multi-line, so don't assume position — instead, the LAST
+        // numbers on the line are reliable: in "qty disc%? unitPrice total 0",
+        // the trailing "0" is % IVA. Walk numbers backwards.
+        const numList = nums.map(n => n.val);
+        // Drop the trailing 0 (IVA).
+        while (numList.length && numList[numList.length-1] === 0) numList.pop();
+
+        let qty = null, dealerPrice = null;
+        if (hasDiscount) {
+          // Numbers on first line of a discounted item:
+          //   [qty, disc%, discPrice3dec, discTotal] — origPrice and origTotal are
+          //   on a continuation line below. Take qty + discPrice3dec.
+          // Find the discount % in numList (matches discountMatch[1]).
+          const discPct = parseInt(discountMatch[1]);
+          const idxDisc = numList.findIndex(v => v === discPct);
+          if (idxDisc > 0) {
+            qty = numList[idxDisc - 1];                // qty just before %
+            dealerPrice = numList[idxDisc + 1] || null; // discounted price after %
+          }
+        } else {
+          // Without discount: [qty, unitPrice, totalPrice]
+          // qty is the smallest integer (1-99 typically), price is the rest.
+          if (numList.length >= 3) {
+            qty = numList[numList.length - 3];
+            dealerPrice = numList[numList.length - 2];
+          } else if (numList.length === 2) {
+            // qty + price (total dropped/missing)
+            qty = numList[0];
+            dealerPrice = numList[1];
+          }
+        }
+
+        if (qty != null && dealerPrice != null && qty > 0 && dealerPrice > 0) {
+          items.push({ catno: firstWord, qty: Math.round(qty), dealerPrice });
+          pending = null;
+        } else if (firstWord.length >= 3) {
+          // Couldn't parse numbers — possibly continuation line. Hold as pending
+          // so the next line's numbers can fill in.
+          pending = { catno: firstWord };
+        }
+      } else if (pending && nums.length >= 2) {
+        // Continuation line for a pending item.
+        const numList = nums.map(n => n.val);
+        while (numList.length && numList[numList.length-1] === 0) numList.pop();
+        if (numList.length >= 3) {
+          pending.qty = Math.round(numList[numList.length - 3]);
+          pending.dealerPrice = numList[numList.length - 2];
+          if (pending.qty > 0 && pending.dealerPrice > 0) items.push(pending);
+        }
+        pending = null;
+      }
+    }
+    return items;
+  }
+
+  // ── HTML LISTENER PARSER ──────────────────────────────────────
+  // Extract `const RELEASES = [...]` from the listener HTML.
+  async function parseListenerHTML(file) {
+    const text = await file.text();
+    const m = text.match(/const\s+RELEASES\s*=\s*(\[[\s\S]*?\]);/);
+    if (!m) throw new Error('Could not find RELEASES array in HTML file');
+    let data;
+    try { data = JSON.parse(m[1]); }
+    catch (e) { throw new Error('RELEASES JSON parse failed: ' + e.message); }
+
+    // Index by normalized catno; on duplicates, prefer the entry with most data
+    // (cover present + tracks present + description non-empty).
+    const score = (r) =>
+      (r.cover ? 4 : 0) + (r.tracks?.length ? 2 : 0) + (r.description ? 1 : 0);
+    const map = {};
+    for (const r of data) {
+      const key = normCatno(r.cat);
+      if (!key) continue;
+      if (!map[key] || score(r) > score(map[key])) map[key] = r;
+    }
+    return map;
+  }
+
+  // ── FOLDER INDEXER ────────────────────────────────────────────
+  // Receive a flat list of File objects (each with file.webkitRelativePath).
+  // Walk paths, pick a "best matching catno" for each file by checking each
+  // path segment against all known catnos from the invoice. Group accordingly.
+  function buildFolderIndex(files, knownCatnos) {
+    const index = {};                      // catnoNorm → { covers:[File], audio:[File] }
+    const knownSet = new Set(knownCatnos.map(normCatno));
+    const SKIP_FILE = (n) =>
+      n.startsWith('._') ||                       // macOS resource forks
+      n === '.DS_Store' || n === 'Thumbs.db';
+    const SKIP_DIR  = (seg) => seg === '__MACOSX';
+
+    for (const f of files) {
+      const path = f.webkitRelativePath || f.name;
+      const segs = path.split('/');
+      const fname = segs[segs.length - 1];
+      if (SKIP_FILE(fname)) continue;
+      if (segs.some(SKIP_DIR)) continue;
+
+      // Find the deepest path segment that matches a known catno.
+      let matchedKey = null;
+      for (const seg of segs) {
+        const k = normCatno(seg);
+        if (k && knownSet.has(k)) { matchedKey = k; /* keep walking — deepest wins */ }
+      }
+      if (!matchedKey) continue;
+
+      // Classify file by extension.
+      const ext = (fname.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
+      const isImg   = ['jpg','jpeg','png','webp'].includes(ext);
+      const isAudio = ['mp3','wav','flac','aac','ogg','m4a'].includes(ext);
+      // Skip ZIP (e.g. EGLO99 has both AUDIO CLIPS.zip and AUDIO CLIPS/ folder),
+      // PDFs, RTFs, etc.
+      if (!isImg && !isAudio) continue;
+
+      if (!index[matchedKey]) index[matchedKey] = { covers: [], audio: [] };
+      if (isImg)   index[matchedKey].covers.push(f);
+      if (isAudio) index[matchedKey].audio.push(f);
+    }
+    return index;
+  }
+
+  // ── COVER SELECTION ───────────────────────────────────────────
+  // Given a list of image Files for one catno, pick the best front cover.
+  // Priority order tested against real distributor data: explicit "front cover" >
+  // "front" > "side a"/"_a_"/"label a" > "cover"/"artwork" > anything not "back" >
+  // largest file > first.
+  function selectCover(images) {
+    if (!images || images.length === 0) return null;
+    if (images.length === 1) return images[0];
+    const lc = (f) => f.name.toLowerCase();
+    const tests = [
+      f => /front[\s_-]*cover/i.test(lc(f)),
+      f => /\bfront\b/i.test(lc(f)) && !/\bback\b/i.test(lc(f)),
+      f => /(side[\s_-]*a|\b_a_\b|\ba[\s_-]*side\b|label[\s_-]*a|\(a\)|art[\s_-]*a[\s_-]*side)/i.test(lc(f))
+            && !/\bback\b/i.test(lc(f)),
+      f => /(cover|artwork|art\b|main)/i.test(lc(f)) && !/\bback\b/i.test(lc(f)),
+      f => !/\bback\b/i.test(lc(f)),
+    ];
+    for (const t of tests) {
+      const hit = images.find(t);
+      if (hit) return hit;
+    }
+    // Fallback: largest by size.
+    return images.slice().sort((a,b) => b.size - a.size)[0];
+  }
+
+  // ── AUDIO SELECTION + ORDERING ────────────────────────────────
+  // If both MP3 and WAV exist for the same track name, prefer MP3.
+  // Sort by side (A,B,C,D) + track number; fall back to "01.","02." style;
+  // then alphabetical. THIS/THAT subfolders signal A/B side respectively.
+  function orderAudio(audioFiles) {
+    if (!audioFiles || audioFiles.length === 0) return [];
+    // De-prefer WAV when the same basename exists as MP3.
+    const byBase = {};
+    for (const f of audioFiles) {
+      const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
+      const ext  = (f.name.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
+      const score = ext === 'mp3' ? 3 : ext === 'm4a' ? 2 : ext === 'wav' ? 1 : 0;
+      if (!byBase[base] || score > byBase[base].score) byBase[base] = { f, score };
+    }
+    const filtered = Object.values(byBase).map(x => x.f);
+    // Sort key: (sideRank, trackNum, fallbackName)
+    const keyOf = (f) => {
+      const path = f.webkitRelativePath || f.name;
+      const inThis = /\/THIS\b/i.test(path) || /\/THIS\//i.test(path);
+      const inThat = /\/THAT\b/i.test(path) || /\/THAT\//i.test(path);
+      const fname = f.name;
+      // Patterns: "A1", "A1.", "A1 -", "A 1.", "Side A.1", "Side A 1", "01 A1 - ", "01.", "1."
+      let side = 99, num = 999;
+      let m;
+      if ((m = fname.match(/^(?:\d+\s*[-_.]?\s*)?Side\s+([A-D])[.\s]+(\d+)/i))) {
+        side = m[1].toUpperCase().charCodeAt(0) - 65;
+        num  = parseInt(m[2]);
+      } else if ((m = fname.match(/^(?:\d+\s*[-_.]?\s*)?([A-D])\s*(\d+)\b/i))) {
+        side = m[1].toUpperCase().charCodeAt(0) - 65;
+        num  = parseInt(m[2]);
+      } else if ((m = fname.match(/^([A-D])\s+Side\b/i))) {
+        side = m[1].toUpperCase().charCodeAt(0) - 65;
+        num  = 0;
+      } else if ((m = fname.match(/^(\d+)[.\s_-]/))) {
+        side = inThat ? 1 : (inThis ? 0 : 50);   // THIS=A, THAT=B
+        num  = parseInt(m[1]);
+      } else {
+        side = inThat ? 1 : (inThis ? 0 : 99);
+      }
+      return [side, num, fname.toLowerCase()];
+    };
+    return filtered.slice().sort((a,b) => {
+      const ka = keyOf(a), kb = keyOf(b);
+      return (ka[0]-kb[0]) || (ka[1]-kb[1]) || (ka[2] < kb[2] ? -1 : ka[2] > kb[2] ? 1 : 0);
+    });
+  }
+
+  // ── TRACK NAME EXTRACTION ─────────────────────────────────────
+  // Strip prefixes (A1, B2, Side A.1, 01.) and suffixes (Snippet, Clip, Preview,
+  // "60 sec taster", "_snippet"). Leave the actual song title.
+  function trackNameFromFilename(fname) {
+    let n = fname.replace(/\.[^.]+$/, '');                        // ext
+    n = n.replace(/^\d+\s*[-_.]\s*/, '');                          // leading "01 - " / "01_" / "01."
+    n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-_.]?\s*/i, '');    // "Side A.1 "
+    n = n.replace(/^[A-D]\s*\d+\s*[-_.]?\s*/i, '');                // "A1 - "
+    n = n.replace(/^[A-D]\s+(?:Side\s*[-_.]?\s*)?/i, '');          // "A Side - "
+    n = n.replace(/^TRACK\s+\d+[\s_-]*/i, '');                     // "TRACK 1 "
+    // Trailing noise: "(Snippet)", "_snippet", "(Clip)", "(Preview)", "(60 sec taster)"
+    n = n.replace(/[\s_-]*\(\s*\d+\s*sec\s+taster\s*\)\s*$/i, '');
+    n = n.replace(/[\s_-]*\(?\s*(snippet|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
+    n = n.replace(/[\s_-]+$/, '').trim();
+    n = n.replace(/_/g, ' ');                                      // underscores → spaces
+    n = n.replace(/\s{2,}/g, ' ').trim();
+    return n || fname.replace(/\.[^.]+$/, '');
+  }
+
+  // ── DERIVE WEIGHT FROM FORMAT ─────────────────────────────────
+  function gramsFromFmt(fmt) {
+    const f = String(fmt || '').toLowerCase();
+    if (/3\s*x\s*12|3x12|triple/.test(f)) return '1300';
+    if (/2\s*x\s*12|2x12|double/.test(f)) return '900';
+    if (/7"|7\s*inch/.test(f))            return '180';
+    return '500';
+  }
+
+  // ── INPUT HANDLERS ────────────────────────────────────────────
+  const onPdf = async (file) => {
+    if (!file) return;
+    setError(''); setStatus('parsing');
+    try {
+      const items = await parseInvoicePDF(file);
+      setInvoiceItems(items);
+      setPdfFile(file.name);
+      setStatus('idle');
+    } catch (e) {
+      setError('PDF parse error: ' + e.message); setStatus('idle');
+    }
+  };
+
+  const onHtml = async (file) => {
+    if (!file) return;
+    setError(''); setStatus('parsing');
+    try {
+      const map = await parseListenerHTML(file);
+      setReleaseMeta(map);
+      setHtmlFile(file.name);
+      setStatus('idle');
+    } catch (e) {
+      setError('HTML parse error: ' + e.message); setStatus('idle');
+    }
+  };
+
+  const onFolder = (filesList) => {
+    const arr = Array.from(filesList || []);
+    setFolderFiles(arr);
+  };
+
+  // Re-build the folder index whenever inputs change (so user can drop in any order).
+  useEffect(() => {
+    if (!folderFiles.length || !invoiceItems.length) {
+      setFolderIndex({});
+      return;
+    }
+    const idx = buildFolderIndex(folderFiles, invoiceItems.map(i => i.catno));
+    setFolderIndex(idx);
+  }, [folderFiles, invoiceItems]);
+
+  // ── PROCESSING PIPELINE ───────────────────────────────────────
+  const process = async () => {
+    if (!invoiceItems.length) { setError('Need invoice PDF first'); return; }
+    setError(''); setStatus('processing'); setResults([]);
+    try {
+      const total = invoiceItems.length;
+      const processed = [];
+      for (let i = 0; i < invoiceItems.length; i++) {
+        const item = invoiceItems[i];
+        const key  = normCatno(item.catno);
+        const meta = releaseMeta[key] || {};
+        const assets = folderIndex[key] || { covers: [], audio: [] };
+        setProgress({ done:i, total, current:`${item.catno} — preparing…` });
+
+        // Pull metadata from listener JSON (preferred) or fall back to catno only.
+        const artist = meta.artist || '';
+        const title  = meta.title  || item.catno;
+        const label  = meta.label  || '';
+        const fmtNorm = meta.fmt_norm || meta.format || '';
+        const grams  = gramsFromFmt(fmtNorm);
+        const desc   = meta.description || '';
+        const handle = item.catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+        const safeKey = item.catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+
+        // Pricing — same formula as DBH/Kudos: dealer × (1+margin%) → ceil − 0.01.
+        const rawPrice = item.dealerPrice * (1 + margin / 100);
+        const price    = (Math.ceil(rawPrice) - 0.01).toFixed(2);
+
+        // Upload cover (if any) to R2.
+        let coverUrl = '';
+        let itemError = '';
+        const coverFile = selectCover(assets.covers);
+        if (coverFile) {
+          try {
+            setProgress({ done:i, total, current:`${item.catno} — uploading cover…` });
+            const ext = (coverFile.name.match(/\.([a-z0-9]+)$/i) || [,'jpg'])[1].toLowerCase();
+            const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+            coverUrl = await uploadToR2(coverFile, `covers/${safeKey}.${ext}`, mime);
+          } catch (e) { itemError = 'Cover upload: ' + e.message; }
+        }
+
+        // Upload audio snippets (if any) to R2.
+        const tracks = [];
+        const audioOrdered = orderAudio(assets.audio);
+        for (let a = 0; a < audioOrdered.length; a++) {
+          const af = audioOrdered[a];
+          const safeFilename = af.name.replace(/[^A-Za-z0-9._-]+/g, '-');
+          try {
+            setProgress({ done:i, total, current:`${item.catno} — audio ${a+1}/${audioOrdered.length}…` });
+            const url = await uploadToR2(af, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+            tracks.push({ name: trackNameFromFilename(af.name), url });
+          } catch (e) {
+            // Don't kill the whole import for one bad track; just skip.
+            if (!itemError) itemError = 'Audio upload partial fail';
+          }
+        }
+
+        // Build description HTML using the shared helper.
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
+
+        const shopifyTags = [
+          'vinyl', 'mothertongue',
+          label ? `label:${label}` : '',
+          String(new Date().getFullYear()),
+        ].filter(Boolean).join(', ');
+
+        processed.push({
+          _catno: item.catno, _title: title, _artist: artist,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _hasMeta: !!meta.artist, _hasAssets: !!(assets.covers.length || assets.audio.length),
+          'Handle': handle,
+          'Title': title || item.catno,
+          'Body (HTML)': `${descHtml}${audioHtml}`,
+          'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+          'Type': '',
+          'Tags': shopifyTags,
+          'Published': 'TRUE',
+          'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
+          'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
+          'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
+          'Variant SKU': item.catno,
+          'Variant Grams': grams,
+          'Variant Inventory Tracker': 'shopify',
+          'Variant Inventory Qty': String(item.qty),
+          'Variant Inventory Policy': 'continue',
+          'Variant Fulfillment Service': 'manual',
+          'Variant Price': price,
+          'Variant Compare At Price': '',
+          'Variant Requires Shipping': 'TRUE',
+          'Variant Taxable': 'TRUE',
+          'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
+          'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
+          'Variant Barcode': '',
+          'Image Src': coverUrl,
+          'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
+          'Variant Image':'','Variant Weight Unit':'kg',
+          'Variant Tax Code':'','Cost per item': item.dealerPrice.toFixed(2), 'Status':'active',
+        });
+        setProgress({ done:i+1, total, current:'' });
+      }
+      setResults(processed);
+      setStatus('review');
+    } catch (e) {
+      setError(e.message); setStatus('idle');
+    }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [
+      CSV_KEYS.join(','),
+      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+    ];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mothertongue_shopify_import.csv';
+    a.click();
+  };
+
+  // ── DERIVED STATS ─────────────────────────────────────────────
+  const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+  const matchedMeta   = invoiceItems.filter(it => releaseMeta[normCatno(it.catno)]).length;
+  const matchedAssets = invoiceItems.filter(it => folderIndex[normCatno(it.catno)]).length;
+  const itemsWithCover = invoiceItems.filter(it => {
+    const idx = folderIndex[normCatno(it.catno)];
+    return idx && idx.covers.length > 0;
+  }).length;
+  const itemsWithAudio = invoiceItems.filter(it => {
+    const idx = folderIndex[normCatno(it.catno)];
+    return idx && idx.audio.length > 0;
+  }).length;
+
+  // ── RENDER ────────────────────────────────────────────────────
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
+        Drop the invoice PDF, the listener HTML (descriptions/artist/title), and the
+        full distributor folder. The importer will match catnos across all three
+        sources and build the Shopify CSV.
+      </p>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e=>e.preventDefault()}
+        onDrop={e=>{
+          e.preventDefault();
+          const fl = [...e.dataTransfer.files];
+          const pdf  = fl.find(f => /\.pdf$/i.test(f.name));
+          const html = fl.find(f => /\.html?$/i.test(f.name));
+          if (pdf)  onPdf(pdf);
+          if (html) onHtml(html);
+        }}
+        style={{
+          border:`2px dashed ${(pdfFile||htmlFile||folderFiles.length)?S.accent:S.border}`,
+          borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14,
+          transition:'border 0.15s'
+        }}
+      >
+        <div style={{fontSize:28,marginBottom:6}}>🇮🇹</div>
+        <div style={{fontSize:11,color:(pdfFile||htmlFile||folderFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
+          Mother Tongue · Drop invoice PDF + listener HTML, then pick folder
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+          <input ref={pdfRef}  type="file" accept=".pdf"  style={{display:'none'}} onChange={e=>{if(e.target.files[0])onPdf(e.target.files[0]);e.target.value='';}} />
+          <input ref={htmlRef} type="file" accept=".html,.htm" style={{display:'none'}} onChange={e=>{if(e.target.files[0])onHtml(e.target.files[0]);e.target.value='';}} />
+          <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple style={{display:'none'}} onChange={e=>{onFolder(e.target.files);e.target.value='';}} />
+          <button onClick={()=>pdfRef.current.click()}
+            style={{background:pdfFile?S.accent:S.border,border:'none',color:pdfFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {pdfFile?`✓ ${pdfFile}`:'+ Invoice PDF'}
+          </button>
+          <button onClick={()=>htmlRef.current.click()}
+            style={{background:htmlFile?S.accent:S.border,border:'none',color:htmlFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {htmlFile?`✓ ${htmlFile}`:'+ Listener HTML'}
+          </button>
+          <button onClick={()=>folderRef.current.click()}
+            style={{background:folderFiles.length?S.accent:S.border,border:'none',color:folderFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {folderFiles.length?`✓ ${folderFiles.length} files`:'+ Distributor folder'}
+          </button>
+          {folderFiles.length>0&&<button onClick={()=>setFolderFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear</button>}
+        </div>
+      </div>
+
+      {/* Status panel */}
+      {(invoiceItems.length>0 || Object.keys(releaseMeta).length>0 || folderFiles.length>0) && status==='idle' && (
+        <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
+          <span>Invoice items: <b style={{color:S.text}}>{invoiceItems.length}</b></span>
+          {Object.keys(releaseMeta).length>0 && (
+            <span>Listener releases: <b style={{color:S.text}}>{Object.keys(releaseMeta).length}</b></span>
+          )}
+          {invoiceItems.length>0 && (
+            <span>Meta matched: <b style={{color: matchedMeta===invoiceItems.length ? S.accent : '#ff8800'}}>{matchedMeta}/{invoiceItems.length}</b></span>
+          )}
+          {invoiceItems.length>0 && folderFiles.length>0 && (
+            <>
+              <span>Assets matched: <b style={{color: matchedAssets===invoiceItems.length ? S.accent : '#ff8800'}}>{matchedAssets}/{invoiceItems.length}</b></span>
+              <span>With cover: <b style={{color:S.accent}}>{itemsWithCover}</b></span>
+              <span>With audio: <b style={{color:S.accent}}>{itemsWithAudio}</b></span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Margin + process */}
+      {invoiceItems.length>0 && status==='idle' && (
+        <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <span style={{fontSize:10,color:S.muted}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)}
+              style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
+          </div>
+          <span style={{fontSize:9,color:S.muted}}>
+            e.g. €8.24 × {(1+margin/100).toFixed(2)} = €{(8.24*(1+margin/100)).toFixed(2)} → €{(Math.ceil(8.24*(1+margin/100))-0.01).toFixed(2)}
+          </span>
+          <div style={{flex:1}}/>
+          <Btn ch={`🚀 Process ${invoiceItems.length} releases`} onClick={process} full />
+        </div>
+      )}
+
+      {/* Progress */}
+      {status==='processing' && (
+        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>PROCESSING…</span>
+            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
+            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
+          </div>
+          {progress.current && <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {error && (
+        <div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>
+      )}
+
+      {/* Results grid */}
+      {status==='review' && results.length>0 && (
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} releases</span>
+              <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
+                {results.filter(r=>r._coverUrl).length} covers · {results.filter(r=>r._tracks?.length>0).length} audio
+                {results.filter(r=>!r._hasMeta).length>0 ? ` · ${results.filter(r=>!r._hasMeta).length} no meta` : ''}
+                {results.filter(r=>!r._hasAssets).length>0 ? ` · ${results.filter(r=>!r._hasAssets).length} no assets` : ''}
+                {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
+              </span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
+            {results.map((r,i)=>(
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
+                <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
+                  {r._coverUrl
+                    ? <img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
+                    : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
+                  }
+                  {r._tracks?.length>0 && <div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
+                  {!r._hasMeta && <div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO META</div>}
+                  {!r._coverUrl && r._hasAssets && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
+                  {!r._hasAssets && <div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>NO ASSETS</div>}
+                  {r._error && <div style={{position:'absolute',bottom:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                </div>
+                <div style={{padding:'8px 8px 6px'}}>
+                  <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
+                  <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
+                  <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist||'—'}</div>
+                  <div style={{fontSize:10,color:S.accent,marginTop:3,fontWeight:700}}>€{r['Variant Price']}</div>
+                  {r._error && <div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
@@ -3130,10 +3836,12 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('zip','📦 W&S Import')}
           {tabBtn('kudos','🎵 Kudos Import')}
           {tabBtn('dbh','🏠 DBH Import')}
+          {tabBtn('mt','🇮🇹 MT Import')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
         {tab==='dbh'   && <DBHImporter />}
+        {tab==='mt'    && <MotherTongueImporter />}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
