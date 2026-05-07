@@ -3140,176 +3140,158 @@ function MotherTongueImporter() {
   // ── PDF PARSER ────────────────────────────────────────────────
   // Mother Tongue invoices have a 7-column table:
   //   CÓDIGO | DESCRIPCIÓN | CANTIDAD | DESCUENTO | PRECIO POR UNIDAD | IMPORTE | % IVA
-  // PDF.js streams text positioned by coordinate; we reconstruct lines by Y, then
-  // scan each line for "<catno> <descripcion> <qty> [<discount>%] <unitPrice> <total> 0"
-  // Items with discount show the discounted price in 3 decimals (e.g. "5.931") above
-  // the original (struck-through) "6.59" — we always take the smaller (real) price.
+  //
+  // Three line patterns appear in the wild — the parser handles all of them:
+  //   1. Single-line item (no discount, short title):
+  //      "BLACKLP010 dego - love was never your goal 2 € 12.08 € 24.16 0"
+  //   2. Multi-line title (no discount, long title): title wraps but the catno
+  //      line still carries qty + prices.
+  //   3. Discount item (10% promo): the catno line has only "qty 10% 0", and
+  //      the discounted unit price (3-decimal, e.g. "€ 7.911") sits on a
+  //      SIBLING line just above; the original (struck-through) price is below.
+  //
+  // Heuristics that took several iterations to land:
+  //   - "qty" is the integer immediately preceding the FIRST €-prefixed number
+  //     (NOT just the first integer — defends against titles like "(2024 Reissue)"
+  //     or "33.10.3402 Labyrinths" that contain numbers).
+  //   - Discounted unit price is identified by 3-decimal format ("7.911"); we
+  //     scan ±20px Y for the closest sibling line containing one.
+  //   - Trailing "0" on a candidate line is required as the % IVA marker —
+  //     prevents legal-text lines like "Decreto legge 331/93" from registering
+  //     as items even though "legge" passes the catno regex.
   async function parseInvoicePDF(file) {
     const pdfjsLib = await loadPDFJS();
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    // Concatenate all text items from all pages into one stream of words+positions.
-    const tokens = [];
+    // Group text items into lines per page, sorted top-to-bottom then left-to-right.
+    const lines = [];
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const c = await page.getTextContent();
       const vp = page.getViewport({ scale: 1 });
+      const byY = new Map();
       for (const it of c.items) {
         const x = it.transform[4];
-        const y = vp.height - it.transform[5]; // flip Y to top-down
-        const s = String(it.str || '').trim();
-        if (s) tokens.push({ s, x, y, page: p });
+        const y = vp.height - it.transform[5];
+        const s = String(it.str || '');
+        if (!s) continue;
+        const key = Math.round(y / 4) * 4;     // 4px Y bucket
+        if (!byY.has(key)) byY.set(key, []);
+        byY.get(key).push({ s, x, x1: x + (it.width || 0) });
+      }
+      for (const [y, toks] of byY.entries()) {
+        toks.sort((a, b) => a.x - b.x);
+        // Reconstruct text preserving spaces between far-apart tokens.
+        let text = '', lastX = null;
+        for (const t of toks) {
+          if (lastX !== null && t.x - lastX > 1.0) text += ' ';
+          text += t.s;
+          lastX = t.x1;
+        }
+        lines.push({ page: p, y, text: text.trim() });
       }
     }
-    // Group tokens into lines by (page, rounded Y).
-    const lineMap = new Map();
-    for (const t of tokens) {
-      const key = `${t.page}:${Math.round(t.y / 4)}`; // 4px tolerance
-      if (!lineMap.has(key)) lineMap.set(key, []);
-      lineMap.get(key).push(t);
-    }
-    const lines = Array.from(lineMap.values())
-      .map(toks => ({ toks: toks.sort((a,b) => a.x - b.x), page: toks[0].page, y: toks[0].y }))
-      .sort((a,b) => a.page - b.page || a.y - b.y);
+    lines.sort((a, b) => a.page - b.page || a.y - b.y);
 
-    // Skip headers/footers/decoration.
+    // Headers / footers / decoration / legal text — never treated as items.
     const SKIP_PATTERNS = [
-      /^Mother Tongue srl/i,
-      /^Lungadige Galtarossa/i,
-      /^N\.?i\.?f\.?/i,
-      /^FACTURA\s*n/i,
-      /^Factura\s*n.*?\d+\s*\/\s*\d+/i,
-      /^info@mothertonguerecords/i,
-      /^tel:/i,
-      /^OBJETO/i,
-      /^MAILORDER/i,
-      /^CÓDIGO\b/i,
-      /^DESCRIPCIÓN\b/i,
-      /^Ordine\s+n\./i,
-      /^EMAIL\b/i,
-      /^DESTINATARIO\b/i,
-      /^Telsnap/i,
-      /^Avenida/i,
-      /^\d{5}\s+Madrid/i,
-      /^Spain\s*$/i,
-      /^NOTE\s+/i,
-      /^In riferimento/i,
-      /^FORMA DE PAGO/i,
-      /^Bonifico/i,
-      /^IBAN/i,
-      /^SWIFT/i,
-      /^PLAZOS/i,
-      /^RESUMEN DE IVA/i,
-      /^GRAVABLE\b/i,
-      /^IMPUESTOS\b/i,
-      /^Gravable\s+€/i,
-      /^Non\s+imponibile/i,
-      /^Documento\s+generato/i,
-      /^SH001\b/i,                 // shipping line
-      /^SHIPPING\s*$/i,
-      /^HS CODE/i,
-      /^vinyl\s+records\s*$/i,
+      /^Mother Tongue srl/i, /^Lungadige/i, /^N\.?i\.?f\.?/i,
+      /^FACTURA/i, /^Factura/i, /^info@/i, /^tel:/i,
+      /^OBJETO/i, /^MAILORDER/i, /^CÓDIGO/i, /^DESCRIPCIÓN/i,
+      /^Ordine/i, /^EMAIL\b/i, /^DESTINATARIO/i, /^Telsnap/i,
+      /^Avenida/i, /^\d{5}\s*Madrid/i, /^Spain\s*$/i,
+      /^NOTE\b/i, /\bPlease use the invoice/i, /^In riferimento/i,
+      /^FORMA DE PAGO/i, /^Bonifico/i, /^IBAN/i, /^SWIFT/i,
+      /^PLAZOS/i, /^RESUMEN DE IVA/i, /^GRAVABLE/i,
+      /^Gravable/i, /^Non\s+imponibile/i,
+      /^0%\s*-\s*Non\s+imponibile/i,
+      /^legge\s+\d/i,                    // "legge 331/93" — legal text, not catno
+      /^Documento/i, /^SH001\b/i, /^SHIPPING\s*$/i, /^HS CODE/i,
+      /^vinyl\s+records\s*$/i, /^N\.I\.F\./i,
     ];
-    const skip = (s) => SKIP_PATTERNS.some(rx => rx.test(s));
+    const skip = (t) => SKIP_PATTERNS.some(rx => rx.test(t));
 
-    // Reconstruct lines as text strings, but keep structure: leading word is catno.
-    // Mother Tongue lines look like:
-    //   "BLACKLP010 dego - love was never your goal 2 € 12.08 € 24.16 0"
-    //   "mt7003 Tiombé Lockhart - Sexy Suzy on a Sunday (Remixes) 7"  2 10% € 5.931  € 11.86 0"
-    //                                                                            6.59     13.18
-    // (the discounted line spreads "5.931" and "6.59" across two visual rows)
     const items = [];
-    let pending = null;       // half-parsed item awaiting continuation line
-    const CATNO_RX = /^[A-Za-z0-9][A-Za-z0-9._\-]*$/;
+    const CATNO_RX = /^([A-Za-z0-9][A-Za-z0-9._\-]{2,29})/;
 
-    for (const line of lines) {
-      const text = line.toks.map(t => t.s).join(' ').replace(/\s+/g, ' ').trim();
-      if (!text) continue;
-      if (skip(text)) continue;
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      if (!ln.text) continue;
+      if (skip(ln.text)) continue;
 
-      // Try to identify if this line starts with a catno.
-      // Catno = first whitespace-delimited word, alphanumeric/hyphen/underscore/dot,
-      // length 3..30, and exists somewhere later in the line as a number column.
-      const firstWord = text.split(/\s+/)[0];
-      const looksLikeCatno = firstWord
-        && firstWord.length >= 3 && firstWord.length <= 30
-        && CATNO_RX.test(firstWord)
-        && /[A-Za-z]/.test(firstWord)        // must contain at least one letter
-        && /^[A-Z0-9]/i.test(firstWord);
+      const m = CATNO_RX.exec(ln.text);
+      if (!m) continue;
+      const catno = m[1];
+      if (!/[A-Za-z]/.test(catno)) continue;        // need at least one letter
+      const rest = ln.text.slice(catno.length);
 
-      // Scan numbers in the line (qty, discount%, unit price, total).
-      // Match "€ 12.08", "€12,08", "12.08" etc. — accept both . and , as decimal.
-      const numRx = /(?:€\s*)?(\d+(?:[.,]\d+)?)/g;
-      const nums = [];
-      let m;
-      while ((m = numRx.exec(text)) !== null) {
-        // Capture position so we can dedupe overlapping matches.
-        nums.push({ raw: m[1], val: parseFloat(m[1].replace(',', '.')), idx: m.index });
+      // Find all numbers (with positions) and €-prefixed prices separately.
+      const allNums = [];
+      const numRx = /(\d+(?:[.,]\d+)?)/g;
+      let nm;
+      while ((nm = numRx.exec(rest)) !== null) {
+        const raw = nm[1];
+        allNums.push({
+          val: parseFloat(raw.replace(',', '.')),
+          decimal: raw.includes('.') || raw.includes(','),
+          idx: nm.index,
+        });
+      }
+      // Trailing 0 = % IVA marker. Required to confirm this is an item line.
+      if (allNums.length === 0 || allNums[allNums.length - 1].val !== 0) continue;
+
+      const euroPrices = [];
+      const euroRx = /€\s*(\d+(?:[.,]\d+)?)/g;
+      let em;
+      while ((em = euroRx.exec(rest)) !== null) {
+        euroPrices.push({
+          val: parseFloat(em[1].replace(',', '.')),
+          idx: em.index + em[0].indexOf(em[1]),  // start of the digit
+        });
       }
 
-      const discountMatch = text.match(/\b(\d{1,2})%/);
+      const discountMatch = rest.match(/(\d{1,2})%/);
       const hasDiscount = !!discountMatch;
 
-      if (looksLikeCatno) {
-        // New item starting on this line. Extract numbers AFTER the first word.
-        // Pattern (no discount):  qty, € unitPrice, € totalPrice, 0
-        // Pattern (with disc):    qty, disc%, [discPrice 3dec, origPrice 2dec], [discTotal, origTotal], 0
-        // Strategy:
-        //  - Find the qty: the smallest integer near start (before discount/price).
-        //  - For unit price: prefer the 3-decimal number (e.g. 5.931) if present
-        //    (it's the real discounted price); otherwise the first €-prefixed number.
+      let qty = null, dealerPrice = null;
 
-        // Look for "<qty> <something> ... <unitPrice>". Qty comes right after title.
-        // Title can run multi-line, so don't assume position — instead, the LAST
-        // numbers on the line are reliable: in "qty disc%? unitPrice total 0",
-        // the trailing "0" is % IVA. Walk numbers backwards.
-        const numList = nums.map(n => n.val);
-        // Drop the trailing 0 (IVA).
-        while (numList.length && numList[numList.length-1] === 0) numList.pop();
+      if (hasDiscount) {
+        // Discounted lines have qty + "10%" + trailing 0, but NO prices.
+        // Real discounted unit price (3-decimal) is on a sibling line within ±20px Y.
+        const pct = parseInt(discountMatch[1]);
+        const pctIdx = allNums.findIndex(n => n.val === pct && !n.decimal);
+        if (pctIdx > 0) qty = Math.round(allNums[pctIdx - 1].val);
 
-        let qty = null, dealerPrice = null;
-        if (hasDiscount) {
-          // Numbers on first line of a discounted item:
-          //   [qty, disc%, discPrice3dec, discTotal] — origPrice and origTotal are
-          //   on a continuation line below. Take qty + discPrice3dec.
-          // Find the discount % in numList (matches discountMatch[1]).
-          const discPct = parseInt(discountMatch[1]);
-          const idxDisc = numList.findIndex(v => v === discPct);
-          if (idxDisc > 0) {
-            qty = numList[idxDisc - 1];                // qty just before %
-            dealerPrice = numList[idxDisc + 1] || null; // discounted price after %
-          }
-        } else {
-          // Without discount: [qty, unitPrice, totalPrice]
-          // qty is the smallest integer (1-99 typically), price is the rest.
-          if (numList.length >= 3) {
-            qty = numList[numList.length - 3];
-            dealerPrice = numList[numList.length - 2];
-          } else if (numList.length === 2) {
-            // qty + price (total dropped/missing)
-            qty = numList[0];
-            dealerPrice = numList[1];
+        let bestDy = Infinity, bestPrice = null;
+        for (let j = 0; j < lines.length; j++) {
+          if (j === i) continue;
+          if (lines[j].page !== ln.page) continue;
+          const dy = Math.abs(lines[j].y - ln.y);
+          if (dy > 20) continue;
+          const pm = lines[j].text.match(/(\d+\.\d{3})/);   // 3-decimal = discounted unit price
+          if (pm && dy < bestDy) {
+            bestDy = dy;
+            bestPrice = parseFloat(pm[1]);
           }
         }
+        dealerPrice = bestPrice;
+      } else {
+        // No discount: qty is the LAST non-decimal integer appearing BEFORE the
+        // first €-prefixed price. Defends against "(2024 Reissue)" and similar.
+        if (euroPrices.length >= 1) {
+          const firstPriceIdx = euroPrices[0].idx;
+          const qtyCandidates = allNums.filter(n =>
+            n.idx < firstPriceIdx && !n.decimal && n.val >= 1 && n.val <= 99
+          );
+          if (qtyCandidates.length > 0) {
+            qty = Math.round(qtyCandidates[qtyCandidates.length - 1].val);
+            dealerPrice = euroPrices[0].val;
+          }
+        }
+      }
 
-        if (qty != null && dealerPrice != null && qty > 0 && dealerPrice > 0) {
-          items.push({ catno: firstWord, qty: Math.round(qty), dealerPrice });
-          pending = null;
-        } else if (firstWord.length >= 3) {
-          // Couldn't parse numbers — possibly continuation line. Hold as pending
-          // so the next line's numbers can fill in.
-          pending = { catno: firstWord };
-        }
-      } else if (pending && nums.length >= 2) {
-        // Continuation line for a pending item.
-        const numList = nums.map(n => n.val);
-        while (numList.length && numList[numList.length-1] === 0) numList.pop();
-        if (numList.length >= 3) {
-          pending.qty = Math.round(numList[numList.length - 3]);
-          pending.dealerPrice = numList[numList.length - 2];
-          if (pending.qty > 0 && pending.dealerPrice > 0) items.push(pending);
-        }
-        pending = null;
+      if (qty && dealerPrice && qty > 0 && dealerPrice > 0 && qty < 100) {
+        items.push({ catno, qty, dealerPrice });
       }
     }
     return items;
