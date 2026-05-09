@@ -760,14 +760,32 @@ function PlayerProvider({ children }) {
       a.load();
       return;
     }
-    if (a.src !== cur.url) {
+    const srcChanged = a.src !== cur.url;
+    if (srcChanged) {
       a.src = cur.url;
+      // Force the element to (re)load the new source. Without this, after a
+      // prior removeAttribute('src') + load() (e.g. from clearQueue), the
+      // element can stay in an "empty" media state and a.play() rejects.
+      a.load();
     }
+    let onReady = null;
     if (isPlaying) {
-      a.play().catch(() => setPlaying(false));
+      // play() returns a promise that can reject if interrupted by a load.
+      // If src changed in this same tick, the load() above may not be ready
+      // yet — wait for canplay before calling play() to avoid an AbortError
+      // that would silently flip isPlaying back to false.
+      if (srcChanged) {
+        onReady = () => { a.play().catch(() => setPlaying(false)); };
+        a.addEventListener('canplay', onReady, { once: true });
+      } else {
+        a.play().catch(() => setPlaying(false));
+      }
     } else {
       a.pause();
     }
+    return () => {
+      if (onReady) a.removeEventListener('canplay', onReady);
+    };
   }, [queue, currentIdx, isPlaying]);
 
   // Volume + mute → audio
