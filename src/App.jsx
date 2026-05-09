@@ -625,13 +625,34 @@ function PlayerProvider({ children }) {
     }));
   };
 
-  const playRelease = useCallback((r) => {
+  const playRelease = useCallback((r, startAtTrackIdx = 0) => {
     const items = itemsFromRelease(r);
     if (!items.length) return;
-    setQueue(items);
-    setCurIdx(0);
-    setPlaying(true);
-  }, []);
+    const startOffset = Math.max(0, Math.min(items.length - 1, startAtTrackIdx));
+    setQueue(prevQueue => {
+      // Case 1: empty queue → start fresh with this release.
+      if (prevQueue.length === 0) {
+        setCurIdx(startOffset);
+        setPlaying(true);
+        return items;
+      }
+      // Case 2: release is already in the queue → jump to the requested track of that release, don't duplicate.
+      const releaseId = items[0].releaseId;
+      const existingIdx = prevQueue.findIndex(it => it.releaseId === releaseId);
+      if (existingIdx >= 0) {
+        setCurIdx(existingIdx + startOffset);
+        setPlaying(true);
+        return prevQueue;
+      }
+      // Case 3: insert release immediately after the currently-playing item, then jump to its requested track.
+      // If nothing is currently playing (currentIdx < 0), insert at the start.
+      const insertAt = currentIdx < 0 ? 0 : currentIdx + 1;
+      const next = [...prevQueue.slice(0, insertAt), ...items, ...prevQueue.slice(insertAt)];
+      setCurIdx(insertAt + startOffset);
+      setPlaying(true);
+      return next;
+    });
+  }, [currentIdx]);
 
   const addToQueue = useCallback((r) => {
     const items = itemsFromRelease(r);
@@ -813,17 +834,24 @@ function fmtTime(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+// Shared viewport hook: returns true when window is narrower than `threshold` px.
+// Used by PlayerBar and RecordCard to switch to a stacked layout on phones.
+function useIsMobile(threshold = 720) {
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < threshold);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < threshold);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [threshold]);
+  return isMobile;
+}
+
 // ── PLAYER BAR (sticky bottom) ──────────────────────────────────
 function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const p = usePlayer();
   const [queueOpen, setQueueOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 720);
+  const isMobile = useIsMobile(720);
   const barRef = useRef(null);
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 720);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
   // Sync the rendered player-bar height to a CSS variable so the root container's
   // bottom padding clears the bar exactly, on any layout (1-row desktop / 2-row mobile).
   useEffect(() => {
@@ -945,7 +973,7 @@ function transportBtnStyle(enabled) {
 function QueuePanel({ onClose, onOpenRelease }) {
   const p = usePlayer();
   if (!p) return null;
-  const { queue, currentIdx, removeFromQueue, clearQueue } = p;
+  const { queue, currentIdx, removeFromQueue, clearQueue, jumpToQueueIdx } = p;
 
   return (
     <div style={{ position:'fixed', bottom:'var(--player-h, 64px)', right:14, left:'auto', width:340, maxWidth:'calc(100vw - 28px)', maxHeight:'60vh', background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, zIndex:899, display:'flex', flexDirection:'column', boxShadow:'0 8px 24px rgba(0,0,0,0.5)', fontFamily:"'Inter',system-ui,sans-serif" }}>
@@ -964,8 +992,8 @@ function QueuePanel({ onClose, onOpenRelease }) {
           const trackName = (item.name || '').replace(/^\d+_\d+_/, '').replace(/\.(mp3|wav|flac|aac|ogg)$/i, '');
           return (
             <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 14px', borderBottom:`1px solid ${S.border}`, background:isCur?'#141400':'transparent' }}>
-              <div onClick={()=>onOpenRelease && onOpenRelease(r)} style={{ width:32, height:32, flexShrink:0, background:`linear-gradient(${r.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
-              <div style={{ minWidth:0, flex:1, lineHeight:1.3 }}>
+              <div onClick={()=>onOpenRelease && onOpenRelease(r)} title="Open release details" style={{ width:32, height:32, flexShrink:0, background:`linear-gradient(${r.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
+              <div onClick={()=>jumpToQueueIdx && jumpToQueueIdx(i)} title={isCur?'Restart this track':'Play this track'} style={{ minWidth:0, flex:1, lineHeight:1.3, cursor:'pointer' }}>
                 <div style={{ fontSize:11, fontWeight:700, color:isCur?S.accent:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
                 <div style={{ fontSize:9, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{r.artist} — {r.title}</div>
               </div>
@@ -1008,6 +1036,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const [hov, setHov] = useState(false);
   const wished = isWished ? isWished(r) : false;
   const player = usePlayer();
+  const isMobile = useIsMobile(720);
   const hasTracks = (r.tracks || []).length > 0;
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
@@ -1023,9 +1052,9 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13, fontWeight:700, color:S.text, lineHeight:1.3, marginBottom:2 }}>{r.title}</div>
         <div style={{ fontSize:11, color:S.muted, marginBottom:10 }}>{r.artist}</div>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+        <div style={{ display:'flex', flexDirection:isMobile?'column':'row', alignItems:isMobile?'stretch':'center', justifyContent:'space-between', gap:isMobile?8:6 }}>
           <span style={{ fontSize:15, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
-          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:4, justifyContent:isMobile?'flex-end':'flex-end' }}>
             {onWishlistToggle && (
               <button
                 onClick={e=>{e.stopPropagation();onWishlistToggle(r);}}
@@ -1250,11 +1279,8 @@ function TrackPlayer({ tracks, release }) {
       player.jumpToQueueIdx(player.currentIdx + offset);
       return;
     }
-    // Different release (or nothing playing): replace queue with this release and start at clicked track
-    player.playRelease({ ...release, tracks });
-    // playRelease starts at idx 0; jump forward to the clicked track once state has propagated.
-    // Use a microtask to let the queue state apply before jumping.
-    if (i > 0) Promise.resolve().then(() => player.jumpToQueueIdx(i));
+    // Different release (or nothing playing): insert this release into the queue and start at clicked track.
+    player.playRelease({ ...release, tracks }, i);
   };
 
   return (
@@ -1646,7 +1672,13 @@ function OrdersView({ orders, loading, err, onRefresh }) {
 }
 
 // ── WISHLIST DRAWER ────────────────────────────────────────────
-function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenItem, isLoggedIn, onSignInClick }) {
+function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onAddAllToCart, onOpenItem, isLoggedIn, onSignInClick }) {
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const handleBulkAdd = async () => {
+    if (bulkAdding || !onAddAllToCart) return;
+    setBulkAdding(true);
+    try { await onAddAllToCart(); } finally { setBulkAdding(false); }
+  };
   return (
     <>
       {open && <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1099, backdropFilter:'blur(2px)' }} />}
@@ -1655,6 +1687,17 @@ function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenIte
           <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Wishlist {items.length>0 && `(${items.length})`}</span>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:22, padding:0, lineHeight:1 }}>×</button>
         </div>
+
+        {items.length > 1 && (
+          <div style={{ padding:'10px 20px', borderBottom:`1px solid ${S.border}` }}>
+            <button
+              onClick={handleBulkAdd}
+              disabled={bulkAdding}
+              style={{ width:'100%', background:bulkAdding?S.border:S.accent, color:bulkAdding?S.muted:'#080808', border:'none', borderRadius:2, padding:'9px 12px', fontSize:10, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:bulkAdding?'wait':'pointer', fontFamily:'inherit', transition:'background 0.15s' }}>
+              {bulkAdding ? 'Adding…' : `+ Add all to cart (${items.length})`}
+            </button>
+          </div>
+        )}
 
         {!isLoggedIn && items.length > 0 && (
           <div style={{ padding:'10px 20px', background:S.bg, borderBottom:`1px solid ${S.border}`, fontSize:10, color:S.muted, lineHeight:1.5 }}>
@@ -2521,6 +2564,7 @@ function KudosImporter() {
   const [scriptCopied, setScriptCopied] = useState(false);
   const [fx, setFx]         = useState(1.15);
   const [margin, setMargin] = useState(60);
+  const [minRetail, setMinRetail] = useState(9.99);
   const [stdW, setStdW]     = useState(500);
   const [dblW, setDblW]     = useState(900);
   const pickRef = useRef(null);
@@ -2584,10 +2628,17 @@ function KudosImporter() {
       const label=api?decodeHtml(api.label):''; const genre=api?api.genre:''; const subgenre=api?api.subgenre:'';
       const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
       const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
-      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0; const retailP=rawRetail>0?(Math.ceil(rawRetail)-0.01).toFixed(2):'';
-      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
+      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
       const formatDisplay=fmt?fmt.display:r.format;
       const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
+      // Floor applies only to single 12" releases. 7" can legitimately retail below the
+      // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
+      const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[""′″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
+      const flooredRetail = rawRetail > 0
+        ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
+        : 0;
+      const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
+      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
       let audioTracksJson = '';
@@ -2683,7 +2734,7 @@ function KudosImporter() {
       {/* Controls */}
       {pickFile && (
         <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',padding:'12px 16px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
-          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
+          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['12" floor €',minRetail,setMinRetail,0.5],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
             <div key={label} style={{display:'flex',alignItems:'center',gap:6}}>
               <span style={{fontSize:10,color:S.muted,whiteSpace:'nowrap'}}>{label}</span>
               <input type="number" value={val} step={step} onChange={e=>setter(parseFloat(e.target.value)||val)} style={{width:72,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
@@ -3105,849 +3156,6 @@ function DBHImporter() {
   );
 }
 
-// ── MOTHER TONGUE IMPORTER ─────────────────────────────────────
-// Combines 3 sources to build the Shopify CSV:
-//   1. Invoice PDF      → catno, qty, dealer price (with discount detection)
-//   2. Listener HTML    → artist, title, label, format, description, GENRES,
-//                         and a fallback cover URL from mothertonguerecords.com
-//   3. Distributor folder → cover image + audio snippets (uploaded to R2)
-//
-// Folder is dropped via webkitdirectory; we walk every file and index by
-// "normalized catno" (uppercase, alphanumeric only). Tolerates the chaotic
-// distributor structure: covers can be flat or in subfolders (Artwork/,
-// snippets/, CLIPS/, MP3/, THIS/THAT, drive-download-*/, etc.).
-//
-// Five product policy decisions (frozen 2026-05-07):
-//   D1. Tag policy is label-only — no operational `mothertongue` tag exposed
-//       to customers. The `label:` prefix already identifies the imprint.
-//   D2. Releases with no listener metadata (no artist, no title) come out as
-//       Status=draft so customers don't see catno-only placeholders.
-//   D3. If no real sleeve cover is available (folder + listener), accept a
-//       side-label/spindle/promo image as last resort rather than no image.
-//   D4. Genre tags come from the WooCommerce categories scraped per product.
-//       Filter out operational categories (What's New / Distribution / We Dig)
-//       and split slash-separated multi-genres ("House / Electronic" → both).
-//   D5. Cover priority: folder real-sleeve → listener real-sleeve →
-//       folder anything → listener anything → empty.
-function MotherTongueImporter() {
-  const [pdfFile, setPdfFile]       = useState(null);
-  const [htmlFile, setHtmlFile]     = useState(null);
-  const [folderFiles, setFolderFiles] = useState([]); // raw File[] from webkitdirectory
-  const [invoiceItems, setInvoiceItems] = useState([]); // [{catno, qty, dealerPrice}]
-  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → meta object
-  const [folderIndex, setFolderIndex]   = useState({}); // catnoNorm → {covers:[File], audio:[File]}
-  const [status, setStatus]   = useState('idle');
-  const [progress, setProgress] = useState({ done:0, total:0, current:'' });
-  const [results, setResults] = useState([]);
-  const [error, setError]     = useState('');
-  const [margin, setMargin]   = useState(60);
-  const pdfRef    = useRef(null);
-  const htmlRef   = useRef(null);
-  const folderRef = useRef(null);
-
-  // Normalize catno for matching: uppercase + alphanumeric only.
-  // "BLDT007r" → "BLDT007R"; "MT-NERO-002" → "MTNERO002"; "WW-019" → "WW019".
-  const normCatno = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-
-  // ── PDF PARSER ────────────────────────────────────────────────
-  // Mother Tongue invoices have a 7-column table:
-  //   CÓDIGO | DESCRIPCIÓN | CANTIDAD | DESCUENTO | PRECIO POR UNIDAD | IMPORTE | % IVA
-  //
-  // Three line patterns appear in the wild — the parser handles all of them:
-  //   1. Single-line item (no discount, short title):
-  //      "BLACKLP010 dego - love was never your goal 2 € 12.08 € 24.16 0"
-  //   2. Multi-line title (no discount, long title): title wraps but the catno
-  //      line still carries qty + prices.
-  //   3. Discount item (10% promo): the catno line has only "qty 10% 0", and
-  //      the discounted unit price (3-decimal, e.g. "€ 7.911") sits on a
-  //      SIBLING line just above; the original (struck-through) price is below.
-  //
-  // Heuristics that took several iterations to land:
-  //   - "qty" is the integer immediately preceding the FIRST €-prefixed number
-  //     (NOT just the first integer — defends against titles like "(2024 Reissue)"
-  //     or "33.10.3402 Labyrinths" that contain numbers).
-  //   - Discounted unit price is identified by 3-decimal format ("7.911"); we
-  //     scan ±20px Y for the closest sibling line containing one.
-  //   - Trailing "0" on a candidate line is required as the % IVA marker —
-  //     prevents legal-text lines like "Decreto legge 331/93" from registering
-  //     as items even though "legge" passes the catno regex.
-  async function parseInvoicePDF(file) {
-    const pdfjsLib = await loadPDFJS();
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const lines = [];
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p);
-      const c = await page.getTextContent();
-      const vp = page.getViewport({ scale: 1 });
-      const byY = new Map();
-      for (const it of c.items) {
-        const x = it.transform[4];
-        const y = vp.height - it.transform[5];
-        const s = String(it.str || '');
-        if (!s) continue;
-        const key = Math.round(y / 4) * 4;
-        if (!byY.has(key)) byY.set(key, []);
-        byY.get(key).push({ s, x, x1: x + (it.width || 0) });
-      }
-      for (const [y, toks] of byY.entries()) {
-        toks.sort((a, b) => a.x - b.x);
-        let text = '', lastX = null;
-        for (const t of toks) {
-          if (lastX !== null && t.x - lastX > 1.0) text += ' ';
-          text += t.s;
-          lastX = t.x1;
-        }
-        lines.push({ page: p, y, text: text.trim() });
-      }
-    }
-    lines.sort((a, b) => a.page - b.page || a.y - b.y);
-
-    const SKIP_PATTERNS = [
-      /^Mother Tongue srl/i, /^Lungadige/i, /^N\.?i\.?f\.?/i,
-      /^FACTURA/i, /^Factura/i, /^info@/i, /^tel:/i,
-      /^OBJETO/i, /^MAILORDER/i, /^CÓDIGO/i, /^DESCRIPCIÓN/i,
-      /^Ordine/i, /^EMAIL\b/i, /^DESTINATARIO/i, /^Telsnap/i,
-      /^Avenida/i, /^\d{5}\s*Madrid/i, /^Spain\s*$/i,
-      /^NOTE\b/i, /\bPlease use the invoice/i, /^In riferimento/i,
-      /^FORMA DE PAGO/i, /^Bonifico/i, /^IBAN/i, /^SWIFT/i,
-      /^PLAZOS/i, /^RESUMEN DE IVA/i, /^GRAVABLE/i,
-      /^Gravable/i, /^Non\s+imponibile/i,
-      /^0%\s*-\s*Non\s+imponibile/i,
-      /^legge\s+\d/i,
-      /^Documento/i, /^SH001\b/i, /^SHIPPING\s*$/i, /^HS CODE/i,
-      /^vinyl\s+records\s*$/i, /^N\.I\.F\./i,
-    ];
-    const skip = (t) => SKIP_PATTERNS.some(rx => rx.test(t));
-
-    const items = [];
-    const CATNO_RX = /^([A-Za-z0-9][A-Za-z0-9._\-]{2,29})/;
-
-    for (let i = 0; i < lines.length; i++) {
-      const ln = lines[i];
-      if (!ln.text) continue;
-      if (skip(ln.text)) continue;
-
-      const m = CATNO_RX.exec(ln.text);
-      if (!m) continue;
-      const catno = m[1];
-      if (!/[A-Za-z]/.test(catno)) continue;
-      const rest = ln.text.slice(catno.length);
-
-      const allNums = [];
-      const numRx = /(\d+(?:[.,]\d+)?)/g;
-      let nm;
-      while ((nm = numRx.exec(rest)) !== null) {
-        const raw = nm[1];
-        allNums.push({
-          val: parseFloat(raw.replace(',', '.')),
-          decimal: raw.includes('.') || raw.includes(','),
-          idx: nm.index,
-        });
-      }
-      if (allNums.length === 0 || allNums[allNums.length - 1].val !== 0) continue;
-
-      const euroPrices = [];
-      const euroRx = /€\s*(\d+(?:[.,]\d+)?)/g;
-      let em;
-      while ((em = euroRx.exec(rest)) !== null) {
-        euroPrices.push({
-          val: parseFloat(em[1].replace(',', '.')),
-          idx: em.index + em[0].indexOf(em[1]),
-        });
-      }
-
-      const discountMatch = rest.match(/(\d{1,2})%/);
-      const hasDiscount = !!discountMatch;
-      let qty = null, dealerPrice = null;
-
-      if (hasDiscount) {
-        const pct = parseInt(discountMatch[1]);
-        const pctIdx = allNums.findIndex(n => n.val === pct && !n.decimal);
-        if (pctIdx > 0) qty = Math.round(allNums[pctIdx - 1].val);
-        let bestDy = Infinity, bestPrice = null;
-        for (let j = 0; j < lines.length; j++) {
-          if (j === i) continue;
-          if (lines[j].page !== ln.page) continue;
-          const dy = Math.abs(lines[j].y - ln.y);
-          if (dy > 20) continue;
-          const pm = lines[j].text.match(/(\d+\.\d{3})/);
-          if (pm && dy < bestDy) {
-            bestDy = dy;
-            bestPrice = parseFloat(pm[1]);
-          }
-        }
-        dealerPrice = bestPrice;
-      } else {
-        if (euroPrices.length >= 1) {
-          const firstPriceIdx = euroPrices[0].idx;
-          const qtyCandidates = allNums.filter(n =>
-            n.idx < firstPriceIdx && !n.decimal && n.val >= 1 && n.val <= 99
-          );
-          if (qtyCandidates.length > 0) {
-            qty = Math.round(qtyCandidates[qtyCandidates.length - 1].val);
-            dealerPrice = euroPrices[0].val;
-          }
-        }
-      }
-
-      if (qty && dealerPrice && qty > 0 && dealerPrice > 0 && qty < 100) {
-        items.push({ catno, qty, dealerPrice });
-      }
-    }
-    return items;
-  }
-
-  // ── HTML LISTENER PARSER ──────────────────────────────────────
-  // Extracts `const RELEASES = [...]` and indexes by normalized catno.
-  // The listener now (post 2026-05-07) carries a `genres` array per release.
-  async function parseListenerHTML(file) {
-    const text = await file.text();
-    const m = text.match(/const\s+RELEASES\s*=\s*(\[[\s\S]*?\]);/);
-    if (!m) throw new Error('Could not find RELEASES array in HTML file');
-    let data;
-    try { data = JSON.parse(m[1]); }
-    catch (e) { throw new Error('RELEASES JSON parse failed: ' + e.message); }
-
-    // Index by normalized catno; on duplicates, prefer the entry with most data.
-    const score = (r) =>
-      (r.cover ? 4 : 0) + (r.tracks?.length ? 2 : 0) +
-      (r.description ? 1 : 0) + (r.genres?.length ? 1 : 0);
-    const map = {};
-    for (const r of data) {
-      const key = normCatno(r.cat);
-      if (!key) continue;
-      if (!map[key] || score(r) > score(map[key])) map[key] = r;
-    }
-    return map;
-  }
-
-  // ── FOLDER INDEXER ────────────────────────────────────────────
-  function buildFolderIndex(files, knownCatnos) {
-    const index = {};
-    const knownSet = new Set(knownCatnos.map(normCatno));
-    const SKIP_FILE = (n) =>
-      n.startsWith('._') || n === '.DS_Store' || n === 'Thumbs.db';
-    const SKIP_DIR  = (seg) => seg === '__MACOSX';
-
-    for (const f of files) {
-      const path = f.webkitRelativePath || f.name;
-      const segs = path.split('/');
-      const fname = segs[segs.length - 1];
-      if (SKIP_FILE(fname)) continue;
-      if (segs.some(SKIP_DIR)) continue;
-
-      let matchedKey = null;
-      for (const seg of segs) {
-        const k = normCatno(seg);
-        if (k && knownSet.has(k)) matchedKey = k;
-      }
-      if (!matchedKey) continue;
-
-      const ext = (fname.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
-      const isImg   = ['jpg','jpeg','png','webp'].includes(ext);
-      const isAudio = ['mp3','wav','flac','aac','ogg','m4a'].includes(ext);
-      if (!isImg && !isAudio) continue;
-
-      if (!index[matchedKey]) index[matchedKey] = { covers: [], audio: [] };
-      if (isImg)   index[matchedKey].covers.push(f);
-      if (isAudio) index[matchedKey].audio.push(f);
-    }
-    return index;
-  }
-
-  // ── COVER-CANDIDATE CLASSIFIER ────────────────────────────────
-  // Decision D5: pick a real sleeve image first; fall back to label/spindle
-  // only if nothing better exists. These predicates classify a filename or URL
-  // into one of three buckets:
-  //   - "real":  explicit front/sleeve/cover/artwork (use first)
-  //   - "label": center sticker, side-A/B image, promo sheet (use last)
-  //   - "back":  back cover (skip — never use)
-  // Names that match nothing fall through to a "neutral" category and are
-  // treated as "real" by default (better than nothing).
-  const isBack = (s) => /\bback\b|_back\b|-back\b/i.test(s);
-  const isLabel = (s) => {
-    const l = s.toLowerCase();
-    return (
-      // Side-letter markers — A/B/C/D side labels
-      /\bside[-_\s]*[abcd]\b/i.test(l) ||
-      /\b[abcd][-_\s]*side\b/i.test(l) ||
-      /[-_]([abcd])[-_\s]*(?:side|label)?(?:\.|$|[-_\s])/i.test(l) ||
-      // Explicit center-label names
-      /\blabel[\s_-]*[abcd]?\b/i.test(l) ||
-      /\bspindle\b/i.test(l) ||
-      /\bsticker\b/i.test(l) ||
-      /\bcenter[\s_-]*label\b/i.test(l) ||
-      // Promo/press-release/info-sheet (Mother Tongue style)
-      /\bpromo\b/i.test(l) ||
-      /\bpress[\s_-]*release\b/i.test(l) ||
-      /\binfo[\s_-]*sheet\b/i.test(l) ||
-      /\brelease[\s_-]*info\b/i.test(l) ||
-      /\bone[\s_-]*sheet\b/i.test(l) ||
-      // Mother Tongue WordPress slug patterns: -sideA-, _side-a, sideA-scaled
-      /side[-_]?[ab]/i.test(l)
-    );
-  };
-  const isRealSleeve = (s) => {
-    const l = s.toLowerCase();
-    if (isBack(s)) return false;
-    if (isLabel(s)) return false;
-    return /(\bfront\b|\bcover\b|\bsleeve\b|\bartwork\b|\bjacket\b|\bart\b|\bmain\b)/i.test(l);
-  };
-
-  // ── COVER SELECTION FROM FOLDER ───────────────────────────────
-  // Two-pass strategy reflecting D5:
-  //   Pass 1: find a clearly "real" sleeve image. If found, return it.
-  //   Pass 2: nothing real — split images into "neutral" (no marker) vs label.
-  //           Prefer neutral over label (some folders just have generic names
-  //           like "BLACKLP010.jpg" which are usually the front sleeve).
-  //   Pass 3: only labels left → return the largest one (the front-of-vinyl
-  //           shot, if any, tends to be larger). D3 says we accept this.
-  function selectCover(images) {
-    if (!images || images.length === 0) return null;
-    const usable = images.filter(f => !isBack(f.name));
-    if (usable.length === 0) return null;
-    const real = usable.filter(f => isRealSleeve(f.name));
-    if (real.length > 0) {
-      return real.slice().sort((a,b) => b.size - a.size)[0];
-    }
-    const neutral = usable.filter(f => !isLabel(f.name));
-    if (neutral.length > 0) {
-      return neutral.slice().sort((a,b) => b.size - a.size)[0];
-    }
-    // Only labels remain — D3: accept anyway as last resort.
-    return usable.slice().sort((a,b) => b.size - a.size)[0];
-  }
-
-  // Listener URL classifier — same predicates applied to the URL string.
-  // mothertonguerecords.com sometimes only hosts side-label photos; if so,
-  // we still try to use them as last resort per D3 / D5.
-  function classifyListenerUrl(url) {
-    if (!url) return 'none';
-    if (isBack(url)) return 'back';
-    if (isRealSleeve(url)) return 'real';
-    if (isLabel(url)) return 'label';
-    return 'neutral';
-  }
-
-  // ── AUDIO ORDERING ────────────────────────────────────────────
-  function orderAudio(audioFiles) {
-    if (!audioFiles || audioFiles.length === 0) return [];
-    const byBase = {};
-    for (const f of audioFiles) {
-      const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
-      const ext  = (f.name.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
-      const score = ext === 'mp3' ? 3 : ext === 'm4a' ? 2 : ext === 'wav' ? 1 : 0;
-      if (!byBase[base] || score > byBase[base].score) byBase[base] = { f, score };
-    }
-    const filtered = Object.values(byBase).map(x => x.f);
-    const keyOf = (f) => {
-      const path = f.webkitRelativePath || f.name;
-      const inThis = /\/THIS\//i.test(path);
-      const inThat = /\/THAT\//i.test(path);
-      const fname = f.name;
-      let side = 99, num = 999;
-      let m;
-      if ((m = fname.match(/^(?:\d+\s*[-_.]?\s*)?Side\s+([A-D])[.\s]+(\d+)/i))) {
-        side = m[1].toUpperCase().charCodeAt(0) - 65;
-        num  = parseInt(m[2]);
-      } else if ((m = fname.match(/^(?:\d+\s*[-_.]?\s*)?([A-D])\s*(\d+)\b/i))) {
-        side = m[1].toUpperCase().charCodeAt(0) - 65;
-        num  = parseInt(m[2]);
-      } else if ((m = fname.match(/^([A-D])\s+Side\b/i))) {
-        side = m[1].toUpperCase().charCodeAt(0) - 65;
-        num  = 0;
-      } else if ((m = fname.match(/^(\d+)[.\s_-]/))) {
-        side = inThat ? 1 : (inThis ? 0 : 50);
-        num  = parseInt(m[1]);
-      } else {
-        side = inThat ? 1 : (inThis ? 0 : 99);
-      }
-      return [side, num, fname.toLowerCase()];
-    };
-    return filtered.slice().sort((a,b) => {
-      const ka = keyOf(a), kb = keyOf(b);
-      return (ka[0]-kb[0]) || (ka[1]-kb[1]) || (ka[2] < kb[2] ? -1 : ka[2] > kb[2] ? 1 : 0);
-    });
-  }
-
-  // ── TRACK NAME EXTRACTION ─────────────────────────────────────
-  // Strip prefixes (A1, B2, Side A.1, 01., catalog number) and suffixes
-  // (Snippet, Clip, Preview, "60 sec taster", "[1.30MIN SNIPPET]", " - 2000BLACK").
-  // Catno is passed in so we can recognize SKU-prefixed track names like
-  // "DTW082 A1 Don't Forget Your Hiss" or "MT19022- 1-A1 Terra de Luz".
-  function trackNameFromFilename(fname, catno) {
-    let n = fname.replace(/\.[^.]+$/, '');
-    n = n.replace(/_/g, ' ');
-    n = n.replace(/\s*\[\s*\d+\.?\d*\s*MIN\s*SNIPPET\s*\]\s*/i, '');
-
-    const skuRx = catno ? catno.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
-    for (let i = 0; i < 5; i++) {
-      const before = n;
-      n = n.replace(/^[\s\-–]+/, '');
-      if (skuRx) n = n.replace(new RegExp('^' + skuRx + '\\s*', 'i'), '');
-      n = n.replace(/^[AB]\s*[-–]\s+/i, '');
-      n = n.replace(/^\d+\s*[-–]\s*/, '');
-      n = n.replace(/^[AB]\d+\.?\s*[-–]?\s*/i, '');
-      n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-–]?\s*/i, '');
-      n = n.replace(/^TRACK\s+\d+[\s_\-]*/i, '');
-      n = n.replace(/^\d{1,2}[\s_.\-]+/, '');
-      if (n === before) break;
-    }
-    n = n.replace(/[\s_.\-]*\(?\s*(snippet|snip|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
-    n = n.replace(/[\s_-]*\(\s*\d+\s*sec\s+taster\s*\)\s*$/i, '');
-    n = n.replace(/\s*-\s*2000BLACK\s*$/i, '');
-    n = n.replace(/\s{2,}/g, ' ').trim();
-    return n || fname.replace(/\.[^.]+$/, '');
-  }
-
-  // ── GENRE TAG NORMALIZATION ───────────────────────────────────
-  // Decision D4: WooCommerce categories include some operational ones
-  // ("What's New", "Distribution (Wholesale)", "We Dig", "International")
-  // that aren't real genres and shouldn't appear as customer-facing tags.
-  // Plus, multi-genre values come slash-separated ("House / Electronic" or
-  // "Soul / Hip Hop / RnB") — split them so customers can filter by atomic
-  // genres.
-  const NON_GENRE_CATEGORIES = new Set([
-    "what's new", 'whats new', 'distribution (wholesale)',
-    'distribution', 'wholesale', 'we dig', 'international',
-    'all releases', 'releases', 'shop', 'mailorder',
-  ]);
-  function normalizeGenres(rawGenres) {
-    if (!Array.isArray(rawGenres)) return [];
-    const out = new Set();
-    for (const raw of rawGenres) {
-      if (!raw) continue;
-      // Split "House / Electronic" → ["House", "Electronic"]
-      for (const piece of String(raw).split(/\s*\/\s*/)) {
-        const trimmed = piece.trim();
-        if (!trimmed) continue;
-        if (NON_GENRE_CATEGORIES.has(trimmed.toLowerCase())) continue;
-        out.add(trimmed);
-      }
-    }
-    return Array.from(out);
-  }
-
-  // ── DERIVE WEIGHT FROM FORMAT ─────────────────────────────────
-  function gramsFromFmt(fmt) {
-    const f = String(fmt || '').toLowerCase();
-    if (/3\s*x\s*12|3x12|triple/.test(f)) return '1300';
-    if (/2\s*x\s*12|2x12|double/.test(f)) return '900';
-    if (/7"|7\s*inch/.test(f))            return '180';
-    return '500';
-  }
-
-  // ── INPUT HANDLERS ────────────────────────────────────────────
-  const onPdf = async (file) => {
-    if (!file) return;
-    setError(''); setStatus('parsing');
-    try {
-      const items = await parseInvoicePDF(file);
-      setInvoiceItems(items);
-      setPdfFile(file.name);
-      setStatus('idle');
-    } catch (e) {
-      setError('PDF parse error: ' + e.message); setStatus('idle');
-    }
-  };
-
-  const onHtml = async (file) => {
-    if (!file) return;
-    setError(''); setStatus('parsing');
-    try {
-      const map = await parseListenerHTML(file);
-      setReleaseMeta(map);
-      setHtmlFile(file.name);
-      setStatus('idle');
-    } catch (e) {
-      setError('HTML parse error: ' + e.message); setStatus('idle');
-    }
-  };
-
-  const onFolder = (filesList) => {
-    const arr = Array.from(filesList || []);
-    setFolderFiles(arr);
-  };
-
-  useEffect(() => {
-    if (!folderFiles.length || !invoiceItems.length) {
-      setFolderIndex({});
-      return;
-    }
-    const idx = buildFolderIndex(folderFiles, invoiceItems.map(i => i.catno));
-    setFolderIndex(idx);
-  }, [folderFiles, invoiceItems]);
-
-  // ── PROCESSING PIPELINE ───────────────────────────────────────
-  const process = async () => {
-    if (!invoiceItems.length) { setError('Need invoice PDF first'); return; }
-    setError(''); setStatus('processing'); setResults([]);
-    try {
-      const total = invoiceItems.length;
-      const processed = [];
-      for (let i = 0; i < invoiceItems.length; i++) {
-        const item = invoiceItems[i];
-        const key  = normCatno(item.catno);
-        const meta = releaseMeta[key] || {};
-        const assets = folderIndex[key] || { covers: [], audio: [] };
-        setProgress({ done:i, total, current:`${item.catno} — preparing…` });
-
-        // ── METADATA + D1 (no operational tag) + D2 (draft fallback) ──
-        const rawArtist = (meta.artist || '').trim();
-        const rawTitle  = (meta.title  || '').trim();
-        const labelMeta = (meta.label  || '').trim();
-        const fmtNorm   = meta.fmt_norm || meta.format || '';
-        const grams     = gramsFromFmt(fmtNorm);
-
-        // Vendor cleanup: V.A. (Various Artists) doesn't help in the storefront —
-        // substitute the label name when available. Skip the "House Only" fallback;
-        // empty Vendor is fine in Shopify.
-        let artist = rawArtist;
-        if (/^V\.?\s*A\.?$/i.test(artist) || /^V\.?\s*A\.?\s*\(/i.test(artist) || /^Various/i.test(artist)) {
-          artist = labelMeta || 'Various Artists';
-        } else if (artist.length > 50) {
-          // Take first artist before "/", "feat", "ft.", ","
-          const firstArtist = artist.split(/\s*(?:\/|feat\.?|ft\.?|,)\s*/i)[0].trim();
-          if (firstArtist && firstArtist.length >= 3) artist = firstArtist;
-        }
-
-        // Title cleanup: strip "...." artifacts, strip lone "/", fall back to catno.
-        let title = rawTitle.replace(/\s*\.{3,}\s*/g, ' ').replace(/\s+/g, ' ').trim();
-        if (!title || title === '/' || title.length < 2) title = item.catno;
-
-        // Description cleanup: scraper truncates at ~500 chars regardless of
-        // sentence boundary. Append "…" when text doesn't end on punctuation.
-        let desc = (meta.description || '').trim();
-        if (desc.length > 100 && !/[.!?:;)]$/.test(desc)) desc += '…';
-
-        // D2: draft if NO listener metadata was matched at all.
-        const hasMeta = !!(rawArtist || rawTitle);
-        const productStatus = hasMeta ? 'active' : 'draft';
-
-        // Derive label-clean (drop suffix "- (Worldwide except UK)" etc.)
-        const labelClean = labelMeta.replace(/\s*-\s*\(.*?\)\s*$/, '').trim();
-
-        const handle = item.catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
-        const safeKey = item.catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
-
-        // Pricing: dealer × (1+margin%) → ceil − 0.01.
-        const rawPrice = item.dealerPrice * (1 + margin / 100);
-        const price    = (Math.ceil(rawPrice) - 0.01).toFixed(2);
-
-        // ── COVER (D5: folder-real → listener-real → folder-any → listener-any) ──
-        let coverUrl = '';
-        let itemError = '';
-        const folderCover = selectCover(assets.covers);
-        const folderCoverIsReal = folderCover && isRealSleeve(folderCover.name);
-        const listenerUrlClass = classifyListenerUrl(meta.cover);
-
-        // Helper: upload a File to R2 and return the public URL.
-        const uploadFolderCover = async (file) => {
-          const ext = (file.name.match(/\.([a-z0-9]+)$/i) || [,'jpg'])[1].toLowerCase();
-          const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-          return await uploadToR2(file, `covers/${safeKey}.${ext}`, mime);
-        };
-        // Helper: ask the Worker to mirror an external image URL to R2.
-        // The browser can't fetch mothertonguerecords.com directly because
-        // their server omits CORS headers; the Worker can, since fetch() at
-        // the edge isn't subject to CORS. The Worker validates the host
-        // against an allowlist, hard-caps size/timeout, and refuses anything
-        // that isn't an image/* response, so we just trust its return URL.
-        const mirrorListenerCover = async (url) => {
-          if (!url) return '';
-          const urlExt = (url.match(/\.(jpg|jpeg|png|webp)(\?|$)/i) || [,'jpg'])[1].toLowerCase();
-          const ext = urlExt === 'jpeg' ? 'jpg' : urlExt;
-          const r = await fetch(`${WORKER_URL}?action=mirror`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, key: `covers/${safeKey}.${ext}` }),
-          });
-          if (!r.ok) return '';
-          const data = await r.json().catch(() => ({}));
-          return data.url || '';
-        };
-
-        // Pass 1: prefer a real sleeve from the folder.
-        if (folderCoverIsReal) {
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — uploading cover (folder real)…` });
-            coverUrl = await uploadFolderCover(folderCover);
-          } catch (e) { itemError = 'Cover upload: ' + e.message; }
-        }
-        // Pass 2: try a real listener URL.
-        if (!coverUrl && listenerUrlClass === 'real') {
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — fetching listener cover (real)…` });
-            coverUrl = await mirrorListenerCover(meta.cover);
-          } catch (_) { /* CORS or 404 — continue */ }
-        }
-        // Pass 3: folder cover even if it's a label/spindle/promo (D3).
-        if (!coverUrl && folderCover) {
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — uploading cover (folder fallback)…` });
-            coverUrl = await uploadFolderCover(folderCover);
-          } catch (e) { if (!itemError) itemError = 'Cover upload: ' + e.message; }
-        }
-        // Pass 4: listener URL even if it's a label.
-        if (!coverUrl && (listenerUrlClass === 'label' || listenerUrlClass === 'neutral')) {
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — fetching listener cover (fallback)…` });
-            coverUrl = await mirrorListenerCover(meta.cover);
-          } catch (_) { /* swallow */ }
-        }
-
-        // ── AUDIO ────────────────────────────────────────────
-        const tracks = [];
-        const audioOrdered = orderAudio(assets.audio);
-        for (let a = 0; a < audioOrdered.length; a++) {
-          const af = audioOrdered[a];
-          const safeFilename = af.name.replace(/[^A-Za-z0-9._-]+/g, '-');
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — audio ${a+1}/${audioOrdered.length}…` });
-            const url = await uploadToR2(af, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
-            tracks.push({ name: trackNameFromFilename(af.name, item.catno), url });
-          } catch (_) {
-            if (!itemError) itemError = 'Audio upload partial fail';
-          }
-        }
-
-        // ── TAGS (D1 label-only + D4 genres) ────────────────────
-        const genres = normalizeGenres(meta.genres);
-        const tagParts = ['vinyl'];
-        if (labelClean) tagParts.push(`label:${labelClean}`);
-        for (const g of genres) tagParts.push(`genre:${g}`);
-        tagParts.push(String(new Date().getFullYear()));
-        const shopifyTags = tagParts.join(', ');
-
-        // ── BUILD CSV ROW ────────────────────────────────────
-        const descHtml  = buildDescriptionHtml({ artist, title, label: labelClean, year:'', tracks, sourceNotes: desc });
-        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
-
-        processed.push({
-          _catno: item.catno, _title: title, _artist: artist,
-          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _hasMeta: hasMeta, _hasAssets: !!(assets.covers.length || assets.audio.length),
-          _draft: productStatus === 'draft',
-          'Handle': handle,
-          'Title': title || item.catno,
-          'Body (HTML)': `${descHtml}${audioHtml}`,
-          'Vendor': artist,
-          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
-          'Type': '',
-          'Tags': shopifyTags,
-          'Published': productStatus === 'active' ? 'TRUE' : 'FALSE',
-          'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
-          'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
-          'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
-          'Variant SKU': item.catno,
-          'Variant Grams': grams,
-          'Variant Inventory Tracker': 'shopify',
-          'Variant Inventory Qty': String(item.qty),
-          'Variant Inventory Policy': 'continue',
-          'Variant Fulfillment Service': 'manual',
-          'Variant Price': price,
-          'Variant Compare At Price': '',
-          'Variant Requires Shipping': 'TRUE',
-          'Variant Taxable': 'TRUE',
-          'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
-          'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
-          'Variant Barcode': '',
-          'Image Src': coverUrl,
-          'Image Position': coverUrl ? '1' : '',
-          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
-          'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
-          'Variant Image':'','Variant Weight Unit':'kg',
-          'Variant Tax Code':'','Cost per item': item.dealerPrice.toFixed(2),
-          'Status': productStatus,
-        });
-        setProgress({ done:i+1, total, current:'' });
-      }
-      setResults(processed);
-      setStatus('review');
-    } catch (e) {
-      setError(e.message); setStatus('idle');
-    }
-  };
-
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [
-      CSV_KEYS.join(','),
-      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
-    ];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'mothertongue_shopify_import.csv';
-    a.click();
-  };
-
-  // ── DERIVED STATS ─────────────────────────────────────────────
-  const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
-  const matchedMeta   = invoiceItems.filter(it => releaseMeta[normCatno(it.catno)]).length;
-  const matchedAssets = invoiceItems.filter(it => folderIndex[normCatno(it.catno)]).length;
-  const itemsWithCover = invoiceItems.filter(it => {
-    const idx = folderIndex[normCatno(it.catno)];
-    return idx && idx.covers.length > 0;
-  }).length;
-  const itemsWithAudio = invoiceItems.filter(it => {
-    const idx = folderIndex[normCatno(it.catno)];
-    return idx && idx.audio.length > 0;
-  }).length;
-  const itemsWithGenres = invoiceItems.filter(it => {
-    const m = releaseMeta[normCatno(it.catno)];
-    return m && Array.isArray(m.genres) && normalizeGenres(m.genres).length > 0;
-  }).length;
-
-  // ── RENDER ────────────────────────────────────────────────────
-  return (
-    <div>
-      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Drop the invoice PDF, the listener HTML (descriptions/artist/title/genres), and the
-        full distributor folder. The importer matches catnos across all three
-        sources and builds the Shopify CSV.
-      </p>
-
-      <div
-        onDragOver={e=>e.preventDefault()}
-        onDrop={e=>{
-          e.preventDefault();
-          const fl = [...e.dataTransfer.files];
-          const pdf  = fl.find(f => /\.pdf$/i.test(f.name));
-          const html = fl.find(f => /\.html?$/i.test(f.name));
-          if (pdf)  onPdf(pdf);
-          if (html) onHtml(html);
-        }}
-        style={{
-          border:`2px dashed ${(pdfFile||htmlFile||folderFiles.length)?S.accent:S.border}`,
-          borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14,
-          transition:'border 0.15s'
-        }}
-      >
-        <div style={{fontSize:28,marginBottom:6}}>🇮🇹</div>
-        <div style={{fontSize:11,color:(pdfFile||htmlFile||folderFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
-          Mother Tongue · Drop invoice PDF + listener HTML, then pick folder
-        </div>
-        <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
-          <input ref={pdfRef}  type="file" accept=".pdf"  style={{display:'none'}} onChange={e=>{if(e.target.files[0])onPdf(e.target.files[0]);e.target.value='';}} />
-          <input ref={htmlRef} type="file" accept=".html,.htm" style={{display:'none'}} onChange={e=>{if(e.target.files[0])onHtml(e.target.files[0]);e.target.value='';}} />
-          <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple style={{display:'none'}} onChange={e=>{onFolder(e.target.files);e.target.value='';}} />
-          <button onClick={()=>pdfRef.current.click()}
-            style={{background:pdfFile?S.accent:S.border,border:'none',color:pdfFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {pdfFile?`✓ ${pdfFile}`:'+ Invoice PDF'}
-          </button>
-          <button onClick={()=>htmlRef.current.click()}
-            style={{background:htmlFile?S.accent:S.border,border:'none',color:htmlFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {htmlFile?`✓ ${htmlFile}`:'+ Listener HTML'}
-          </button>
-          <button onClick={()=>folderRef.current.click()}
-            style={{background:folderFiles.length?S.accent:S.border,border:'none',color:folderFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {folderFiles.length?`✓ ${folderFiles.length} files`:'+ Distributor folder'}
-          </button>
-          {folderFiles.length>0&&<button onClick={()=>setFolderFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear</button>}
-        </div>
-      </div>
-
-      {(invoiceItems.length>0 || Object.keys(releaseMeta).length>0 || folderFiles.length>0) && status==='idle' && (
-        <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
-          <span>Invoice items: <b style={{color:S.text}}>{invoiceItems.length}</b></span>
-          {Object.keys(releaseMeta).length>0 && (
-            <span>Listener releases: <b style={{color:S.text}}>{Object.keys(releaseMeta).length}</b></span>
-          )}
-          {invoiceItems.length>0 && (
-            <span>Meta matched: <b style={{color: matchedMeta===invoiceItems.length ? S.accent : '#ff8800'}}>{matchedMeta}/{invoiceItems.length}</b></span>
-          )}
-          {invoiceItems.length>0 && Object.keys(releaseMeta).length>0 && (
-            <span>With genres: <b style={{color: itemsWithGenres===invoiceItems.length ? S.accent : '#ff8800'}}>{itemsWithGenres}/{invoiceItems.length}</b></span>
-          )}
-          {invoiceItems.length>0 && folderFiles.length>0 && (
-            <>
-              <span>Assets matched: <b style={{color: matchedAssets===invoiceItems.length ? S.accent : '#ff8800'}}>{matchedAssets}/{invoiceItems.length}</b></span>
-              <span>With cover: <b style={{color:S.accent}}>{itemsWithCover}</b></span>
-              <span>With audio: <b style={{color:S.accent}}>{itemsWithAudio}</b></span>
-            </>
-          )}
-        </div>
-      )}
-
-      {invoiceItems.length>0 && status==='idle' && (
-        <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
-          <div style={{display:'flex',alignItems:'center',gap:6}}>
-            <span style={{fontSize:10,color:S.muted}}>Margin %</span>
-            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)}
-              style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
-          </div>
-          <span style={{fontSize:9,color:S.muted}}>
-            e.g. €8.24 × {(1+margin/100).toFixed(2)} = €{(8.24*(1+margin/100)).toFixed(2)} → €{(Math.ceil(8.24*(1+margin/100))-0.01).toFixed(2)}
-          </span>
-          <div style={{flex:1}}/>
-          <Btn ch={`🚀 Process ${invoiceItems.length} releases`} onClick={process} full />
-        </div>
-      )}
-
-      {status==='processing' && (
-        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
-          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>PROCESSING…</span>
-            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
-          </div>
-          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
-            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
-          </div>
-          {progress.current && <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
-        </div>
-      )}
-
-      {error && (
-        <div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>
-      )}
-
-      {status==='review' && results.length>0 && (
-        <div>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
-            <div>
-              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} releases</span>
-              <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
-                {results.filter(r=>r._coverUrl).length} covers · {results.filter(r=>r._tracks?.length>0).length} audio
-                {results.filter(r=>r._draft).length>0 ? ` · ${results.filter(r=>r._draft).length} draft` : ''}
-                {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
-              </span>
-            </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
-          </div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
-            {results.map((r,i)=>(
-              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
-                <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
-                  {r._coverUrl
-                    ? <img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
-                    : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
-                  }
-                  {r._tracks?.length>0 && <div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
-                  {r._draft && <div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>DRAFT</div>}
-                  {!r._coverUrl && !r._draft && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
-                  {r._error && <div style={{position:'absolute',bottom:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
-                </div>
-                <div style={{padding:'8px 8px 6px'}}>
-                  <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
-                  <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
-                  <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist||'—'}</div>
-                  <div style={{fontSize:10,color:S.accent,marginTop:3,fontWeight:700}}>€{r['Variant Price']}</div>
-                  {r._error && <div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── ADMIN PANEL ────────────────────────────────────────────────
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
@@ -3973,12 +3181,10 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('zip','📦 W&S Import')}
           {tabBtn('kudos','🎵 Kudos Import')}
           {tabBtn('dbh','🏠 DBH Import')}
-          {tabBtn('mt','🇮🇹 MT Import')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
         {tab==='dbh'   && <DBHImporter />}
-        {tab==='mt'    && <MotherTongueImporter />}
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
@@ -4258,6 +3464,27 @@ export default function App() {
     wishlistRemove(item.handle);
   };
 
+  // Bulk: resolve every wishlist item, add in-stock ones to cart, remove them from wishlist.
+  // Out-of-stock and unresolvable items stay in the wishlist so the customer can deal with
+  // them separately (e.g., submit a backorder request).
+  const addAllWishlistToCart = async () => {
+    if (wishItems.length === 0) return;
+    const toAdd = [];
+    for (const item of wishItems) {
+      let r = records.find(rec => (rec.slug||'') === item.handle);
+      if (!r) {
+        try { r = await fetchShopifyProductByHandle(item.handle); } catch { /* skip */ }
+      }
+      if (r && r.stock > 0) toAdd.push({ item, r });
+    }
+    for (const { r } of toAdd) addToCart(r);
+    for (const { item } of toAdd) wishlistRemove(item.handle);
+    if (toAdd.length > 0) {
+      setWishOpen(false);
+      setCartOpen(true);
+    }
+  };
+
   // Keep `path` in sync with browser back/forward
   useEffect(()=>{
     const onPop = () => setPath(window.location.pathname);
@@ -4282,8 +3509,14 @@ export default function App() {
     setPath(newPath);
   };
   const openProduct = (r) => {
-    setSelected(r);
-    navigate(`/products/${r.slug}`);
+    if (!r) return;
+    // The player bar stores release snapshots that lack description, tracklist, and tags.
+    // When opening from the player, prefer the fully-loaded record from `records` so the
+    // modal shows complete content. Fall back to the snap if not found in the catalog
+    // (rare: release was unpublished mid-session).
+    const full = records.find(rec => rec.id === r.id) || records.find(rec => rec.slug && rec.slug === r.slug) || r;
+    setSelected(full);
+    navigate(`/products/${full.slug}`);
   };
   const closeProduct = () => {
     setSelected(null);
@@ -4465,7 +3698,7 @@ export default function App() {
       <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.token||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
-      <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
+      <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
     </PlayerProvider>
