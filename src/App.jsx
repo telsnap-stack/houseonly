@@ -625,13 +625,34 @@ function PlayerProvider({ children }) {
     }));
   };
 
-  const playRelease = useCallback((r) => {
+  const playRelease = useCallback((r, startAtTrackIdx = 0) => {
     const items = itemsFromRelease(r);
     if (!items.length) return;
-    setQueue(items);
-    setCurIdx(0);
-    setPlaying(true);
-  }, []);
+    const startOffset = Math.max(0, Math.min(items.length - 1, startAtTrackIdx));
+    setQueue(prevQueue => {
+      // Case 1: empty queue → start fresh with this release.
+      if (prevQueue.length === 0) {
+        setCurIdx(startOffset);
+        setPlaying(true);
+        return items;
+      }
+      // Case 2: release is already in the queue → jump to the requested track of that release, don't duplicate.
+      const releaseId = items[0].releaseId;
+      const existingIdx = prevQueue.findIndex(it => it.releaseId === releaseId);
+      if (existingIdx >= 0) {
+        setCurIdx(existingIdx + startOffset);
+        setPlaying(true);
+        return prevQueue;
+      }
+      // Case 3: insert release immediately after the currently-playing item, then jump to its requested track.
+      // If nothing is currently playing (currentIdx < 0), insert at the start.
+      const insertAt = currentIdx < 0 ? 0 : currentIdx + 1;
+      const next = [...prevQueue.slice(0, insertAt), ...items, ...prevQueue.slice(insertAt)];
+      setCurIdx(insertAt + startOffset);
+      setPlaying(true);
+      return next;
+    });
+  }, [currentIdx]);
 
   const addToQueue = useCallback((r) => {
     const items = itemsFromRelease(r);
@@ -813,17 +834,24 @@ function fmtTime(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+// Shared viewport hook: returns true when window is narrower than `threshold` px.
+// Used by PlayerBar and RecordCard to switch to a stacked layout on phones.
+function useIsMobile(threshold = 720) {
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < threshold);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < threshold);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [threshold]);
+  return isMobile;
+}
+
 // ── PLAYER BAR (sticky bottom) ──────────────────────────────────
 function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const p = usePlayer();
   const [queueOpen, setQueueOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 720);
+  const isMobile = useIsMobile(720);
   const barRef = useRef(null);
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 720);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
   // Sync the rendered player-bar height to a CSS variable so the root container's
   // bottom padding clears the bar exactly, on any layout (1-row desktop / 2-row mobile).
   useEffect(() => {
@@ -945,7 +973,7 @@ function transportBtnStyle(enabled) {
 function QueuePanel({ onClose, onOpenRelease }) {
   const p = usePlayer();
   if (!p) return null;
-  const { queue, currentIdx, removeFromQueue, clearQueue } = p;
+  const { queue, currentIdx, removeFromQueue, clearQueue, jumpToQueueIdx } = p;
 
   return (
     <div style={{ position:'fixed', bottom:'var(--player-h, 64px)', right:14, left:'auto', width:340, maxWidth:'calc(100vw - 28px)', maxHeight:'60vh', background:S.surf, border:`1px solid ${S.border}`, borderRadius:4, zIndex:899, display:'flex', flexDirection:'column', boxShadow:'0 8px 24px rgba(0,0,0,0.5)', fontFamily:"'Inter',system-ui,sans-serif" }}>
@@ -964,8 +992,8 @@ function QueuePanel({ onClose, onOpenRelease }) {
           const trackName = (item.name || '').replace(/^\d+_\d+_/, '').replace(/\.(mp3|wav|flac|aac|ogg)$/i, '');
           return (
             <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 14px', borderBottom:`1px solid ${S.border}`, background:isCur?'#141400':'transparent' }}>
-              <div onClick={()=>onOpenRelease && onOpenRelease(r)} style={{ width:32, height:32, flexShrink:0, background:`linear-gradient(${r.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
-              <div style={{ minWidth:0, flex:1, lineHeight:1.3 }}>
+              <div onClick={()=>onOpenRelease && onOpenRelease(r)} title="Open release details" style={{ width:32, height:32, flexShrink:0, background:`linear-gradient(${r.g||'135deg,#1a1a2e,#16213e'})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', borderRadius:2, cursor:'pointer' }} />
+              <div onClick={()=>jumpToQueueIdx && jumpToQueueIdx(i)} title={isCur?'Restart this track':'Play this track'} style={{ minWidth:0, flex:1, lineHeight:1.3, cursor:'pointer' }}>
                 <div style={{ fontSize:11, fontWeight:700, color:isCur?S.accent:S.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{trackName}</div>
                 <div style={{ fontSize:9, color:S.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{r.artist} — {r.title}</div>
               </div>
@@ -1008,6 +1036,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const [hov, setHov] = useState(false);
   const wished = isWished ? isWished(r) : false;
   const player = usePlayer();
+  const isMobile = useIsMobile(720);
   const hasTracks = (r.tracks || []).length > 0;
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
@@ -1023,9 +1052,9 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13, fontWeight:700, color:S.text, lineHeight:1.3, marginBottom:2 }}>{r.title}</div>
         <div style={{ fontSize:11, color:S.muted, marginBottom:10 }}>{r.artist}</div>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+        <div style={{ display:'flex', flexDirection:isMobile?'column':'row', alignItems:isMobile?'stretch':'center', justifyContent:'space-between', gap:isMobile?8:6 }}>
           <span style={{ fontSize:15, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
-          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:4, justifyContent:'flex-end' }}>
             {onWishlistToggle && (
               <button
                 onClick={e=>{e.stopPropagation();onWishlistToggle(r);}}
@@ -1250,11 +1279,8 @@ function TrackPlayer({ tracks, release }) {
       player.jumpToQueueIdx(player.currentIdx + offset);
       return;
     }
-    // Different release (or nothing playing): replace queue with this release and start at clicked track
-    player.playRelease({ ...release, tracks });
-    // playRelease starts at idx 0; jump forward to the clicked track once state has propagated.
-    // Use a microtask to let the queue state apply before jumping.
-    if (i > 0) Promise.resolve().then(() => player.jumpToQueueIdx(i));
+    // Different release (or nothing playing): insert this release into the queue and start at clicked track.
+    player.playRelease({ ...release, tracks }, i);
   };
 
   return (
@@ -1646,7 +1672,13 @@ function OrdersView({ orders, loading, err, onRefresh }) {
 }
 
 // ── WISHLIST DRAWER ────────────────────────────────────────────
-function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenItem, isLoggedIn, onSignInClick }) {
+function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onAddAllToCart, onOpenItem, isLoggedIn, onSignInClick }) {
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const handleBulkAdd = async () => {
+    if (bulkAdding || !onAddAllToCart) return;
+    setBulkAdding(true);
+    try { await onAddAllToCart(); } finally { setBulkAdding(false); }
+  };
   return (
     <>
       {open && <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:1099, backdropFilter:'blur(2px)' }} />}
@@ -1655,6 +1687,17 @@ function WishlistDrawer({ items, open, onClose, onRemove, onAddToCart, onOpenIte
           <span style={{ fontSize:11, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Wishlist {items.length>0 && `(${items.length})`}</span>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:22, padding:0, lineHeight:1 }}>×</button>
         </div>
+
+        {items.length > 1 && (
+          <div style={{ padding:'10px 20px', borderBottom:`1px solid ${S.border}` }}>
+            <button
+              onClick={handleBulkAdd}
+              disabled={bulkAdding}
+              style={{ width:'100%', background:bulkAdding?S.border:S.accent, color:bulkAdding?S.muted:'#080808', border:'none', borderRadius:2, padding:'9px 12px', fontSize:10, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', cursor:bulkAdding?'wait':'pointer', fontFamily:'inherit', transition:'background 0.15s' }}>
+              {bulkAdding ? 'Adding…' : `+ Add all to cart (${items.length})`}
+            </button>
+          </div>
+        )}
 
         {!isLoggedIn && items.length > 0 && (
           <div style={{ padding:'10px 20px', background:S.bg, borderBottom:`1px solid ${S.border}`, fontSize:10, color:S.muted, lineHeight:1.5 }}>
@@ -2521,6 +2564,7 @@ function KudosImporter() {
   const [scriptCopied, setScriptCopied] = useState(false);
   const [fx, setFx]         = useState(1.15);
   const [margin, setMargin] = useState(60);
+  const [minRetail, setMinRetail] = useState(9.99);
   const [stdW, setStdW]     = useState(500);
   const [dblW, setDblW]     = useState(900);
   const pickRef = useRef(null);
@@ -2584,10 +2628,17 @@ function KudosImporter() {
       const label=api?decodeHtml(api.label):''; const genre=api?api.genre:''; const subgenre=api?api.subgenre:'';
       const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
       const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
-      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0; const retailP=rawRetail>0?(Math.ceil(rawRetail)-0.01).toFixed(2):'';
-      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
+      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
       const formatDisplay=fmt?fmt.display:r.format;
       const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
+      // Floor applies only to single 12" releases. 7" can legitimately retail below the
+      // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
+      const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
+      const flooredRetail = rawRetail > 0
+        ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
+        : 0;
+      const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
+      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
       const grams=is2LP?String(dblW):String(stdW);
       let bodyHtml='';
       let audioTracksJson = '';
@@ -2683,7 +2734,7 @@ function KudosImporter() {
       {/* Controls */}
       {pickFile && (
         <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',padding:'12px 16px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
-          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
+          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['12" floor €',minRetail,setMinRetail,0.5],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
             <div key={label} style={{display:'flex',alignItems:'center',gap:6}}>
               <span style={{fontSize:10,color:S.muted,whiteSpace:'nowrap'}}>{label}</span>
               <input type="number" value={val} step={step} onChange={e=>setter(parseFloat(e.target.value)||val)} style={{width:72,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
@@ -4258,6 +4309,27 @@ export default function App() {
     wishlistRemove(item.handle);
   };
 
+  // Bulk: resolve every wishlist item, add in-stock ones to cart, remove them from wishlist.
+  // Out-of-stock and unresolvable items stay in the wishlist so the customer can deal with
+  // them separately (e.g., submit a backorder request).
+  const addAllWishlistToCart = async () => {
+    if (wishItems.length === 0) return;
+    const toAdd = [];
+    for (const item of wishItems) {
+      let r = records.find(rec => (rec.slug||'') === item.handle);
+      if (!r) {
+        try { r = await fetchShopifyProductByHandle(item.handle); } catch { /* skip */ }
+      }
+      if (r && r.stock > 0) toAdd.push({ item, r });
+    }
+    for (const { r } of toAdd) addToCart(r);
+    for (const { item } of toAdd) wishlistRemove(item.handle);
+    if (toAdd.length > 0) {
+      setWishOpen(false);
+      setCartOpen(true);
+    }
+  };
+
   // Keep `path` in sync with browser back/forward
   useEffect(()=>{
     const onPop = () => setPath(window.location.pathname);
@@ -4282,8 +4354,14 @@ export default function App() {
     setPath(newPath);
   };
   const openProduct = (r) => {
-    setSelected(r);
-    navigate(`/products/${r.slug}`);
+    if (!r) return;
+    // The player bar stores release snapshots that lack description, tracklist, and tags.
+    // When opening from the player, prefer the fully-loaded record from `records` so the
+    // modal shows complete content. Fall back to the snap if not found in the catalog
+    // (rare: release was unpublished mid-session).
+    const full = records.find(rec => rec.id === r.id) || records.find(rec => rec.slug && rec.slug === r.slug) || r;
+    setSelected(full);
+    navigate(`/products/${full.slug}`);
   };
   const closeProduct = () => {
     setSelected(null);
@@ -4465,7 +4543,7 @@ export default function App() {
       <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.token||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
-      <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
+      <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
     </PlayerProvider>
