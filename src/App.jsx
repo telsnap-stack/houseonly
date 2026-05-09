@@ -4061,12 +4061,6 @@ function RushHourImporter() {
   const jsonRef = useRef(null);
   const zipRef  = useRef(null);
 
-  // Normalize slug for matching across JSON ↔ ZIP filename variants.
-  // Strip everything but lowercase alphanumerics. The "subset-in-either-
-  // direction" comparison (below) handles the harder cases where Rush Hour's
-  // ZIP-naming script uses different word boundaries than the URL slug.
-  const normSlug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
   // ── JSON PARSER ───────────────────────────────────────────────
   // Bookmarklet output:
   //   { orderNumber: "1778948",
@@ -4091,43 +4085,36 @@ function RushHourImporter() {
     return valid;
   }
 
+  // Normalize catno for matching across JSON ↔ ZIP filename.
+  // The bookmarklet now writes ZIP files as "artwork_<CATNOSAFE>.zip" and
+  // "snippets_<CATNOSAFE>.zip" where CATNOSAFE = uppercase alphanumeric only.
+  // Examples: "WPH LP 004" → "WPHLP004", "RHMC 006-1" → "RHMC0061",
+  // "FARO 153LP" → "FARO153LP". This makes JSON↔ZIP matching deterministic
+  // and survives Rush Hour's SEO slug rewrites (the URL slug doesn't always
+  // agree with the title-derived ZIP slug).
+  const normCatno = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
   // ── ZIP INDEXER ───────────────────────────────────────────────
-  // Filename patterns observed (varies by release):
-  //   "artwork_fantasize_then_realize_09-05-2026_1922.zip"
-  //   "artwork_my-sons-smile-ep-ge-ology-remix.zip"
-  //   "snippets_distmantled_into_juice_rh_exclusive_09-05-2026_1922.zip"
-  //
-  // Strategy: strip the "artwork_" / "snippets_" prefix, strip the trailing
-  // "_DD-MM-YYYY_HHMM.zip" suffix (or just ".zip"), normalize to alphanumeric
-  // lowercase, and match against each JSON item's normalized slug.
-  // Match condition: subset-in-either-direction — the simpler form is a
-  // substring of the more complex form.
+  // Filename pattern (deterministic since bookmarklet rev 2):
+  //   "artwork_WPHLP004.zip"
+  //   "snippets_RHMC0061.zip"
   function buildZipIndex(files, jsonItems) {
-    const slugToFiles = {};
+    const catnoToFiles = {};
     for (const it of jsonItems) {
-      const k = normSlug(it.slug);
-      if (k) slugToFiles[k] = { artwork: null, snippets: null, _jsonSlug: it.slug };
+      const k = normCatno(it.catno);
+      if (k) catnoToFiles[k] = { artwork: null, snippets: null, _catno: it.catno };
     }
     for (const f of files) {
-      const m = f.name.match(/^(artwork|snippets)_(.+?)(?:_\d{2}-\d{2}-\d{4}_\d{4})?\.zip$/i);
+      const m = f.name.match(/^(artwork|snippets)_([A-Z0-9]+)\.zip$/i);
       if (!m) continue;
       const kind = m[1].toLowerCase();
-      const zipSlug = normSlug(m[2]);
-      if (!zipSlug) continue;
-      let best = null;
-      for (const k of Object.keys(slugToFiles)) {
-        if (k === zipSlug || k.includes(zipSlug) || zipSlug.includes(k)) {
-          if (!best || Math.abs(k.length - zipSlug.length) < Math.abs(best.length - zipSlug.length)) {
-            best = k;
-          }
-        }
-      }
-      if (best) {
-        if (kind === 'artwork')  slugToFiles[best].artwork  = f;
-        if (kind === 'snippets') slugToFiles[best].snippets = f;
+      const zipCatno = m[2].toUpperCase();
+      if (catnoToFiles[zipCatno]) {
+        if (kind === 'artwork')  catnoToFiles[zipCatno].artwork  = f;
+        if (kind === 'snippets') catnoToFiles[zipCatno].snippets = f;
       }
     }
-    return slugToFiles;
+    return catnoToFiles;
   }
 
   // ── DERIVATIONS ───────────────────────────────────────────────
@@ -4215,14 +4202,14 @@ function RushHourImporter() {
         const grams  = gramsFromFormat(meta.format);
         const desc   = (meta.description || '').trim();
         const slug   = meta.slug || '';
-        const slugKey = normSlug(slug);
+        const catnoKey = normCatno(catno);
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'') || slug || 'unknown';
         const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'') || slug;
 
         // ── COVER (artwork ZIP → R2) ──────────────────────────
         let coverUrl = '';
         let itemError = '';
-        const zipPair = zipIndex[slugKey];
+        const zipPair = zipIndex[catnoKey];
         const artworkZip = zipPair?.artwork;
         if (artworkZip) {
           try {
@@ -4352,7 +4339,7 @@ function RushHourImporter() {
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
         Drop the order JSON (from the bookmarklet) and all artwork+snippets
         ZIPs. The JSON carries dealer prices, quantities, and metadata —
-        slugs match JSON↔ZIPs to attach covers and audio. Builds the Shopify
+        catnos match JSON↔ZIPs to attach covers and audio. Builds the Shopify
         CSV in one pass.
       </p>
 
@@ -4396,7 +4383,7 @@ function RushHourImporter() {
           {orderItems.length>0 && zipFiles.length>0 && (
             <>
               <span>ZIPs: <b style={{color:S.text}}>{zipFiles.length}</b> ({matchedBoth} pairs)</span>
-              <span>Slugs matched: <b style={{color: matchedBoth===orderItems.length ? S.accent : '#ff8800'}}>{matchedBoth}/{orderItems.length}</b></span>
+              <span>Catnos matched: <b style={{color: matchedBoth===orderItems.length ? S.accent : '#ff8800'}}>{matchedBoth}/{orderItems.length}</b></span>
             </>
           )}
         </div>
