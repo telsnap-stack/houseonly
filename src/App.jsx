@@ -4018,27 +4018,21 @@ function MotherTongueImporter() {
 }
 
 // ── RUSH HOUR IMPORTER ─────────────────────────────────────────
-// Combines 3 sources to build the Shopify CSV:
-//   1. Invoice PDF       → catno, qty, dealer price (per row)
-//   2. Order JSON        → metadata (artist, title, label, format, tracks,
-//                          description, genre tag, year, artwork+snippets URLs)
-//                          produced by the Rush Hour bookmarklet from
-//                          distribution.rushhour.nl/orders/<n>
-//   3. ZIPs (artwork + snippets, 2 per release) → cover image + audio MP3s,
-//                          uploaded to R2.
+// Combines 2 sources to build the Shopify CSV:
+//   1. Order JSON (from the bookmarklet) → catno, qty, dealerPrice, slug,
+//      artist, title, label, format, barcode, tag, release, tracks[],
+//      description, artworkUrl, snippetsUrl. Everything that used to come
+//      from the invoice PDF is now read straight from the order page DOM.
+//   2. ZIPs (artwork + snippets, 2 per release) → cover image + audio MP3s,
+//      uploaded to R2.
 //
 // JSON / ZIP matching: by slug. The bookmarklet records each release's slug
 // (from /record/vinyl/<slug>); the ZIPs are named
-// "artwork_<slug>_<DD-MM-YYYY>_<HHMM>.zip" and "snippets_<slug>_..." but slug
-// normalization in the filename varies — sometimes hyphens, sometimes
-// underscores, sometimes a different word ("dismantled-juice" → "dismantled
-// _into_juice"). We match by stripping prefix/suffix and comparing as
-// alphanumeric-only subsets.
-//
-// PDF / JSON matching: by normalized catno (uppercase + alphanumeric only).
-//   "WPH LP 004"  → "WPHLP004"
-//   "RHMC 006-1"  → "RHMC0061"
-//   "FARO 153LP"  → "FARO153LP"
+// "artwork_<slug>_<DD-MM-YYYY>_<HHMM>.zip" and "snippets_<slug>_..." but
+// slug normalization in the filename varies — sometimes hyphens, sometimes
+// underscores, sometimes a different word ("dismantled-juice" →
+// "dismantled_into_juice"). We match by stripping prefix/suffix and
+// comparing as alphanumeric-only with subset-in-either-direction.
 //
 // Five product policy decisions (frozen 2026-05-09):
 //   D1. Tag policy is label-only (`label:<name>`) plus genre tags from the
@@ -4055,147 +4049,33 @@ function MotherTongueImporter() {
 //   D5. Format-driven weight: 12" → 500g, 2LP → 900g, 3LP → 1300g, 7" → 180g.
 
 function RushHourImporter() {
-  const [pdfFile, setPdfFile]       = useState(null);
   const [jsonFile, setJsonFile]     = useState(null);
   const [zipFiles, setZipFiles]     = useState([]); // raw File[]
-  const [invoiceItems, setInvoiceItems] = useState([]); // [{catno, qty, dealerPrice}]
-  const [orderItems, setOrderItems]     = useState([]); // [{catno, slug, title, artist, ...}]
-  const [zipIndex, setZipIndex]         = useState({}); // slugNorm → {artwork:File, snippets:File}
+  const [orderItems, setOrderItems] = useState([]); // [{catno, slug, qty, dealerPrice, ...}]
+  const [zipIndex, setZipIndex]     = useState({}); // slugNorm → {artwork:File, snippets:File}
   const [status, setStatus]   = useState('idle');
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
-  const pdfRef  = useRef(null);
   const jsonRef = useRef(null);
   const zipRef  = useRef(null);
 
-  // Normalize catno for matching: uppercase + alphanumeric only.
-  // "WPH LP 004"  → "WPHLP004"
-  // "RHMC 006-1"  → "RHMC0061"
-  // "FARO 153LP"  → "FARO153LP"
-  const normCatno = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-
   // Normalize slug for matching across JSON ↔ ZIP filename variants.
-  // Strip everything but lowercase alphanumerics. Used both ways:
-  //   "fantasize-then-realize"            → "fantasizethenrealize"
-  //   "fantasize_then_realize"            → "fantasizethenrealize"  (match)
-  //   "ripen-vol1"   vs   "ripen_vol.1"   → both → "ripenvol1"      (match)
-  // The "subset-in-either-direction" comparison handles the harder cases:
-  //   JSON "distmantled-juice-rh-exclusive"  → "distmantledjuicerhexclusive"
-  //   ZIP  "distmantled_into_juice_rh_..."   → "distmantledintojuicerhexclusive"
-  //   → JSON's normalized form is a subset of the ZIP's, so they match.
+  // Strip everything but lowercase alphanumerics. The "subset-in-either-
+  // direction" comparison (below) handles the harder cases where Rush Hour's
+  // ZIP-naming script uses different word boundaries than the URL slug.
   const normSlug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // ── PDF PARSER ────────────────────────────────────────────────
-  // Rush Hour invoices have a 7-column layout with very stable X coordinates:
-  //   Cat #         x ≈  28-50
-  //   Label         x ≈  64
-  //   Artist        x ≈ 164
-  //   Title         x ≈ 293
-  //   Format/Barcode x ≈ 441-461
-  //   Price (€)     x ≈ 507-510
-  //   Qty           x ≈ 529
-  //   Total         x ≈ 541-548
-  //
-  // Strategy: group items by Y row, then split tokens by X column boundary.
-  //   - Tokens with x < 64                 → catno
-  //   - Token at x ≈ 529 (and not € or a price) → qty
-  //   - First "€ <number>" pair where € is at x ≈ 507  → unit price
-  //
-  // The header row contains "Cat # Label Artist Title FormatBarcode Price ..."
-  // which we use as a sentinel — items start on the row right after.
-  // Stop conditions: rows containing "Subtotal", "Total products", "DHL",
-  // "Order total", or any row with no qty/price columns populated.
-  async function parseInvoicePDF(file) {
-    const pdfjsLib = await loadPDFJS();
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const lines = [];
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p);
-      const c = await page.getTextContent();
-      const vp = page.getViewport({ scale: 1 });
-      const byY = new Map();
-      for (const it of c.items) {
-        const x = it.transform[4];
-        const y = vp.height - it.transform[5];
-        const s = String(it.str || '');
-        if (!s.trim()) continue;
-        const key = Math.round(y / 4) * 4;
-        if (!byY.has(key)) byY.set(key, []);
-        byY.get(key).push({ s, x, x1: x + (it.width || 0) });
-      }
-      for (const [y, toks] of byY.entries()) {
-        toks.sort((a, b) => a.x - b.x);
-        lines.push({ page: p, y, tokens: toks });
-      }
-    }
-    lines.sort((a, b) => a.page - b.page || a.y - b.y);
-
-    // Locate the header row (containing "Cat" + "Label" + "Artist" + "Title")
-    let headerIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const text = lines[i].tokens.map(t => t.s).join(' ');
-      if (/Cat\s*#/i.test(text) && /Label/i.test(text) && /Artist/i.test(text) && /Title/i.test(text)) {
-        headerIdx = i;
-        break;
-      }
-    }
-    if (headerIdx < 0) throw new Error('Invoice header (Cat # Label Artist Title) not found');
-
-    const items = [];
-    const STOP_RX = /^(Subtotal|Total\s+products|Order\s+total|DHL|Sales\s+note|Thank\s+you)/i;
-
-    for (let i = headerIdx + 1; i < lines.length; i++) {
-      const ln = lines[i];
-      const fullText = ln.tokens.map(t => t.s).join(' ');
-      if (STOP_RX.test(fullText)) break;
-
-      // Split tokens into columns by X position
-      const catnoToks   = ln.tokens.filter(t => t.x < 64);
-      const priceToks   = ln.tokens.filter(t => t.x >= 500 && t.x < 525);
-      const qtyToks     = ln.tokens.filter(t => t.x >= 525 && t.x < 540);
-
-      if (catnoToks.length === 0) continue;
-      if (priceToks.length === 0 || qtyToks.length === 0) continue;
-
-      // Catno: join tokens with a space, normalize whitespace
-      const catnoRaw = catnoToks.map(t => t.s).join(' ').replace(/\s+/g, ' ').trim();
-      if (!catnoRaw) continue;
-
-      // Qty: should be a single integer
-      const qtyText = qtyToks.map(t => t.s).join('').trim();
-      const qty = parseInt(qtyText, 10);
-      if (!qty || qty <= 0 || qty > 99) continue;
-
-      // Price: tokens are like "€" + "19,50" — find the numeric one
-      let dealerPrice = null;
-      for (const t of priceToks) {
-        const m = t.s.replace(/\s/g, '').match(/^(\d+(?:[.,]\d+)?)$/);
-        if (m) {
-          dealerPrice = parseFloat(m[1].replace(',', '.'));
-          break;
-        }
-      }
-      if (!dealerPrice || dealerPrice <= 0) continue;
-
-      items.push({ catno: catnoRaw, qty, dealerPrice });
-    }
-    return items;
-  }
-
   // ── JSON PARSER ───────────────────────────────────────────────
-  // Output of the Rush Hour bookmarklet:
-  //   {
-  //     orderNumber: "1778948",
+  // Bookmarklet output:
+  //   { orderNumber: "1778948",
   //     items: [
-  //       { catno, slug, qty, productUrl,
-  //         nodeId, title, artist, label, tag, release, format, sku,
-  //         tracks: ["Fantasize Then Realize", ...],
-  //         description, artworkUrl, snippetsUrl }
-  //     ]
-  //   }
+  //       { catno, label, artist, title, slug, productUrl, format, barcode,
+  //         dealerPrice, qty, total,
+  //         nodeId, artworkUrl, snippetsUrl, h1Title,
+  //         tag, release, sku, tracks: [...], description }
+  //     ] }
   async function parseOrderJSON(file) {
     const text = await file.text();
     let data;
@@ -4205,7 +4085,10 @@ function RushHourImporter() {
               : Array.isArray(data.items) ? data.items
               : [];
     if (!arr.length) throw new Error('No items found in JSON');
-    return arr;
+    // Filter out malformed rows (need at least slug + dealerPrice + qty)
+    const valid = arr.filter(it => it.slug && it.dealerPrice > 0 && it.qty > 0);
+    if (!valid.length) throw new Error('JSON has no items with slug + dealerPrice + qty');
+    return valid;
   }
 
   // ── ZIP INDEXER ───────────────────────────────────────────────
@@ -4220,7 +4103,7 @@ function RushHourImporter() {
   // Match condition: subset-in-either-direction — the simpler form is a
   // substring of the more complex form.
   function buildZipIndex(files, jsonItems) {
-    const slugToFiles = {}; // jsonSlugNorm → {artwork, snippets}
+    const slugToFiles = {};
     for (const it of jsonItems) {
       const k = normSlug(it.slug);
       if (k) slugToFiles[k] = { artwork: null, snippets: null, _jsonSlug: it.slug };
@@ -4231,7 +4114,6 @@ function RushHourImporter() {
       const kind = m[1].toLowerCase();
       const zipSlug = normSlug(m[2]);
       if (!zipSlug) continue;
-      // Find the best matching JSON slug
       let best = null;
       for (const k of Object.keys(slugToFiles)) {
         if (k === zipSlug || k.includes(zipSlug) || zipSlug.includes(k)) {
@@ -4249,9 +4131,7 @@ function RushHourImporter() {
   }
 
   // ── DERIVATIONS ───────────────────────────────────────────────
-
   // Year from JSON `release` field. Examples: "W 07 - 2023" / "Week 03 / 2024".
-  // Just grab the first 4-digit year.
   function yearFromRelease(release) {
     const m = String(release || '').match(/(20\d{2}|19\d{2})/);
     return m ? parseInt(m[1], 10) : '';
@@ -4279,19 +4159,6 @@ function RushHourImporter() {
   }
 
   // ── INPUT HANDLERS ────────────────────────────────────────────
-  const onPdf = async (file) => {
-    if (!file) return;
-    setError(''); setStatus('parsing');
-    try {
-      const items = await parseInvoicePDF(file);
-      setInvoiceItems(items);
-      setPdfFile(file.name);
-      setStatus('idle');
-    } catch (e) {
-      setError('PDF parse error: ' + e.message); setStatus('idle');
-    }
-  };
-
   const onJson = async (file) => {
     if (!file) return;
     setError(''); setStatus('parsing');
@@ -4324,83 +4191,33 @@ function RushHourImporter() {
 
   // ── PROCESSING PIPELINE ───────────────────────────────────────
   const process = async () => {
-    if (!invoiceItems.length) { setError('Need invoice PDF first'); return; }
-    if (!orderItems.length)   { setError('Need order JSON first'); return; }
+    if (!orderItems.length) { setError('Need order JSON first'); return; }
     setError(''); setStatus('processing'); setResults([]);
     try {
       const JSZip = await loadJSZip();
-
-      // Index invoice items by normalized catno
-      const invByCatno = {};
-      for (const it of invoiceItems) invByCatno[normCatno(it.catno)] = it;
-
       const total = orderItems.length;
       const processed = [];
 
       for (let i = 0; i < orderItems.length; i++) {
         const meta = orderItems[i];
-        const catno   = meta.catno || '';
-        const catnoNorm = normCatno(catno);
-        const inv = invByCatno[catnoNorm];
-
+        const catno = meta.catno || '';
         setProgress({ done:i, total, current:`${catno} — preparing…` });
 
-        // Pricing: prefer invoice dealer price; fall back to JSON qty if invoice missing
-        const qty = inv?.qty ?? meta.qty ?? 1;
-        const dealerPrice = inv?.dealerPrice;
-        if (!dealerPrice) {
-          // No invoice match — record as error but still emit a row with status=draft
-          processed.push({
-            _catno: catno, _title: meta.title || catno, _artist: meta.artist || '',
-            _coverUrl: '', _tracks: [], _error: 'No invoice match',
-            _draft: true,
-            'Handle': (catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'') || 'unknown'),
-            'Title': meta.title || catno,
-            'Body (HTML)': '<p></p>',
-            'Vendor': meta.artist || '',
-            'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
-            'Tags': 'vinyl',
-            'Published': 'FALSE',
-            'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
-            'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
-            'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
-            'Variant SKU': catno,
-            'Variant Grams': gramsFromFormat(meta.format),
-            'Variant Inventory Tracker': 'shopify',
-            'Variant Inventory Qty': String(qty),
-            'Variant Inventory Policy': 'continue',
-            'Variant Fulfillment Service': 'manual',
-            'Variant Price': '',
-            'Variant Compare At Price': '',
-            'Variant Requires Shipping': 'TRUE',
-            'Variant Taxable': 'TRUE',
-            'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
-            'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
-            'Variant Barcode': meta.sku || '',
-            'Image Src': '', 'Image Position': '', 'Image Alt Text': '',
-            'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
-            'Variant Image':'','Variant Weight Unit':'kg',
-            'Variant Tax Code':'','Cost per item': '','Status':'draft',
-          });
-          setProgress({ done:i+1, total, current:'' });
-          continue;
-        }
-
+        const qty = meta.qty || 1;
+        const dealerPrice = meta.dealerPrice;
         const rawPrice = dealerPrice * (1 + margin / 100);
         const price = (Math.ceil(rawPrice) - 0.01).toFixed(2);
 
-        // Description / metadata
         const artist = (meta.artist || '').trim();
         const title  = (meta.title  || '').trim() || catno;
         const label  = (meta.label  || '').trim();
         const year   = yearFromRelease(meta.release);
         const grams  = gramsFromFormat(meta.format);
         const desc   = (meta.description || '').trim();
-
-        const slug = meta.slug || '';
+        const slug   = meta.slug || '';
         const slugKey = normSlug(slug);
-        const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'') || 'unknown';
-        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+        const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'') || slug || 'unknown';
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'') || slug;
 
         // ── COVER (artwork ZIP → R2) ──────────────────────────
         let coverUrl = '';
@@ -4413,7 +4230,6 @@ function RushHourImporter() {
             const zip = await JSZip.loadAsync(artworkZip);
             const files = Object.values(zip.files).filter(f => !f.dir);
             const imgFiles = files.filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f.name));
-            // Prefer "album_cover" or "front" or "cover"; otherwise largest image
             const real = imgFiles.find(f => /album_cover|front|cover|sleeve/i.test(f.name));
             const coverFile = real || imgFiles[0];
             if (coverFile) {
@@ -4436,13 +4252,10 @@ function RushHourImporter() {
             setProgress({ done:i, total, current:`${catno} — extracting snippets…` });
             const zip = await JSZip.loadAsync(snippetsZip);
             const files = Object.values(zip.files).filter(f => !f.dir);
-            // Audio files in side order: a1, a2, b1, b2, c1, ...
             const audioFiles = files
               .filter(f => /\.(mp3|wav|flac|aac|ogg|m4a)$/i.test(f.name))
               .sort((a, b) => a.name.localeCompare(b.name));
 
-            // Track names from JSON `tracks[]` (vinyl side order); fall back to
-            // cleaned filename if the count mismatches.
             const jsonTracks = Array.isArray(meta.tracks) ? meta.tracks : [];
             for (let a = 0; a < audioFiles.length; a++) {
               const af = audioFiles[a];
@@ -4498,7 +4311,7 @@ function RushHourImporter() {
           'Variant Taxable': 'TRUE',
           'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
           'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
-          'Variant Barcode': meta.sku || '',
+          'Variant Barcode': meta.barcode || meta.sku || '',
           'Image Src': coverUrl,
           'Image Position': coverUrl ? '1' : '',
           'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
@@ -4531,17 +4344,16 @@ function RushHourImporter() {
 
   // ── DERIVED STATS ─────────────────────────────────────────────
   const pct = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
-  const matchedInvoice = orderItems.filter(it => invoiceItems.some(inv => normCatno(inv.catno) === normCatno(it.catno))).length;
-  const matchedZips = Object.values(zipIndex).filter(v => v.artwork || v.snippets).length;
   const matchedBoth = Object.values(zipIndex).filter(v => v.artwork && v.snippets).length;
 
   // ── RENDER ────────────────────────────────────────────────────
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Drop the Rush Hour invoice PDF, the order JSON (from the bookmarklet),
-        and all artwork+snippets ZIPs. Catnos match across PDF↔JSON; slugs
-        match JSON↔ZIPs. Builds the Shopify CSV in one pass.
+        Drop the order JSON (from the bookmarklet) and all artwork+snippets
+        ZIPs. The JSON carries dealer prices, quantities, and metadata —
+        slugs match JSON↔ZIPs to attach covers and audio. Builds the Shopify
+        CSV in one pass.
       </p>
 
       <div
@@ -4549,30 +4361,23 @@ function RushHourImporter() {
         onDrop={e=>{
           e.preventDefault();
           const fl = [...e.dataTransfer.files];
-          const pdf  = fl.find(f => /\.pdf$/i.test(f.name));
           const json = fl.find(f => /\.json$/i.test(f.name));
-          if (pdf)  onPdf(pdf);
           if (json) onJson(json);
           assignZips(fl);
         }}
         style={{
-          border:`2px dashed ${(pdfFile||jsonFile||zipFiles.length)?S.accent:S.border}`,
+          border:`2px dashed ${(jsonFile||zipFiles.length)?S.accent:S.border}`,
           borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14,
           transition:'border 0.15s'
         }}
       >
         <div style={{fontSize:28,marginBottom:6}}>💎</div>
-        <div style={{fontSize:11,color:(pdfFile||jsonFile||zipFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
-          Rush Hour · Drop invoice PDF + order JSON + ZIPs
+        <div style={{fontSize:11,color:(jsonFile||zipFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
+          Rush Hour · Drop order JSON + ZIPs
         </div>
         <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
-          <input ref={pdfRef}  type="file" accept=".pdf"  style={{display:'none'}} onChange={e=>{if(e.target.files[0])onPdf(e.target.files[0]);e.target.value='';}} />
           <input ref={jsonRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])onJson(e.target.files[0]);e.target.value='';}} />
           <input ref={zipRef}  type="file" accept=".zip"  multiple style={{display:'none'}} onChange={e=>{assignZips(e.target.files);e.target.value='';}} />
-          <button onClick={()=>pdfRef.current.click()}
-            style={{background:pdfFile?S.accent:S.border,border:'none',color:pdfFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {pdfFile?`✓ ${pdfFile}`:'+ Invoice PDF'}
-          </button>
           <button onClick={()=>jsonRef.current.click()}
             style={{background:jsonFile?S.accent:S.border,border:'none',color:jsonFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
             {jsonFile?`✓ ${jsonFile}`:'+ Order JSON'}
@@ -4585,13 +4390,9 @@ function RushHourImporter() {
         </div>
       </div>
 
-      {(invoiceItems.length>0 || orderItems.length>0 || zipFiles.length>0) && status==='idle' && (
+      {(orderItems.length>0 || zipFiles.length>0) && status==='idle' && (
         <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
-          <span>Invoice items: <b style={{color:S.text}}>{invoiceItems.length}</b></span>
           <span>JSON items: <b style={{color:S.text}}>{orderItems.length}</b></span>
-          {orderItems.length>0 && invoiceItems.length>0 && (
-            <span>Catnos matched: <b style={{color: matchedInvoice===orderItems.length ? S.accent : '#ff8800'}}>{matchedInvoice}/{orderItems.length}</b></span>
-          )}
           {orderItems.length>0 && zipFiles.length>0 && (
             <>
               <span>ZIPs: <b style={{color:S.text}}>{zipFiles.length}</b> ({matchedBoth} pairs)</span>
@@ -4601,7 +4402,7 @@ function RushHourImporter() {
         </div>
       )}
 
-      {invoiceItems.length>0 && orderItems.length>0 && status==='idle' && (
+      {orderItems.length>0 && status==='idle' && (
         <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
           <div style={{display:'flex',alignItems:'center',gap:6}}>
             <span style={{fontSize:10,color:S.muted}}>Margin %</span>
@@ -4640,7 +4441,6 @@ function RushHourImporter() {
               <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} releases</span>
               <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
                 {results.filter(r=>r._coverUrl).length} covers · {results.filter(r=>r._tracks?.length>0).length} audio
-                {results.filter(r=>r._draft).length>0 ? ` · ${results.filter(r=>r._draft).length} draft` : ''}
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
@@ -4648,15 +4448,14 @@ function RushHourImporter() {
           </div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
-              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:S.border}`,borderRadius:3,overflow:'hidden'}}>
                 <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
                   {r._coverUrl
                     ? <img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
                     : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
                   }
                   {r._tracks?.length>0 && <div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
-                  {r._draft && <div style={{position:'absolute',top:4,left:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>DRAFT</div>}
-                  {!r._coverUrl && !r._draft && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
+                  {!r._coverUrl && <div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>NO IMG</div>}
                   {r._error && <div style={{position:'absolute',bottom:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>
