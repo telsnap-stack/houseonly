@@ -4227,9 +4227,29 @@ function RushHourImporter() {
               coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, mime);
             }
           } catch (e) { itemError = 'Artwork: ' + e.message; }
-        } else {
-          itemError = 'No artwork ZIP';
         }
+
+        // ── COVER FALLBACK: coverImageUrl from product page ───
+        // For releases where Rush Hour has no "Download Artwork" file but the
+        // product page does show a cover inline (objectstore.true.nl, ~285x285).
+        // The bookmarklet records this URL on each item.
+        if (!coverUrl && meta.coverImageUrl) {
+          try {
+            setProgress({ done:i, total, current:`${catno} — fetching inline cover…` });
+            const r = await fetch(meta.coverImageUrl);
+            if (r.ok) {
+              const ct = r.headers.get('content-type') || '';
+              if (/^image\//i.test(ct)) {
+                const blob = await r.blob();
+                const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg';
+                coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ct);
+                itemError = ''; // clear "Artwork:" errors above if fallback succeeded
+              }
+            }
+          } catch (e) { if (!itemError) itemError = 'Cover fallback: ' + e.message; }
+        }
+
+        if (!coverUrl && !itemError) itemError = 'No artwork available';
 
         // ── AUDIO (snippets ZIP → R2 per track) ───────────────
         const tracks = [];
