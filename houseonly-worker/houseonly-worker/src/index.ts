@@ -384,6 +384,7 @@ const MIRROR_TIMEOUT_MS = 15_000;
 const MIRROR_ALLOWED_HOSTS = new Set([
   'www.mothertonguerecords.com',
   'mothertonguerecords.com',
+  'objectstore.true.nl',  // Rush Hour cover images (CDN behind their distribution site)
   // Add other distributor hosts here when needed:
   // 'kompakt.fm', 'www.kompakt.fm', etc.
 ]);

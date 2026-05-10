@@ -4233,18 +4233,27 @@ function RushHourImporter() {
         // For releases where Rush Hour has no "Download Artwork" file but the
         // product page does show a cover inline (objectstore.true.nl, ~285x285).
         // The bookmarklet records this URL on each item.
+        //
+        // We can't fetch objectstore.true.nl directly from the browser — they
+        // don't return CORS headers. Use the worker's mirror endpoint, which
+        // does the fetch server-side and stores the image straight into R2.
+        // Allowlist enforced server-side; see worker MIRROR_ALLOWED_HOSTS.
         if (!coverUrl && meta.coverImageUrl) {
           try {
             setProgress({ done:i, total, current:`${catno} — fetching inline cover…` });
-            const r = await fetch(meta.coverImageUrl);
-            if (r.ok) {
-              const ct = r.headers.get('content-type') || '';
-              if (/^image\//i.test(ct)) {
-                const blob = await r.blob();
-                const ext = ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg';
-                coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ct);
-                itemError = ''; // clear "Artwork:" errors above if fallback succeeded
-              }
+            // Pick extension from URL (usually .jpg.webp or .jpg). Default to .jpg.
+            const ext = (meta.coverImageUrl.match(/\.(jpe?g|png|webp)(?:[?#]|$)/i) || [,'jpg'])[1].toLowerCase();
+            const r = await fetch(`${WORKER_URL}?action=mirror`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: meta.coverImageUrl, key: `covers/${safeKey}.${ext}` }),
+            });
+            const d = await r.json();
+            if (r.ok && d.url) {
+              coverUrl = d.url;
+              itemError = ''; // clear any prior "Artwork:" error if fallback succeeded
+            } else if (!itemError) {
+              itemError = 'Cover fallback: ' + (d.error || `HTTP ${r.status}`);
             }
           } catch (e) { if (!itemError) itemError = 'Cover fallback: ' + e.message; }
         }
