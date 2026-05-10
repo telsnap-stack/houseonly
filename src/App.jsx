@@ -1054,7 +1054,6 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const [hov, setHov] = useState(false);
   const wished = isWished ? isWished(r) : false;
   const player = usePlayer();
-  const isMobile = useIsMobile(720);
   const hasTracks = (r.tracks || []).length > 0;
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
@@ -1070,7 +1069,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13, fontWeight:700, color:S.text, lineHeight:1.3, marginBottom:2 }}>{r.title}</div>
         <div style={{ fontSize:11, color:S.muted, marginBottom:10 }}>{r.artist}</div>
-        <div style={{ display:'flex', flexDirection:isMobile?'column':'row', alignItems:isMobile?'stretch':'center', justifyContent:'space-between', gap:isMobile?8:6 }}>
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'stretch', justifyContent:'space-between', gap:8 }}>
           <span style={{ fontSize:15, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
           <div style={{ display:'flex', alignItems:'center', gap:4, justifyContent:'flex-end' }}>
             {onWishlistToggle && (
