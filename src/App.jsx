@@ -80,6 +80,7 @@ function parseProduct({ node }) {
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
+    createdAt: node.createdAt || null,
   };
 }
 
@@ -90,7 +91,7 @@ async function fetchShopifyProducts(cursor=null) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id title vendor descriptionHtml tags
+          id title vendor descriptionHtml tags createdAt
           variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -1890,6 +1891,13 @@ function Filters({ filters, onChange, records, allLabels, allGenres, allYears })
     <div style={{ marginBottom:24 }}>
       <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
         {sel('genre', genres, 'All Genres')}{sel('label', labels, 'All Labels')}
+        <div style={{ position:'relative', flexShrink:0 }}>
+          <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
+            <option value="newest">Newest</option>
+            <option value="price-asc">Price: Low → High</option>
+          </select>
+          <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:S.muted }}>▼</span>
+        </div>
       </div>
       <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none' }}>
         {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
@@ -4909,6 +4917,21 @@ export default function App() {
     }
     return true;
   });
+  // Apply sort. Default is "newest" (Shopify createdAt descending). Records that
+  // pre-date this feature won't have createdAt, so they sort to the bottom under
+  // newest mode — fine, they're old back-catalog and shouldn't be "new" anyway.
+  const sortedFiltered = (() => {
+    const sort = filters.sort || 'newest';
+    if (sort === 'price-asc') {
+      return [...filtered].sort((a,b) => (a.price ?? 9999) - (b.price ?? 9999));
+    }
+    // 'newest'
+    return [...filtered].sort((a,b) => {
+      const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+      return tb - ta;
+    });
+  })();
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
   // When a filter narrows visible results below a threshold but more products
@@ -5012,7 +5035,7 @@ export default function App() {
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          {sortedFiltered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
         </div>
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
