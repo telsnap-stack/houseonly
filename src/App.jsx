@@ -80,18 +80,24 @@ function parseProduct({ node }) {
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
-    createdAt: node.createdAt || null,
   };
 }
 
-async function fetchShopifyProducts(cursor=null) {
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[] } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
+  // Build a tag-AND query string for server-side filtering. Each filterTag is a
+  // raw tag value like "label:Word and Sound" or "year:2025". We escape single
+  // quotes inside values by switching to double quotes around the value.
+  const queryArg = filterTags.length
+    ? `, query: ${JSON.stringify(filterTags.map(t => `tag:'${t}'`).join(' AND '))}`
+    : '';
+  const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
-    products(first: 24${after}) {
+    products(first: 24${after}${sortArg}${queryArg}) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id title vendor descriptionHtml tags createdAt
+          id title vendor descriptionHtml tags
           variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -1892,9 +1898,10 @@ function Filters({ filters, onChange, records, allLabels, allGenres, allYears })
       <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
         {sel('genre', genres, 'All Genres')}{sel('label', labels, 'All Labels')}
         <div style={{ position:'relative', flexShrink:0 }}>
-          <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
-            <option value="newest">Newest</option>
+          <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:120 }}>
+            <option value="newest">New Arrivals</option>
             <option value="price-asc">Price: Low → High</option>
+            <option value="price-desc">Price: High → Low</option>
           </select>
           <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:S.muted }}>▼</span>
         </div>
@@ -4697,7 +4704,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest'});
   const [search,setSearch]               = useState('');
   const [page,setPage]                   = useState('shop');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
@@ -4879,14 +4886,36 @@ export default function App() {
     return ()=>window.removeEventListener('keydown', handler);
   },[]);
 
-  // Initial Shopify products fetch
+  // Translate UI filters/sort into Shopify Storefront API params.
+  // Tag formats match what the importers write:
+  //   - label tags are prefixed: "label:Word and Sound"
+  //   - genre tags are plain values: "Deep House"
+  //   - year tags are plain 4-digit years: "2025"
+  // useMemo so the effect below only refetches when they actually change.
+  const fetchParams = useMemo(() => {
+    const filterTags = [];
+    if (filters.genre) filterTags.push(filters.genre);
+    if (filters.label) filterTags.push(`label:${filters.label}`);
+    if (filters.year)  filterTags.push(String(filters.year));
+    let sortKey = 'CREATED_AT', reverse = true;
+    if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
+    if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
+    return { filterTags, sortKey, reverse };
+  }, [filters.genre, filters.label, filters.year, filters.sort]);
+
+  // Fetch (or refetch) page 1 whenever sort or filter params change. Wipes
+  // existing records so the customer doesn't see stale results during reload.
   useEffect(()=>{
-    fetchShopifyProducts()
+    setShopifyLoaded(false);
+    fetchShopifyProducts({ ...fetchParams })
       .then(({ products, hasNextPage, endCursor })=>{
-        if(products.length){ setRecords(products); setShopifyLoaded(true); setHasMore(hasNextPage); setCursor(endCursor); }
+        setRecords(products);
+        setShopifyLoaded(true);
+        setHasMore(hasNextPage);
+        setCursor(endCursor);
       })
-      .catch(e=>setShopifyErr(e.message));
-  },[]);
+      .catch(e=>{ setShopifyErr(e.message); setShopifyLoaded(true); });
+  },[fetchParams]);
 
   // Catalog-wide metadata fetch (tags + vendor only, all products). Powers the
   // filter pills so customers can see every genre, year, and label that exists
@@ -4900,54 +4929,32 @@ export default function App() {
 
   const loadMore=async()=>{
     if(!hasMore||loadingMore) return; setLoadingMore(true);
-    try { const {products,hasNextPage,endCursor}=await fetchShopifyProducts(cursor); setRecords(r=>[...r,...products]); setHasMore(hasNextPage); setCursor(endCursor); } catch(e){setShopifyErr(e.message);}
+    try {
+      const {products,hasNextPage,endCursor} = await fetchShopifyProducts({ cursor, ...fetchParams });
+      setRecords(r=>[...r,...products]);
+      setHasMore(hasNextPage);
+      setCursor(endCursor);
+    } catch(e){setShopifyErr(e.message);}
     setLoadingMore(false);
   };
 
   const addToCart=r=>setCart(c=>{const ex=c.find(i=>i.id===r.id);return ex?c.map(i=>i.id===r.id?{...i,qty:i.qty+1}:i):[...c,{...r,qty:1}];});
   const setFilter=(k,v)=>setFilters(f=>({...f,[k]:v}));
-  const filtered=records.filter(r=>{
-    if(filters.genre&&r.genre!==filters.genre) return false;
-    if(filters.label&&r.label!==filters.label) return false;
-    if(filters.year&&r.year!==filters.year) return false;
-    if(search){
-      const haystack=`${r.title} ${r.artist} ${r.label} ${r.catalog} ${r.desc} ${r.genre}`.toLowerCase();
-      const words=search.toLowerCase().trim().split(/\s+/);
-      if(!words.every(w=>haystack.includes(w))) return false;
-    }
-    return true;
-  });
-  // Apply sort. Default is "newest" (Shopify createdAt descending). Records that
-  // pre-date this feature won't have createdAt, so they sort to the bottom under
-  // newest mode — fine, they're old back-catalog and shouldn't be "new" anyway.
-  const sortedFiltered = (() => {
-    const sort = filters.sort || 'newest';
-    if (sort === 'price-asc') {
-      return [...filtered].sort((a,b) => (a.price ?? 9999) - (b.price ?? 9999));
-    }
-    // 'newest'
-    return [...filtered].sort((a,b) => {
-      const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
-      const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
-      return tb - ta;
-    });
-  })();
-  const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
-  // When a filter narrows visible results below a threshold but more products
-  // exist in the catalog, auto-load the next page in the background. This
-  // prevents the "No records found" / nearly-empty state when a customer
-  // filters on, say, 2018 but no 2018 products are in the first 24 loaded.
-  // Stops when threshold is hit or catalog is exhausted.
-  useEffect(()=>{
-    const hasActiveFilter = filters.genre || filters.label || filters.year || search;
-    if (!hasActiveFilter) return;
-    if (loadingMore || !hasMore) return;
-    const visibleMatches = filtered.length;
-    if (visibleMatches < 6) {
-      loadMore();
-    }
-  }, [filters, search, records.length, hasMore, loadingMore]);
+  // Free-text search remains client-side. It searches across whatever records
+  // are currently loaded — a known limitation. If a customer searches for
+  // something that's only in unloaded records, they need to scroll/load more
+  // first. Acceptable for now; could be moved to Shopify's `search` query
+  // later if it becomes a real friction point.
+  const filtered = search
+    ? records.filter(r => {
+        const haystack = `${r.title} ${r.artist} ${r.label} ${r.catalog} ${r.desc} ${r.genre}`.toLowerCase();
+        const words = search.toLowerCase().trim().split(/\s+/);
+        return words.every(w => haystack.includes(w));
+      })
+    : records;
+
+  const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
   // Derive filter pill values from the catalog-wide metadata (every product's
   // tags). useMemo so we don't recompute on every render. If catalogMeta hasn't
@@ -5035,7 +5042,7 @@ export default function App() {
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {sortedFiltered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
         </div>
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
