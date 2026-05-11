@@ -182,6 +182,51 @@ async function shopifyCheckout(cartItems, customerAccessToken=null) {
 // ── WORKER / R2 ────────────────────────────────────────────────
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
 
+// Resize an image blob to fit within maxDim x maxDim, preserving aspect ratio.
+// Returns the original blob untouched if it's already within bounds. Used to
+// prevent Shopify's ~25 megapixel rejection (covers above ~5000px are common
+// from W&S salespapers). Uses Canvas API in the browser — no server calls.
+//
+// quality is 0..1 for JPEG re-encoding. Default 0.92 keeps visual quality high
+// while shaving plenty of bytes off the original 7000x7000+ originals.
+async function resizeImageIfNeeded(blob, maxDim = 2000, quality = 0.92) {
+  // Decode the image to check its real dimensions. createImageBitmap is fast
+  // and doesn't need a DOM <img> element.
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+  } catch {
+    // Decode failed (corrupt image, unsupported format). Return original
+    // and let the upload step handle / surface the error.
+    return blob;
+  }
+  const { width, height } = bitmap;
+  if (width <= maxDim && height <= maxDim) {
+    bitmap.close?.();
+    return blob; // already small enough
+  }
+  // Compute target dimensions preserving aspect ratio.
+  const scale = Math.min(maxDim / width, maxDim / height);
+  const targetW = Math.round(width * scale);
+  const targetH = Math.round(height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+  bitmap.close?.();
+  // Re-encode as JPEG. We always emit JPEG regardless of input type, since
+  // a 2000px JPEG at q=0.92 is the right format for cover art (small + good).
+  const resized = await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))),
+      'image/jpeg',
+      quality
+    );
+  });
+  return resized;
+}
+
 async function uploadToR2(blob, key, mimeType) {
   const fd = new FormData();
   fd.append('file', new File([blob], key.split('/').pop(), { type: mimeType }));
@@ -2340,9 +2385,16 @@ function ZipImporter() {
           const audioFiles = files.filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a, b) => a.name.localeCompare(b.name));
           if (coverFile) {
             setProgress({ done:i, total, current:`${catno} — uploading cover…` });
-            const blob = await coverFile.async('blob');
-            const ext  = coverFile.name.split('.').pop().toLowerCase();
-            coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            const rawBlob = await coverFile.async('blob');
+            const ext     = coverFile.name.split('.').pop().toLowerCase();
+            // Resize if needed. resizeImageIfNeeded returns the original blob
+            // untouched when within bounds, so this is cheap in the common
+            // case. If a resize happens, the output is always JPEG.
+            const resizedBlob = await resizeImageIfNeeded(rawBlob, 2000, 0.92);
+            const wasResized  = resizedBlob !== rawBlob;
+            const outExt      = wasResized ? 'jpg' : ext;
+            const outMime     = wasResized ? 'image/jpeg' : (ext==='png' ? 'image/png' : 'image/jpeg');
+            coverUrl = await uploadToR2(resizedBlob, `covers/${safeKey}.${outExt}`, outMime);
           }
           if (pdfFile) {
             setProgress({ done:i, total, current:`${catno} — reading press text…` });
