@@ -2,15 +2,19 @@ interface Env {
   R2: R2Bucket;
   WISHLIST: KVNamespace;
   // SYNC_STATE: KV namespace for Discogs↔Shopify sync metadata.
-  // Used by Fase 3 handlers (sync, polling, webhook) once shipped.
-  // Currently bound but not yet read/written by any code.
+  // Used by Fase 3 sync handlers (bootstrap, status, webhook, polling).
   SYNC_STATE: KVNamespace;
   SHOPIFY_ADMIN_CLIENT_ID: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
   // DISCOGS_TOKEN: Personal Access Token for Discogs API.
   // Configured via `wrangler secret put DISCOGS_TOKEN` (separate command for staging).
-  // Currently declared but not yet read by any code.
+  // Used by sync handlers in src/lib/sync.ts.
   DISCOGS_TOKEN: string;
+  // BOOTSTRAP_AUTH_SECRET: Shared secret protecting the sync-bootstrap endpoint.
+  // Configured via `wrangler secret put BOOTSTRAP_AUTH_SECRET`. Required header:
+  //   Authorization: Bearer <secret>
+  // The endpoint is admin-only and called manually via curl; no third-party use.
+  BOOTSTRAP_AUTH_SECRET: string;
 }
 
 const R2_PUBLIC         = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -141,6 +145,7 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 // See src/lib/shopify-admin.ts for full docs.
 
 import { shopifyAdminGraphQL } from './lib/shopify-admin';
+import { handleSyncBootstrap, handleSyncStatus } from './lib/sync';
 
 
 
@@ -418,6 +423,29 @@ export default {
         return jsonRes({ error: 'invalid json' }, 400);
       }
       return await handleBackorderRequest(body, env);
+    }
+
+    // ── SYNC BOOTSTRAP ──────────────────────────────────────
+    // POST ?action=sync-bootstrap
+    // Header: Authorization: Bearer <BOOTSTRAP_AUTH_SECRET>
+    //
+    // One-shot endpoint: paginate the Discogs inventory and populate
+    // SYNC_STATE KV with sku↔listing_id mappings. Idempotent.
+    //
+    // Admin-only — called manually by Eduardo via curl after configuring
+    // wrangler secrets DISCOGS_TOKEN and BOOTSTRAP_AUTH_SECRET.
+    if (action === 'sync-bootstrap' && request.method === 'POST') {
+      return await handleSyncBootstrap(request, env);
+    }
+
+    // ── SYNC STATUS ─────────────────────────────────────────
+    // GET ?action=sync-status
+    //
+    // Read-only summary: when bootstrap last ran, stats from that run,
+    // last polled timestamp (when Fase 3E ships). No auth required —
+    // data is non-sensitive (stats only, no SKUs).
+    if (action === 'sync-status' && request.method === 'GET') {
+      return await handleSyncStatus(request, env);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────
