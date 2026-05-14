@@ -4923,7 +4923,7 @@ export default function App() {
     // (rare: release was unpublished mid-session).
     const full = records.find(rec => rec.id === r.id) || records.find(rec => rec.slug && rec.slug === r.slug) || r;
     setSelected(full);
-    navigate(`/products/${full.slug}`);
+    navigate(`/products/${full.slug}/`);
   };
   const closeProduct = () => {
     setSelected(null);
