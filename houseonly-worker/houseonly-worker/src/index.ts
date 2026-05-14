@@ -150,6 +150,8 @@ import {
   handleSyncStatus,
   handleRegisterWebhook,
   handleShopifyOrderWebhook,
+  handleSyncMode,
+  pollDiscogsForSales,
 } from './lib/sync';
 
 
@@ -453,6 +455,17 @@ export default {
       return await handleSyncStatus(request, env);
     }
 
+    // ── SYNC MODE (Fase 3E dry/live switch) ─────────────────
+    // GET  ?action=sync-mode  → returns {"mode":"dry"|"live"} (no auth)
+    // POST ?action=sync-mode  → set mode (auth: Bearer)
+    //   body: {"mode":"dry"} or {"mode":"live"}
+    //
+    // The scheduled handler reads this flag every run. Switching modes
+    // takes effect on the next cron invocation (within 15 min).
+    if (action === 'sync-mode') {
+      return await handleSyncMode(request, env);
+    }
+
     // ── SYNC REGISTER WEBHOOK ───────────────────────────────
     // POST ?action=sync-register-webhook
     // Header: Authorization: Bearer <BOOTSTRAP_AUTH_SECRET>
@@ -656,5 +669,39 @@ export default {
     } catch {}
 
     return jsonRes({ imageUrl: '' });
+  },
+
+  // ── SCHEDULED HANDLER (Fase 3E) ───────────────────────────────
+  // Runs every 15 min (cron */15 * * * *, configured in wrangler.jsonc).
+  // Polls Discogs for new firm sales and (in live mode) reduces Shopify
+  // inventory. Starts in 'dry' mode; switch via ?action=sync-mode.
+  //
+  // ctx.waitUntil ensures the work runs even if the cron event handler
+  // returns before pollDiscogsForSales is done. Errors are caught so a
+  // bad poll doesn't crash the Worker — we want next run to try again.
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      pollDiscogsForSales(env).then(
+        (result) => {
+          // Store the latest poll result for inspection via sync-status
+          // (or just by reading meta:last_poll_result directly from KV).
+          return env.SYNC_STATE.put(
+            'meta:last_poll_result',
+            JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ...result }),
+          );
+        },
+        (err) => {
+          // Network error or similar — log to KV so we can see it.
+          return env.SYNC_STATE.put(
+            'meta:last_poll_result',
+            JSON.stringify({
+              scheduled_at: new Date(event.scheduledTime).toISOString(),
+              ok: false,
+              error: err?.message || String(err),
+            }),
+          );
+        },
+      ),
+    );
   },
 };

@@ -27,8 +27,8 @@
       "id": "5c5c0ee16cc34f68bd2109b01894f09d"
     }
   ],
-  // Cron triggers placeholder. Activated in Fase 3E when scheduled() handler ships.
-  // Until then, leaving empty array means no scheduled invocations.
+  // Cron triggers. Production cron is empty until we migrate Fase 3 to prod
+  // in a future session (currently webhook + KV bootstrap are in staging only).
   "triggers": {
     "crons": []
   },
@@ -54,8 +54,10 @@
           "id": "5069be832df64efdb5e3d1a49f85b0ea"
         }
       ],
+      // Fase 3E cron: poll Discogs every 15 min. Worker reads meta:sync_3e_mode
+      // from KV to decide between dry (default, log only) and live (adjust stock).
       "triggers": {
-        "crons": []
+        "crons": ["*/15 * * * *"]
       }
     }
   }

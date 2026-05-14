@@ -4,29 +4,47 @@
 // sync between Shopify (primary) and Discogs (secondary) without manual
 // intervention.
 //
-// This file holds the handlers for the new ?action=... endpoints added in
-// Fase 3C and beyond. Each handler is independent and can be invoked
-// without affecting the rest of the Worker.
-//
 // Endpoints currently implemented:
 //   - sync-bootstrap        : populate KV with SKU↔listing_id mapping (Fase 3C)
-//   - sync-status           : read-only summary of sync state (Fase 3C)
+//   - sync-status           : read-only summary of sync state (Fase 3C/3E)
 //   - sync-register-webhook : register Shopify orders/create webhook (Fase 3D)
 //   - webhook-shopify-order : delist on Discogs when Shopify sells (Fase 3D)
+//   - sync-mode             : view/set Fase 3E mode (dry | live)
 //
-// Endpoints planned but not yet implemented:
-//   - scheduled handler     : poll Discogs orders, decrement Shopify (Fase 3E)
+// Scheduled handler (Fase 3E): pollDiscogsForSales(env)
+//   Runs every 15 min via cron (configured in wrangler.jsonc).
+//   Polls Discogs for new orders, decrements Shopify inventory.
+//   Starts in 'dry' mode (logs only). Switch to 'live' via sync-mode endpoint.
 
-import { getInventory, updateListingStatus, type DiscogsListing } from './discogs';
+import {
+  getInventory,
+  updateListingStatus,
+  getOrders,
+  type DiscogsListing,
+  type DiscogsOrder,
+} from './discogs';
 import {
   validateShopifyWebhookHmac,
   registerShopifyWebhook,
   listShopifyWebhooks,
+  findVariantBySku,
+  getPrimaryLocationId,
+  adjustInventory,
   type ShopifyAdminEnv,
 } from './shopify-admin';
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
+
+// Status values from Discogs we consider "firm sale" — we reduce Shopify
+// inventory when an order reaches one of these. Earlier states ("New Order",
+// "Payment Pending") may still cancel; later states already had inventory
+// reduced when they hit "Payment Received".
+const FIRM_SALE_STATUSES = new Set([
+  'Payment Received',
+  'In Progress',
+  'Shipped',
+]);
 
 // ── ENV ─────────────────────────────────────────────────────────────
 
@@ -238,10 +256,12 @@ export async function handleSyncStatus(
   _request: Request,
   env: SyncEnv,
 ): Promise<Response> {
-  const [lastRun, statsRaw, lastPolled] = await Promise.all([
+  const [lastRun, statsRaw, lastPolled, mode, lastPollResultRaw] = await Promise.all([
     env.SYNC_STATE.get('meta:bootstrap_last_run'),
     env.SYNC_STATE.get('meta:bootstrap_stats'),
     env.SYNC_STATE.get('meta:last_polled_ts'),
+    env.SYNC_STATE.get('meta:sync_3e_mode'),
+    env.SYNC_STATE.get('meta:last_poll_result'),
   ]);
 
   let stats: BootstrapStats | null = null;
@@ -249,10 +269,17 @@ export async function handleSyncStatus(
     try { stats = JSON.parse(statsRaw); } catch { /* leave null */ }
   }
 
+  let lastPollResult: any = null;
+  if (lastPollResultRaw) {
+    try { lastPollResult = JSON.parse(lastPollResultRaw); } catch { /* leave null */ }
+  }
+
   return jsonResponse({
     bootstrap_last_run: lastRun || null,
     bootstrap_stats: stats,
     last_polled_ts: lastPolled || null,
+    sync_3e_mode: mode === 'live' ? 'live' : 'dry',
+    last_poll_result: lastPollResult,
   });
 }
 
@@ -507,6 +534,302 @@ export async function getListingMapping(
   const raw = await env.SYNC_STATE.get(`listing:${listingId}`);
   if (!raw) return null;
   try { return JSON.parse(raw) as ListingMapping; } catch { return null; }
+}
+
+// ── FASE 3E: SCHEDULED POLL OF DISCOGS ORDERS ───────────────────────
+//
+// Runs every 15 min via cron. Detects new firm sales on Discogs and
+// reduces the corresponding Shopify inventory.
+//
+// Modes:
+//   - dry  : logs intended adjustments to KV under sales-detected:* but
+//            does NOT call adjustInventory. Default mode.
+//   - live : also calls adjustInventory(-quantity) on Shopify.
+//
+// Switch modes via the sync-mode endpoint (no redeploy needed).
+//
+// Cursor:
+//   meta:last_polled_ts (ISO 8601) — orders with created_at after this
+//   timestamp are considered new. Updated to the newest processed order's
+//   created_at on success.
+//
+// Idempotency:
+//   lock:order:{order_id} TTL 24h — set BEFORE adjustment is attempted.
+//   If a second cron run sees the same order, it's skipped.
+//
+// Audit:
+//   sales-detected:{order_id} JSON entry kept 30 days — for forensics.
+
+type SyncMode = 'dry' | 'live';
+
+interface PollResult {
+  ok: boolean;
+  mode: SyncMode;
+  orders_examined: number;
+  firm_sales_found: number;
+  skipped_duplicate: number;
+  shopify_adjustments_attempted: number;
+  shopify_adjustments_succeeded: number;
+  shopify_adjustments_failed: number;
+  unmapped_listings: number;
+  variant_not_found: number;
+  new_cursor: string | null;
+  errors?: string[];
+}
+
+/**
+ * Read current sync mode. Defaults to 'dry' if unset.
+ */
+async function getSyncMode(env: SyncEnv): Promise<SyncMode> {
+  const raw = await env.SYNC_STATE.get('meta:sync_3e_mode');
+  return raw === 'live' ? 'live' : 'dry';
+}
+
+/**
+ * Main entry point for the cron handler. Called every 15 min.
+ *
+ * @param env Worker env (needs SYNC_STATE, DISCOGS_TOKEN, Shopify admin secrets)
+ */
+export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult> {
+  const mode = await getSyncMode(env);
+  const errors: string[] = [];
+
+  const result: PollResult = {
+    ok: true,
+    mode,
+    orders_examined: 0,
+    firm_sales_found: 0,
+    skipped_duplicate: 0,
+    shopify_adjustments_attempted: 0,
+    shopify_adjustments_succeeded: 0,
+    shopify_adjustments_failed: 0,
+    unmapped_listings: 0,
+    variant_not_found: 0,
+    new_cursor: null,
+  };
+
+  // ── 1. Determine cursor (createdAfter) ──────────────────────────
+  let cursor = await env.SYNC_STATE.get('meta:last_polled_ts');
+  if (!cursor) {
+    // First run: use bootstrap timestamp as starting point, so we don't
+    // re-process orders that existed before our system started watching.
+    cursor = await env.SYNC_STATE.get('meta:bootstrap_last_run');
+  }
+  if (!cursor) {
+    // Truly first time, neither bootstrap nor a previous poll has run.
+    // Start from 24 h ago as a safety fallback.
+    cursor = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  // ── 2. Fetch orders from Discogs ────────────────────────────────
+  // We don't filter by status in the API call — Discogs only accepts one
+  // status per call, and we want 3 (Payment Received, In Progress, Shipped).
+  // Filtering in code is simpler than 3 API calls.
+  let orders: DiscogsOrder[] = [];
+  try {
+    // First page only for now — at 15 min poll cadence and ≤50 per page,
+    // we'd need 50+ firm sales in 15 min to overflow. Highly unlikely for
+    // a vinyl shop. If it ever happens, we'll log and add pagination.
+    const page = await getOrders(env.DISCOGS_TOKEN, {
+      createdAfter: cursor,
+      sort: 'created',
+      sortOrder: 'asc',
+      page: 1,
+    });
+    orders = page.orders;
+    result.orders_examined = orders.length;
+  } catch (e: any) {
+    errors.push(`getOrders failed: ${e?.message || e}`);
+    result.ok = false;
+    result.errors = errors;
+    return result;
+  }
+
+  // ── 3. Process each order ───────────────────────────────────────
+  let newestProcessed = cursor;
+
+  for (const order of orders) {
+    // Track the newest seen — we use this as the next cursor even if
+    // the order is skipped (e.g. status not firm sale).
+    if (order.created && order.created > newestProcessed) {
+      newestProcessed = order.created;
+    }
+
+    // Filter to firm-sale statuses
+    if (!FIRM_SALE_STATUSES.has(order.status)) continue;
+    result.firm_sales_found++;
+
+    // Idempotency check: have we already processed this order?
+    const orderIdStr = String(order.id);
+    const lockKey = `lock:order:${orderIdStr}`;
+    const alreadyProcessed = await env.SYNC_STATE.get(lockKey);
+    if (alreadyProcessed) {
+      result.skipped_duplicate++;
+      continue;
+    }
+
+    // Set lock IMMEDIATELY — even if we fail mid-way, we don't want
+    // to retry blindly on next cron run (would double-decrement stock).
+    // TTL 24 h is enough cushion.
+    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 24 * 60 * 60 });
+
+    // Process each item in the order
+    const audit: any = {
+      order_id: orderIdStr,
+      status: order.status,
+      created: order.created,
+      mode,
+      processed_at: new Date().toISOString(),
+      items: [],
+    };
+
+    for (const item of (order.items || [])) {
+      const itemAudit: any = {
+        listing_id: item.id,
+        release_title: item.release?.description,
+        quantity: 1,  // Discogs marketplace items are always quantity 1
+        sku: null as string | null,
+        shopify_variant_id: null as string | null,
+        shopify_location_id: null as string | null,
+        outcome: 'pending',
+        error: null as string | null,
+      };
+
+      // Resolve listing_id → sku via KV (populated by Fase 3C bootstrap)
+      const listingMapping = await getListingMapping(env, item.id);
+      if (!listingMapping?.sku) {
+        itemAudit.outcome = 'unmapped_listing';
+        result.unmapped_listings++;
+        audit.items.push(itemAudit);
+        continue;
+      }
+      itemAudit.sku = listingMapping.sku;
+
+      // Resolve sku → Shopify variant + inventory item
+      let variant;
+      try {
+        variant = await findVariantBySku(env, listingMapping.sku);
+      } catch (e: any) {
+        itemAudit.outcome = 'shopify_lookup_failed';
+        itemAudit.error = e?.message || String(e);
+        result.shopify_adjustments_failed++;
+        audit.items.push(itemAudit);
+        continue;
+      }
+      if (!variant?.inventoryItemId) {
+        itemAudit.outcome = 'variant_not_found';
+        result.variant_not_found++;
+        audit.items.push(itemAudit);
+        continue;
+      }
+      itemAudit.shopify_variant_id = variant.variantId;
+
+      // Resolve location ID
+      let locationId;
+      try {
+        locationId = await getPrimaryLocationId(env);
+      } catch (e: any) {
+        itemAudit.outcome = 'location_lookup_failed';
+        itemAudit.error = e?.message || String(e);
+        result.shopify_adjustments_failed++;
+        audit.items.push(itemAudit);
+        continue;
+      }
+      itemAudit.shopify_location_id = locationId;
+
+      // ── Branch: dry or live ────────────────────────────
+      if (mode === 'dry') {
+        itemAudit.outcome = 'would_adjust_dry_run';
+        result.shopify_adjustments_attempted++;
+        // count as "succeeded" semantically — we say "would have worked"
+        result.shopify_adjustments_succeeded++;
+        audit.items.push(itemAudit);
+        continue;
+      }
+
+      // LIVE mode: actually call Shopify
+      result.shopify_adjustments_attempted++;
+      const idempotencyKey = `discogs-order-${orderIdStr}-item-${item.id}`;
+      const adjustResult = await adjustInventory(
+        env,
+        [{
+          inventoryItemId: variant.inventoryItemId,
+          locationId,
+          delta: -1,  // one unit sold
+        }],
+        idempotencyKey,
+        'movement_created',
+        `discogs:order:${orderIdStr}`,
+      );
+
+      if (adjustResult.ok) {
+        itemAudit.outcome = 'adjusted_live';
+        result.shopify_adjustments_succeeded++;
+      } else {
+        itemAudit.outcome = 'shopify_adjust_failed';
+        itemAudit.error = JSON.stringify(adjustResult.userErrors);
+        result.shopify_adjustments_failed++;
+      }
+      audit.items.push(itemAudit);
+    }
+
+    // Save audit trail (30 day TTL)
+    await env.SYNC_STATE.put(
+      `sales-detected:${orderIdStr}`,
+      JSON.stringify(audit),
+      { expirationTtl: 30 * 24 * 60 * 60 },
+    );
+  }
+
+  // ── 4. Update cursor ────────────────────────────────────────────
+  if (newestProcessed !== cursor) {
+    await env.SYNC_STATE.put('meta:last_polled_ts', newestProcessed);
+    result.new_cursor = newestProcessed;
+  }
+
+  if (errors.length > 0) result.errors = errors;
+  return result;
+}
+
+// ── FASE 3E: MODE MANAGEMENT ENDPOINT ──────────────────────────────
+//
+// GET  ?action=sync-mode   → returns current mode (no auth, non-sensitive)
+// POST ?action=sync-mode   → set mode (auth: Bearer BOOTSTRAP_AUTH_SECRET)
+//   body: {"mode": "dry"} or {"mode": "live"}
+
+export async function handleSyncMode(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method === 'GET') {
+    const mode = await getSyncMode(env);
+    return jsonResponse({ mode });
+  }
+
+  if (request.method === 'POST') {
+    // Auth
+    const header = request.headers.get('authorization') || '';
+    const match = header.match(/^Bearer\s+(.+)$/i);
+    if (!match || match[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+      return jsonResponse({ error: 'unauthorized' }, 401);
+    }
+
+    let body: { mode?: string } = {};
+    try { body = await request.json(); } catch { /* allow missing */ }
+
+    const newMode = body.mode;
+    if (newMode !== 'dry' && newMode !== 'live') {
+      return jsonResponse({
+        error: 'mode must be "dry" or "live"',
+        received: newMode,
+      }, 400);
+    }
+
+    await env.SYNC_STATE.put('meta:sync_3e_mode', newMode);
+    return jsonResponse({ ok: true, mode: newMode });
+  }
+
+  return jsonResponse({ error: 'method not allowed' }, 405);
 }
 
 // ── INTERNAL: JSON response helper ──────────────────────────────────
