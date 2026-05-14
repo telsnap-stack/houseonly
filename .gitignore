@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Worker backups (local-only, not tracked)
+*.backup-*

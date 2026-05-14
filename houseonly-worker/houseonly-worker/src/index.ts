@@ -1,8 +1,16 @@
 interface Env {
   R2: R2Bucket;
   WISHLIST: KVNamespace;
+  // SYNC_STATE: KV namespace for Discogs↔Shopify sync metadata.
+  // Used by Fase 3 handlers (sync, polling, webhook) once shipped.
+  // Currently bound but not yet read/written by any code.
+  SYNC_STATE: KVNamespace;
   SHOPIFY_ADMIN_CLIENT_ID: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
+  // DISCOGS_TOKEN: Personal Access Token for Discogs API.
+  // Configured via `wrangler secret put DISCOGS_TOKEN` (separate command for staging).
+  // Currently declared but not yet read by any code.
+  DISCOGS_TOKEN: string;
 }
 
 const R2_PUBLIC         = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';

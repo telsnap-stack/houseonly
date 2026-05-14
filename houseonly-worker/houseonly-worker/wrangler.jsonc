@@ -21,8 +21,17 @@
     {
       "binding": "WISHLIST",
       "id": "cc7a1301f8b146768e4c2604c6b3d563"
+    },
+    {
+      "binding": "SYNC_STATE",
+      "id": "5c5c0ee16cc34f68bd2109b01894f09d"
     }
   ],
+  // Cron triggers placeholder. Activated in Fase 3E when scheduled() handler ships.
+  // Until then, leaving empty array means no scheduled invocations.
+  "triggers": {
+    "crons": []
+  },
   "env": {
     "staging": {
       "name": "houseonly-worker-staging",
@@ -39,8 +48,15 @@
         {
           "binding": "WISHLIST",
           "id": "cc7a1301f8b146768e4c2604c6b3d563"
+        },
+        {
+          "binding": "SYNC_STATE",
+          "id": "5069be832df64efdb5e3d1a49f85b0ea"
         }
-      ]
+      ],
+      "triggers": {
+        "crons": []
+      }
     }
   }
 }
