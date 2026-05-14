@@ -154,7 +154,7 @@ function getIndexTemplate() {
 }
 
 function renderProductHtml(template, product) {
-  const url = `${SITE_URL}/products/${product.slug}`;
+  const url = `${SITE_URL}/products/${product.slug}/`;
   const fullTitle = product.artist
     ? `${product.title} — ${product.artist} | House Only`
     : `${product.title} | House Only`;
@@ -230,7 +230,7 @@ function renderSitemap(products) {
   const urls = [
     `<url><loc>${SITE_URL}/</loc><lastmod>${today}</lastmod><priority>1.0</priority></url>`,
     ...products.map(p =>
-      `<url><loc>${SITE_URL}/products/${p.slug}</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
+      `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
     ),
   ];
   return `<?xml version="1.0" encoding="UTF-8"?>
