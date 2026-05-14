@@ -145,7 +145,12 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 // See src/lib/shopify-admin.ts for full docs.
 
 import { shopifyAdminGraphQL } from './lib/shopify-admin';
-import { handleSyncBootstrap, handleSyncStatus } from './lib/sync';
+import {
+  handleSyncBootstrap,
+  handleSyncStatus,
+  handleRegisterWebhook,
+  handleShopifyOrderWebhook,
+} from './lib/sync';
 
 
 
@@ -399,7 +404,7 @@ async function handleMirror(req: { url?: string; key?: string }, env: Env): Prom
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS });
@@ -446,6 +451,30 @@ export default {
     // data is non-sensitive (stats only, no SKUs).
     if (action === 'sync-status' && request.method === 'GET') {
       return await handleSyncStatus(request, env);
+    }
+
+    // ── SYNC REGISTER WEBHOOK ───────────────────────────────
+    // POST ?action=sync-register-webhook
+    // Header: Authorization: Bearer <BOOTSTRAP_AUTH_SECRET>
+    // Body:   { worker_url: "https://houseonly-worker[-staging].emontagut.workers.dev" }
+    //
+    // One-shot: registers the Shopify orders/create webhook pointing at
+    // this Worker. Idempotent — if the same webhook is already registered,
+    // returns 200 with already_registered=true.
+    if (action === 'sync-register-webhook' && request.method === 'POST') {
+      return await handleRegisterWebhook(request, env);
+    }
+
+    // ── WEBHOOK: SHOPIFY ORDERS/CREATE ──────────────────────
+    // POST ?action=webhook-shopify-order
+    // Headers: X-Shopify-Hmac-SHA256, X-Shopify-Topic, etc.
+    //
+    // Receives Shopify orders/create webhook. Validates HMAC, then for
+    // each line item with a SKU mapped in KV, marks the corresponding
+    // Discogs listing as Draft. Discogs calls run in the background
+    // (ctx.waitUntil) so we respond <5s as Shopify requires.
+    if (action === 'webhook-shopify-order' && request.method === 'POST') {
+      return await handleShopifyOrderWebhook(request, env, ctx);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────

@@ -293,3 +293,175 @@ export async function adjustInventory(
     groupId: payload?.inventoryAdjustmentGroup?.id,
   };
 }
+
+// ── WEBHOOK HMAC VALIDATION ─────────────────────────────────────────
+//
+// Shopify signs every webhook with HMAC-SHA256 using the app's CLIENT
+// SECRET (the same SHOPIFY_ADMIN_CLIENT_SECRET we already have for OAuth).
+// The signature is sent in the `X-Shopify-Hmac-SHA256` header as base64.
+//
+// CRITICAL: must be computed on the raw request body (bytes, not parsed
+// JSON). In our handler we read the body once as text and pass it here
+// AND to JSON.parse() — that ordering preserves the raw bytes.
+
+/**
+ * Verify that a webhook request was sent by Shopify.
+ *
+ * @param rawBody   The raw request body as a string (UTF-8)
+ * @param hmacHeader The value of the X-Shopify-Hmac-SHA256 header
+ * @param secret    The app's client secret
+ * @returns true if the HMAC matches, false otherwise
+ */
+export async function validateShopifyWebhookHmac(
+  rawBody: string,
+  hmacHeader: string | null,
+  secret: string,
+): Promise<boolean> {
+  if (!hmacHeader || !secret) return false;
+
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(secret);
+  const bodyData = encoder.encode(rawBody);
+
+  let key: CryptoKey;
+  try {
+    key = await crypto.subtle.importKey(
+      'raw',
+      keyData,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+  } catch {
+    return false;
+  }
+
+  const signature = await crypto.subtle.sign('HMAC', key, bodyData);
+
+  // Base64-encode the signature
+  const signatureBytes = new Uint8Array(signature);
+  let binary = '';
+  for (let i = 0; i < signatureBytes.byteLength; i++) {
+    binary += String.fromCharCode(signatureBytes[i]);
+  }
+  const computed = btoa(binary);
+
+  // Constant-time comparison
+  return constantTimeEqual(computed, hmacHeader);
+}
+
+/**
+ * Length-independent constant-time string comparison.
+ *
+ * We use this for HMAC comparison so an attacker cannot use timing
+ * differences to learn anything about the expected value. Standard
+ * `===` short-circuits on first difference, which is a timing oracle.
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// ── WEBHOOK REGISTRATION ────────────────────────────────────────────
+
+export interface WebhookRegistrationResult {
+  ok: boolean;
+  webhookId?: string;
+  topic?: string;
+  uri?: string;
+  userErrors?: any[];
+  error?: string;
+}
+
+/**
+ * Register a webhook subscription via the GraphQL Admin API.
+ * Idempotent-ish: if a subscription with the same topic + uri already
+ * exists, Shopify returns a userError (we treat it as success).
+ *
+ * @param env  Worker env
+ * @param topic  Shopify webhook topic (e.g. "ORDERS_CREATE")
+ * @param uri    Full HTTPS URL where webhooks should be delivered
+ */
+export async function registerShopifyWebhook(
+  env: ShopifyAdminEnv,
+  topic: string,
+  uri: string,
+): Promise<WebhookRegistrationResult> {
+  const mutation = `
+    mutation webhookSubscriptionCreate(
+      $topic: WebhookSubscriptionTopic!
+      $webhookSubscription: WebhookSubscriptionInput!
+    ) {
+      webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+        webhookSubscription {
+          id
+          topic
+          uri
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const variables = {
+    topic,
+    webhookSubscription: { uri, format: 'JSON' },
+  };
+
+  try {
+    const result = await shopifyAdminGraphQL(env, mutation, variables);
+    const payload = result?.data?.webhookSubscriptionCreate;
+    const userErrors = payload?.userErrors || [];
+    const webhook = payload?.webhookSubscription;
+
+    if (webhook?.id) {
+      return {
+        ok: true,
+        webhookId: webhook.id,
+        topic: webhook.topic,
+        uri: webhook.uri,
+      };
+    }
+
+    return { ok: false, userErrors };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+/**
+ * List existing webhook subscriptions for the app, used by callers that
+ * want to check whether a webhook is already registered before creating
+ * one (avoids spurious "already exists" userErrors).
+ */
+export async function listShopifyWebhooks(
+  env: ShopifyAdminEnv,
+): Promise<Array<{ id: string; topic: string; uri: string }>> {
+  const query = `
+    query {
+      webhookSubscriptions(first: 50) {
+        edges {
+          node {
+            id
+            topic
+            endpoint {
+              __typename
+              ... on WebhookHttpEndpoint { callbackUrl }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const result = await shopifyAdminGraphQL(env, query);
+  const edges = result?.data?.webhookSubscriptions?.edges || [];
+  return edges.map((e: any) => ({
+    id: e.node.id,
+    topic: e.node.topic,
+    uri: e.node.endpoint?.callbackUrl || '',
+  }));
+}
