@@ -124,108 +124,25 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
   );
 }
 
-// ── SHOPIFY ADMIN API (token management + GraphQL helper) ──────────
+// ── SHOPIFY ADMIN API ──────────────────────────────────────────────
 //
-// Uses OAuth 2 client credentials grant. The client_id and client_secret
-// are wrangler secrets (see SHOPIFY_ADMIN_CLIENT_ID / SHOPIFY_ADMIN_CLIENT_SECRET).
+// Token management and GraphQL helper moved to ./lib/shopify-admin.ts in
+// Fase 3B (May 2026) so they can be reused by the new sync flows without
+// duplicating code. Behaviour identical to before; only the location
+// changed.
 //
-// Token flow:
-//   1. POST to /admin/oauth/access_token with grant_type=client_credentials
-//   2. Response includes access_token (and possibly expires_in for some tokens;
-//      Shopify's docs are inconsistent — we treat the token as valid for 24h
-//      from issue and refresh ~1 hour before expiry)
-//   3. Cache in KV under key `shopify_admin_token` as JSON {token, expiresAt}
+// The module exports:
+//   - getShopifyAdminToken(env, force?) — cached OAuth token retrieval
+//   - shopifyAdminGraphQL(env, query, variables?) — wrapper with 401 retry
+//   - findVariantBySku(env, sku) — used by Fase 3 sync (new)
+//   - getPrimaryLocationId(env) — used by Fase 3 sync (new)
+//   - adjustInventory(env, adjustments, idempotencyKey, ...) — used by Fase 3E (new)
 //
-// On any 401 from a subsequent Admin API call, we evict the cached token and
-// retry once with a fresh token (in case the cache has gone stale early).
-//
-// We reuse the existing WISHLIST KV namespace for this — adding a separate
-// namespace just for one key isn't worth the wrangler config churn.
+// See src/lib/shopify-admin.ts for full docs.
 
-const TOKEN_KV_KEY = 'shopify_admin_token';
-const TOKEN_TTL_MS = 23 * 60 * 60 * 1000;  // refresh after 23h to stay clear of any 24h expiry
-const TOKEN_REFRESH_THRESHOLD_MS = 60 * 60 * 1000;  // refresh if <1h until expiry
+import { shopifyAdminGraphQL } from './lib/shopify-admin';
 
-interface CachedToken {
-  token: string;
-  expiresAt: number;  // epoch ms
-}
 
-async function fetchFreshAdminToken(env: Env): Promise<string> {
-  if (!env.SHOPIFY_ADMIN_CLIENT_ID || !env.SHOPIFY_ADMIN_CLIENT_SECRET) {
-    throw new Error('Shopify admin credentials not configured');
-  }
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: env.SHOPIFY_ADMIN_CLIENT_ID,
-    client_secret: env.SHOPIFY_ADMIN_CLIENT_SECRET,
-  });
-  const r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/oauth/access_token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`Shopify token endpoint returned ${r.status}: ${text}`);
-  }
-  const data: any = await r.json();
-  const token = data?.access_token;
-  if (!token) {
-    throw new Error(`Shopify token response missing access_token: ${JSON.stringify(data)}`);
-  }
-  // Cache it with our own expiry (Shopify doesn't always return expires_in)
-  const cached: CachedToken = { token, expiresAt: Date.now() + TOKEN_TTL_MS };
-  await env.WISHLIST.put(TOKEN_KV_KEY, JSON.stringify(cached));
-  return token;
-}
-
-async function getShopifyAdminToken(env: Env, force = false): Promise<string> {
-  if (!force) {
-    const raw = await env.WISHLIST.get(TOKEN_KV_KEY);
-    if (raw) {
-      try {
-        const cached: CachedToken = JSON.parse(raw);
-        const msUntilExpiry = cached.expiresAt - Date.now();
-        if (msUntilExpiry > TOKEN_REFRESH_THRESHOLD_MS && cached.token) {
-          return cached.token;
-        }
-      } catch {}
-    }
-  }
-  return await fetchFreshAdminToken(env);
-}
-
-async function shopifyAdminGraphQL(env: Env, query: string, variables?: any): Promise<any> {
-  // First attempt with cached token
-  let token = await getShopifyAdminToken(env);
-  let r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2026-04/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': token,
-    },
-    body: JSON.stringify({ query, variables: variables || {} }),
-  });
-  // On 401, refresh token and retry once
-  if (r.status === 401) {
-    token = await getShopifyAdminToken(env, true);
-    r = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2026-04/graphql.json`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': token,
-      },
-      body: JSON.stringify({ query, variables: variables || {} }),
-    });
-  }
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`Shopify Admin API ${r.status}: ${text}`);
-  }
-  const data = await r.json();
-  return data;
-}
 
 // ── BACKORDER REQUEST HANDLER ─────────────────────────────────────
 //
