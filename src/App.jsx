@@ -108,6 +108,58 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
   return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
+// Server-side free-text search via the Storefront API's `search` endpoint.
+// Used when the customer types in the search box — searches the WHOLE catalog,
+// not just the records currently loaded into memory.
+//
+// Differences vs fetchShopifyProducts:
+//   - `search` endpoint returns Product | Page | Article; we filter to Product
+//   - Results are sorted by relevance, not by CREATED_AT/PRICE (sort is
+//     intentionally ignored when searching — relevance wins)
+//   - `prefix: LAST` enables partial-word match on the final term, so typing
+//     "moody" matches "moodymann" without waiting for the full word
+//   - Filter tags ARE still applied if present, so "year=2024 + search=detroit"
+//     narrows correctly
+//
+// Note: server-side search uses Shopify's relevance scoring which indexes
+// title, vendor, tags, product_type, and metafields exposed to search.
+// Description body is NOT searched by default.
+async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[] } = {}) {
+  if (!searchTerm.trim()) {
+    // Caller should not invoke us with empty term; bail safely.
+    return { products: [], hasNextPage: false, endCursor: null };
+  }
+  const after = cursor ? `, after: "${cursor}"` : '';
+  // Combine the free-text search with optional tag filters. The search-syntax
+  // is space-separated AND, so we append each `tag:'X'` clause inline.
+  const queryParts = [searchTerm.trim()];
+  for (const t of filterTags) queryParts.push(`tag:'${t}'`);
+  const combinedQuery = JSON.stringify(queryParts.join(' '));
+  const data = await shopifyQuery(`{
+    search(query: ${combinedQuery}, first: 24${after}, types: PRODUCT, prefix: LAST) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          ... on Product {
+            id title vendor descriptionHtml tags
+            variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
+            images(first:1) { edges { node { url } } }
+          }
+        }
+      }
+    }
+  }`);
+  const { edges, pageInfo } = data.search;
+  // Filter out any edges that weren't Products (defensive — types: PRODUCT
+  // should make this unnecessary, but if Shopify ever returns mixed types
+  // we won't crash on missing fields).
+  const products = edges
+    .map(e => e.node)
+    .filter(n => n && n.id && n.id.includes('/Product/'))
+    .map(node => parseProduct({ node }));
+  return { products, hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
+}
+
 // Fetch only the lightweight metadata (tags + vendor) for ALL products in the
 // catalog. Used to populate filter pills (genres, years, labels) so customers
 // can see the full range of options on first page load — not just the first
@@ -4758,6 +4810,14 @@ export default function App() {
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest'});
   const [search,setSearch]               = useState('');
+  // Debounced version of `search`: updated 300ms after the user stops typing.
+  // We use this (not `search`) in fetchParams so we don't fire a Shopify
+  // search request on every keystroke.
+  const [debouncedSearch,setDebouncedSearch] = useState('');
+  useEffect(()=>{
+    const handle = setTimeout(()=>setDebouncedSearch(search.trim()), 300);
+    return ()=>clearTimeout(handle);
+  },[search]);
   const [page,setPage]                   = useState('shop');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
 
@@ -4944,6 +5004,8 @@ export default function App() {
   //   - genre tags are plain values: "Deep House"
   //   - year tags are plain 4-digit years: "2025"
   // useMemo so the effect below only refetches when they actually change.
+  // searchTerm uses the debounced value so we don't fire a Shopify query
+  // on every keystroke.
   const fetchParams = useMemo(() => {
     const filterTags = [];
     if (filters.genre) filterTags.push(filters.genre);
@@ -4952,14 +5014,35 @@ export default function App() {
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
-    return { filterTags, sortKey, reverse };
-  }, [filters.genre, filters.label, filters.year, filters.sort]);
+    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch };
+  }, [filters.genre, filters.label, filters.year, filters.sort, debouncedSearch]);
 
-  // Fetch (or refetch) page 1 whenever sort or filter params change. Wipes
-  // existing records so the customer doesn't see stale results during reload.
+  // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
+  // Two code paths:
+  //   - searchTerm present → use Shopify's `search` endpoint (relevance-ranked,
+  //     prefix-matches the last word, searches the WHOLE catalog)
+  //   - no searchTerm → use `products` endpoint (sortable, paginated, also full catalog)
+  // Both honor filter tags. The active code path is encapsulated in
+  // fetchActivePage so loadMore stays simple.
+  const fetchActivePage = useCallback((extraOpts={}) => {
+    if (fetchParams.searchTerm) {
+      return fetchShopifyProductSearch({
+        searchTerm: fetchParams.searchTerm,
+        filterTags: fetchParams.filterTags,
+        ...extraOpts,
+      });
+    }
+    return fetchShopifyProducts({
+      sortKey: fetchParams.sortKey,
+      reverse: fetchParams.reverse,
+      filterTags: fetchParams.filterTags,
+      ...extraOpts,
+    });
+  }, [fetchParams]);
+
   useEffect(()=>{
     setShopifyLoaded(false);
-    fetchShopifyProducts({ ...fetchParams })
+    fetchActivePage()
       .then(({ products, hasNextPage, endCursor })=>{
         setRecords(products);
         setShopifyLoaded(true);
@@ -4967,7 +5050,7 @@ export default function App() {
         setCursor(endCursor);
       })
       .catch(e=>{ setShopifyErr(e.message); setShopifyLoaded(true); });
-  },[fetchParams]);
+  },[fetchActivePage]);
 
   // Catalog-wide metadata fetch (tags + vendor only, all products). Powers the
   // filter pills so customers can see every genre, year, and label that exists
@@ -4982,7 +5065,7 @@ export default function App() {
   const loadMore=async()=>{
     if(!hasMore||loadingMore) return; setLoadingMore(true);
     try {
-      const {products,hasNextPage,endCursor} = await fetchShopifyProducts({ cursor, ...fetchParams });
+      const {products,hasNextPage,endCursor} = await fetchActivePage({ cursor });
       setRecords(r=>[...r,...products]);
       setHasMore(hasNextPage);
       setCursor(endCursor);
@@ -4993,18 +5076,9 @@ export default function App() {
   const addToCart=r=>setCart(c=>{const ex=c.find(i=>i.id===r.id);return ex?c.map(i=>i.id===r.id?{...i,qty:i.qty+1}:i):[...c,{...r,qty:1}];});
   const setFilter=(k,v)=>setFilters(f=>({...f,[k]:v}));
 
-  // Free-text search remains client-side. It searches across whatever records
-  // are currently loaded — a known limitation. If a customer searches for
-  // something that's only in unloaded records, they need to scroll/load more
-  // first. Acceptable for now; could be moved to Shopify's `search` query
-  // later if it becomes a real friction point.
-  const filtered = search
-    ? records.filter(r => {
-        const haystack = `${r.title} ${r.artist} ${r.label} ${r.catalog} ${r.desc} ${r.genre}`.toLowerCase();
-        const words = search.toLowerCase().trim().split(/\s+/);
-        return words.every(w => haystack.includes(w));
-      })
-    : records;
+  // Free-text search is now server-side via fetchShopifyProductSearch (above).
+  // Records arrives already filtered & sorted by relevance, so we render directly.
+  const filtered = records;
 
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
