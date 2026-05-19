@@ -15,11 +15,16 @@ interface Env {
   //   Authorization: Bearer <secret>
   // The endpoint is admin-only and called manually via curl; no third-party use.
   BOOTSTRAP_AUTH_SECRET: string;
+  // Spotify credentials for cover-art lookup. Previously hardcoded; moved to
+  // wrangler secrets May 19 2026 (see `wrangler secret put SPOTIFY_CLIENT_ID/SECRET`).
+  SPOTIFY_CLIENT_ID: string;
+  SPOTIFY_CLIENT_SECRET: string;
+  // Shopify Storefront API token, used by customerIdFromToken() for wishlist auth.
+  // Previously hardcoded; moved to wrangler secrets May 19 2026.
+  STOREFRONT_TOKEN: string;
 }
 
-const R2_PUBLIC         = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
-const SPOTIFY_CLIENT_ID = '9d42a0fa3bb74eada7e6b4659e5fcf0e';
-const SPOTIFY_CLIENT_SECRET = '6989af05077e493088e83f59a05bfb5e';
+const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -52,7 +57,6 @@ function jsonRes(data: any, status = 200): Response {
 // fails, we reject the request — no anonymous writes.
 
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
-const STOREFRONT_TOKEN = '3edf470af24f9bd4b81bca274121eec4';
 
 interface WishlistItem {
   handle: string;
@@ -69,14 +73,14 @@ interface WishlistData {
   updatedAt: number;
 }
 
-async function customerIdFromToken(token: string): Promise<string | null> {
+async function customerIdFromToken(env: Env, token: string): Promise<string | null> {
   if (!token) return null;
   try {
     const r = await fetch(`https://${SHOPIFY_DOMAIN}/api/2024-04/graphql.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
+        'X-Shopify-Storefront-Access-Token': env.STOREFRONT_TOKEN,
       },
       body: JSON.stringify({
         query: `query($t:String!){customer(customerAccessToken:$t){id email}}`,
@@ -516,7 +520,7 @@ export default {
       // GET: return wishlist
       if (request.method === 'GET') {
         const token = url.searchParams.get('token') || '';
-        const cid = await customerIdFromToken(token);
+        const cid = await customerIdFromToken(env, token);
         if (!cid) return jsonRes({ error: 'auth' }, 401);
         const data = await loadWishlist(env, cid);
         return jsonRes(data);
@@ -529,7 +533,7 @@ export default {
       } catch {
         return jsonRes({ error: 'invalid json' }, 400);
       }
-      const cid = await customerIdFromToken(body.token || '');
+      const cid = await customerIdFromToken(env, body.token || '');
       if (!cid) return jsonRes({ error: 'auth' }, 401);
 
       // POST: add or merge
@@ -607,7 +611,7 @@ export default {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': 'Basic ' + btoa(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`),
+          'Authorization': 'Basic ' + btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`),
         },
         body: 'grant_type=client_credentials',
       });
