@@ -2530,7 +2530,7 @@ function ZipImporter() {
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
-          'Tags': ['vinyl', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
+          'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
@@ -3110,7 +3110,7 @@ function DBHImporter() {
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
-        const shopifyTags = ['vinyl','dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
+        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
@@ -3901,7 +3901,7 @@ function MotherTongueImporter() {
 
         // ── TAGS (D1 label-only + D4 genres) ────────────────────
         const genres = normalizeGenres(meta.genres);
-        const tagParts = ['vinyl'];
+        const tagParts = ['vinyl', 'source:kudos'];
         if (labelClean) tagParts.push(`label:${labelClean}`);
         for (const g of genres) tagParts.push(`genre:${g}`);
         tagParts.push(String(new Date().getFullYear()));
@@ -4408,7 +4408,7 @@ function RushHourImporter() {
 
         // ── TAGS (D1) ────────────────────────────────────────
         const genres = genresFromTag(meta.tag);
-        const tagParts = ['vinyl'];
+        const tagParts = ['vinyl', 'source:mt'];
         if (label) tagParts.push(`label:${label}`);
         for (const g of genres) tagParts.push(`genre:${g}`);
         if (year) tagParts.push(String(year));
