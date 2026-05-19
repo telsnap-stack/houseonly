@@ -27,10 +27,11 @@
       "id": "5c5c0ee16cc34f68bd2109b01894f09d"
     }
   ],
-  // Cron triggers. Production cron is empty until we migrate Fase 3 to prod
-  // in a future session (currently webhook + KV bootstrap are in staging only).
+  // Cron triggers. Production cron activated May 19 2026 when Fase 3 was migrated
+  // to prod. Polls Discogs marketplace every 15 min to detect sales (Fase 3E).
+  // Staging cron continues to run independently (see env.staging.triggers below).
   "triggers": {
-    "crons": []
+    "crons": ["*/15 * * * *"]
   },
   "env": {
     "staging": {
