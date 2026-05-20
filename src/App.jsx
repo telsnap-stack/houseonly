@@ -5103,6 +5103,132 @@ function Shot2Canvas({ release, line }) {
   );
 }
 
+// ── SHOT 3 CANVAS (Stories) ────────────────────────────────────
+// The closing brand shot at 1080x1920: HOUSE ONLY logo as the hero, a small
+// cover reminder, title/artist/catalog, and a "Tap to shop →" CTA that pulses
+// subtly on the 120 BPM beat — same heartbeat as Shots 1 and 2. The CTA pulse
+// draws the eye to the call-to-action at the moment of the tap. Preview-only.
+function Shot3Canvas({ release }) {
+  const canvasRef = useRef(null);
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+  const coverImgRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const W = 1080, H = 1920;
+  const DUR = 5.0;
+  const beatSec = 60 / 120; // 120 BPM
+
+  useEffect(() => {
+    coverImgRef.current = null;
+    const url = coverSrc(release?.coverUrl);
+    if (url) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { coverImgRef.current = img; drawFrame(0); };
+      img.onerror = () => { coverImgRef.current = null; drawFrame(0); };
+      img.src = url;
+    } else { drawFrame(0); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [release?.coverUrl]);
+
+  const drawFrame = (elapsed) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // HOUSE ONLY logo — hero, centered upper third.
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '900 110px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', W / 2, H * 0.22);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', W / 2, H * 0.22 + 110);
+
+    // Cover reminder — centered, ~42% width.
+    const cs = W * 0.42;
+    const cxv = W / 2, cyv = H * 0.50;
+    const img = coverImgRef.current;
+    if (img) {
+      ctx.drawImage(img, cxv - cs / 2, cyv - cs / 2, cs, cs);
+    } else {
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(cxv - cs / 2, cyv - cs / 2, cs, cs);
+    }
+
+    // Title / artist / catalog under the cover.
+    let ty = cyv + cs / 2 + 60;
+    ctx.fillStyle = '#efefef';
+    ctx.font = '800 46px Inter, sans-serif';
+    ctx.fillText(release?.title || '', W / 2, ty);
+    ty += 56;
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '500 32px Inter, sans-serif';
+    ctx.fillText(release?.artist || '', W / 2, ty);
+    ty += 44;
+    ctx.fillStyle = '#585858';
+    ctx.font = '500 26px "JetBrains Mono", monospace';
+    ctx.fillText(release?.catalog || '', W / 2, ty);
+
+    // "Tap to shop →" CTA pill, pulsing on the 120 BPM beat.
+    const phase = elapsed % beatSec;
+    let punch = 1;
+    if (phase < 0.16) punch = 1 + (1 - phase / 0.16) * 0.04; // +4% on the beat
+    const ctaText = 'TAP TO SHOP →';
+    ctx.font = '800 38px Inter, sans-serif';
+    const tw = ctx.measureText(ctaText).width;
+    const padX = 48, padY = 28;
+    const pillW = tw + padX * 2, pillH = 38 + padY * 2;
+    const pillX = W / 2, pillY = H * 0.84;
+    ctx.save();
+    ctx.translate(pillX, pillY);
+    ctx.scale(punch, punch);
+    // pill bg
+    ctx.fillStyle = '#c8ff00';
+    const r = pillH / 2;
+    ctx.beginPath();
+    ctx.moveTo(-pillW / 2 + r, -pillH / 2);
+    ctx.arcTo(pillW / 2, -pillH / 2, pillW / 2, pillH / 2, r);
+    ctx.arcTo(pillW / 2, pillH / 2, -pillW / 2, pillH / 2, r);
+    ctx.arcTo(-pillW / 2, pillH / 2, -pillW / 2, -pillH / 2, r);
+    ctx.arcTo(-pillW / 2, -pillH / 2, pillW / 2, -pillH / 2, r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#080808';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ctaText, 0, 2);
+    ctx.restore();
+  };
+
+  const loop = () => {
+    const elapsed = (performance.now() - startRef.current) / 1000;
+    drawFrame(elapsed);
+    if (elapsed < DUR) rafRef.current = requestAnimationFrame(loop);
+    else { setPlaying(false); drawFrame(0); }
+  };
+
+  const play = () => {
+    if (playing) { setPlaying(false); if (rafRef.current) cancelAnimationFrame(rafRef.current); drawFrame(0); return; }
+    startRef.current = performance.now();
+    setPlaying(true);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }} />
+      <button onClick={play} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: 'pointer', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Stop' : '▶ Preview Shot 3'}
+      </button>
+    </div>
+  );
+}
+
 function StoriesGenerator() {
   const [query, setQuery]       = useState('');
   const [results, setResults]   = useState([]);
@@ -5359,6 +5485,10 @@ function StoriesGenerator() {
                 <div>
                   <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 2 — knowledge line</div>
                   <Shot2Canvas release={selected} line={ctxChosen} />
+                </div>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 3 — tap to shop</div>
+                  <Shot3Canvas release={selected} />
                 </div>
               </div>
             </div>
