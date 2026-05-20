@@ -5133,18 +5133,18 @@ function Shot3Canvas({ release }) {
     g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
 
-    // HOUSE ONLY logo — hero, centered upper third.
+    // HOUSE ONLY logo — large but secondary (cover is the protagonist).
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = '900 110px Inter, sans-serif';
+    ctx.font = '900 92px Inter, sans-serif';
     ctx.fillStyle = '#efefef';
-    ctx.fillText('HOUSE', W / 2, H * 0.22);
+    ctx.fillText('HOUSE', W / 2, H * 0.14);
     ctx.fillStyle = '#c8ff00';
-    ctx.fillText('ONLY', W / 2, H * 0.22 + 110);
+    ctx.fillText('ONLY', W / 2, H * 0.14 + 92);
 
-    // Cover reminder — centered, ~42% width.
-    const cs = W * 0.42;
-    const cxv = W / 2, cyv = H * 0.50;
+    // Cover — protagonist: large, centered upper-middle (~56% width).
+    const cs = W * 0.56;
+    const cxv = W / 2, cyv = H * 0.44;
     const img = coverImgRef.current;
     if (img) {
       ctx.drawImage(img, cxv - cs / 2, cyv - cs / 2, cs, cs);
@@ -5154,48 +5154,21 @@ function Shot3Canvas({ release }) {
     }
 
     // Title / artist / catalog under the cover.
-    let ty = cyv + cs / 2 + 60;
+    let ty = cyv + cs / 2 + 64;
     ctx.fillStyle = '#efefef';
-    ctx.font = '800 46px Inter, sans-serif';
+    ctx.font = '800 52px Inter, sans-serif';
     ctx.fillText(release?.title || '', W / 2, ty);
-    ty += 56;
+    ty += 62;
     ctx.fillStyle = '#9a9a9a';
-    ctx.font = '500 32px Inter, sans-serif';
+    ctx.font = '500 36px Inter, sans-serif';
     ctx.fillText(release?.artist || '', W / 2, ty);
-    ty += 44;
+    ty += 48;
     ctx.fillStyle = '#585858';
-    ctx.font = '500 26px "JetBrains Mono", monospace';
+    ctx.font = '500 28px "JetBrains Mono", monospace';
     ctx.fillText(release?.catalog || '', W / 2, ty);
 
-    // "Tap to shop →" CTA pill, pulsing on the 120 BPM beat.
-    const phase = elapsed % beatSec;
-    let punch = 1;
-    if (phase < 0.16) punch = 1 + (1 - phase / 0.16) * 0.04; // +4% on the beat
-    const ctaText = 'TAP TO SHOP →';
-    ctx.font = '800 38px Inter, sans-serif';
-    const tw = ctx.measureText(ctaText).width;
-    const padX = 48, padY = 28;
-    const pillW = tw + padX * 2, pillH = 38 + padY * 2;
-    const pillX = W / 2, pillY = H * 0.84;
-    ctx.save();
-    ctx.translate(pillX, pillY);
-    ctx.scale(punch, punch);
-    // pill bg
-    ctx.fillStyle = '#c8ff00';
-    const r = pillH / 2;
-    ctx.beginPath();
-    ctx.moveTo(-pillW / 2 + r, -pillH / 2);
-    ctx.arcTo(pillW / 2, -pillH / 2, pillW / 2, pillH / 2, r);
-    ctx.arcTo(pillW / 2, pillH / 2, -pillW / 2, pillH / 2, r);
-    ctx.arcTo(-pillW / 2, pillH / 2, -pillW / 2, -pillH / 2, r);
-    ctx.arcTo(-pillW / 2, -pillH / 2, pillW / 2, -pillH / 2, r);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = '#080808';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(ctaText, 0, 2);
-    ctx.restore();
+    // No drawn CTA — the Instagram link sticker (always visible) is the real,
+    // tappable link. The bottom band is left clear so the sticker can sit there.
   };
 
   const loop = () => {
@@ -5282,7 +5255,7 @@ function shot2Layout(measureCtx, W, H, text) {
   // so long phrases grow downward into the full available space instead of
   // overflowing off-screen.
   const topY = 300;
-  const bottomY = H - 240;
+  const bottomY = H - 340;   // leave the bottom band (~1580-1700) clear for the IG link sticker
   const availH = bottomY - topY;
   // Pick the largest font (from a preferred ladder) at which the wrapped text
   // fits availH. Long phrases automatically use a smaller size so every line
@@ -5352,37 +5325,25 @@ function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
 }
 
 function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
-  const beatSec = 0.5;
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // Logo: large but secondary (the cover is the protagonist of the close).
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = '900 110px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', W/2, H*0.22);
-  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', W/2, H*0.22 + 110);
-  const cs = W * 0.42, cxv = W/2, cyv = H*0.50;
+  ctx.font = '900 92px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', W/2, H*0.14);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', W/2, H*0.14 + 92);
+  // Cover: protagonist — large, centered in the upper-middle.
+  const cs = W * 0.56, cxv = W/2, cyv = H*0.44;
   if (coverImg) ctx.drawImage(coverImg, cxv - cs/2, cyv - cs/2, cs, cs);
   else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cxv - cs/2, cyv - cs/2, cs, cs); }
-  let ty = cyv + cs/2 + 60;
-  ctx.fillStyle = '#efefef'; ctx.font = '800 46px Inter, sans-serif'; ctx.fillText(release?.title || '', W/2, ty);
-  ty += 56; ctx.fillStyle = '#9a9a9a'; ctx.font = '500 32px Inter, sans-serif'; ctx.fillText(release?.artist || '', W/2, ty);
-  ty += 44; ctx.fillStyle = '#585858'; ctx.font = '500 26px "JetBrains Mono", monospace'; ctx.fillText(release?.catalog || '', W/2, ty);
-  const phase = elapsed % beatSec;
-  const punch = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.04 : 1;
-  const ctaText = 'TAP TO SHOP →';
-  ctx.font = '800 38px Inter, sans-serif';
-  const tw = ctx.measureText(ctaText).width, padX = 48, padY = 28;
-  const pillW = tw + padX * 2, pillH = 38 + padY * 2, pillX = W/2, pillY = H*0.84;
-  ctx.save(); ctx.translate(pillX, pillY); ctx.scale(punch, punch);
-  ctx.fillStyle = '#c8ff00'; const r = pillH / 2;
-  ctx.beginPath();
-  ctx.moveTo(-pillW/2 + r, -pillH/2);
-  ctx.arcTo(pillW/2, -pillH/2, pillW/2, pillH/2, r);
-  ctx.arcTo(pillW/2, pillH/2, -pillW/2, pillH/2, r);
-  ctx.arcTo(-pillW/2, pillH/2, -pillW/2, -pillH/2, r);
-  ctx.arcTo(-pillW/2, -pillH/2, pillW/2, -pillH/2, r);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#080808'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(ctaText, 0, 2); ctx.restore();
+  // Title / artist / catalog under the cover.
+  let ty = cyv + cs/2 + 64;
+  ctx.fillStyle = '#efefef'; ctx.font = '800 52px Inter, sans-serif'; ctx.fillText(release?.title || '', W/2, ty);
+  ty += 62; ctx.fillStyle = '#9a9a9a'; ctx.font = '500 36px Inter, sans-serif'; ctx.fillText(release?.artist || '', W/2, ty);
+  ty += 48; ctx.fillStyle = '#585858'; ctx.font = '500 28px "JetBrains Mono", monospace'; ctx.fillText(release?.catalog || '', W/2, ty);
+  // NOTE: no drawn CTA button — the Instagram link sticker (always visible) is
+  // the real, tappable link. The bottom band (~y 1450-1700) is left clear so
+  // the sticker can sit there without covering anything.
 }
 
 // StoryExporter — master 15s timeline: Shot1 (0-5s), Shot2 (5-10s), Shot3
@@ -5499,7 +5460,7 @@ function StoryExporter({ release, track, line }) {
   const busy = status === 'preparing' || status === 'recording';
   return (
     <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${S.border}` }}>
-      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story (15s)</div>
+      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story</div>
       <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
       <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
       <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
@@ -5508,7 +5469,7 @@ function StoryExporter({ release, track, line }) {
       {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
       {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
       <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
-        Records the 3 shots over 15s with the track audio. Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, add a link sticker over "TAP TO SHOP".
+        Records the 3 shots with the track audio (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom.
       </div>
     </div>
   );
