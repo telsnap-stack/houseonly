@@ -4692,8 +4692,8 @@ async function analyzeKicks(audioUrl) {
     if (maxFlux < 0.002) return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0 };
     // Threshold on the RISE, plus require the absolute energy to be substantial
     // (so we don't catch tiny rises in quiet passages).
-    const fluxThresh = maxFlux * 0.22;   // looser: fire on moderate rises, not only extreme
-    const energyFloor = maxEnv * 0.18;   // looser body requirement
+    const fluxThresh = maxFlux * 0.30;   // moderate threshold; grid filter below cleans the rest
+    const energyFloor = maxEnv * 0.20;   // body requirement
     const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks
     const kicks = [];
     let lastIdx = -minGapWins;
@@ -4722,6 +4722,38 @@ async function analyzeKicks(audioUrl) {
     while (bpm > 150) bpm = Math.round(bpm / 2);
     while (bpm > 0 && bpm < 90) bpm = bpm * 2;
 
+    // GRID FILTER — the raw detector is intentionally generous (it over-detects:
+    // hi-hats, bass transients, ghost notes). Rather than fight the threshold,
+    // we keep only detections that land ON the beat grid. Build a grid from the
+    // folded BPM (beat = 60/bpm seconds), then for each grid slot keep the
+    // single strongest nearby detection (within ±35% of a beat). This collapses
+    // ~575 noisy onsets down to the ~50-70 real kicks aligned to the pulse, so
+    // the cover punches exactly on the four-to-the-floor.
+    let gridKicks = kicks;
+    if (bpm >= 90 && bpm <= 150 && kicks.length > 6) {
+      const beat = 60 / bpm;                       // seconds per beat
+      const tol = beat * 0.35;                     // how close to a grid slot counts
+      const start = kicks[0];
+      const end = kicks[kicks.length - 1];
+      // Strength of a detection ≈ the low-band energy at its window.
+      const strengthAt = (t) => env[Math.round(t / 0.01)] || 0;
+      const snapped = [];
+      for (let g = start; g <= end + beat; g += beat) {
+        // candidates near this grid slot
+        let best = null, bestS = -1;
+        for (const k of kicks) {
+          if (Math.abs(k - g) <= tol) {
+            const s = strengthAt(k);
+            if (s > bestS) { bestS = s; best = k; }
+          }
+        }
+        if (best != null && (snapped.length === 0 || best - snapped[snapped.length - 1] > beat * 0.5)) {
+          snapped.push(best);
+        }
+      }
+      if (snapped.length >= 4) gridKicks = snapped;
+    }
+
     // SCORING — for a House Only story we want the track that HITS HARDEST with
     // a solid 4/4, not the most skeletal/clean one. So we reward kick strength
     // and overall energy, and treat steadiness as a pass/fail floor rather than
@@ -4740,7 +4772,7 @@ async function analyzeKicks(audioUrl) {
 
     // Final: punch (45) + energy (35) + tempo pocket (20), all gated by steadiness.
     const score = Math.round((kickStrength * 45 + energy * 35 + tempoInRange * 20) * steadyFloor);
-    return { kicks, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
+    return { kicks: gridKicks, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
   } catch (e) {
     return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0, error: e?.message || 'analyze failed' };
   }
