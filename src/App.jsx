@@ -4686,27 +4686,44 @@ async function analyzeKicks(audioUrl) {
         lastIdx = i;
       }
     }
-    if (kicks.length < 3) return { kicks, score: kicks.length ? 15 : 0, bpm: 0 };
+    if (kicks.length < 3) return { kicks, score: kicks.length ? 15 : 0, bpm: 0, kickStrength: 0, energy: 0 };
 
-    // Intervals between kicks → regularity + tempo.
+    // Intervals between kicks → tempo + a sanity check on steadiness.
     const intervals = [];
     for (let i = 1; i < kicks.length; i++) intervals.push(kicks[i] - kicks[i - 1]);
     const meanInt = intervals.reduce((a, b) => a + b, 0) / intervals.length;
     const variance = intervals.reduce((a, b) => a + (b - meanInt) ** 2, 0) / intervals.length;
-    const stdDev = Math.sqrt(variance);
-    const cv = meanInt > 0 ? stdDev / meanInt : 1; // coefficient of variation; lower = steadier
-    const bpm = meanInt > 0 ? Math.round(60 / meanInt) : 0;
+    const cv = meanInt > 0 ? Math.sqrt(variance) / meanInt : 1; // lower = steadier
 
-    // Scoring.
-    const presence = Math.min(40, (maxEnv / 0.2) * 40);            // up to 40
-    const regularity = Math.max(0, 40 * (1 - Math.min(cv, 1)));    // up to 40, steadier=higher
-    // Tempo fit: house ~115-130bpm (or half/double of it for the detected rate).
-    const tempoTargets = [122, 61, 244];
-    const tempoFit = 20 * Math.max(0, 1 - Math.min(...tempoTargets.map(t => Math.abs(bpm - t) / 40)));
-    const score = Math.round(presence + regularity + tempoFit);
-    return { kicks, score: Math.min(100, score), bpm };
+    // Raw BPM, then TEMPO FOLDING: hi-hats/claps/off-beats can double the
+    // detected rate (e.g. 240bpm = real 120). Fold anything >150 down by halving
+    // until it lands in the house-realistic 90-150 range. Also fold very low
+    // (half-time detections) up.
+    let bpm = meanInt > 0 ? Math.round(60 / meanInt) : 0;
+    while (bpm > 150) bpm = Math.round(bpm / 2);
+    while (bpm > 0 && bpm < 90) bpm = bpm * 2;
+
+    // SCORING — for a House Only story we want the track that HITS HARDEST with
+    // a solid 4/4, not the most skeletal/clean one. So we reward kick strength
+    // and overall energy, and treat steadiness as a pass/fail floor rather than
+    // the dominant factor (the old scoring favored sparse dubs — wrong).
+    //
+    // kickStrength: how punchy the kick band is (peak low-end amplitude).
+    const kickStrength = Math.min(1, maxEnv / 0.18);
+    // energy: overall RMS of the low-passed signal = how much "drive"/density.
+    const meanEnv = env.reduce((a, b) => a + b, 0) / env.length;
+    const energy = Math.min(1, meanEnv / 0.06);
+    // steadyFloor: 1 if it holds a recognizable 4/4 (cv reasonably low), else
+    // scaled down. Acts as a gate, not the main driver.
+    const steadyFloor = cv < 0.45 ? 1 : Math.max(0.4, 1 - (cv - 0.45));
+    // tempoInRange: small bonus for sitting in the house pocket once folded.
+    const tempoInRange = bpm >= 110 && bpm <= 132 ? 1 : (bpm >= 100 && bpm <= 140 ? 0.6 : 0.2);
+
+    // Final: punch (45) + energy (35) + tempo pocket (20), all gated by steadiness.
+    const score = Math.round((kickStrength * 45 + energy * 35 + tempoInRange * 20) * steadyFloor);
+    return { kicks, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
   } catch (e) {
-    return { kicks: [], score: 0, bpm: 0, error: e?.message || 'analyze failed' };
+    return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0, error: e?.message || 'analyze failed' };
   }
 }
 
@@ -4714,13 +4731,17 @@ async function analyzeKicks(audioUrl) {
 // Returns { tracks:[{name,url,score,bpm,kicks}], bestIndex }.
 async function pickBestTrack(tracks) {
   const analyzed = [];
-  for (const t of tracks) {
-    if (!t || !t.url) { analyzed.push({ ...t, score: 0, bpm: 0, kicks: [] }); continue; }
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (!t || !t.url) { analyzed.push({ ...t, origIndex: i, score: 0, bpm: 0, kicks: [], kickStrength: 0, energy: 0 }); continue; }
     const a = await analyzeKicks(t.url);
-    analyzed.push({ ...t, score: a.score, bpm: a.bpm, kicks: a.kicks });
+    analyzed.push({ ...t, origIndex: i, score: a.score, bpm: a.bpm, kicks: a.kicks, kickStrength: a.kickStrength || 0, energy: a.energy || 0 });
   }
-  let bestIndex = 0, bestScore = -1;
-  analyzed.forEach((t, i) => { if (t.score > bestScore) { bestScore = t.score; bestIndex = i; } });
+  // B-intermediate: sort by score descending so the punchiest tracks rise to the
+  // top as a triage aid. The top one is pre-selected as a SOFT suggestion (no
+  // authoritative "best" label) — Eduardo's ear makes the final call.
+  analyzed.sort((a, b) => b.score - a.score);
+  const bestIndex = 0; // after sort, the strongest is first
   return { tracks: analyzed, bestIndex };
 }
 
@@ -4936,7 +4957,7 @@ function StoriesGenerator() {
 
             {(kickAnalysis?.tracks || audioTracks).map((t, i) => {
               const analyzed = !!kickAnalysis;
-              const isBest = analyzed && i === kickAnalysis.bestIndex;
+              const isTop = analyzed && i === 0; // sorted by score: first is the soft suggestion
               const isChosen = chosenTrack === i;
               const score = analyzed ? (t.score || 0) : null;
               // Bar of 5 blocks to visualize the kick strength.
@@ -4951,7 +4972,7 @@ function StoriesGenerator() {
                       <span style={{ display:'flex', gap:2 }}>
                         {[0,1,2,3,4].map(b => <span key={b} style={{ width:5, height:12, borderRadius:1, background:b<blocks?S.accent:S.border }} />)}
                       </span>
-                      {isBest && <span style={{ fontSize:7, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:800 }}>best 4/4</span>}
+                      {isTop && <span style={{ fontSize:7, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:800 }}>suggested</span>}
                     </span>
                   )}
                   <AudioPlayer src={t.url} />
@@ -4960,12 +4981,10 @@ function StoriesGenerator() {
             })}
 
             {kickAnalysis && (
-              <div style={{ fontSize:9, color:S.muted, marginTop:10, fontStyle:'italic' }}>
-                {chosenTrack != null && kickAnalysis.tracks[chosenTrack]?.score >= 40
-                  ? `Featuring "${kickAnalysis.tracks[chosenTrack]?.name}" — strongest four-to-the-floor. Tap another to override.`
-                  : chosenTrack != null && kickAnalysis.tracks[chosenTrack]?.score > 0
-                    ? `Featuring "${kickAnalysis.tracks[chosenTrack]?.name}". Kick is present but not a strong 4/4 — tap another if you prefer.`
-                    : 'No strong kick detected in any snippet — the waveform will animate without a pulse. Tap to choose anyway.'}
+              <div style={{ fontSize:9, color:S.muted, marginTop:10, fontStyle:'italic', lineHeight:1.6 }}>
+                {kickAnalysis.tracks.some(t => t.score > 0)
+                  ? `Sorted by punch + energy — strongest at top, pre-selected as a suggestion. Your ear decides: play a few and tap the one you want.`
+                  : 'No clear kick detected in any snippet — the waveform will animate without a pulse. Tap whichever you prefer.'}
               </div>
             )}
           </div>
@@ -4979,7 +4998,7 @@ function StoriesGenerator() {
           </div>
 
           <div style={{ marginTop:18, padding:'10px 12px', background:S.bg, border:`1px dashed ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
-            <strong style={{ color:S.accent }}>Checkpoint 4A-1.</strong> Kick detection: each snippet scored on its 4/4 strength + BPM, strongest auto-selected. Next (4A-2): render Shot 1 on canvas with the cover punching on each detected kick.
+            <strong style={{ color:S.accent }}>Checkpoint 4A-1.</strong> Tracks scored on punch + energy (tempo-folded BPM), sorted strongest-first, top pre-selected as a soft suggestion. Next (4A-2): render Shot 1 on canvas with the cover punching on each detected kick.
           </div>
         </div>
       )}
