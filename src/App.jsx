@@ -4660,7 +4660,7 @@ async function analyzeKicks(audioUrl) {
     hp.Q.value = 0.7;
     const lp = offline.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 100;   // kick body sits ~50-100Hz
+    lp.frequency.value = 130;   // kick body extends to ~120-150Hz; widen to catch it
     lp.Q.value = 0.7;
     src.connect(hp);
     hp.connect(lp);
@@ -4692,8 +4692,8 @@ async function analyzeKicks(audioUrl) {
     if (maxFlux < 0.002) return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0 };
     // Threshold on the RISE, plus require the absolute energy to be substantial
     // (so we don't catch tiny rises in quiet passages).
-    const fluxThresh = maxFlux * 0.40;
-    const energyFloor = maxEnv * 0.30;
+    const fluxThresh = maxFlux * 0.22;   // looser: fire on moderate rises, not only extreme
+    const energyFloor = maxEnv * 0.18;   // looser body requirement
     const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks
     const kicks = [];
     let lastIdx = -minGapWins;
@@ -4922,7 +4922,9 @@ function Shot1Canvas({ release, track }) {
       <button onClick={togglePlay} disabled={!track?.url} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: track?.url ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
         {playing ? '■ Stop preview' : '▶ Preview Shot 1'}
       </button>
-      {kicks.length > 0 && <div style={{ fontSize: 8, color: S.muted, marginTop: 6, letterSpacing: 1, textTransform: 'uppercase' }}>{kicks.length} kicks · cover punches on each</div>}
+      <div style={{ fontSize: 9, color: kicks.length > 8 ? S.accent : '#ff8800', marginTop: 6, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>
+        {kicks.length > 0 ? `${kicks.length} kicks detected · ${track?.bpm || '?'} bpm` : 'no kicks detected'}
+      </div>
     </div>
   );
 }
