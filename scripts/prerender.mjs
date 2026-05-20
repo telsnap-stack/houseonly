@@ -216,8 +216,15 @@ function renderProductHtml(template, product) {
   `;
 
   // Replace the original <title>houseonly</title> and inject head + body content.
+  // Also strip the static canonical that index.html carries (it points to the
+  // homepage "/" and is correct for the SPA home + non-prerendered routes, but
+  // on a prerendered product page it would duplicate — and precede — the
+  // per-product canonical injected via seoHead, making crawlers/browsers treat
+  // the homepage as canonical. Remove it here so the product page has exactly
+  // one canonical (its own). The home and other SPA routes keep the static one.
   let html = template
     .replace(/<title>[^<]*<\/title>/, '')
+    .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
     .replace('</head>', `${seoHead}\n  </head>`)
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 
