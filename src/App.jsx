@@ -4648,15 +4648,22 @@ async function analyzeKicks(audioUrl) {
 
     const duration = audioBuf.duration;
     const sampleRate = audioBuf.sampleRate;
-    // Render through a low-pass filter to isolate the kick band.
+    // Render through a BANDPASS centered on the kick body (~45-100Hz) to reduce
+    // overlap with sustained bass lines that share the low-end. A lowpass alone
+    // (old approach) let bass notes through and made the pulse fire on bass.
     const offline = new AC(1, Math.ceil(duration * sampleRate), sampleRate);
     const src = offline.createBufferSource();
     src.buffer = audioBuf;
+    const hp = offline.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 45;    // cut sub-rumble below the kick fundamental
+    hp.Q.value = 0.7;
     const lp = offline.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 120;   // kick fundamental lives ~50-100Hz
-    lp.Q.value = 1;
-    src.connect(lp);
+    lp.frequency.value = 100;   // kick body sits ~50-100Hz
+    lp.Q.value = 0.7;
+    src.connect(hp);
+    hp.connect(lp);
     lp.connect(offline.destination);
     src.start(0);
     const rendered = await offline.startRendering();
@@ -4674,14 +4681,26 @@ async function analyzeKicks(audioUrl) {
     const maxEnv = Math.max(...env);
     if (maxEnv < 0.005) return { kicks: [], score: 0, bpm: 0 }; // basically silent low-end
 
-    // Peak picking: an onset is a window above threshold that's a local max,
-    // with a refractory gap so we don't double-count one kick.
-    const thresh = maxEnv * 0.45;
-    const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks (~max 500bpm guard)
+    // ONSET DETECTION (transient, not energy level). A kick is a SUDDEN RISE in
+    // low-band energy — a sharp attack. A sustained bass note has high but FLAT
+    // energy (its flux is ~0 once sounding), so it won't trigger. We compute the
+    // positive energy flux (rise vs the previous window) and pick peaks in THAT,
+    // not in raw energy. This is what stops the pulse firing on bass lines.
+    const flux = [0];
+    for (let i = 1; i < env.length; i++) flux.push(Math.max(0, env[i] - env[i - 1]));
+    const maxFlux = Math.max(...flux);
+    if (maxFlux < 0.002) return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0 };
+    // Threshold on the RISE, plus require the absolute energy to be substantial
+    // (so we don't catch tiny rises in quiet passages).
+    const fluxThresh = maxFlux * 0.40;
+    const energyFloor = maxEnv * 0.30;
+    const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks
     const kicks = [];
     let lastIdx = -minGapWins;
-    for (let i = 1; i < env.length - 1; i++) {
-      if (env[i] >= thresh && env[i] >= env[i - 1] && env[i] >= env[i + 1] && (i - lastIdx) >= minGapWins) {
+    for (let i = 1; i < flux.length - 1; i++) {
+      const isRisePeak = flux[i] >= fluxThresh && flux[i] >= flux[i - 1] && flux[i] >= flux[i + 1];
+      const hasBody = env[i] >= energyFloor || (env[i + 1] || 0) >= energyFloor;
+      if (isRisePeak && hasBody && (i - lastIdx) >= minGapWins) {
         kicks.push(i * 0.01);
         lastIdx = i;
       }
