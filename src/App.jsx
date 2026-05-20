@@ -4980,8 +4980,14 @@ function Shot2Canvas({ release, line }) {
   const startRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const W = 1080, H = 1920;
-  const DUR = 5.0;            // shot length (s)
   const text = (line || '').trim();
+  // Match the exporter: duration depends on the line length (reveal + read).
+  const DUR = (() => {
+    try {
+      const mc = document.createElement('canvas').getContext('2d');
+      return shot2Layout(mc, W, H, text).dur;
+    } catch { return 5.0; }
+  })();
 
   // Wrap the line into rows at a given font size, returns array of strings.
   const wrapText = (ctx, str, font, maxW) => {
@@ -5034,7 +5040,7 @@ function Shot2Canvas({ release, line }) {
     // per half-bar (t=1,2,3,4s), leaving ~1s to read. For other line counts we
     // keep the half-bar (1s) cadence but cap so it always finishes by ~4.2s.
     const beat = 0.5;                          // 120 BPM
-    const cadence = rows.length <= 4 ? 1.0 : Math.max(0.5, 4.0 / rows.length);
+    const cadence = 1.0;                       // constant 1s/line (matches exporter)
     rows.forEach((row, i) => {
       const rowStart = beat + i * cadence;     // first line at beat 1 (0.5s)
       const dt = elapsed - rowStart;
@@ -5273,6 +5279,39 @@ function exDrawShot1(ctx, W, H, release, coverImg, t) {
   ctx.fillText(release?.artist || '', 60, by);
 }
 
+// Shot 2 layout + timing. The knowledge line varies in length, so Shot 2 must
+// last long enough to reveal every line AND leave time to read the full text.
+// We wrap the text exactly as exDrawShot2 draws it, reveal one line per beat
+// (1s, on the 120 BPM grid — the rhythm Eduardo likes), then hold the complete
+// text for a read pause proportional to its length. Returns { rows, fontSize,
+// font, beat, cadence, dur }. `measureCtx` is any 2D context for text metrics.
+function shot2Layout(measureCtx, W, H, text) {
+  text = (text || '').trim();
+  const maxW = W - 160;
+  const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
+  const font = `800 ${fontSize}px Inter, sans-serif`;
+  measureCtx.font = font;
+  const words = text.split(/\s+/); const rows = []; let cur = '';
+  for (const w of words) {
+    const test = cur ? cur + ' ' + w : w;
+    if (measureCtx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; }
+    else cur = test;
+  }
+  if (cur) rows.push(cur);
+  const beat = 0.5;                 // 120 BPM
+  const cadence = 1.0;              // one line per half-bar (constant — no compression)
+  const lastLineStart = beat + (rows.length - 1) * cadence;
+  const revealDone = lastLineStart + 0.35;            // last line finished fading in
+  // Read pause: ~1.4s per line of reading time after the reveal completes,
+  // floored so even a one-liner gets a beat to breathe.
+  const readPause = Math.max(1.4, rows.length * 1.4);
+  // Total shot duration: never shorter than the original 5s; capped at 8s (the
+  // prompt targets concise 1-2 line specialist hooks, so the cap is a safety
+  // net for the occasional 3-4 line case — not the norm).
+  const dur = Math.min(8, Math.max(5, revealDone + readPause));
+  return { rows, fontSize, font, beat, cadence, dur };
+}
+
 function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
   const text = (lineText || '').trim();
   const g = ctx.createLinearGradient(0, 0, 0, H);
@@ -5290,7 +5329,7 @@ function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
   if (cur) rows.push(cur);
   const lineH = fontSize * 1.28, blockH = rows.length * lineH, y = (H - blockH) / 2;
   ctx.textAlign = 'left';
-  const beat = 0.5, cadence = rows.length <= 4 ? 1.0 : Math.max(0.5, 4.0 / rows.length);
+  const beat = 0.5, cadence = 1.0;  // constant 1s/line (no compression) — matches shot2Layout
   rows.forEach((row, i) => {
     const rowStart = beat + i * cadence, dt = elapsed - rowStart;
     const fade = Math.max(0, Math.min(1, dt / 0.35));
@@ -5356,7 +5395,17 @@ function StoryExporter({ release, track, line }) {
   const rafRef = useRef(null);
   const [status, setStatus] = useState('idle'); // idle | preparing | recording | done | error
   const [msg, setMsg] = useState('');
-  const W = 1080, H = 1920, SHOT = 5, TOTAL = 15;
+  const W = 1080, H = 1920, SHOT = 5;
+  // Shot 2 duration depends on the knowledge line's length (reveal + read time).
+  // Compute it once from the layout helper using an offscreen measuring context.
+  const shot2Dur = (() => {
+    try {
+      const mc = document.createElement('canvas').getContext('2d');
+      return shot2Layout(mc, W, H, line).dur;
+    } catch { return 5; }
+  })();
+  const SHOT2_END = SHOT + shot2Dur;       // Shot 2 runs [SHOT, SHOT2_END)
+  const TOTAL = SHOT2_END + SHOT;          // Shot 3 is a fixed 5s after Shot 2
 
   useEffect(() => {
     const url = coverSrc(release?.coverUrl);
@@ -5369,13 +5418,16 @@ function StoryExporter({ release, track, line }) {
 
   const drawAt = (ctx, elapsed) => {
     if (elapsed < SHOT) exDrawShot1(ctx, W, H, release, coverImgRef.current, elapsed);
-    else if (elapsed < SHOT * 2) exDrawShot2(ctx, W, H, release, line, elapsed - SHOT);
-    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT * 2);
+    else if (elapsed < SHOT2_END) exDrawShot2(ctx, W, H, release, line, elapsed - SHOT);
+    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT2_END);
   };
 
   const copyProductUrl = async () => {
-    const slug = release?.slug || '';
-    const url = slug ? `https://houseonly.store${slug.startsWith('/') ? '' : '/'}${slug}` : 'https://houseonly.store';
+    // Real product route is https://houseonly.store/products/{slug}/ — build it
+    // robustly (strip leading/trailing slashes and a leading "products/").
+    let s = (release?.slug || release?.handle || '').trim();
+    s = s.replace(/^\/+/, '').replace(/\/+$/, '').replace(/^products\//, '');
+    const url = s ? `https://houseonly.store/products/${s}/` : 'https://houseonly.store';
     try { await navigator.clipboard.writeText(url); } catch {}
     return url;
   };
@@ -5425,8 +5477,8 @@ function StoryExporter({ release, track, line }) {
       setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}`);
     };
 
-    // Go: start audio + recorder, drive the canvas for 15s.
-    setStatus('recording'); setMsg('Recording 15s…');
+    // Go: start audio + recorder, drive the canvas for the full (variable) length.
+    setStatus('recording'); setMsg(`Recording ${TOTAL.toFixed(1)}s…`);
     await ac.resume();
     a.play().catch(()=>{});
     const start = performance.now();
