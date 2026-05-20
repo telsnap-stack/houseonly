@@ -5023,24 +5023,13 @@ function Shot2Canvas({ release, line }) {
     ctx.fillStyle = '#c8ff00';
     ctx.fillText('ONLY', 70, 134);
 
-    // Knowledge line — big, wrapped, vertically centered, revealed by row.
-    const maxW = W - 160;
-    const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
-    const font = `800 ${fontSize}px Inter, sans-serif`;
-    const rows = wrapText(ctx, text, font, maxW);
-    const lineH = fontSize * 1.28;
-    const blockH = rows.length * lineH;
-    let y = (H - blockH) / 2;
+    // Knowledge line — top-anchored, adaptive font, revealed by row.
+    // Uses the shared shot2Layout so the preview matches the export exactly.
+    const L = shot2Layout(ctx, W, H, text);
+    const { rows, fontSize, font, beat, cadence, startY, lineH } = L;
 
     ctx.font = font;
     ctx.textAlign = 'left';
-    // RHYTHMIC REVEAL at 120 BPM: beat = 0.5s, half-bar = 1.0s. Each line lands
-    // on a beat with a subtle punch (slight overshoot settling in ~150ms). We
-    // spread the lines across the first ~4s so a 4-line phrase reveals one line
-    // per half-bar (t=1,2,3,4s), leaving ~1s to read. For other line counts we
-    // keep the half-bar (1s) cadence but cap so it always finishes by ~4.2s.
-    const beat = 0.5;                          // 120 BPM
-    const cadence = 1.0;                       // constant 1s/line (matches exporter)
     rows.forEach((row, i) => {
       const rowStart = beat + i * cadence;     // first line at beat 1 (0.5s)
       const dt = elapsed - rowStart;
@@ -5052,7 +5041,7 @@ function Shot2Canvas({ release, line }) {
       if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = '#efefef';
-      const cyRow = y + i * lineH;
+      const cyRow = startY + i * lineH;
       ctx.save();
       // Scale around the row's left-center for the punch.
       ctx.translate(80, cyRow + fontSize * 0.4);
@@ -5288,28 +5277,45 @@ function exDrawShot1(ctx, W, H, release, coverImg, t) {
 function shot2Layout(measureCtx, W, H, text) {
   text = (text || '').trim();
   const maxW = W - 160;
-  const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
-  const font = `800 ${fontSize}px Inter, sans-serif`;
-  measureCtx.font = font;
-  const words = text.split(/\s+/); const rows = []; let cur = '';
-  for (const w of words) {
-    const test = cur ? cur + ' ' + w : w;
-    if (measureCtx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; }
-    else cur = test;
+  // Vertical area for the line: below the logo (~220) down to above the meta
+  // row (~H-220). The text is anchored to the TOP of this band (not centered),
+  // so long phrases grow downward into the full available space instead of
+  // overflowing off-screen.
+  const topY = 300;
+  const bottomY = H - 240;
+  const availH = bottomY - topY;
+  // Pick the largest font (from a preferred ladder) at which the wrapped text
+  // fits availH. Long phrases automatically use a smaller size so every line
+  // shows; short phrases stay big and punchy.
+  const sizes = [80, 72, 64, 58, 52, 46, 42, 38];
+  let chosen = sizes[sizes.length - 1], rows = [];
+  for (const fs of sizes) {
+    measureCtx.font = `800 ${fs}px Inter, sans-serif`;
+    const words = text.split(/\s+/); const r = []; let cur = '';
+    for (const w of words) {
+      const test = cur ? cur + ' ' + w : w;
+      if (measureCtx.measureText(test).width > maxW && cur) { r.push(cur); cur = w; }
+      else cur = test;
+    }
+    if (cur) r.push(cur);
+    const lineH = fs * 1.3;
+    if (r.length * lineH <= availH) { chosen = fs; rows = r; break; }
+    chosen = fs; rows = r; // keep last (smallest) if none fit
   }
-  if (cur) rows.push(cur);
+  const fontSize = chosen;
+  const font = `800 ${fontSize}px Inter, sans-serif`;
+  const lineH = fontSize * 1.3;
   const beat = 0.5;                 // 120 BPM
   const cadence = 1.0;              // one line per half-bar (constant — no compression)
   const lastLineStart = beat + (rows.length - 1) * cadence;
   const revealDone = lastLineStart + 0.35;            // last line finished fading in
-  // Read pause: ~1.4s per line of reading time after the reveal completes,
-  // floored so even a one-liner gets a beat to breathe.
-  const readPause = Math.max(1.4, rows.length * 1.4);
-  // Total shot duration: never shorter than the original 5s; capped at 8s (the
-  // prompt targets concise 1-2 line specialist hooks, so the cap is a safety
-  // net for the occasional 3-4 line case — not the norm).
-  const dur = Math.min(8, Math.max(5, revealDone + readPause));
-  return { rows, fontSize, font, beat, cadence, dur };
+  // Read pause after the full text is on screen: ~1.2s per line, floored so a
+  // one-liner still breathes. Eduardo wants long phrases to last as long as
+  // needed to read, so there's no tight cap — only a high safety ceiling (22s)
+  // to prevent a pathological runaway.
+  const readPause = Math.max(1.4, rows.length * 1.2);
+  const dur = Math.min(22, Math.max(5, revealDone + readPause));
+  return { rows, fontSize, font, beat, cadence, dur, startY: topY, lineH };
 }
 
 function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
@@ -5321,22 +5327,17 @@ function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
   ctx.font = '900 40px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', 70, 90);
   ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 70, 134);
   const maxW = W - 160;
-  const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
-  const font = `800 ${fontSize}px Inter, sans-serif`;
+  const L = shot2Layout(ctx, W, H, text);
+  const { rows, fontSize, font, beat, cadence, startY, lineH } = L;
   ctx.font = font;
-  const words = text.split(/\s+/); const rows = []; let cur = '';
-  for (const w of words) { const test = cur ? cur + ' ' + w : w; if (ctx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; } else cur = test; }
-  if (cur) rows.push(cur);
-  const lineH = fontSize * 1.28, blockH = rows.length * lineH, y = (H - blockH) / 2;
   ctx.textAlign = 'left';
-  const beat = 0.5, cadence = 1.0;  // constant 1s/line (no compression) — matches shot2Layout
   rows.forEach((row, i) => {
     const rowStart = beat + i * cadence, dt = elapsed - rowStart;
     const fade = Math.max(0, Math.min(1, dt / 0.35));
     const alpha = 1 - Math.pow(1 - fade, 2);
     let punch = 1; if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
     ctx.globalAlpha = alpha; ctx.fillStyle = '#efefef';
-    const cyRow = y + i * lineH;
+    const cyRow = startY + i * lineH;
     ctx.save(); ctx.translate(80, cyRow + fontSize * 0.4); ctx.scale(punch, punch);
     ctx.fillText(row, 0, -fontSize * 0.4); ctx.restore();
   });
