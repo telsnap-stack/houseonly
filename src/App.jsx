@@ -5445,7 +5445,7 @@ function StoryExporter({ release, track, line }) {
   const busy = status === 'preparing' || status === 'recording';
   return (
     <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${S.border}` }}>
-      <div style={lbl}>Export — full story (15s)</div>
+      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story (15s)</div>
       <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
       <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
       <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
