@@ -4861,8 +4861,8 @@ function Shot1Canvas({ release, track }) {
 
     // Cover: square, centered horizontally, upper-middle. Punch scales it.
     const img = coverImgRef.current;
-    const coverSize = W * 0.82;
-    const cx = W / 2, cy = H * 0.40;
+    const coverSize = W * 0.70;
+    const cx = W / 2, cy = H * 0.32;
     const s = coverSize * scale;
     if (img) {
       ctx.save();
@@ -4890,7 +4890,7 @@ function Shot1Canvas({ release, track }) {
     ctx.textAlign = 'left';
 
     // Waveform band low on the frame, pulsing on kicks.
-    const wfY = H * 0.74, wfH = 90, bars = 60, gap = 6;
+    const wfY = H * 0.56, wfH = 80, bars = 60, gap = 6;
     const bw = (W - 120 - gap * (bars - 1)) / bars;
     for (let i = 0; i < bars; i++) {
       const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
@@ -4902,7 +4902,7 @@ function Shot1Canvas({ release, track }) {
     ctx.globalAlpha = 1;
 
     // Label / title / artist anchored bottom.
-    let by = H * 0.82;
+    let by = H * 0.64;
     ctx.font = '700 22px Inter, sans-serif';
     ctx.fillStyle = '#585858';
     ctx.fillText((release?.label || '').toUpperCase(), 60, by);
@@ -5060,7 +5060,7 @@ function Shot2Canvas({ release, line }) {
     ctx.fillStyle = '#585858';
     ctx.textAlign = 'left';
     const meta = [release?.artist, release?.catalog].filter(Boolean).join('  ·  ');
-    ctx.fillText(meta, 80, H - 160);
+    ctx.fillText(meta, 80, H - 540);
     ctx.globalAlpha = 1;
   };
 
@@ -5208,7 +5208,10 @@ function exDrawShot1(ctx, W, H, release, coverImg, t) {
   const phase = t % beatSec;
   const scale = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.025 : 1;
   ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, W, H);
-  const coverSize = W * 0.82, cx = W / 2, cy = H * 0.40, s = coverSize * scale;
+  // Cover lifted slightly (center at 0.35H) so the waveform + info below it all
+  // finish above the sticker lane (~y1450). The bottom band is left clear for
+  // the Instagram link sticker, which is visible across all 3 shots.
+  const coverSize = W * 0.70, cx = W / 2, cy = H * 0.32, s = coverSize * scale;
   if (coverImg) { ctx.save(); ctx.translate(cx, cy); ctx.drawImage(coverImg, -s/2, -s/2, s, s); ctx.restore(); }
   else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cx - s/2, cy - s/2, s, s); }
   ctx.textBaseline = 'top'; ctx.textAlign = 'left';
@@ -5216,7 +5219,7 @@ function exDrawShot1(ctx, W, H, release, coverImg, t) {
   ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 60, 116);
   ctx.font = '500 26px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858';
   ctx.textAlign = 'right'; ctx.fillText(`${release?.catalog || ''}`, W - 60, 80); ctx.textAlign = 'left';
-  const wfY = H * 0.74, wfH = 90, bars = 60, gap = 6;
+  const wfY = H * 0.56, wfH = 80, bars = 60, gap = 6;
   const bw = (W - 120 - gap * (bars - 1)) / bars;
   for (let i = 0; i < bars; i++) {
     const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
@@ -5225,7 +5228,7 @@ function exDrawShot1(ctx, W, H, release, coverImg, t) {
     ctx.fillRect(60 + i * (bw + gap), wfY + (wfH - h) / 2, bw, h);
   }
   ctx.globalAlpha = 1;
-  let by = H * 0.82;
+  let by = H * 0.64;
   ctx.font = '700 22px Inter, sans-serif'; ctx.fillStyle = '#585858';
   ctx.fillText((release?.label || '').toUpperCase(), 60, by);
   by += 40; ctx.font = '800 56px Inter, sans-serif'; ctx.fillStyle = '#efefef';
@@ -5255,7 +5258,7 @@ function shot2Layout(measureCtx, W, H, text) {
   // so long phrases grow downward into the full available space instead of
   // overflowing off-screen.
   const topY = 300;
-  const bottomY = H - 340;   // leave the bottom band (~1580-1700) clear for the IG link sticker
+  const bottomY = H - 580;   // text ends ~y1340; the band below is the sticker lane (clear in all 3 shots)
   const availH = bottomY - topY;
   // Pick the largest font (from a preferred ladder) at which the wrapped text
   // fits availH. Long phrases automatically use a smaller size so every line
@@ -5320,7 +5323,7 @@ function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
   const ctxAlpha = Math.max(0, Math.min(1, (elapsed - metaStart) / 0.5));
   ctx.globalAlpha = ctxAlpha;
   ctx.font = '500 30px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858'; ctx.textAlign = 'left';
-  ctx.fillText([release?.artist, release?.catalog].filter(Boolean).join('  ·  '), 80, H - 160);
+  ctx.fillText([release?.artist, release?.catalog].filter(Boolean).join('  ·  '), 80, H - 540);
   ctx.globalAlpha = 1;
 }
 
