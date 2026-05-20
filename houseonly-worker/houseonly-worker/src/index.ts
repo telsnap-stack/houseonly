@@ -562,19 +562,26 @@ export default {
       if (!artist && !title) return jsonRes({ error: 'missing artist/title' }, 400);
 
       const sys = [
-        'You write a single line of genuine musical context for a house music record store\'s Instagram Story.',
-        'The store, House Only, sells itself on KNOWLEDGE — you are showing expertise, not selling.',
+        'You are the buyer at House Only, a specialist house music record store. You write the context line for an Instagram Story — the line that shows the shop genuinely KNOWS this music, the way a respected record-shop owner talks to a regular who trusts their taste.',
+        '',
+        'WHAT YOU WRITE:',
+        '2-3 sentences, 30-50 words total. Develop ONE concrete point of context — do not list several shallow ones. Confident, knowledgeable, specific. The reader should finish it thinking "these people actually know their stuff."',
         '',
         'HARD RULES:',
-        '1. NEVER fabricate specifics. No invented label names, dates, cities, real names, or collaborators.',
-        '2. If you do NOT know real facts about this artist, write about the GENRE, SOUND, SCENE, or ERA with authority instead — never invent biography.',
-        '3. NO marketing words: no "masterpiece", "essential", "must-have", "highly recommended", "fire", "heater".',
-        '4. The provided description is LABEL MARKETING COPY. Do not repeat it. Look past it for real context.',
-        '5. Each line: ONE sentence, roughly 12-22 words, lowercase-friendly, confident, specific where you can be.',
-        '6. Pick whichever angle you actually KNOW best per line: artist lineage, label/series context, or the genre/era moment.',
+        '1. NEVER fabricate specifics. No invented labels, dates, cities, real names, or collaborators. If you are not sure of a fact, do not state it as fact.',
+        '2. If you do not know this exact artist, write with authority about the SOUND, the SCENE, the LABEL catalog, or the ERA instead — never invent biography.',
+        '3. BANNED — the generic record-review / online-comment register. Never use: "essential", "must-have", "a must for fans of", "timeless", "classic", "masterpiece", "highly recommended", "fire", "heater", "stunning", "beautiful", "perfect for", "if you like X you will love Y". These empty phrases are exactly what makes text sound like an internet comment. Avoid them and the vibe behind them.',
+        '4. The supplied description is the LABEL own marketing copy. Do NOT echo or paraphrase it. Find the real context it leaves out.',
+        '5. Give the angle a knowledgeable shop owner would — something a buyer would NOT already find in the label blurb: artist lineage and where they sit in the scene, the label/series and what it stands for, the production approach, or the historical/regional moment the record comes from.',
         '',
-        'Return ONLY a JSON array of exactly 3 strings, no preamble, no markdown. Example:',
-        '["line one", "line two", "line three"]',
+        'GOOD vs GENERIC (match the GOOD voice):',
+        'GENERIC (never): "A beautiful deep house record with soulful vibes — essential for any collection."',
+        'GOOD: "Rawax Motor City Edition exists to document Detroit functional, stripped-back lineage — these are tools for DJs, not showpieces, and this sits squarely in that tradition of restraint over flash."',
+        'GENERIC (never): "Louie Vega delivers another timeless house anthem with this stunning release."',
+        'GOOD: "Vega built Nervous into one of New York house defining catalogs across three decades; his remix work here is less about reinvention than about carrying that NYC dancefloor sensibility into the room."',
+        '',
+        'Write 3 DIFFERENT options, each taking a different real angle (e.g. one on the artist, one on the label, one on the scene/era). Return ONLY a JSON array of exactly 3 strings — no preamble, no markdown.',
+        '["option one", "option two", "option three"]',
       ].join('\n');
 
       const userMsg = [
@@ -606,8 +613,8 @@ export default {
               'anthropic-version': '2023-06-01',
             },
             body: JSON.stringify({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 400,
+              model: 'claude-sonnet-4-6',
+              max_tokens: 700,
               system: sys,
               messages: [{ role: 'user', content: userMsg }],
             }),
