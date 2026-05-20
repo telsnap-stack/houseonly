@@ -4624,6 +4624,106 @@ function RushHourImporter() {
 // preview panel. No canvas/MP4 yet — that's a later phase. This proves the
 // data pipeline (Shopify search → cover, audio snippets, description, artist
 // photo from Spotify) before we build rendering on top of it.
+// ── KICK DETECTION (Stories Shot 1) ────────────────────────────
+// Analyzes an audio snippet to find the kick drum and score how strong/steady
+// its 4/4 is. For a house music store, we want Shot 1 to feature the track with
+// the best four-to-the-floor — "people expect that from House Only."
+//
+// How it works: decode the audio, run it through a low-pass filter (~120Hz) to
+// isolate the kick band, then find energy peaks (onsets). Score combines:
+//   - presence: is there real low-end energy at all? (rules out beatless intros)
+//   - regularity: are the kicks evenly spaced? (a steady 4/4 scores high)
+//   - tempo fit: ~115-130 BPM (house range) scores highest
+// Returns { kicks:[seconds], score:0-100, bpm } — or score 0 on no clear kick.
+async function analyzeKicks(audioUrl) {
+  try {
+    const resp = await fetch(audioUrl);
+    if (!resp.ok) return { kicks: [], score: 0, bpm: 0, error: `fetch ${resp.status}` };
+    const arrayBuf = await resp.arrayBuffer();
+    const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    // Decode with a temporary online context (decodeAudioData needs one).
+    const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuf = await tmpCtx.decodeAudioData(arrayBuf.slice(0));
+    tmpCtx.close();
+
+    const duration = audioBuf.duration;
+    const sampleRate = audioBuf.sampleRate;
+    // Render through a low-pass filter to isolate the kick band.
+    const offline = new AC(1, Math.ceil(duration * sampleRate), sampleRate);
+    const src = offline.createBufferSource();
+    src.buffer = audioBuf;
+    const lp = offline.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 120;   // kick fundamental lives ~50-100Hz
+    lp.Q.value = 1;
+    src.connect(lp);
+    lp.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    const data = rendered.getChannelData(0);
+
+    // Energy envelope in ~10ms windows.
+    const win = Math.floor(sampleRate * 0.01);
+    const env = [];
+    for (let i = 0; i < data.length; i += win) {
+      let sum = 0;
+      for (let j = i; j < i + win && j < data.length; j++) sum += data[j] * data[j];
+      env.push(Math.sqrt(sum / win));
+    }
+    if (!env.length) return { kicks: [], score: 0, bpm: 0 };
+    const maxEnv = Math.max(...env);
+    if (maxEnv < 0.005) return { kicks: [], score: 0, bpm: 0 }; // basically silent low-end
+
+    // Peak picking: an onset is a window above threshold that's a local max,
+    // with a refractory gap so we don't double-count one kick.
+    const thresh = maxEnv * 0.45;
+    const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks (~max 500bpm guard)
+    const kicks = [];
+    let lastIdx = -minGapWins;
+    for (let i = 1; i < env.length - 1; i++) {
+      if (env[i] >= thresh && env[i] >= env[i - 1] && env[i] >= env[i + 1] && (i - lastIdx) >= minGapWins) {
+        kicks.push(i * 0.01);
+        lastIdx = i;
+      }
+    }
+    if (kicks.length < 3) return { kicks, score: kicks.length ? 15 : 0, bpm: 0 };
+
+    // Intervals between kicks → regularity + tempo.
+    const intervals = [];
+    for (let i = 1; i < kicks.length; i++) intervals.push(kicks[i] - kicks[i - 1]);
+    const meanInt = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((a, b) => a + (b - meanInt) ** 2, 0) / intervals.length;
+    const stdDev = Math.sqrt(variance);
+    const cv = meanInt > 0 ? stdDev / meanInt : 1; // coefficient of variation; lower = steadier
+    const bpm = meanInt > 0 ? Math.round(60 / meanInt) : 0;
+
+    // Scoring.
+    const presence = Math.min(40, (maxEnv / 0.2) * 40);            // up to 40
+    const regularity = Math.max(0, 40 * (1 - Math.min(cv, 1)));    // up to 40, steadier=higher
+    // Tempo fit: house ~115-130bpm (or half/double of it for the detected rate).
+    const tempoTargets = [122, 61, 244];
+    const tempoFit = 20 * Math.max(0, 1 - Math.min(...tempoTargets.map(t => Math.abs(bpm - t) / 40)));
+    const score = Math.round(presence + regularity + tempoFit);
+    return { kicks, score: Math.min(100, score), bpm };
+  } catch (e) {
+    return { kicks: [], score: 0, bpm: 0, error: e?.message || 'analyze failed' };
+  }
+}
+
+// Analyze all snippets for a release and pick the one with the strongest 4/4.
+// Returns { tracks:[{name,url,score,bpm,kicks}], bestIndex }.
+async function pickBestTrack(tracks) {
+  const analyzed = [];
+  for (const t of tracks) {
+    if (!t || !t.url) { analyzed.push({ ...t, score: 0, bpm: 0, kicks: [] }); continue; }
+    const a = await analyzeKicks(t.url);
+    analyzed.push({ ...t, score: a.score, bpm: a.bpm, kicks: a.kicks });
+  }
+  let bestIndex = 0, bestScore = -1;
+  analyzed.forEach((t, i) => { if (t.score > bestScore) { bestScore = t.score; bestIndex = i; } });
+  return { tracks: analyzed, bestIndex };
+}
+
 function StoriesGenerator() {
   const [query, setQuery]       = useState('');
   const [results, setResults]   = useState([]);
@@ -4637,6 +4737,12 @@ function StoriesGenerator() {
   const [ctxChosen, setCtxChosen]   = useState('');   // the selected/edited line
   const [ctxLoading, setCtxLoading] = useState(false);
   const [ctxErr, setCtxErr]         = useState('');
+  // Shot 1 = cover + kick-synced waveform. We analyze every snippet on pick,
+  // auto-select the one with the strongest 4/4 (house store = four-to-the-floor),
+  // and keep its kick timestamps for the waveform pulse (canvas comes in 4A-2).
+  const [kickAnalysis, setKickAnalysis] = useState(null);   // {tracks:[{...,score,bpm,kicks}], bestIndex}
+  const [kickLoading, setKickLoading]   = useState(false);
+  const [chosenTrack, setChosenTrack]   = useState(null);   // index into analyzed tracks
 
   // Debounced server-side search over the WHOLE catalog (reuses the same
   // Storefront `search` endpoint the storefront uses). We don't auto-fire on
@@ -4662,9 +4768,25 @@ function StoriesGenerator() {
 
   // When a release is picked: load it and clear any previous knowledge line.
   // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
-  const pickRelease = (r) => {
+  const pickRelease = async (r) => {
     setSelected(r);
     setCtxOptions([]); setCtxChosen(''); setCtxErr('');
+    setKickAnalysis(null); setChosenTrack(null);
+    // Analyze all snippets for their 4/4 kick and auto-pick the strongest.
+    const tracks = (r.tracks || []).filter(t => t && t.url);
+    if (tracks.length) {
+      setKickLoading(true);
+      try {
+        const result = await pickBestTrack(tracks);
+        setKickAnalysis(result);
+        setChosenTrack(result.bestIndex);
+      } catch (e) {
+        setKickAnalysis({ tracks: tracks.map(t => ({ ...t, score: 0, bpm: 0, kicks: [] })), bestIndex: 0, error: e?.message });
+        setChosenTrack(0);
+      } finally {
+        setKickLoading(false);
+      }
+    }
   };
 
   // Generate 3 knowledge-line options from the worker's story-context endpoint
@@ -4804,32 +4926,60 @@ function StoriesGenerator() {
             )}
           </div>
 
-          {/* Audio snippets */}
+          {/* Shot 1 — audio + kick analysis */}
           <div style={{ marginTop:16 }}>
-            <div style={lbl}>Audio snippets ({audioTracks.length} with audio)</div>
-            {audioTracks.length === 0 && <div style={{ fontSize:10, color:S.danger }}>No audio snippets found for this release — story needs audio.</div>}
-            {audioTracks.map((t, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'4px 0' }}>
-                <span style={{ fontSize:10, color:S.muted, width:24 }}>{i+1}.</span>
-                <span style={{ fontSize:11, color:S.text, flex:1 }}>{t.name || `Track ${i+1}`}</span>
-                <AudioPlayer src={t.url} />
-              </div>
-            ))}
-            <div style={{ fontSize:9, color:S.muted, marginTop:8, fontStyle:'italic' }}>
-              Phase 4 will auto-pick the snippet with the strongest 4/4 kick and sync the waveform to it.
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <div style={lbl}>Shot 1 — audio (auto-picks the strongest 4/4)</div>
+              {kickLoading && <span style={{ fontSize:9, color:S.accent, letterSpacing:1, textTransform:'uppercase' }}>Analyzing kicks…</span>}
             </div>
+            {audioTracks.length === 0 && <div style={{ fontSize:10, color:S.danger }}>No audio snippets found for this release — story needs audio.</div>}
+
+            {(kickAnalysis?.tracks || audioTracks).map((t, i) => {
+              const analyzed = !!kickAnalysis;
+              const isBest = analyzed && i === kickAnalysis.bestIndex;
+              const isChosen = chosenTrack === i;
+              const score = analyzed ? (t.score || 0) : null;
+              // Bar of 5 blocks to visualize the kick strength.
+              const blocks = analyzed ? Math.round((score / 100) * 5) : 0;
+              return (
+                <div key={i} onClick={() => analyzed && setChosenTrack(i)} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 10px', marginTop:4, borderRadius:2, cursor:analyzed?'pointer':'default', background:isChosen?S.bg:'transparent', border:`1px solid ${isChosen?S.accent:'transparent'}` }}>
+                  <span style={{ fontSize:9, color:isChosen?S.accent:S.muted, width:14 }}>{isChosen?'●':'○'}</span>
+                  <span style={{ fontSize:11, color:S.text, flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{t.name || `Track ${i+1}`}</span>
+                  {analyzed && (
+                    <span style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <span style={{ fontFamily:'monospace', fontSize:9, color:S.muted, width:54, textAlign:'right' }}>{t.bpm ? `${t.bpm} bpm` : 'no kick'}</span>
+                      <span style={{ display:'flex', gap:2 }}>
+                        {[0,1,2,3,4].map(b => <span key={b} style={{ width:5, height:12, borderRadius:1, background:b<blocks?S.accent:S.border }} />)}
+                      </span>
+                      {isBest && <span style={{ fontSize:7, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:800 }}>best 4/4</span>}
+                    </span>
+                  )}
+                  <AudioPlayer src={t.url} />
+                </div>
+              );
+            })}
+
+            {kickAnalysis && (
+              <div style={{ fontSize:9, color:S.muted, marginTop:10, fontStyle:'italic' }}>
+                {chosenTrack != null && kickAnalysis.tracks[chosenTrack]?.score >= 40
+                  ? `Featuring "${kickAnalysis.tracks[chosenTrack]?.name}" — strongest four-to-the-floor. Tap another to override.`
+                  : chosenTrack != null && kickAnalysis.tracks[chosenTrack]?.score > 0
+                    ? `Featuring "${kickAnalysis.tracks[chosenTrack]?.name}". Kick is present but not a strong 4/4 — tap another if you prefer.`
+                    : 'No strong kick detected in any snippet — the waveform will animate without a pulse. Tap to choose anyway.'}
+              </div>
+            )}
           </div>
 
-          {/* Quote (editable in a later phase) */}
+          {/* Description (reference) */}
           <div style={{ marginTop:16 }}>
-            <div style={lbl}>Description (Shot 2 quote will be drawn from this)</div>
+            <div style={lbl}>Description (label marketing — reference only)</div>
             <div style={{ fontSize:11, color:S.muted, lineHeight:1.6, maxHeight:80, overflowY:'auto', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, padding:'8px 10px' }}>
               {selected.desc || '(no description)'}
             </div>
           </div>
 
           <div style={{ marginTop:18, padding:'10px 12px', background:S.bg, border:`1px dashed ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
-            <strong style={{ color:S.accent }}>Checkpoint.</strong> If the cover, audio snippets, description, and knowledge line above all loaded correctly, the data pipeline works. Canvas rendering + MP4 export come next.
+            <strong style={{ color:S.accent }}>Checkpoint 4A-1.</strong> Kick detection: each snippet scored on its 4/4 strength + BPM, strongest auto-selected. Next (4A-2): render Shot 1 on canvas with the cover punching on each detected kick.
           </div>
         </div>
       )}
