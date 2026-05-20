@@ -6094,14 +6094,47 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   },[]);
 
-  // Open modal automatically when URL is /products/<slug> and that record is loaded
+  // Open modal automatically when URL is /products/<slug>.
+  // Fast path: the product is already in the loaded (paginated) `records` —
+  // open it directly. Fallback (direct load of a product outside the current
+  // page, e.g. a shared/Google/bookmarked link): the product won't be in
+  // `records`, so resolve it by SKU. The prerendered HTML (scripts/prerender.mjs)
+  // injects a JSON-LD <script> carrying the product's "sku", and the Shopify
+  // handle is always that SKU lowercased (verified: FAT072→fat072, etc.). We
+  // read the SKU from the DOM and fetch that single product by handle — O(1),
+  // independent of catalog size, so it scales as the catalog grows.
+  const directFetchedSlug = useRef(null);
   useEffect(()=>{
     const m = path.match(/^\/products\/([^/]+)\/?$/);
-    if (!m) { if (selected) setSelected(null); return; }
+    if (!m) { if (selected) setSelected(null); directFetchedSlug.current = null; return; }
     const slug = m[1];
     if (selected && selected.slug === slug) return;
     const found = records.find(r => r.slug === slug);
-    if (found) setSelected(found);
+    if (found) { setSelected(found); return; }
+    // Not in the loaded page. Resolve by SKU from the prerendered JSON-LD.
+    // Guard so we attempt the network fetch only once per slug.
+    if (directFetchedSlug.current === slug) return;
+    directFetchedSlug.current = slug;
+    let sku = '';
+    try {
+      const blocks = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const b of blocks) {
+        const json = JSON.parse(b.textContent || '{}');
+        if (json && json['@type'] === 'Product' && json.sku) { sku = String(json.sku); break; }
+      }
+    } catch { /* malformed/absent JSON-LD — fall through */ }
+    if (!sku) return; // no SKU available (e.g. dev server without prerender) — leave as-is
+    let cancelled = false;
+    fetchShopifyProductByHandle(sku.toLowerCase())
+      .then(prod => {
+        if (cancelled || !prod) return;
+        // Only open if the URL still points at this slug (user may have navigated away).
+        if (window.location.pathname.match(/^\/products\/([^/]+)\/?$/)?.[1] === slug) {
+          setSelected(prod);
+        }
+      })
+      .catch(()=>{ /* network error — leave on home rather than crash */ });
+    return ()=>{ cancelled = true; };
   },[path, records]);
 
   // Navigation helpers — push URL + update state in one call
