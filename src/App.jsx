@@ -4989,17 +4989,20 @@ export default function App() {
       }
     } catch { /* malformed/absent JSON-LD — fall through */ }
     if (!sku) return; // no SKU available (e.g. dev server without prerender) — leave as-is
-    let cancelled = false;
     fetchShopifyProductByHandle(sku.toLowerCase())
       .then(prod => {
-        if (cancelled || !prod) return;
-        // Only open if the URL still points at this slug (user may have navigated away).
+        if (!prod) return;
+        // Open only if the URL still points at this slug. (We deliberately do
+        // NOT use an effect-cleanup `cancelled` flag here: this effect re-runs
+        // when `records` loads, and that cleanup would cancel the in-flight
+        // fetch before it resolves — leaving the modal closed. The live URL
+        // check is the correct guard: it stays valid across that re-run and
+        // only fails if the user actually navigated away.)
         if (window.location.pathname.match(/^\/products\/([^/]+)\/?$/)?.[1] === slug) {
           setSelected(prod);
         }
       })
       .catch(()=>{ /* network error — leave on home rather than crash */ });
-    return ()=>{ cancelled = true; };
   },[path, records]);
 
   // Navigation helpers — push URL + update state in one call
