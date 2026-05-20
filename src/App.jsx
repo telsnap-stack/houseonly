@@ -4612,6 +4612,183 @@ function RushHourImporter() {
 }
 
 // ── ADMIN PANEL ────────────────────────────────────────────────
+// ── INSTAGRAM STORIES GENERATOR ────────────────────────────────
+// Builds a 3-shot Instagram Story for a release:
+//   Shot 1 — cover + kick-synced waveform (audio 0:00–0:05)
+//   Shot 2 — artist photo (Spotify) + editable quote (audio 0:05–0:10)
+//   Shot 3 — House Only logo + title + "Tap to shop →" (audio 0:10–0:15)
+// Audio is always the store's own R2 snippet (curated highlight). Spotify is
+// used ONLY to fetch the artist press photo for Shot 2.
+//
+// PHASE 1 (this commit): release search + pick + load raw materials into a
+// preview panel. No canvas/MP4 yet — that's a later phase. This proves the
+// data pipeline (Shopify search → cover, audio snippets, description, artist
+// photo from Spotify) before we build rendering on top of it.
+function StoriesGenerator() {
+  const [query, setQuery]       = useState('');
+  const [results, setResults]   = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState('');
+  const [selected, setSelected] = useState(null);   // the picked release (parseProduct shape)
+  const [artist, setArtist]     = useState(null);   // {name, imageUrl, ...} from Spotify, or null
+  const [artistLoading, setArtistLoading] = useState(false);
+  const [artistErr, setArtistErr] = useState('');
+
+  // Debounced server-side search over the WHOLE catalog (reuses the same
+  // Storefront `search` endpoint the storefront uses). We don't auto-fire on
+  // every keystroke beyond a small debounce to avoid hammering Shopify.
+  const searchTimer = useRef(null);
+  const runSearch = (term) => {
+    setQuery(term);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!term.trim()) { setResults([]); setSearchErr(''); return; }
+    searchTimer.current = setTimeout(async () => {
+      setSearching(true); setSearchErr('');
+      try {
+        const { products } = await fetchShopifyProductSearch({ searchTerm: term.trim() });
+        setResults(products);
+      } catch (e) {
+        setSearchErr('Search failed: ' + (e?.message || 'unknown error'));
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+  };
+
+  // When a release is picked, fetch the artist photo from Spotify (via the
+  // Worker's spotify-artist endpoint). On miss, artist stays null and the
+  // UI offers a manual upload (wired in a later phase).
+  const pickRelease = async (r) => {
+    setSelected(r);
+    setArtist(null); setArtistErr('');
+    const artistName = (r.artist || '').trim();
+    if (!artistName) { setArtistErr('No artist name on this release — manual photo needed.'); return; }
+    setArtistLoading(true);
+    try {
+      const res = await fetch(`${WORKER_URL}?action=spotify-artist&q=${encodeURIComponent(artistName)}`);
+      const data = await res.json();
+      if (data && data.imageUrl) {
+        setArtist(data);
+      } else {
+        setArtistErr('No Spotify photo found — manual upload needed.');
+      }
+    } catch (e) {
+      setArtistErr('Spotify lookup failed: ' + (e?.message || 'unknown'));
+    } finally {
+      setArtistLoading(false);
+    }
+  };
+
+  const lbl = { fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 };
+  const audioTracks = (selected?.tracks || []).filter(t => t && t.url);
+
+  return (
+    <div>
+      {/* Search box */}
+      <div style={lbl}>Find a release</div>
+      <input
+        value={query}
+        onChange={e => runSearch(e.target.value)}
+        placeholder="Search by artist, title, label…"
+        style={{ background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:13, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' }}
+      />
+      {searching && <div style={{ fontSize:10, color:S.muted, marginTop:8 }}>Searching…</div>}
+      {searchErr && <div style={{ fontSize:10, color:S.danger, marginTop:8 }}>{searchErr}</div>}
+
+      {/* Results list */}
+      {results.length > 0 && !selected && (
+        <div style={{ marginTop:12, display:'flex', flexDirection:'column', gap:1, maxHeight:320, overflowY:'auto' }}>
+          {results.map(r => (
+            <div key={r.id} onClick={() => pickRelease(r)} style={{ display:'flex', alignItems:'center', gap:12, background:S.surf, padding:'8px 12px', borderRadius:2, cursor:'pointer' }}>
+              <div style={{ width:40, height:40, borderRadius:2, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', flexShrink:0 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.title}</div>
+                <div style={{ fontSize:9, color:S.muted }}>{r.artist} · {r.label} · {r.catalog}</div>
+              </div>
+              <div style={{ fontSize:9, color:(r.tracks||[]).some(t=>t?.url)?S.accent:S.muted, letterSpacing:1, textTransform:'uppercase' }}>
+                {(r.tracks||[]).filter(t=>t?.url).length} ♫
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Selected release — raw materials preview (Phase 1 endpoint) */}
+      {selected && (
+        <div style={{ marginTop:16, background:S.surf, border:`1px solid ${S.border}`, borderRadius:3, padding:18 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+            <div style={{ fontSize:11, fontWeight:800, color:S.text, letterSpacing:1, textTransform:'uppercase' }}>Story materials</div>
+            <button onClick={() => { setSelected(null); setArtist(null); }} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2 }}>← Back to search</button>
+          </div>
+
+          <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
+            {/* Cover */}
+            <div>
+              <div style={lbl}>Cover</div>
+              <div style={{ width:120, height:120, borderRadius:2, background:`linear-gradient(${selected.g})`, backgroundImage:coverSrc(selected.coverUrl)?`url(${coverSrc(selected.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${S.border}` }} />
+              <div style={{ fontSize:8, color:selected.coverUrl?S.accent:S.danger, marginTop:6, letterSpacing:1, textTransform:'uppercase' }}>{selected.coverUrl ? '✓ loaded' : '✗ no cover'}</div>
+            </div>
+
+            {/* Artist photo (Spotify) */}
+            <div>
+              <div style={lbl}>Artist photo (Spotify)</div>
+              <div style={{ width:120, height:120, borderRadius:2, background:S.bg, backgroundImage:artist?.imageUrl?`url(${artist.imageUrl})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${S.border}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                {artistLoading && <span style={{ fontSize:9, color:S.muted }}>Looking up…</span>}
+                {!artistLoading && !artist?.imageUrl && <span style={{ fontSize:20 }}>👤</span>}
+              </div>
+              <div style={{ fontSize:8, color:artist?.imageUrl?S.accent:'#ff8800', marginTop:6, letterSpacing:1, textTransform:'uppercase', maxWidth:120, lineHeight:1.4 }}>
+                {artist?.imageUrl ? `✓ ${artist.name}` : (artistErr || '—')}
+              </div>
+            </div>
+
+            {/* Metadata */}
+            <div style={{ flex:1, minWidth:200 }}>
+              <div style={lbl}>Release</div>
+              <div style={{ fontSize:14, fontWeight:800, color:S.text }}>{selected.title}</div>
+              <div style={{ fontSize:11, color:S.muted, marginBottom:8 }}>{selected.artist}</div>
+              <div style={{ fontSize:10, color:S.muted, lineHeight:1.7 }}>
+                <div><span style={{ color:S.text }}>Label:</span> {selected.label || '—'}</div>
+                <div><span style={{ color:S.text }}>Catno:</span> {selected.catalog || '—'}</div>
+                <div><span style={{ color:S.text }}>Genre:</span> {selected.genre || '—'} · {selected.year || '—'}</div>
+                <div><span style={{ color:S.text }}>Slug:</span> <span style={{ fontFamily:'monospace', fontSize:9 }}>/products/{selected.slug}</span></div>
+              </div>
+            </div>
+          </div>
+
+          {/* Audio snippets */}
+          <div style={{ marginTop:16 }}>
+            <div style={lbl}>Audio snippets ({audioTracks.length} with audio)</div>
+            {audioTracks.length === 0 && <div style={{ fontSize:10, color:S.danger }}>No audio snippets found for this release — story needs audio.</div>}
+            {audioTracks.map((t, i) => (
+              <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'4px 0' }}>
+                <span style={{ fontSize:10, color:S.muted, width:24 }}>{i+1}.</span>
+                <span style={{ fontSize:11, color:S.text, flex:1 }}>{t.name || `Track ${i+1}`}</span>
+                <AudioPlayer src={t.url} />
+              </div>
+            ))}
+            <div style={{ fontSize:9, color:S.muted, marginTop:8, fontStyle:'italic' }}>
+              Phase 4 will auto-pick the snippet with the strongest 4/4 kick and sync the waveform to it.
+            </div>
+          </div>
+
+          {/* Quote (editable in a later phase) */}
+          <div style={{ marginTop:16 }}>
+            <div style={lbl}>Description (Shot 2 quote will be drawn from this)</div>
+            <div style={{ fontSize:11, color:S.muted, lineHeight:1.6, maxHeight:80, overflowY:'auto', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, padding:'8px 10px' }}>
+              {selected.desc || '(no description)'}
+            </div>
+          </div>
+
+          <div style={{ marginTop:18, padding:'10px 12px', background:S.bg, border:`1px dashed ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
+            <strong style={{ color:S.accent }}>Phase 1 checkpoint.</strong> If the cover, artist photo, audio snippets, and description above all loaded correctly, the data pipeline works. Canvas rendering + MP4 export come next.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -4644,6 +4821,10 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+      </div>
+      <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>📸 Content · Instagram Stories</div>
+        <StoriesGenerator />
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>
