@@ -81,7 +81,7 @@ async function fetchAllProducts() {
         pageInfo { hasNextPage endCursor }
         edges {
           node {
-            id title vendor descriptionHtml tags
+            id title vendor descriptionHtml tags handle
             variants(first:1) { edges { node { sku price { amount currencyCode } quantityAvailable } } }
             images(first:1) { edges { node { url } } }
           }
@@ -138,6 +138,7 @@ function parseProduct(node) {
     title, artist, label, catalog, desc, price, stock, year,
     image: img?.url || '',
     slug: makeSlug(artist, title, catalog),
+    handle: node.handle || '',
   };
 }
 
@@ -188,6 +189,7 @@ function renderProductHtml(template, product) {
     <title>${escapeHtml(fullTitle)}</title>
     <meta name="description" content="${escapeHtml(metaDesc)}" />
     <link rel="canonical" href="${escapeHtml(url)}" />
+    <meta name="shopify-handle" content="${escapeHtml(product.handle || '')}" />
     <meta property="og:type" content="product" />
     <meta property="og:title" content="${escapeHtml(fullTitle)}" />
     <meta property="og:description" content="${escapeHtml(metaDesc)}" />

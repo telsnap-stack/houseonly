@@ -6111,28 +6111,35 @@ export default function App() {
     if (selected && selected.slug === slug) return;
     const found = records.find(r => r.slug === slug);
     if (found) { setSelected(found); return; }
-    // Not in the loaded page. Resolve by SKU from the prerendered JSON-LD.
+    // Not in the loaded page. Resolve via Shopify's real handle, which the
+    // prerender writes into <meta name="shopify-handle"> (scripts/prerender.mjs).
+    // We deliberately do NOT derive the handle from the SKU: SKUs can contain
+    // spaces or punctuation that Shopify normalizes in the handle (e.g. SKU
+    // "SS 004" → handle "ss-004"), so guessing breaks. The meta tag carries the
+    // exact handle. Fallback to a sanitized SKU only if the meta is absent.
     // Guard so we attempt the network fetch only once per slug.
     if (directFetchedSlug.current === slug) return;
     directFetchedSlug.current = slug;
-    let sku = '';
-    try {
-      const blocks = document.querySelectorAll('script[type="application/ld+json"]');
-      for (const b of blocks) {
-        const json = JSON.parse(b.textContent || '{}');
-        if (json && json['@type'] === 'Product' && json.sku) { sku = String(json.sku); break; }
-      }
-    } catch { /* malformed/absent JSON-LD — fall through */ }
-    if (!sku) return; // no SKU available (e.g. dev server without prerender) — leave as-is
-    fetchShopifyProductByHandle(sku.toLowerCase())
+    let handle = document.querySelector('meta[name="shopify-handle"]')?.content?.trim() || '';
+    if (!handle) {
+      // Fallback: derive from JSON-LD SKU (legacy / pre-meta prerenders).
+      let sku = '';
+      try {
+        for (const b of document.querySelectorAll('script[type="application/ld+json"]')) {
+          const json = JSON.parse(b.textContent || '{}');
+          if (json && json['@type'] === 'Product' && json.sku) { sku = String(json.sku); break; }
+        }
+      } catch { /* ignore */ }
+      handle = sku.toLowerCase().replace(/\s+/g, '-');
+    }
+    if (!handle) return; // nothing to resolve with (e.g. dev server without prerender)
+    fetchShopifyProductByHandle(handle)
       .then(prod => {
         if (!prod) return;
-        // Open only if the URL still points at this slug. (We deliberately do
-        // NOT use an effect-cleanup `cancelled` flag here: this effect re-runs
-        // when `records` loads, and that cleanup would cancel the in-flight
-        // fetch before it resolves — leaving the modal closed. The live URL
-        // check is the correct guard: it stays valid across that re-run and
-        // only fails if the user actually navigated away.)
+        // Open only if the URL still points at this slug. (No effect-cleanup
+        // `cancelled` flag: this effect re-runs when `records` loads, and that
+        // cleanup would cancel the in-flight fetch before it resolves. The live
+        // URL check stays valid across that re-run and only fails on real nav.)
         if (window.location.pathname.match(/^\/products\/([^/]+)\/?$/)?.[1] === slug) {
           setSelected(prod);
         }
