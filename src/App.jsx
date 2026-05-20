@@ -4630,19 +4630,13 @@ function StoriesGenerator() {
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState('');
   const [selected, setSelected] = useState(null);   // the picked release (parseProduct shape)
-  const [artist, setArtist]     = useState(null);   // {name, imageUrl, ...} from Spotify, or null
-  const [artistLoading, setArtistLoading] = useState(false);
-  const [artistErr, setArtistErr] = useState('');
-  // Phase 2: the chosen artist photo (R2 URL once mirrored/uploaded, or a
-  // Spotify URL if accepted as-is). chosenPhotoSource tells the UI where it
-  // came from. spotifyLooksLikeCover flags when Spotify returned the sleeve.
-  const [chosenPhoto, setChosenPhoto] = useState('');       // final photo URL for the story
-  const [chosenSource, setChosenSource] = useState('');     // 'cache' | 'spotify' | 'paste' | 'upload'
-  const [spotifyLooksLikeCover, setSpotifyLooksLikeCover] = useState(false);
-  const [pasteUrl, setPasteUrl] = useState('');
-  const [photoBusy, setPhotoBusy] = useState(false);
-  const [photoErr, setPhotoErr] = useState('');
-  const uploadRef = useRef(null);
+  // Shot 2 = AI-generated "knowledge line": genuine musical context, not
+  // marketing bluff. We fetch 3 options from the worker's story-context
+  // endpoint (Anthropic), Eduardo picks one and can edit it before export.
+  const [ctxOptions, setCtxOptions] = useState([]);   // 3 generated lines
+  const [ctxChosen, setCtxChosen]   = useState('');   // the selected/edited line
+  const [ctxLoading, setCtxLoading] = useState(false);
+  const [ctxErr, setCtxErr]         = useState('');
 
   // Debounced server-side search over the WHOLE catalog (reuses the same
   // Storefront `search` endpoint the storefront uses). We don't auto-fire on
@@ -4666,116 +4660,44 @@ function StoriesGenerator() {
     }, 300);
   };
 
-  // When a release is picked: (1) check the KV cache for a photo we've already
-  // saved for this artist; (2) if none, ask Spotify for a suggestion. Spotify's
-  // "artist image" is sometimes actually the record sleeve for underground
-  // artists — we flag that case so you don't post a cover as a photo. The final
-  // photo is always your choice via the picker below.
-  const pickRelease = async (r) => {
+  // When a release is picked: load it and clear any previous knowledge line.
+  // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
+  const pickRelease = (r) => {
     setSelected(r);
-    setArtist(null); setArtistErr('');
-    setChosenPhoto(''); setChosenSource(''); setSpotifyLooksLikeCover(false);
-    setPasteUrl(''); setPhotoErr('');
-    const artistName = (r.artist || '').trim();
-    if (!artistName) { setArtistErr('No artist name on this release — paste or upload a photo below.'); return; }
-    setArtistLoading(true);
-    try {
-      // 1. Cached photo for this artist?
-      try {
-        const cRes = await fetch(`${WORKER_URL}?action=artist-photo&artist=${encodeURIComponent(artistName)}`);
-        const cData = await cRes.json();
-        if (cData && cData.url) {
-          setChosenPhoto(cData.url);
-          setChosenSource('cache');
-        }
-      } catch { /* cache miss is fine */ }
-      // 2. Spotify suggestion (shown even if cache hit, as an alternative).
-      const res = await fetch(`${WORKER_URL}?action=spotify-artist&q=${encodeURIComponent(artistName)}`);
-      const data = await res.json();
-      if (data && data.imageUrl) {
-        setArtist(data);
-        // Heuristic: if Spotify's "artist image" is byte-similar to the release
-        // cover, it's probably the sleeve, not a photo. We can't compare bytes
-        // cheaply cross-origin, so we use a weak signal: flag it for your eye.
-        // (A real per-pixel compare would need both images on a canvas; not
-        // worth it — your glance is the reliable check.)
-        setSpotifyLooksLikeCover(true); // always invite a human glance; see note in UI
-      } else {
-        setArtistErr('No Spotify photo found — paste or upload a photo below.');
-      }
-    } catch (e) {
-      setArtistErr('Spotify lookup failed: ' + (e?.message || 'unknown'));
-    } finally {
-      setArtistLoading(false);
-    }
+    setCtxOptions([]); setCtxChosen(''); setCtxErr('');
   };
 
-  // Accept the Spotify suggestion as the chosen photo (use as-is). Note: this
-  // is a Spotify CDN URL (i.scdn.co), which IS in the mirror-image allowlist,
-  // so we mirror it to R2 for clean canvas CORS + caching.
-  const acceptSpotifyPhoto = async () => {
-    if (!artist?.imageUrl || !selected) return;
-    await mirrorPhoto(artist.imageUrl);
-  };
-
-  // Mirror a pasted/Spotify photo URL to R2 via the worker, then set it chosen.
-  const mirrorPhoto = async (photoUrl) => {
-    if (!photoUrl || !selected) return;
-    setPhotoBusy(true); setPhotoErr('');
+  // Generate 3 knowledge-line options from the worker's story-context endpoint
+  // (Anthropic). Genuine musical context, anti-bluff. Eduardo picks/edits.
+  const generateContext = async () => {
+    if (!selected) return;
+    setCtxLoading(true); setCtxErr(''); setCtxOptions([]);
     try {
-      const res = await fetch(`${WORKER_URL}?action=mirror-image`, {
+      const res = await fetch(`${WORKER_URL}?action=story-context`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: photoUrl, artist: (selected.artist || '').trim() }),
+        body: JSON.stringify({
+          artist: selected.artist || '',
+          title: selected.title || '',
+          label: selected.label || '',
+          catalog: selected.catalog || '',
+          genre: selected.genre || '',
+          year: selected.year || '',
+          description: selected.desc || '',
+          tracks: (selected.tracks || []).map(t => t && t.name).filter(Boolean),
+        }),
       });
       const data = await res.json();
-      if (data && data.url) {
-        setChosenPhoto(data.url);
-        setChosenSource(photoUrl.includes('i.scdn.co') ? 'spotify' : 'paste');
-        setPasteUrl('');
+      if (data && Array.isArray(data.options) && data.options.length) {
+        setCtxOptions(data.options);
+        setCtxChosen(data.options[0]);
       } else {
-        setPhotoErr(data?.error ? `Couldn't mirror: ${data.error}${data.hint ? ' — ' + data.hint : ''}` : 'Mirror failed.');
+        setCtxErr(data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
       }
     } catch (e) {
-      setPhotoErr('Mirror failed: ' + (e?.message || 'unknown'));
+      setCtxErr('Generation failed: ' + (e?.message || 'unknown'));
     } finally {
-      setPhotoBusy(false);
-    }
-  };
-
-  // Upload a chosen image file directly to R2 (for hosts not in the allowlist,
-  // or local images). Reuses the existing ?action=upload endpoint.
-  const uploadPhoto = async (file) => {
-    if (!file || !selected) return;
-    setPhotoBusy(true); setPhotoErr('');
-    try {
-      const slug = (selected.artist || 'artist').toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-      const ext = (file.name.match(/\.(jpg|jpeg|png|webp)$/i) || [, 'jpg'])[1].toLowerCase().replace('jpeg', 'jpg');
-      const key = `artists/${slug || 'artist'}.${ext}`;
-      const fd = new FormData();
-      fd.append('file', file, file.name);
-      fd.append('key', key);
-      const res = await fetch(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
-      const data = await res.json();
-      if (data && data.url) {
-        setChosenPhoto(data.url);
-        setChosenSource('upload');
-        // Also cache it for this artist so future releases auto-fill.
-        try {
-          await fetch(`${WORKER_URL}?action=mirror-image`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: data.url, artist: (selected.artist || '').trim() }),
-          });
-        } catch { /* cache best-effort */ }
-      } else {
-        setPhotoErr(data?.error ? `Upload failed: ${data.error}` : 'Upload failed.');
-      }
-    } catch (e) {
-      setPhotoErr('Upload failed: ' + (e?.message || 'unknown'));
-    } finally {
-      setPhotoBusy(false);
+      setCtxLoading(false);
     }
   };
 
@@ -4818,7 +4740,7 @@ function StoriesGenerator() {
         <div style={{ marginTop:16, background:S.surf, border:`1px solid ${S.border}`, borderRadius:3, padding:18 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
             <div style={{ fontSize:11, fontWeight:800, color:S.text, letterSpacing:1, textTransform:'uppercase' }}>Story materials</div>
-            <button onClick={() => { setSelected(null); setArtist(null); }} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2 }}>← Back to search</button>
+            <button onClick={() => { setSelected(null); setCtxOptions([]); setCtxChosen(''); }} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2 }}>← Back to search</button>
           </div>
 
           <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
@@ -4827,18 +4749,6 @@ function StoriesGenerator() {
               <div style={lbl}>Cover</div>
               <div style={{ width:120, height:120, borderRadius:2, background:`linear-gradient(${selected.g})`, backgroundImage:coverSrc(selected.coverUrl)?`url(${coverSrc(selected.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${S.border}` }} />
               <div style={{ fontSize:8, color:selected.coverUrl?S.accent:S.danger, marginTop:6, letterSpacing:1, textTransform:'uppercase' }}>{selected.coverUrl ? '✓ loaded' : '✗ no cover'}</div>
-            </div>
-
-            {/* Artist photo — chosen result */}
-            <div>
-              <div style={lbl}>Artist photo {chosenSource ? `(${chosenSource})` : ''}</div>
-              <div style={{ width:120, height:120, borderRadius:2, background:S.bg, backgroundImage:chosenPhoto?`url(${chosenPhoto})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${chosenPhoto?S.accent:S.border}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
-                {artistLoading && <span style={{ fontSize:9, color:S.muted }}>Looking up…</span>}
-                {!artistLoading && !chosenPhoto && <span style={{ fontSize:20 }}>👤</span>}
-              </div>
-              <div style={{ fontSize:8, color:chosenPhoto?S.accent:'#ff8800', marginTop:6, letterSpacing:1, textTransform:'uppercase', maxWidth:120, lineHeight:1.4 }}>
-                {chosenPhoto ? `✓ photo set` : 'no photo yet'}
-              </div>
             </div>
 
             {/* Metadata */}
@@ -4855,63 +4765,43 @@ function StoriesGenerator() {
             </div>
           </div>
 
-          {/* Artist photo picker (Phase 2) */}
+          {/* Shot 2 — knowledge line (AI-generated context, not bluff) */}
           <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
-            <div style={lbl}>Set the artist photo</div>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+              <div style={lbl}>Shot 2 — knowledge line</div>
+              <button onClick={generateContext} disabled={ctxLoading} style={{ background:ctxLoading?S.border:S.accent, color:ctxLoading?S.muted:'#080808', border:'none', borderRadius:2, cursor:ctxLoading?'wait':'pointer', fontSize:9, fontWeight:800, letterSpacing:1.5, textTransform:'uppercase', padding:'7px 14px' }}>
+                {ctxLoading ? 'Generating…' : (ctxOptions.length ? '↻ Regenerate' : '✦ Generate 3 lines')}
+              </button>
+            </div>
             <div style={{ fontSize:10, color:S.muted, lineHeight:1.6, marginBottom:12 }}>
-              Spotify often returns the record sleeve instead of a real photo for underground artists.
-              Check the suggestion — if it's a sleeve, search RA or Google, copy the image address, and paste it.
+              Genuine musical context — artist lineage, label, or era. Not marketing copy. Pick one, edit if needed. You are the final fact-check.
             </div>
 
-            <div style={{ display:'flex', gap:16, flexWrap:'wrap', alignItems:'flex-start' }}>
-              {/* Spotify suggestion */}
+            {ctxErr && <div style={{ fontSize:10, color:S.danger, marginBottom:10 }}>{ctxErr}</div>}
+
+            {ctxOptions.length > 0 && (
+              <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:12 }}>
+                {ctxOptions.map((opt, i) => (
+                  <div key={i} onClick={() => setCtxChosen(opt)} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
+                    <span style={{ fontSize:9, color:ctxChosen===opt?S.accent:S.muted, fontWeight:800, marginTop:2 }}>{ctxChosen===opt?'●':'○'}</span>
+                    <span style={{ fontSize:12, color:S.text, lineHeight:1.5 }}>{opt}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {ctxChosen && (
               <div>
-                <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Spotify suggestion</div>
-                <div style={{ width:96, height:96, borderRadius:2, background:S.bg, backgroundImage:artist?.imageUrl?`url(${artist.imageUrl})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${S.border}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
-                  {!artist?.imageUrl && <span style={{ fontSize:9, color:S.muted }}>none</span>}
-                </div>
-                {artist?.imageUrl && (
-                  <>
-                    <div style={{ fontSize:7, color:'#ff8800', marginTop:5, letterSpacing:0.5, lineHeight:1.4, maxWidth:96 }}>⚠ verify this is a photo, not the sleeve</div>
-                    <button onClick={acceptSpotifyPhoto} disabled={photoBusy} style={{ marginTop:6, width:96, background:S.border, color:S.text, border:'none', borderRadius:2, cursor:photoBusy?'wait':'pointer', fontSize:8, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'6px 0' }}>Use this</button>
-                  </>
-                )}
+                <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Final line (editable)</div>
+                <textarea
+                  value={ctxChosen}
+                  onChange={e => setCtxChosen(e.target.value)}
+                  rows={2}
+                  style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+                />
+                <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>{ctxChosen.length} chars · {ctxChosen.trim().split(/\s+/).filter(Boolean).length} words</div>
               </div>
-
-              {/* Search buttons + paste + upload */}
-              <div style={{ flex:1, minWidth:240 }}>
-                <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Find a real photo</div>
-                <div style={{ display:'flex', gap:6, marginBottom:10, flexWrap:'wrap' }}>
-                  <a href={`https://ra.co/search?searchTerm=${encodeURIComponent(selected.artist || '')}`} target="_blank" rel="noreferrer" style={{ textDecoration:'none' }}>
-                    <span style={{ display:'inline-block', background:S.border, color:S.text, borderRadius:2, fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'7px 12px' }}>🔍 Search RA</span>
-                  </a>
-                  <a href={`https://www.google.com/search?udm=2&q=${encodeURIComponent(selected.artist || '')}`} target="_blank" rel="noreferrer" style={{ textDecoration:'none' }}>
-                    <span style={{ display:'inline-block', background:S.border, color:S.text, borderRadius:2, fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'7px 12px' }}>🔍 Google Images</span>
-                  </a>
-                </div>
-
-                {/* Paste URL */}
-                <div style={{ display:'flex', gap:6, marginBottom:8 }}>
-                  <input
-                    value={pasteUrl}
-                    onChange={e => setPasteUrl(e.target.value)}
-                    placeholder="Paste image address (right-click → copy image address)"
-                    style={{ flex:1, background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:11, fontFamily:'inherit', outline:'none' }}
-                  />
-                  <button onClick={() => mirrorPhoto(pasteUrl.trim())} disabled={photoBusy || !pasteUrl.trim()} style={{ background:pasteUrl.trim()?S.accent:S.border, color:pasteUrl.trim()?'#080808':S.muted, border:'none', borderRadius:2, cursor:(photoBusy||!pasteUrl.trim())?'not-allowed':'pointer', fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'0 14px' }}>{photoBusy?'…':'Set'}</button>
-                </div>
-
-                {/* Upload */}
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <input ref={uploadRef} type="file" accept="image/*" style={{ display:'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) uploadPhoto(f); e.target.value=''; }} />
-                  <button onClick={() => uploadRef.current?.click()} disabled={photoBusy} style={{ background:'transparent', border:`1px solid ${S.border}`, color:S.muted, borderRadius:2, cursor:photoBusy?'wait':'pointer', fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'7px 12px' }}>⬆ Upload a file instead</button>
-                  <span style={{ fontSize:9, color:S.muted }}>for hosts that won't paste</span>
-                </div>
-
-                {photoErr && <div style={{ fontSize:10, color:S.danger, marginTop:8, lineHeight:1.5 }}>{photoErr}</div>}
-                {chosenSource === 'cache' && <div style={{ fontSize:9, color:S.accent, marginTop:8 }}>✓ Reused a saved photo for {selected.artist}. Override above if you want a different one.</div>}
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Audio snippets */}
@@ -4939,7 +4829,7 @@ function StoriesGenerator() {
           </div>
 
           <div style={{ marginTop:18, padding:'10px 12px', background:S.bg, border:`1px dashed ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
-            <strong style={{ color:S.accent }}>Phase 1 checkpoint.</strong> If the cover, artist photo, audio snippets, and description above all loaded correctly, the data pipeline works. Canvas rendering + MP4 export come next.
+            <strong style={{ color:S.accent }}>Checkpoint.</strong> If the cover, audio snippets, description, and knowledge line above all loaded correctly, the data pipeline works. Canvas rendering + MP4 export come next.
           </div>
         </div>
       )}
