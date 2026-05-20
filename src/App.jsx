@@ -4745,6 +4745,169 @@ async function pickBestTrack(tracks) {
   return { tracks: analyzed, bestIndex };
 }
 
+// ── SHOT 1 CANVAS (Stories) ────────────────────────────────────
+// Renders Shot 1 at 1080x1920 (story vertical): cover full-bleed, House Only
+// system overlay (logo, catno/label/title), a reactive waveform, and — the
+// signature touch — the cover PUNCHES 1-2% on each detected kick. Plays the
+// chosen snippet and animates in sync using the kicks[] timestamps from the
+// analysis. This is preview-only (4A-2); MP4 export is Phase 5.
+//
+// Cover image is loaded with crossOrigin='anonymous' so the canvas stays
+// untainted — required for the later MP4 export. R2 now serves permissive CORS
+// (configured today), so this works for both cover and audio.
+function Shot1Canvas({ release, track }) {
+  const canvasRef = useRef(null);
+  const audioRef  = useRef(null);
+  const rafRef    = useRef(null);
+  const coverImgRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  const W = 1080, H = 1920;
+  const kicks = (track?.kicks || []);
+
+  // Load the cover once (crossOrigin for untainted canvas).
+  useEffect(() => {
+    setReady(false);
+    coverImgRef.current = null;
+    const url = coverSrc(release?.coverUrl);
+    if (!url) { drawFrame(0, 1); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => { coverImgRef.current = img; setReady(true); drawFrame(0, 1); };
+    img.onerror = () => { coverImgRef.current = null; setReady(true); drawFrame(0, 1); };
+    img.src = url;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [release?.coverUrl, track?.url]);
+
+  // Compute a kick "punch" factor for a given time: 1.0 baseline, briefly
+  // scaling up right after each kick, decaying over ~180ms.
+  const punchAt = (t) => {
+    let p = 0;
+    for (const k of kicks) {
+      const dt = t - k;
+      if (dt >= 0 && dt < 0.18) p = Math.max(p, (1 - dt / 0.18));
+    }
+    return 1 + p * 0.02; // up to +2%
+  };
+
+  const drawFrame = (t, scaleOverride) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const scale = scaleOverride != null ? scaleOverride : punchAt(t);
+
+    // Background black.
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, W, H);
+
+    // Cover: square, centered horizontally, upper-middle. Punch scales it.
+    const img = coverImgRef.current;
+    const coverSize = W * 0.82;
+    const cx = W / 2, cy = H * 0.40;
+    const s = coverSize * scale;
+    if (img) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.drawImage(img, -s / 2, -s / 2, s, s);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+    }
+
+    // Logo top-left.
+    ctx.textBaseline = 'top';
+    ctx.font = '900 44px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', 60, 70);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', 60, 116);
+
+    // Catno top-right (mono).
+    ctx.font = '500 26px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#585858';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${release?.catalog || ''}`, W - 60, 80);
+    ctx.textAlign = 'left';
+
+    // Waveform band low on the frame, pulsing on kicks.
+    const wfY = H * 0.74, wfH = 90, bars = 60, gap = 6;
+    const bw = (W - 120 - gap * (bars - 1)) / bars;
+    for (let i = 0; i < bars; i++) {
+      const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
+      const h = (12 + base * 60) * (scale > 1.001 ? 1 + (scale - 1) * 6 : 1);
+      ctx.fillStyle = '#c8ff00';
+      ctx.globalAlpha = 0.35 + base * 0.5;
+      ctx.fillRect(60 + i * (bw + gap), wfY + (wfH - h) / 2, bw, h);
+    }
+    ctx.globalAlpha = 1;
+
+    // Label / title / artist anchored bottom.
+    let by = H * 0.82;
+    ctx.font = '700 22px Inter, sans-serif';
+    ctx.fillStyle = '#585858';
+    ctx.fillText((release?.label || '').toUpperCase(), 60, by);
+    by += 40;
+    ctx.font = '800 56px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    // Wrap title if long.
+    const title = release?.title || '';
+    const maxW = W - 120;
+    let line = '', yy = by;
+    const words = title.split(' ');
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, 60, yy); yy += 64; line = w; }
+      else line = test;
+    }
+    ctx.fillText(line, 60, yy);
+    by = yy + 64;
+    ctx.font = '500 30px Inter, sans-serif';
+    ctx.fillStyle = '#585858';
+    ctx.fillText(release?.artist || '', 60, by);
+  };
+
+  // Animation loop while playing.
+  const loop = () => {
+    const a = audioRef.current;
+    if (a) drawFrame(a.currentTime);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  const togglePlay = () => {
+    const a = audioRef.current; if (!a) return;
+    if (playing) {
+      a.pause(); setPlaying(false);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      drawFrame(a.currentTime || 0, 1);
+    } else {
+      a.currentTime = 0;
+      a.play().then(() => {
+        setPlaying(true);
+        rafRef.current = requestAnimationFrame(loop);
+      }).catch(() => {});
+    }
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas
+        ref={canvasRef}
+        width={W}
+        height={H}
+        style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }}
+      />
+      <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" onEnded={() => { setPlaying(false); if (rafRef.current) cancelAnimationFrame(rafRef.current); }} />
+      <button onClick={togglePlay} disabled={!track?.url} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: track?.url ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Stop preview' : '▶ Preview Shot 1'}
+      </button>
+      {kicks.length > 0 && <div style={{ fontSize: 8, color: S.muted, marginTop: 6, letterSpacing: 1, textTransform: 'uppercase' }}>{kicks.length} kicks · cover punches on each</div>}
+    </div>
+  );
+}
+
 function StoriesGenerator() {
   const [query, setQuery]       = useState('');
   const [results, setResults]   = useState([]);
@@ -4988,6 +5151,14 @@ function StoriesGenerator() {
               </div>
             )}
           </div>
+
+          {/* Shot 1 — canvas preview */}
+          {kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack] && (
+            <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
+              <div style={lbl}>Shot 1 — preview</div>
+              <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+            </div>
+          )}
 
           {/* Description (reference) */}
           <div style={{ marginTop:16 }}>
