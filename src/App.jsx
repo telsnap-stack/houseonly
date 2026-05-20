@@ -5309,11 +5309,12 @@ function shot2Layout(measureCtx, W, H, text) {
   const cadence = 1.0;              // one line per half-bar (constant — no compression)
   const lastLineStart = beat + (rows.length - 1) * cadence;
   const revealDone = lastLineStart + 0.35;            // last line finished fading in
-  // Read pause after the full text is on screen: ~1.2s per line, floored so a
-  // one-liner still breathes. Eduardo wants long phrases to last as long as
-  // needed to read, so there's no tight cap — only a high safety ceiling (22s)
-  // to prevent a pathological runaway.
-  const readPause = Math.max(1.4, rows.length * 1.2);
+  // Read pause after the full text is on screen: a short, fixed ~1s beat, then
+  // cut to Shot 3. (Previously this scaled per line, which left long phrases
+  // sitting on screen far too long after the reveal finished.) Reading happens
+  // progressively as each line lands, so once the last line is up, one extra
+  // second is enough before moving on.
+  const readPause = 1.0;
   const dur = Math.min(22, Math.max(5, revealDone + readPause));
   return { rows, fontSize, font, beat, cadence, dur, startY: topY, lineH };
 }
