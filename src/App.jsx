@@ -5229,6 +5229,237 @@ function Shot3Canvas({ release }) {
   );
 }
 
+// ── STORY EXPORT (Phase 5) ─────────────────────────────────────
+// Pure draw functions (ctx, W, H, data, t) that replicate each shot's render.
+// The preview components keep their own draw logic untouched; these mirror it
+// so the master export canvas can draw all three shots on one 15s timeline
+// without disturbing what already works.
+
+function exDrawShot1(ctx, W, H, release, coverImg, t) {
+  const beatSec = 0.5; // 120 BPM pulse for the cover punch
+  const phase = t % beatSec;
+  const scale = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.025 : 1;
+  ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, W, H);
+  const coverSize = W * 0.82, cx = W / 2, cy = H * 0.40, s = coverSize * scale;
+  if (coverImg) { ctx.save(); ctx.translate(cx, cy); ctx.drawImage(coverImg, -s/2, -s/2, s, s); ctx.restore(); }
+  else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cx - s/2, cy - s/2, s, s); }
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  ctx.font = '900 44px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', 60, 70);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 60, 116);
+  ctx.font = '500 26px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858';
+  ctx.textAlign = 'right'; ctx.fillText(`${release?.catalog || ''}`, W - 60, 80); ctx.textAlign = 'left';
+  const wfY = H * 0.74, wfH = 90, bars = 60, gap = 6;
+  const bw = (W - 120 - gap * (bars - 1)) / bars;
+  for (let i = 0; i < bars; i++) {
+    const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
+    const h = (12 + base * 60) * (scale > 1.001 ? 1 + (scale - 1) * 6 : 1);
+    ctx.fillStyle = '#c8ff00'; ctx.globalAlpha = 0.35 + base * 0.5;
+    ctx.fillRect(60 + i * (bw + gap), wfY + (wfH - h) / 2, bw, h);
+  }
+  ctx.globalAlpha = 1;
+  let by = H * 0.82;
+  ctx.font = '700 22px Inter, sans-serif'; ctx.fillStyle = '#585858';
+  ctx.fillText((release?.label || '').toUpperCase(), 60, by);
+  by += 40; ctx.font = '800 56px Inter, sans-serif'; ctx.fillStyle = '#efefef';
+  const title = release?.title || '', maxW = W - 120;
+  let line = '', yy = by;
+  for (const w of title.split(' ')) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, 60, yy); yy += 64; line = w; }
+    else line = test;
+  }
+  ctx.fillText(line, 60, yy); by = yy + 64;
+  ctx.font = '500 30px Inter, sans-serif'; ctx.fillStyle = '#585858';
+  ctx.fillText(release?.artist || '', 60, by);
+}
+
+function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
+  const text = (lineText || '').trim();
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = '900 40px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', 70, 90);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 70, 134);
+  const maxW = W - 160;
+  const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
+  const font = `800 ${fontSize}px Inter, sans-serif`;
+  ctx.font = font;
+  const words = text.split(/\s+/); const rows = []; let cur = '';
+  for (const w of words) { const test = cur ? cur + ' ' + w : w; if (ctx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; } else cur = test; }
+  if (cur) rows.push(cur);
+  const lineH = fontSize * 1.28, blockH = rows.length * lineH, y = (H - blockH) / 2;
+  ctx.textAlign = 'left';
+  const beat = 0.5, cadence = rows.length <= 4 ? 1.0 : Math.max(0.5, 4.0 / rows.length);
+  rows.forEach((row, i) => {
+    const rowStart = beat + i * cadence, dt = elapsed - rowStart;
+    const fade = Math.max(0, Math.min(1, dt / 0.35));
+    const alpha = 1 - Math.pow(1 - fade, 2);
+    let punch = 1; if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
+    ctx.globalAlpha = alpha; ctx.fillStyle = '#efefef';
+    const cyRow = y + i * lineH;
+    ctx.save(); ctx.translate(80, cyRow + fontSize * 0.4); ctx.scale(punch, punch);
+    ctx.fillText(row, 0, -fontSize * 0.4); ctx.restore();
+  });
+  ctx.globalAlpha = 1;
+  const metaStart = beat + rows.length * cadence;
+  const ctxAlpha = Math.max(0, Math.min(1, (elapsed - metaStart) / 0.5));
+  ctx.globalAlpha = ctxAlpha;
+  ctx.font = '500 30px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858'; ctx.textAlign = 'left';
+  ctx.fillText([release?.artist, release?.catalog].filter(Boolean).join('  ·  '), 80, H - 160);
+  ctx.globalAlpha = 1;
+}
+
+function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
+  const beatSec = 0.5;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '900 110px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', W/2, H*0.22);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', W/2, H*0.22 + 110);
+  const cs = W * 0.42, cxv = W/2, cyv = H*0.50;
+  if (coverImg) ctx.drawImage(coverImg, cxv - cs/2, cyv - cs/2, cs, cs);
+  else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cxv - cs/2, cyv - cs/2, cs, cs); }
+  let ty = cyv + cs/2 + 60;
+  ctx.fillStyle = '#efefef'; ctx.font = '800 46px Inter, sans-serif'; ctx.fillText(release?.title || '', W/2, ty);
+  ty += 56; ctx.fillStyle = '#9a9a9a'; ctx.font = '500 32px Inter, sans-serif'; ctx.fillText(release?.artist || '', W/2, ty);
+  ty += 44; ctx.fillStyle = '#585858'; ctx.font = '500 26px "JetBrains Mono", monospace'; ctx.fillText(release?.catalog || '', W/2, ty);
+  const phase = elapsed % beatSec;
+  const punch = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.04 : 1;
+  const ctaText = 'TAP TO SHOP →';
+  ctx.font = '800 38px Inter, sans-serif';
+  const tw = ctx.measureText(ctaText).width, padX = 48, padY = 28;
+  const pillW = tw + padX * 2, pillH = 38 + padY * 2, pillX = W/2, pillY = H*0.84;
+  ctx.save(); ctx.translate(pillX, pillY); ctx.scale(punch, punch);
+  ctx.fillStyle = '#c8ff00'; const r = pillH / 2;
+  ctx.beginPath();
+  ctx.moveTo(-pillW/2 + r, -pillH/2);
+  ctx.arcTo(pillW/2, -pillH/2, pillW/2, pillH/2, r);
+  ctx.arcTo(pillW/2, pillH/2, -pillW/2, pillH/2, r);
+  ctx.arcTo(-pillW/2, pillH/2, -pillW/2, -pillH/2, r);
+  ctx.arcTo(-pillW/2, -pillH/2, pillW/2, -pillH/2, r);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#080808'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(ctaText, 0, 2); ctx.restore();
+}
+
+// StoryExporter — master 15s timeline: Shot1 (0-5s), Shot2 (5-10s), Shot3
+// (10-15s), with the chosen track's audio playing under it. Records the canvas
+// + audio via MediaRecorder to a WebM and downloads it. (MP4 conversion is 5B.)
+// Also copies the product URL to the clipboard for the Instagram link sticker.
+function StoryExporter({ release, track, line }) {
+  const canvasRef = useRef(null);
+  const audioRef = useRef(null);
+  const coverImgRef = useRef(null);
+  const recRef = useRef(null);
+  const rafRef = useRef(null);
+  const [status, setStatus] = useState('idle'); // idle | preparing | recording | done | error
+  const [msg, setMsg] = useState('');
+  const W = 1080, H = 1920, SHOT = 5, TOTAL = 15;
+
+  useEffect(() => {
+    const url = coverSrc(release?.coverUrl);
+    if (!url) { coverImgRef.current = null; return; }
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => { coverImgRef.current = img; };
+    img.onerror = () => { coverImgRef.current = null; };
+    img.src = url;
+  }, [release?.coverUrl]);
+
+  const drawAt = (ctx, elapsed) => {
+    if (elapsed < SHOT) exDrawShot1(ctx, W, H, release, coverImgRef.current, elapsed);
+    else if (elapsed < SHOT * 2) exDrawShot2(ctx, W, H, release, line, elapsed - SHOT);
+    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT * 2);
+  };
+
+  const copyProductUrl = async () => {
+    const slug = release?.slug || '';
+    const url = slug ? `https://houseonly.store${slug.startsWith('/') ? '' : '/'}${slug}` : 'https://houseonly.store';
+    try { await navigator.clipboard.writeText(url); } catch {}
+    return url;
+  };
+
+  const exportStory = async () => {
+    if (!track?.url) { setStatus('error'); setMsg('No track selected'); return; }
+    setStatus('preparing'); setMsg('Setting up…');
+    const cv = canvasRef.current;
+    const ctx = cv.getContext('2d');
+
+    // Audio graph: route the <audio> element through Web Audio so we can both
+    // hear nothing extra and feed it into the recording stream.
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const a = audioRef.current;
+    a.currentTime = 0;
+    let srcNode;
+    try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
+    const dest = ac.createMediaStreamDestination();
+    srcNode.connect(dest);
+    // (Intentionally NOT connecting to ac.destination — we don't need to blast
+    // the audio out loud during export; the recording captures it from dest.)
+
+    // Combine canvas video + audio into one stream.
+    const canvasStream = cv.captureStream(30);
+    const mixed = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...dest.stream.getAudioTracks(),
+    ]);
+
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? 'video/webm;codecs=vp9,opus'
+      : 'video/webm';
+    const rec = new MediaRecorder(mixed, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+    recRef.current = rec;
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const aTag = document.createElement('a');
+      const safe = (release?.catalog || 'story').replace(/[^a-z0-9]+/gi, '-');
+      aTag.href = url; aTag.download = `houseonly-${safe}.webm`;
+      document.body.appendChild(aTag); aTag.click(); aTag.remove();
+      const purl = await copyProductUrl();
+      try { ac.close(); } catch {}
+      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}`);
+    };
+
+    // Go: start audio + recorder, drive the canvas for 15s.
+    setStatus('recording'); setMsg('Recording 15s…');
+    await ac.resume();
+    a.play().catch(()=>{});
+    const start = performance.now();
+    rec.start();
+    const loop = () => {
+      const elapsed = (performance.now() - start) / 1000;
+      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); a.pause(); rec.stop(); return; }
+      drawAt(ctx, elapsed);
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  const busy = status === 'preparing' || status === 'recording';
+  return (
+    <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${S.border}` }}>
+      <div style={lbl}>Export — full story (15s)</div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
+      <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
+      <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
+        {status === 'recording' ? 'Recording 15s…' : status === 'preparing' ? 'Preparing…' : '⬇ Export story (WebM)'}
+      </button>
+      {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
+      {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
+      <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
+        Records the 3 shots over 15s with the track audio. Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, add a link sticker over "TAP TO SHOP".
+      </div>
+    </div>
+  );
+}
+
 function StoriesGenerator() {
   const [query, setQuery]       = useState('');
   const [results, setResults]   = useState([]);
@@ -5491,6 +5722,7 @@ function StoriesGenerator() {
                   <Shot3Canvas release={selected} />
                 </div>
               </div>
+              <StoryExporter release={selected} track={kickAnalysis.tracks[chosenTrack]} line={ctxChosen} />
             </div>
           )}
 
