@@ -4772,7 +4772,7 @@ async function analyzeKicks(audioUrl) {
 
     // Final: punch (45) + energy (35) + tempo pocket (20), all gated by steadiness.
     const score = Math.round((kickStrength * 45 + energy * 35 + tempoInRange * 20) * steadyFloor);
-    return { kicks: gridKicks, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
+    return { kicks: gridKicks, rawKicks: kicks, env, winSec: 0.01, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
   } catch (e) {
     return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0, error: e?.message || 'analyze failed' };
   }
@@ -4786,7 +4786,7 @@ async function pickBestTrack(tracks) {
     const t = tracks[i];
     if (!t || !t.url) { analyzed.push({ ...t, origIndex: i, score: 0, bpm: 0, kicks: [], kickStrength: 0, energy: 0 }); continue; }
     const a = await analyzeKicks(t.url);
-    analyzed.push({ ...t, origIndex: i, score: a.score, bpm: a.bpm, kicks: a.kicks, kickStrength: a.kickStrength || 0, energy: a.energy || 0 });
+    analyzed.push({ ...t, origIndex: i, score: a.score, bpm: a.bpm, kicks: a.kicks, rawKicks: a.rawKicks || [], env: a.env || [], winSec: a.winSec || 0.01, kickStrength: a.kickStrength || 0, energy: a.energy || 0 });
   }
   // B-intermediate: sort by score descending so the punchiest tracks rise to the
   // top as a triage aid. The top one is pre-selected as a SOFT suggestion (no
@@ -4806,6 +4806,51 @@ async function pickBestTrack(tracks) {
 // Cover image is loaded with crossOrigin='anonymous' so the canvas stays
 // untainted — required for the later MP4 export. R2 now serves permissive CORS
 // (configured today), so this works for both cover and audio.
+// ── KICK DIAGRAM (diagnostic) ──────────────────────────────────
+// Draws the low-band energy envelope as a waveform with vertical marks where
+// kicks were detected: lime = grid-filtered (final), faint gray = raw onsets
+// (before grid). Lets us SEE whether marks land on the energy peaks (good) or
+// between them (bad), and whether the count is right — instead of guessing at
+// thresholds. Temporary calibration aid; removed once the pulse is dialed in.
+function KickDiagram({ track }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const cv = ref.current; if (!cv || !track?.env?.length) return;
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    const env = track.env, winSec = track.winSec || 0.01;
+    const dur = env.length * winSec;
+    const maxE = Math.max(...env) || 1;
+    ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, W, H);
+    // Envelope as filled waveform.
+    ctx.fillStyle = '#2a2a2a';
+    for (let x = 0; x < W; x++) {
+      const i = Math.floor((x / W) * env.length);
+      const h = (env[i] / maxE) * (H - 4);
+      ctx.fillRect(x, H - h, 1, h);
+    }
+    const xOf = (t) => (t / dur) * W;
+    // Raw onsets (faint gray, thin).
+    ctx.strokeStyle = 'rgba(120,120,120,0.5)'; ctx.lineWidth = 1;
+    (track.rawKicks || []).forEach(t => { ctx.beginPath(); ctx.moveTo(xOf(t), 0); ctx.lineTo(xOf(t), H); ctx.stroke(); });
+    // Grid kicks (lime, the ones that drive the pulse).
+    ctx.strokeStyle = '#c8ff00'; ctx.lineWidth = 1.5;
+    (track.kicks || []).forEach(t => { ctx.beginPath(); ctx.moveTo(xOf(t), 0); ctx.lineTo(xOf(t), H); ctx.stroke(); });
+  }, [track?.url, track?.env]);
+  if (!track?.env?.length) return null;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 8, color: S.muted, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
+        Diagnostic — gray = raw onsets · lime = grid kicks (drive the pulse)
+      </div>
+      <canvas ref={ref} width={760} height={90} style={{ width: '100%', maxWidth: 760, height: 90, borderRadius: 2, border: `1px solid ${S.border}`, display: 'block' }} />
+      <div style={{ fontSize: 8, color: S.muted, marginTop: 4 }}>
+        raw: {(track.rawKicks || []).length} · grid: {(track.kicks || []).length} · {track.bpm} bpm
+      </div>
+    </div>
+  );
+}
+
 function Shot1Canvas({ release, track }) {
   const canvasRef = useRef(null);
   const audioRef  = useRef(null);
@@ -5210,6 +5255,7 @@ function StoriesGenerator() {
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
               <div style={lbl}>Shot 1 — preview</div>
               <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+              <KickDiagram track={kickAnalysis.tracks[chosenTrack]} />
             </div>
           )}
 
