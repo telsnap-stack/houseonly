@@ -5028,21 +5028,38 @@ function Shot2Canvas({ release, line }) {
 
     ctx.font = font;
     ctx.textAlign = 'left';
+    // RHYTHMIC REVEAL at 120 BPM: beat = 0.5s, half-bar = 1.0s. Each line lands
+    // on a beat with a subtle punch (slight overshoot settling in ~150ms). We
+    // spread the lines across the first ~4s so a 4-line phrase reveals one line
+    // per half-bar (t=1,2,3,4s), leaving ~1s to read. For other line counts we
+    // keep the half-bar (1s) cadence but cap so it always finishes by ~4.2s.
+    const beat = 0.5;                          // 120 BPM
+    const cadence = rows.length <= 4 ? 1.0 : Math.max(0.5, 4.0 / rows.length);
     rows.forEach((row, i) => {
-      // Stagger: each row begins revealing 0.28s after the previous; reveal
-      // takes 0.5s (fade + slight upward slide).
-      const rowStart = 0.3 + i * 0.28;
-      const t = Math.max(0, Math.min(1, (elapsed - rowStart) / 0.5));
-      const ease = 1 - Math.pow(1 - t, 3); // easeOutCubic
-      ctx.globalAlpha = ease;
-      const slide = (1 - ease) * 24;       // slide up 24px into place
+      const rowStart = beat + i * cadence;     // first line at beat 1 (0.5s)
+      const dt = elapsed - rowStart;
+      // Fade-in over ~0.35s.
+      const fade = Math.max(0, Math.min(1, dt / 0.35));
+      const alpha = 1 - Math.pow(1 - fade, 2); // easeOut
+      // Subtle punch: scale 1.03 → 1.0 over 150ms right as the line lands.
+      let punch = 1;
+      if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = '#efefef';
-      ctx.fillText(row, 80, y + i * lineH + slide);
+      const cyRow = y + i * lineH;
+      ctx.save();
+      // Scale around the row's left-center for the punch.
+      ctx.translate(80, cyRow + fontSize * 0.4);
+      ctx.scale(punch, punch);
+      ctx.fillText(row, 0, -fontSize * 0.4);
+      ctx.restore();
     });
     ctx.globalAlpha = 1;
 
-    // Context line at the bottom: artist · catalog (muted, mono).
-    const ctxAlpha = Math.max(0, Math.min(1, (elapsed - (0.3 + rows.length * 0.28)) / 0.6));
+    // Context line at the bottom: artist · catalog (muted, mono). Lands one
+    // half-bar after the last line.
+    const metaStart = beat + rows.length * cadence;
+    const ctxAlpha = Math.max(0, Math.min(1, (elapsed - metaStart) / 0.5));
     ctx.globalAlpha = ctxAlpha;
     ctx.font = '500 30px "JetBrains Mono", monospace';
     ctx.fillStyle = '#585858';
