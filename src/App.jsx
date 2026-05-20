@@ -4969,6 +4969,123 @@ function Shot1Canvas({ release, track }) {
   );
 }
 
+// ── SHOT 2 CANVAS (Stories) ────────────────────────────────────
+// Renders the knowledge line at 1080x1920 in the House Only system. Editorial
+// reveal: the line wraps into rows and each row fades+slides in, staggered,
+// over the first ~2.5s — then holds. Black background, the words are the hero.
+// Preview-only (no audio here; audio is continuous and assembled in Phase 5).
+function Shot2Canvas({ release, line }) {
+  const canvasRef = useRef(null);
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+  const [playing, setPlaying] = useState(false);
+  const W = 1080, H = 1920;
+  const DUR = 5.0;            // shot length (s)
+  const text = (line || '').trim();
+
+  // Wrap the line into rows at a given font size, returns array of strings.
+  const wrapText = (ctx, str, font, maxW) => {
+    ctx.font = font;
+    const words = str.split(/\s+/);
+    const rows = [];
+    let cur = '';
+    for (const w of words) {
+      const test = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; }
+      else cur = test;
+    }
+    if (cur) rows.push(cur);
+    return rows;
+  };
+
+  const drawFrame = (elapsed) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    // Background: near-black with a very subtle vertical gradient.
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0c0c0c');
+    g.addColorStop(1, '#060606');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // Logo top, signature size.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 40px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', 70, 90);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', 70, 134);
+
+    // Knowledge line — big, wrapped, vertically centered, revealed by row.
+    const maxW = W - 160;
+    const fontSize = text.length > 90 ? 60 : text.length > 60 ? 70 : 80;
+    const font = `800 ${fontSize}px Inter, sans-serif`;
+    const rows = wrapText(ctx, text, font, maxW);
+    const lineH = fontSize * 1.28;
+    const blockH = rows.length * lineH;
+    let y = (H - blockH) / 2;
+
+    ctx.font = font;
+    ctx.textAlign = 'left';
+    rows.forEach((row, i) => {
+      // Stagger: each row begins revealing 0.28s after the previous; reveal
+      // takes 0.5s (fade + slight upward slide).
+      const rowStart = 0.3 + i * 0.28;
+      const t = Math.max(0, Math.min(1, (elapsed - rowStart) / 0.5));
+      const ease = 1 - Math.pow(1 - t, 3); // easeOutCubic
+      ctx.globalAlpha = ease;
+      const slide = (1 - ease) * 24;       // slide up 24px into place
+      ctx.fillStyle = '#efefef';
+      ctx.fillText(row, 80, y + i * lineH + slide);
+    });
+    ctx.globalAlpha = 1;
+
+    // Context line at the bottom: artist · catalog (muted, mono).
+    const ctxAlpha = Math.max(0, Math.min(1, (elapsed - (0.3 + rows.length * 0.28)) / 0.6));
+    ctx.globalAlpha = ctxAlpha;
+    ctx.font = '500 30px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#585858';
+    ctx.textAlign = 'left';
+    const meta = [release?.artist, release?.catalog].filter(Boolean).join('  ·  ');
+    ctx.fillText(meta, 80, H - 160);
+    ctx.globalAlpha = 1;
+  };
+
+  const loop = () => {
+    const elapsed = (performance.now() - startRef.current) / 1000;
+    drawFrame(elapsed);
+    if (elapsed < DUR) rafRef.current = requestAnimationFrame(loop);
+    else setPlaying(false);
+  };
+
+  const play = () => {
+    if (playing) {
+      setPlaying(false);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      drawFrame(DUR); // settle to final
+      return;
+    }
+    startRef.current = performance.now();
+    setPlaying(true);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  // Draw the final (fully-revealed) frame on mount / when the line changes.
+  useEffect(() => { drawFrame(DUR); if (rafRef.current) cancelAnimationFrame(rafRef.current); setPlaying(false); /* eslint-disable-next-line */ }, [text, release?.catalog]);
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }} />
+      <button onClick={play} disabled={!text} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: text ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Replaying…' : '▶ Preview Shot 2'}
+      </button>
+      {!text && <div style={{ fontSize: 8, color: '#ff8800', marginTop: 6, letterSpacing: 1, textTransform: 'uppercase' }}>Generate & pick a knowledge line first</div>}
+    </div>
+  );
+}
+
 function StoriesGenerator() {
   const [query, setQuery]       = useState('');
   const [results, setResults]   = useState([]);
@@ -5213,11 +5330,20 @@ function StoriesGenerator() {
             )}
           </div>
 
-          {/* Shot 1 — canvas preview */}
+          {/* Shots 1 & 2 — canvas previews side by side */}
           {kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack] && (
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
-              <div style={lbl}>Shot 1 — preview</div>
-              <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+              <div style={lbl}>Shot previews</div>
+              <div style={{ display:'flex', gap:24, flexWrap:'wrap' }}>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 1 — cover + pulse</div>
+                  <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+                </div>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 2 — knowledge line</div>
+                  <Shot2Canvas release={selected} line={ctxChosen} />
+                </div>
+              </div>
             </div>
           )}
 
