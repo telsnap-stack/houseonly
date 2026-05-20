@@ -4806,51 +4806,6 @@ async function pickBestTrack(tracks) {
 // Cover image is loaded with crossOrigin='anonymous' so the canvas stays
 // untainted — required for the later MP4 export. R2 now serves permissive CORS
 // (configured today), so this works for both cover and audio.
-// ── KICK DIAGRAM (diagnostic) ──────────────────────────────────
-// Draws the low-band energy envelope as a waveform with vertical marks where
-// kicks were detected: lime = grid-filtered (final), faint gray = raw onsets
-// (before grid). Lets us SEE whether marks land on the energy peaks (good) or
-// between them (bad), and whether the count is right — instead of guessing at
-// thresholds. Temporary calibration aid; removed once the pulse is dialed in.
-function KickDiagram({ track }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    const cv = ref.current; if (!cv || !track?.env?.length) return;
-    const ctx = cv.getContext('2d');
-    const W = cv.width, H = cv.height;
-    const env = track.env, winSec = track.winSec || 0.01;
-    const dur = env.length * winSec;
-    const maxE = Math.max(...env) || 1;
-    ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, W, H);
-    // Envelope as filled waveform.
-    ctx.fillStyle = '#2a2a2a';
-    for (let x = 0; x < W; x++) {
-      const i = Math.floor((x / W) * env.length);
-      const h = (env[i] / maxE) * (H - 4);
-      ctx.fillRect(x, H - h, 1, h);
-    }
-    const xOf = (t) => (t / dur) * W;
-    // Raw onsets (faint gray, thin).
-    ctx.strokeStyle = 'rgba(120,120,120,0.5)'; ctx.lineWidth = 1;
-    (track.rawKicks || []).forEach(t => { ctx.beginPath(); ctx.moveTo(xOf(t), 0); ctx.lineTo(xOf(t), H); ctx.stroke(); });
-    // Grid kicks (lime, the ones that drive the pulse).
-    ctx.strokeStyle = '#c8ff00'; ctx.lineWidth = 1.5;
-    (track.kicks || []).forEach(t => { ctx.beginPath(); ctx.moveTo(xOf(t), 0); ctx.lineTo(xOf(t), H); ctx.stroke(); });
-  }, [track?.url, track?.env]);
-  if (!track?.env?.length) return null;
-  return (
-    <div style={{ marginTop: 10 }}>
-      <div style={{ fontSize: 8, color: S.muted, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
-        Diagnostic — gray = raw onsets · lime = grid kicks (drive the pulse)
-      </div>
-      <canvas ref={ref} width={760} height={90} style={{ width: '100%', maxWidth: 760, height: 90, borderRadius: 2, border: `1px solid ${S.border}`, display: 'block' }} />
-      <div style={{ fontSize: 8, color: S.muted, marginTop: 4 }}>
-        raw: {(track.rawKicks || []).length} · grid: {(track.kicks || []).length} · {track.bpm} bpm
-      </div>
-    </div>
-  );
-}
-
 function Shot1Canvas({ release, track }) {
   const canvasRef = useRef(null);
   const audioRef  = useRef(null);
@@ -4860,7 +4815,15 @@ function Shot1Canvas({ release, track }) {
   const [ready, setReady] = useState(false);
 
   const W = 1080, H = 1920;
-  const kicks = (track?.kicks || []);
+  // SYNTHETIC PULSE — the detected kick timestamps proved unreliable (low-end
+  // energy is a continuous mass in mastered house, not clean peaks). Instead we
+  // drive the cover punch from a perfectly regular four-to-the-floor grid: use
+  // the detected BPM IF it lands in the believable house range (115-128),
+  // otherwise fall back to a steady 120. Result: a clean, danceable pulse every
+  // time, no fragile detection.
+  const detectedBpm = track?.bpm || 0;
+  const pulseBpm = (detectedBpm >= 115 && detectedBpm <= 128) ? detectedBpm : 120;
+  const beatSec = 60 / pulseBpm;
 
   // Load the cover once (crossOrigin for untainted canvas).
   useEffect(() => {
@@ -4876,15 +4839,15 @@ function Shot1Canvas({ release, track }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [release?.coverUrl, track?.url]);
 
-  // Compute a kick "punch" factor for a given time: 1.0 baseline, briefly
-  // scaling up right after each kick, decaying over ~180ms.
+  // Punch factor at time t: 1.0 baseline, spiking right on each synthetic beat,
+  // decaying over ~160ms for a sharp, dry hit (not a soft throb).
   const punchAt = (t) => {
-    let p = 0;
-    for (const k of kicks) {
-      const dt = t - k;
-      if (dt >= 0 && dt < 0.18) p = Math.max(p, (1 - dt / 0.18));
+    const phase = t % beatSec;        // time since the last beat
+    if (phase < 0.16) {
+      const p = 1 - phase / 0.16;     // linear decay over 160ms
+      return 1 + p * 0.025;           // up to +2.5%
     }
-    return 1 + p * 0.02; // up to +2%
+    return 1;
   };
 
   const drawFrame = (t, scaleOverride) => {
@@ -4999,8 +4962,8 @@ function Shot1Canvas({ release, track }) {
       <button onClick={togglePlay} disabled={!track?.url} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: track?.url ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
         {playing ? '■ Stop preview' : '▶ Preview Shot 1'}
       </button>
-      <div style={{ fontSize: 9, color: kicks.length > 8 ? S.accent : '#ff8800', marginTop: 6, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>
-        {kicks.length > 0 ? `${kicks.length} kicks detected · ${track?.bpm || '?'} bpm` : 'no kicks detected'}
+      <div style={{ fontSize: 9, color: S.accent, marginTop: 6, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>
+        Pulse {pulseBpm} bpm {pulseBpm === detectedBpm ? '(detected)' : '(fixed)'}
       </div>
     </div>
   );
@@ -5255,7 +5218,6 @@ function StoriesGenerator() {
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
               <div style={lbl}>Shot 1 — preview</div>
               <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
-              <KickDiagram track={kickAnalysis.tracks[chosenTrack]} />
             </div>
           )}
 
