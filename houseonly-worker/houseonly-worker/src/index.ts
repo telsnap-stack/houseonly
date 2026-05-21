@@ -184,6 +184,9 @@ import {
   handleSyncMode,
   handleProductCreateWebhook,
   handleAutoListMode,
+  handlePendingReviewList,
+  handlePendingReviewApprove,
+  handlePendingReviewReject,
   pollDiscogsForSales,
 } from './lib/sync';
 
@@ -569,6 +572,21 @@ export default {
     // POST ?action=sync35-mode → set mode (Bearer BOOTSTRAP_AUTH_SECRET)
     if (action === 'sync35-mode') {
       return await handleAutoListMode(request, env);
+    }
+
+    // ── FASE 3.5C: REVIEW DASHBOARD ─────────────────────────
+    // GET  ?action=pending-review-list     → all pending records
+    // POST ?action=pending-review-approve  → {sku, release_id} create listing
+    // POST ?action=pending-review-reject   → {sku} discard
+    // All Bearer BOOTSTRAP_AUTH_SECRET.
+    if (action === 'pending-review-list') {
+      return await handlePendingReviewList(request, env);
+    }
+    if (action === 'pending-review-approve') {
+      return await handlePendingReviewApprove(request, env);
+    }
+    if (action === 'pending-review-reject') {
+      return await handlePendingReviewReject(request, env);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────

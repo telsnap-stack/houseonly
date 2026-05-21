@@ -911,7 +911,7 @@ interface PendingReview {
   candidate_count: number;
   ambiguous: boolean;
   candidates: MatchResult['candidates'];
-  status: 'pending' | 'would_list' | 'listed' | 'list_failed';
+  status: 'pending' | 'would_list' | 'listed' | 'list_failed' | 'rejected';
   listing_id?: number;
   error?: string;
   mode: SyncMode;
@@ -1167,6 +1167,164 @@ export async function handleAutoListMode(
   }
 
   return jsonResponse({ error: 'method not allowed' }, 405);
+}
+
+// ── FASE 3.5C: REVIEW DASHBOARD ENDPOINTS ───────────────────────────
+//
+// The review queue (pending-review:{SKU} records) is the PRIMARY workflow
+// for houseonly, because most underground 12"s lack barcodes and match via
+// catno+label (MEDIUM) → manual review rather than HIGH/auto-list.
+//
+//   GET  ?action=pending-review-list     → all pending records (Bearer)
+//   POST ?action=pending-review-approve  → {sku, release_id} create listing
+//   POST ?action=pending-review-reject   → {sku} discard
+//
+// Auth: Bearer BOOTSTRAP_AUTH_SECRET on all three (admin-only).
+
+function checkBearer(request: Request, env: SyncEnv): boolean {
+  const header = request.headers.get('authorization') || '';
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  return Boolean(m && m[1] === env.BOOTSTRAP_AUTH_SECRET);
+}
+
+/**
+ * List all pending-review records. Paginates the KV `pending-review:` prefix,
+ * fetches each value, returns them newest-first. Includes a status filter so
+ * the dashboard can show only actionable items if desired (?status=pending).
+ */
+export async function handlePendingReviewList(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method !== 'GET') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  const url = new URL(request.url);
+  const statusFilter = url.searchParams.get('status'); // optional
+
+  const records: PendingReview[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    pages++;
+    const list = await env.SYNC_STATE.list({ prefix: 'pending-review:', cursor });
+    for (const key of list.keys) {
+      const raw = await env.SYNC_STATE.get(key.name);
+      if (!raw) continue;
+      try {
+        const rec = JSON.parse(raw) as PendingReview;
+        if (!statusFilter || rec.status === statusFilter) records.push(rec);
+      } catch { /* skip malformed */ }
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+    if (pages > 20) break; // safety cap
+  } while (cursor);
+
+  // newest first
+  records.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  return jsonResponse({
+    count: records.length,
+    records,
+  });
+}
+
+/**
+ * Approve a pending record → create the Discogs listing for the chosen
+ * release_id. Unlike the auto-list flow, manual approval ALWAYS creates the
+ * listing (the dry/live gate only governs *automatic* listing; a human
+ * clicking approve is an explicit decision).
+ *
+ * Body: { sku: string, release_id: number }
+ *   release_id lets the dashboard override the matcher's pick — essential for
+ *   ambiguous matches where the user selects the correct candidate.
+ */
+export async function handlePendingReviewApprove(
+  request: Request,
+  env: SyncAdminEnv,
+): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  let body: { sku?: string; release_id?: number } = {};
+  try { body = await request.json(); } catch { /* */ }
+  const sku = (body.sku || '').trim();
+  const releaseId = Number(body.release_id);
+  if (!sku) return jsonResponse({ error: 'sku required' }, 400);
+  if (!Number.isFinite(releaseId) || releaseId <= 0) {
+    return jsonResponse({ error: 'valid release_id required' }, 400);
+  }
+
+  const raw = await env.SYNC_STATE.get(`pending-review:${sku}`);
+  if (!raw) return jsonResponse({ error: 'pending record not found', sku }, 404);
+  const rec = JSON.parse(raw) as PendingReview;
+
+  // Guard: don't double-list an already-listed SKU
+  const existing = await getSkuMapping(env, sku);
+  if (existing) {
+    return jsonResponse({ error: 'sku already mapped', sku, listing_id: existing.listing_id }, 409);
+  }
+
+  if (rec.discogs_price == null) {
+    return jsonResponse({ error: 'no price on record — cannot list', sku }, 400);
+  }
+
+  try {
+    const input: DiscogsListingInput = {
+      release_id: releaseId,
+      condition: DISCOGS_DEFAULT_CONDITION,
+      price: rec.discogs_price,
+      status: 'Draft',
+      external_id: sku,
+      location: sku,
+      weight: rec.weight || WEIGHT_SINGLE_LP,
+    };
+    const listingId = await createListing(env.DISCOGS_TOKEN, input);
+
+    const now = new Date().toISOString();
+    const skuMapping: SkuMapping = { listing_id: listingId, status: 'Draft', synced_at: now };
+    const listingMapping: ListingMapping = { sku, status: 'Draft' };
+    await env.SYNC_STATE.put(`sku:${sku}`, JSON.stringify(skuMapping));
+    await env.SYNC_STATE.put(`listing:${listingId}`, JSON.stringify(listingMapping));
+
+    // Update the pending record → listed (short TTL so it ages out of the queue)
+    const updated: PendingReview = {
+      ...rec, status: 'listed', listing_id: listingId, release_id: releaseId,
+    };
+    await env.SYNC_STATE.put(`pending-review:${sku}`, JSON.stringify(updated),
+      { expirationTtl: 7 * 24 * 60 * 60 });
+
+    return jsonResponse({ ok: true, sku, listing_id: listingId, release_id: releaseId });
+  } catch (e: any) {
+    return jsonResponse({ error: 'createListing failed', message: e?.message || String(e), sku }, 502);
+  }
+}
+
+/**
+ * Reject a pending record → mark rejected (kept briefly for audit, then ages
+ * out). Does not touch Discogs. Body: { sku: string }
+ */
+export async function handlePendingReviewReject(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  let body: { sku?: string } = {};
+  try { body = await request.json(); } catch { /* */ }
+  const sku = (body.sku || '').trim();
+  if (!sku) return jsonResponse({ error: 'sku required' }, 400);
+
+  const raw = await env.SYNC_STATE.get(`pending-review:${sku}`);
+  if (!raw) return jsonResponse({ error: 'pending record not found', sku }, 404);
+  const rec = JSON.parse(raw) as PendingReview;
+
+  const updated: PendingReview = { ...rec, status: 'rejected' };
+  await env.SYNC_STATE.put(`pending-review:${sku}`, JSON.stringify(updated),
+    { expirationTtl: 7 * 24 * 60 * 60 });
+
+  return jsonResponse({ ok: true, sku, status: 'rejected' });
 }
 
 // ── INTERNAL: JSON response helper ──────────────────────────────────
