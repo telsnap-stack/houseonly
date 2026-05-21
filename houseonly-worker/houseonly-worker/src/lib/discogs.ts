@@ -385,8 +385,10 @@ export interface ReleaseCandidate {
 export interface MatchResult {
   confidence: MatchConfidence;
   match_method: MatchMethod;
-  release_id: number | null;     // chosen candidate (first hit), null if NOT_FOUND
-  candidates: ReleaseCandidate[]; // up to 10, for manual review of MED/LOW
+  release_id: number | null;     // auto-selected ONLY when exactly 1 candidate; null otherwise
+  candidate_count: number;       // how many candidates the winning method returned
+  ambiguous: boolean;            // true when >1 candidate — the dashboard must show a picker
+  candidates: ReleaseCandidate[]; // up to 10, for manual review / picker
   tried: MatchMethod[];          // which methods were attempted, in order
 }
 
@@ -475,7 +477,14 @@ export async function searchRelease(
   ): MatchResult => ({
     confidence,
     match_method: method,
-    release_id: candidates.length ? candidates[0].release_id : null,
+    // Only auto-select a release when there's exactly ONE candidate. With
+    // multiple candidates (e.g. a generic catno like "CS001" shared by many
+    // unrelated releases), we MUST NOT guess — null the release_id and let
+    // the review dashboard present the candidates as a picker. This prevents
+    // the matcher from confidently returning a wrong release.
+    release_id: candidates.length === 1 ? candidates[0].release_id : null,
+    candidate_count: candidates.length,
+    ambiguous: candidates.length > 1,
     candidates,
     tried,
   });
@@ -494,11 +503,16 @@ export async function searchRelease(
     if (hits.length) return make('MEDIUM', 'catno+label', hits);
   }
 
-  // 3. catno alone → MEDIUM
+  // 3. catno alone → LOW
+  //    Downgraded from MEDIUM after the CS001 finding (May 2026): a generic
+  //    catalog number with no label constraint frequently returns many
+  //    unrelated releases (10 candidates for "CS001", all different records).
+  //    This tier is a weak signal — treat as LOW and rely on the candidate
+  //    picker for human disambiguation. Never auto-list from here.
   if (catno) {
     tried.push('catno');
     const hits = await runSearch(token, { catno });
-    if (hits.length) return make('MEDIUM', 'catno', hits);
+    if (hits.length) return make('LOW', 'catno', hits);
   }
 
   // 4. artist + title → LOW
