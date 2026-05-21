@@ -2530,7 +2530,7 @@ function ZipImporter() {
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
-          'Tags': ['vinyl', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
+          'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
@@ -3110,7 +3110,7 @@ function DBHImporter() {
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
-        const shopifyTags = ['vinyl','dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
+        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
@@ -3901,7 +3901,7 @@ function MotherTongueImporter() {
 
         // ── TAGS (D1 label-only + D4 genres) ────────────────────
         const genres = normalizeGenres(meta.genres);
-        const tagParts = ['vinyl'];
+        const tagParts = ['vinyl', 'source:kudos'];
         if (labelClean) tagParts.push(`label:${labelClean}`);
         for (const g of genres) tagParts.push(`genre:${g}`);
         tagParts.push(String(new Date().getFullYear()));
@@ -4408,7 +4408,7 @@ function RushHourImporter() {
 
         // ── TAGS (D1) ────────────────────────────────────────
         const genres = genresFromTag(meta.tag);
-        const tagParts = ['vinyl'];
+        const tagParts = ['vinyl', 'source:mt'];
         if (label) tagParts.push(`label:${label}`);
         for (const g of genres) tagParts.push(`genre:${g}`);
         if (year) tagParts.push(String(year));
@@ -4612,6 +4612,1155 @@ function RushHourImporter() {
 }
 
 // ── ADMIN PANEL ────────────────────────────────────────────────
+// ── INSTAGRAM STORIES GENERATOR ────────────────────────────────
+// Builds a 3-shot Instagram Story for a release:
+//   Shot 1 — cover + kick-synced waveform (audio 0:00–0:05)
+//   Shot 2 — artist photo (Spotify) + editable quote (audio 0:05–0:10)
+//   Shot 3 — House Only logo + title + "Tap to shop →" (audio 0:10–0:15)
+// Audio is always the store's own R2 snippet (curated highlight). Spotify is
+// used ONLY to fetch the artist press photo for Shot 2.
+//
+// PHASE 1 (this commit): release search + pick + load raw materials into a
+// preview panel. No canvas/MP4 yet — that's a later phase. This proves the
+// data pipeline (Shopify search → cover, audio snippets, description, artist
+// photo from Spotify) before we build rendering on top of it.
+// ── KICK DETECTION (Stories Shot 1) ────────────────────────────
+// Analyzes an audio snippet to find the kick drum and score how strong/steady
+// its 4/4 is. For a house music store, we want Shot 1 to feature the track with
+// the best four-to-the-floor — "people expect that from House Only."
+//
+// How it works: decode the audio, run it through a low-pass filter (~120Hz) to
+// isolate the kick band, then find energy peaks (onsets). Score combines:
+//   - presence: is there real low-end energy at all? (rules out beatless intros)
+//   - regularity: are the kicks evenly spaced? (a steady 4/4 scores high)
+//   - tempo fit: ~115-130 BPM (house range) scores highest
+// Returns { kicks:[seconds], score:0-100, bpm } — or score 0 on no clear kick.
+async function analyzeKicks(audioUrl) {
+  try {
+    const resp = await fetch(audioUrl);
+    if (!resp.ok) return { kicks: [], score: 0, bpm: 0, error: `fetch ${resp.status}` };
+    const arrayBuf = await resp.arrayBuffer();
+    const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    // Decode with a temporary online context (decodeAudioData needs one).
+    const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuf = await tmpCtx.decodeAudioData(arrayBuf.slice(0));
+    tmpCtx.close();
+
+    const duration = audioBuf.duration;
+    const sampleRate = audioBuf.sampleRate;
+    // Render through a BANDPASS centered on the kick body (~45-100Hz) to reduce
+    // overlap with sustained bass lines that share the low-end. A lowpass alone
+    // (old approach) let bass notes through and made the pulse fire on bass.
+    const offline = new AC(1, Math.ceil(duration * sampleRate), sampleRate);
+    const src = offline.createBufferSource();
+    src.buffer = audioBuf;
+    const hp = offline.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 45;    // cut sub-rumble below the kick fundamental
+    hp.Q.value = 0.7;
+    const lp = offline.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 130;   // kick body extends to ~120-150Hz; widen to catch it
+    lp.Q.value = 0.7;
+    src.connect(hp);
+    hp.connect(lp);
+    lp.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    const data = rendered.getChannelData(0);
+
+    // Energy envelope in ~10ms windows.
+    const win = Math.floor(sampleRate * 0.01);
+    const env = [];
+    for (let i = 0; i < data.length; i += win) {
+      let sum = 0;
+      for (let j = i; j < i + win && j < data.length; j++) sum += data[j] * data[j];
+      env.push(Math.sqrt(sum / win));
+    }
+    if (!env.length) return { kicks: [], score: 0, bpm: 0 };
+    const maxEnv = Math.max(...env);
+    if (maxEnv < 0.005) return { kicks: [], score: 0, bpm: 0 }; // basically silent low-end
+
+    // ONSET DETECTION (transient, not energy level). A kick is a SUDDEN RISE in
+    // low-band energy — a sharp attack. A sustained bass note has high but FLAT
+    // energy (its flux is ~0 once sounding), so it won't trigger. We compute the
+    // positive energy flux (rise vs the previous window) and pick peaks in THAT,
+    // not in raw energy. This is what stops the pulse firing on bass lines.
+    const flux = [0];
+    for (let i = 1; i < env.length; i++) flux.push(Math.max(0, env[i] - env[i - 1]));
+    const maxFlux = Math.max(...flux);
+    if (maxFlux < 0.002) return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0 };
+    // Threshold on the RISE, plus require the absolute energy to be substantial
+    // (so we don't catch tiny rises in quiet passages).
+    const fluxThresh = maxFlux * 0.30;   // moderate threshold; grid filter below cleans the rest
+    const energyFloor = maxEnv * 0.20;   // body requirement
+    const minGapWins = Math.floor(0.12 / 0.01); // 120ms min between kicks
+    const kicks = [];
+    let lastIdx = -minGapWins;
+    for (let i = 1; i < flux.length - 1; i++) {
+      const isRisePeak = flux[i] >= fluxThresh && flux[i] >= flux[i - 1] && flux[i] >= flux[i + 1];
+      const hasBody = env[i] >= energyFloor || (env[i + 1] || 0) >= energyFloor;
+      if (isRisePeak && hasBody && (i - lastIdx) >= minGapWins) {
+        kicks.push(i * 0.01);
+        lastIdx = i;
+      }
+    }
+    if (kicks.length < 3) return { kicks, score: kicks.length ? 15 : 0, bpm: 0, kickStrength: 0, energy: 0 };
+
+    // Intervals between kicks → tempo + a sanity check on steadiness.
+    const intervals = [];
+    for (let i = 1; i < kicks.length; i++) intervals.push(kicks[i] - kicks[i - 1]);
+    const meanInt = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((a, b) => a + (b - meanInt) ** 2, 0) / intervals.length;
+    const cv = meanInt > 0 ? Math.sqrt(variance) / meanInt : 1; // lower = steadier
+
+    // Raw BPM, then TEMPO FOLDING: hi-hats/claps/off-beats can double the
+    // detected rate (e.g. 240bpm = real 120). Fold anything >150 down by halving
+    // until it lands in the house-realistic 90-150 range. Also fold very low
+    // (half-time detections) up.
+    let bpm = meanInt > 0 ? Math.round(60 / meanInt) : 0;
+    while (bpm > 150) bpm = Math.round(bpm / 2);
+    while (bpm > 0 && bpm < 90) bpm = bpm * 2;
+
+    // GRID FILTER — the raw detector is intentionally generous (it over-detects:
+    // hi-hats, bass transients, ghost notes). Rather than fight the threshold,
+    // we keep only detections that land ON the beat grid. Build a grid from the
+    // folded BPM (beat = 60/bpm seconds), then for each grid slot keep the
+    // single strongest nearby detection (within ±35% of a beat). This collapses
+    // ~575 noisy onsets down to the ~50-70 real kicks aligned to the pulse, so
+    // the cover punches exactly on the four-to-the-floor.
+    let gridKicks = kicks;
+    if (bpm >= 90 && bpm <= 150 && kicks.length > 6) {
+      const beat = 60 / bpm;                       // seconds per beat
+      const tol = beat * 0.35;                     // how close to a grid slot counts
+      const start = kicks[0];
+      const end = kicks[kicks.length - 1];
+      // Strength of a detection ≈ the low-band energy at its window.
+      const strengthAt = (t) => env[Math.round(t / 0.01)] || 0;
+      const snapped = [];
+      for (let g = start; g <= end + beat; g += beat) {
+        // candidates near this grid slot
+        let best = null, bestS = -1;
+        for (const k of kicks) {
+          if (Math.abs(k - g) <= tol) {
+            const s = strengthAt(k);
+            if (s > bestS) { bestS = s; best = k; }
+          }
+        }
+        if (best != null && (snapped.length === 0 || best - snapped[snapped.length - 1] > beat * 0.5)) {
+          snapped.push(best);
+        }
+      }
+      if (snapped.length >= 4) gridKicks = snapped;
+    }
+
+    // SCORING — for a House Only story we want the track that HITS HARDEST with
+    // a solid 4/4, not the most skeletal/clean one. So we reward kick strength
+    // and overall energy, and treat steadiness as a pass/fail floor rather than
+    // the dominant factor (the old scoring favored sparse dubs — wrong).
+    //
+    // kickStrength: how punchy the kick band is (peak low-end amplitude).
+    const kickStrength = Math.min(1, maxEnv / 0.18);
+    // energy: overall RMS of the low-passed signal = how much "drive"/density.
+    const meanEnv = env.reduce((a, b) => a + b, 0) / env.length;
+    const energy = Math.min(1, meanEnv / 0.06);
+    // steadyFloor: 1 if it holds a recognizable 4/4 (cv reasonably low), else
+    // scaled down. Acts as a gate, not the main driver.
+    const steadyFloor = cv < 0.45 ? 1 : Math.max(0.4, 1 - (cv - 0.45));
+    // tempoInRange: small bonus for sitting in the house pocket once folded.
+    const tempoInRange = bpm >= 110 && bpm <= 132 ? 1 : (bpm >= 100 && bpm <= 140 ? 0.6 : 0.2);
+
+    // Final: punch (45) + energy (35) + tempo pocket (20), all gated by steadiness.
+    const score = Math.round((kickStrength * 45 + energy * 35 + tempoInRange * 20) * steadyFloor);
+    return { kicks: gridKicks, rawKicks: kicks, env, winSec: 0.01, score: Math.min(100, score), bpm, kickStrength: Math.round(kickStrength * 100), energy: Math.round(energy * 100) };
+  } catch (e) {
+    return { kicks: [], score: 0, bpm: 0, kickStrength: 0, energy: 0, error: e?.message || 'analyze failed' };
+  }
+}
+
+// Analyze all snippets for a release and pick the one with the strongest 4/4.
+// Returns { tracks:[{name,url,score,bpm,kicks}], bestIndex }.
+async function pickBestTrack(tracks) {
+  const analyzed = [];
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (!t || !t.url) { analyzed.push({ ...t, origIndex: i, score: 0, bpm: 0, kicks: [], kickStrength: 0, energy: 0 }); continue; }
+    const a = await analyzeKicks(t.url);
+    analyzed.push({ ...t, origIndex: i, score: a.score, bpm: a.bpm, kicks: a.kicks, rawKicks: a.rawKicks || [], env: a.env || [], winSec: a.winSec || 0.01, kickStrength: a.kickStrength || 0, energy: a.energy || 0 });
+  }
+  // B-intermediate: sort by score descending so the punchiest tracks rise to the
+  // top as a triage aid. The top one is pre-selected as a SOFT suggestion (no
+  // authoritative "best" label) — Eduardo's ear makes the final call.
+  analyzed.sort((a, b) => b.score - a.score);
+  const bestIndex = 0; // after sort, the strongest is first
+  return { tracks: analyzed, bestIndex };
+}
+
+// ── SHOT 1 CANVAS (Stories) ────────────────────────────────────
+// Renders Shot 1 at 1080x1920 (story vertical): cover full-bleed, House Only
+// system overlay (logo, catno/label/title), a reactive waveform, and — the
+// signature touch — the cover PUNCHES 1-2% on each detected kick. Plays the
+// chosen snippet and animates in sync using the kicks[] timestamps from the
+// analysis. This is preview-only (4A-2); MP4 export is Phase 5.
+//
+// Cover image is loaded with crossOrigin='anonymous' so the canvas stays
+// untainted — required for the later MP4 export. R2 now serves permissive CORS
+// (configured today), so this works for both cover and audio.
+function Shot1Canvas({ release, track }) {
+  const canvasRef = useRef(null);
+  const audioRef  = useRef(null);
+  const rafRef    = useRef(null);
+  const coverImgRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  const W = 1080, H = 1920;
+  // SYNTHETIC PULSE — the detected kick timestamps proved unreliable (low-end
+  // energy is a continuous mass in mastered house, not clean peaks). Instead we
+  // drive the cover punch from a perfectly regular four-to-the-floor grid: use
+  // the detected BPM IF it lands in the believable house range (115-128),
+  // otherwise fall back to a steady 120. Result: a clean, danceable pulse every
+  // time, no fragile detection.
+  const detectedBpm = track?.bpm || 0;
+  const pulseBpm = (detectedBpm >= 115 && detectedBpm <= 128) ? detectedBpm : 120;
+  const beatSec = 60 / pulseBpm;
+
+  // Load the cover once (crossOrigin for untainted canvas).
+  useEffect(() => {
+    setReady(false);
+    coverImgRef.current = null;
+    const url = coverSrc(release?.coverUrl);
+    if (!url) { drawFrame(0, 1); return; }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => { coverImgRef.current = img; setReady(true); drawFrame(0, 1); };
+    img.onerror = () => { coverImgRef.current = null; setReady(true); drawFrame(0, 1); };
+    img.src = url;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [release?.coverUrl, track?.url]);
+
+  // Punch factor at time t: 1.0 baseline, spiking right on each synthetic beat,
+  // decaying over ~160ms for a sharp, dry hit (not a soft throb).
+  const punchAt = (t) => {
+    const phase = t % beatSec;        // time since the last beat
+    if (phase < 0.16) {
+      const p = 1 - phase / 0.16;     // linear decay over 160ms
+      return 1 + p * 0.025;           // up to +2.5%
+    }
+    return 1;
+  };
+
+  const drawFrame = (t, scaleOverride) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const scale = scaleOverride != null ? scaleOverride : punchAt(t);
+
+    // Background black.
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, W, H);
+
+    // Cover: square, centered horizontally, upper-middle. Punch scales it.
+    const img = coverImgRef.current;
+    const coverSize = W * 0.70;
+    const cx = W / 2, cy = H * 0.32;
+    const s = coverSize * scale;
+    if (img) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.drawImage(img, -s / 2, -s / 2, s, s);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+    }
+
+    // Logo top-left.
+    ctx.textBaseline = 'top';
+    ctx.font = '900 44px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', 60, 70);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', 60, 116);
+
+    // Catno top-right (mono).
+    ctx.font = '500 26px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#585858';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${release?.catalog || ''}`, W - 60, 80);
+    ctx.textAlign = 'left';
+
+    // Waveform band low on the frame, pulsing on kicks.
+    const wfY = H * 0.56, wfH = 80, bars = 60, gap = 6;
+    const bw = (W - 120 - gap * (bars - 1)) / bars;
+    for (let i = 0; i < bars; i++) {
+      const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
+      const h = (12 + base * 60) * (scale > 1.001 ? 1 + (scale - 1) * 6 : 1);
+      ctx.fillStyle = '#c8ff00';
+      ctx.globalAlpha = 0.35 + base * 0.5;
+      ctx.fillRect(60 + i * (bw + gap), wfY + (wfH - h) / 2, bw, h);
+    }
+    ctx.globalAlpha = 1;
+
+    // Label / title / artist anchored bottom.
+    let by = H * 0.64;
+    ctx.font = '700 22px Inter, sans-serif';
+    ctx.fillStyle = '#585858';
+    ctx.fillText((release?.label || '').toUpperCase(), 60, by);
+    by += 40;
+    ctx.font = '800 56px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    // Wrap title if long.
+    const title = release?.title || '';
+    const maxW = W - 120;
+    let line = '', yy = by;
+    const words = title.split(' ');
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, 60, yy); yy += 64; line = w; }
+      else line = test;
+    }
+    ctx.fillText(line, 60, yy);
+    by = yy + 64;
+    ctx.font = '500 30px Inter, sans-serif';
+    ctx.fillStyle = '#585858';
+    ctx.fillText(release?.artist || '', 60, by);
+  };
+
+  // Animation loop while playing.
+  const loop = () => {
+    const a = audioRef.current;
+    if (a) drawFrame(a.currentTime);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  const togglePlay = () => {
+    const a = audioRef.current; if (!a) return;
+    if (playing) {
+      a.pause(); setPlaying(false);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      drawFrame(a.currentTime || 0, 1);
+    } else {
+      a.currentTime = 0;
+      a.play().then(() => {
+        setPlaying(true);
+        rafRef.current = requestAnimationFrame(loop);
+      }).catch(() => {});
+    }
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas
+        ref={canvasRef}
+        width={W}
+        height={H}
+        style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }}
+      />
+      <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" onEnded={() => { setPlaying(false); if (rafRef.current) cancelAnimationFrame(rafRef.current); }} />
+      <button onClick={togglePlay} disabled={!track?.url} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: track?.url ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Stop preview' : '▶ Preview Shot 1'}
+      </button>
+      <div style={{ fontSize: 9, color: S.accent, marginTop: 6, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>
+        Pulse {pulseBpm} bpm {pulseBpm === detectedBpm ? '(detected)' : '(fixed)'}
+      </div>
+    </div>
+  );
+}
+
+// ── SHOT 2 CANVAS (Stories) ────────────────────────────────────
+// Renders the knowledge line at 1080x1920 in the House Only system. Editorial
+// reveal: the line wraps into rows and each row fades+slides in, staggered,
+// over the first ~2.5s — then holds. Black background, the words are the hero.
+// Preview-only (no audio here; audio is continuous and assembled in Phase 5).
+function Shot2Canvas({ release, line }) {
+  const canvasRef = useRef(null);
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+  const [playing, setPlaying] = useState(false);
+  const W = 1080, H = 1920;
+  const text = (line || '').trim();
+  // Match the exporter: duration depends on the line length (reveal + read).
+  const DUR = (() => {
+    try {
+      const mc = document.createElement('canvas').getContext('2d');
+      return shot2Layout(mc, W, H, text).dur;
+    } catch { return 5.0; }
+  })();
+
+  // Wrap the line into rows at a given font size, returns array of strings.
+  const wrapText = (ctx, str, font, maxW) => {
+    ctx.font = font;
+    const words = str.split(/\s+/);
+    const rows = [];
+    let cur = '';
+    for (const w of words) {
+      const test = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && cur) { rows.push(cur); cur = w; }
+      else cur = test;
+    }
+    if (cur) rows.push(cur);
+    return rows;
+  };
+
+  const drawFrame = (elapsed) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    // Background: near-black with a very subtle vertical gradient.
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0c0c0c');
+    g.addColorStop(1, '#060606');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // Logo top, signature size.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 40px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', 70, 90);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', 70, 134);
+
+    // Knowledge line — top-anchored, adaptive font, revealed by row.
+    // Uses the shared shot2Layout so the preview matches the export exactly.
+    const L = shot2Layout(ctx, W, H, text);
+    const { rows, fontSize, font, beat, cadence, startY, lineH } = L;
+
+    ctx.font = font;
+    ctx.textAlign = 'left';
+    rows.forEach((row, i) => {
+      const rowStart = beat + i * cadence;     // first line at beat 1 (0.5s)
+      const dt = elapsed - rowStart;
+      // Fade-in over ~0.35s.
+      const fade = Math.max(0, Math.min(1, dt / 0.35));
+      const alpha = 1 - Math.pow(1 - fade, 2); // easeOut
+      // Subtle punch: scale 1.03 → 1.0 over 150ms right as the line lands.
+      let punch = 1;
+      if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#efefef';
+      const cyRow = startY + i * lineH;
+      ctx.save();
+      // Scale around the row's left-center for the punch.
+      ctx.translate(80, cyRow + fontSize * 0.4);
+      ctx.scale(punch, punch);
+      ctx.fillText(row, 0, -fontSize * 0.4);
+      ctx.restore();
+    });
+    ctx.globalAlpha = 1;
+
+    // Context line at the bottom: artist · catalog (muted, mono). Lands one
+    // half-bar after the last line.
+    const metaStart = beat + rows.length * cadence;
+    const ctxAlpha = Math.max(0, Math.min(1, (elapsed - metaStart) / 0.5));
+    ctx.globalAlpha = ctxAlpha;
+    ctx.font = '500 30px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#585858';
+    ctx.textAlign = 'left';
+    const meta = [release?.artist, release?.catalog].filter(Boolean).join('  ·  ');
+    ctx.fillText(meta, 80, H - 540);
+    ctx.globalAlpha = 1;
+  };
+
+  const loop = () => {
+    const elapsed = (performance.now() - startRef.current) / 1000;
+    drawFrame(elapsed);
+    if (elapsed < DUR) rafRef.current = requestAnimationFrame(loop);
+    else setPlaying(false);
+  };
+
+  const play = () => {
+    if (playing) {
+      setPlaying(false);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      drawFrame(DUR); // settle to final
+      return;
+    }
+    startRef.current = performance.now();
+    setPlaying(true);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  // Draw the final (fully-revealed) frame on mount / when the line changes.
+  useEffect(() => { drawFrame(DUR); if (rafRef.current) cancelAnimationFrame(rafRef.current); setPlaying(false); /* eslint-disable-next-line */ }, [text, release?.catalog]);
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }} />
+      <button onClick={play} disabled={!text} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: text ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Replaying…' : '▶ Preview Shot 2'}
+      </button>
+      {!text && <div style={{ fontSize: 8, color: '#ff8800', marginTop: 6, letterSpacing: 1, textTransform: 'uppercase' }}>Generate & pick a knowledge line first</div>}
+    </div>
+  );
+}
+
+// ── SHOT 3 CANVAS (Stories) ────────────────────────────────────
+// The closing brand shot at 1080x1920: HOUSE ONLY logo as the hero, a small
+// cover reminder, title/artist/catalog, and a "Tap to shop →" CTA that pulses
+// subtly on the 120 BPM beat — same heartbeat as Shots 1 and 2. The CTA pulse
+// draws the eye to the call-to-action at the moment of the tap. Preview-only.
+function Shot3Canvas({ release }) {
+  const canvasRef = useRef(null);
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+  const coverImgRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const W = 1080, H = 1920;
+  const DUR = 5.0;
+  const beatSec = 60 / 120; // 120 BPM
+
+  useEffect(() => {
+    coverImgRef.current = null;
+    const url = coverSrc(release?.coverUrl);
+    if (url) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { coverImgRef.current = img; drawFrame(0); };
+      img.onerror = () => { coverImgRef.current = null; drawFrame(0); };
+      img.src = url;
+    } else { drawFrame(0); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [release?.coverUrl]);
+
+  const drawFrame = (elapsed) => {
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // HOUSE ONLY logo — large but secondary (cover is the protagonist).
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '900 92px Inter, sans-serif';
+    ctx.fillStyle = '#efefef';
+    ctx.fillText('HOUSE', W / 2, H * 0.14);
+    ctx.fillStyle = '#c8ff00';
+    ctx.fillText('ONLY', W / 2, H * 0.14 + 92);
+
+    // Cover — protagonist: large, centered upper-middle (~56% width).
+    const cs = W * 0.56;
+    const cxv = W / 2, cyv = H * 0.44;
+    const img = coverImgRef.current;
+    if (img) {
+      ctx.drawImage(img, cxv - cs / 2, cyv - cs / 2, cs, cs);
+    } else {
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillRect(cxv - cs / 2, cyv - cs / 2, cs, cs);
+    }
+
+    // Title / artist / catalog under the cover.
+    let ty = cyv + cs / 2 + 64;
+    ctx.fillStyle = '#efefef';
+    ctx.font = '800 52px Inter, sans-serif';
+    ctx.fillText(release?.title || '', W / 2, ty);
+    ty += 62;
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '500 36px Inter, sans-serif';
+    ctx.fillText(release?.artist || '', W / 2, ty);
+    ty += 48;
+    ctx.fillStyle = '#585858';
+    ctx.font = '500 28px "JetBrains Mono", monospace';
+    ctx.fillText(release?.catalog || '', W / 2, ty);
+
+    // No drawn CTA — the Instagram link sticker (always visible) is the real,
+    // tappable link. The bottom band is left clear so the sticker can sit there.
+  };
+
+  const loop = () => {
+    const elapsed = (performance.now() - startRef.current) / 1000;
+    drawFrame(elapsed);
+    if (elapsed < DUR) rafRef.current = requestAnimationFrame(loop);
+    else { setPlaying(false); drawFrame(0); }
+  };
+
+  const play = () => {
+    if (playing) { setPlaying(false); if (rafRef.current) cancelAnimationFrame(rafRef.current); drawFrame(0); return; }
+    startRef.current = performance.now();
+    setPlaying(true);
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  return (
+    <div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ width: 240, height: 427, borderRadius: 4, border: `1px solid ${S.border}`, background: S.bg, display: 'block' }} />
+      <button onClick={play} style={{ marginTop: 10, width: 240, background: playing ? S.border : S.accent, color: playing ? S.text : '#080808', border: 'none', borderRadius: 2, cursor: 'pointer', fontSize: 10, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '9px 0' }}>
+        {playing ? '■ Stop' : '▶ Preview Shot 3'}
+      </button>
+    </div>
+  );
+}
+
+// ── STORY EXPORT (Phase 5) ─────────────────────────────────────
+// Pure draw functions (ctx, W, H, data, t) that replicate each shot's render.
+// The preview components keep their own draw logic untouched; these mirror it
+// so the master export canvas can draw all three shots on one 15s timeline
+// without disturbing what already works.
+
+function exDrawShot1(ctx, W, H, release, coverImg, t) {
+  const beatSec = 0.5; // 120 BPM pulse for the cover punch
+  const phase = t % beatSec;
+  const scale = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.025 : 1;
+  ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, W, H);
+  // Cover lifted slightly (center at 0.35H) so the waveform + info below it all
+  // finish above the sticker lane (~y1450). The bottom band is left clear for
+  // the Instagram link sticker, which is visible across all 3 shots.
+  const coverSize = W * 0.70, cx = W / 2, cy = H * 0.32, s = coverSize * scale;
+  if (coverImg) { ctx.save(); ctx.translate(cx, cy); ctx.drawImage(coverImg, -s/2, -s/2, s, s); ctx.restore(); }
+  else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cx - s/2, cy - s/2, s, s); }
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  ctx.font = '900 44px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', 60, 70);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 60, 116);
+  ctx.font = '500 26px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858';
+  ctx.textAlign = 'right'; ctx.fillText(`${release?.catalog || ''}`, W - 60, 80); ctx.textAlign = 'left';
+  const wfY = H * 0.56, wfH = 80, bars = 60, gap = 6;
+  const bw = (W - 120 - gap * (bars - 1)) / bars;
+  for (let i = 0; i < bars; i++) {
+    const base = Math.abs(Math.sin(i * 0.5) * Math.cos(i * 0.3));
+    const h = (12 + base * 60) * (scale > 1.001 ? 1 + (scale - 1) * 6 : 1);
+    ctx.fillStyle = '#c8ff00'; ctx.globalAlpha = 0.35 + base * 0.5;
+    ctx.fillRect(60 + i * (bw + gap), wfY + (wfH - h) / 2, bw, h);
+  }
+  ctx.globalAlpha = 1;
+  let by = H * 0.64;
+  ctx.font = '700 22px Inter, sans-serif'; ctx.fillStyle = '#585858';
+  ctx.fillText((release?.label || '').toUpperCase(), 60, by);
+  by += 40; ctx.font = '800 56px Inter, sans-serif'; ctx.fillStyle = '#efefef';
+  const title = release?.title || '', maxW = W - 120;
+  let line = '', yy = by;
+  for (const w of title.split(' ')) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, 60, yy); yy += 64; line = w; }
+    else line = test;
+  }
+  ctx.fillText(line, 60, yy); by = yy + 64;
+  ctx.font = '500 30px Inter, sans-serif'; ctx.fillStyle = '#585858';
+  ctx.fillText(release?.artist || '', 60, by);
+}
+
+// Shot 2 layout + timing. The knowledge line varies in length, so Shot 2 must
+// last long enough to reveal every line AND leave time to read the full text.
+// We wrap the text exactly as exDrawShot2 draws it, reveal one line per beat
+// (1s, on the 120 BPM grid — the rhythm Eduardo likes), then hold the complete
+// text for a read pause proportional to its length. Returns { rows, fontSize,
+// font, beat, cadence, dur }. `measureCtx` is any 2D context for text metrics.
+function shot2Layout(measureCtx, W, H, text) {
+  text = (text || '').trim();
+  const maxW = W - 160;
+  // Vertical area for the line: below the logo (~220) down to above the meta
+  // row (~H-220). The text is anchored to the TOP of this band (not centered),
+  // so long phrases grow downward into the full available space instead of
+  // overflowing off-screen.
+  const topY = 300;
+  const bottomY = H - 580;   // text ends ~y1340; the band below is the sticker lane (clear in all 3 shots)
+  const availH = bottomY - topY;
+  // Pick the largest font (from a preferred ladder) at which the wrapped text
+  // fits availH. Long phrases automatically use a smaller size so every line
+  // shows; short phrases stay big and punchy.
+  const sizes = [80, 72, 64, 58, 52, 46, 42, 38];
+  let chosen = sizes[sizes.length - 1], rows = [];
+  for (const fs of sizes) {
+    measureCtx.font = `800 ${fs}px Inter, sans-serif`;
+    const words = text.split(/\s+/); const r = []; let cur = '';
+    for (const w of words) {
+      const test = cur ? cur + ' ' + w : w;
+      if (measureCtx.measureText(test).width > maxW && cur) { r.push(cur); cur = w; }
+      else cur = test;
+    }
+    if (cur) r.push(cur);
+    const lineH = fs * 1.3;
+    if (r.length * lineH <= availH) { chosen = fs; rows = r; break; }
+    chosen = fs; rows = r; // keep last (smallest) if none fit
+  }
+  const fontSize = chosen;
+  const font = `800 ${fontSize}px Inter, sans-serif`;
+  const lineH = fontSize * 1.3;
+  const beat = 0.5;                 // 120 BPM
+  const cadence = 1.0;              // one line per half-bar (constant — no compression)
+  const lastLineStart = beat + (rows.length - 1) * cadence;
+  const revealDone = lastLineStart + 0.35;            // last line finished fading in
+  // Read pause after the full text is on screen: a short, fixed ~1s beat, then
+  // cut to Shot 3. (Previously this scaled per line, which left long phrases
+  // sitting on screen far too long after the reveal finished.) Reading happens
+  // progressively as each line lands, so once the last line is up, one extra
+  // second is enough before moving on.
+  const readPause = 1.0;
+  const dur = Math.min(22, Math.max(5, revealDone + readPause));
+  return { rows, fontSize, font, beat, cadence, dur, startY: topY, lineH };
+}
+
+function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
+  const text = (lineText || '').trim();
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = '900 40px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', 70, 90);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', 70, 134);
+  const maxW = W - 160;
+  const L = shot2Layout(ctx, W, H, text);
+  const { rows, fontSize, font, beat, cadence, startY, lineH } = L;
+  ctx.font = font;
+  ctx.textAlign = 'left';
+  rows.forEach((row, i) => {
+    const rowStart = beat + i * cadence, dt = elapsed - rowStart;
+    const fade = Math.max(0, Math.min(1, dt / 0.35));
+    const alpha = 1 - Math.pow(1 - fade, 2);
+    let punch = 1; if (dt >= 0 && dt < 0.15) punch = 1.03 - 0.03 * (dt / 0.15);
+    ctx.globalAlpha = alpha; ctx.fillStyle = '#efefef';
+    const cyRow = startY + i * lineH;
+    ctx.save(); ctx.translate(80, cyRow + fontSize * 0.4); ctx.scale(punch, punch);
+    ctx.fillText(row, 0, -fontSize * 0.4); ctx.restore();
+  });
+  ctx.globalAlpha = 1;
+  const metaStart = beat + rows.length * cadence;
+  const ctxAlpha = Math.max(0, Math.min(1, (elapsed - metaStart) / 0.5));
+  ctx.globalAlpha = ctxAlpha;
+  ctx.font = '500 30px "JetBrains Mono", monospace'; ctx.fillStyle = '#585858'; ctx.textAlign = 'left';
+  ctx.fillText([release?.artist, release?.catalog].filter(Boolean).join('  ·  '), 80, H - 540);
+  ctx.globalAlpha = 1;
+}
+
+function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // Logo: large but secondary (the cover is the protagonist of the close).
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '900 92px Inter, sans-serif'; ctx.fillStyle = '#efefef'; ctx.fillText('HOUSE', W/2, H*0.14);
+  ctx.fillStyle = '#c8ff00'; ctx.fillText('ONLY', W/2, H*0.14 + 92);
+  // Cover: protagonist — large, centered in the upper-middle.
+  const cs = W * 0.56, cxv = W/2, cyv = H*0.44;
+  if (coverImg) ctx.drawImage(coverImg, cxv - cs/2, cyv - cs/2, cs, cs);
+  else { ctx.fillStyle = '#1a1a2e'; ctx.fillRect(cxv - cs/2, cyv - cs/2, cs, cs); }
+  // Title / artist / catalog under the cover.
+  let ty = cyv + cs/2 + 64;
+  ctx.fillStyle = '#efefef'; ctx.font = '800 52px Inter, sans-serif'; ctx.fillText(release?.title || '', W/2, ty);
+  ty += 62; ctx.fillStyle = '#9a9a9a'; ctx.font = '500 36px Inter, sans-serif'; ctx.fillText(release?.artist || '', W/2, ty);
+  ty += 48; ctx.fillStyle = '#585858'; ctx.font = '500 28px "JetBrains Mono", monospace'; ctx.fillText(release?.catalog || '', W/2, ty);
+  // NOTE: no drawn CTA button — the Instagram link sticker (always visible) is
+  // the real, tappable link. The bottom band (~y 1450-1700) is left clear so
+  // the sticker can sit there without covering anything.
+}
+
+// StoryExporter — master 15s timeline: Shot1 (0-5s), Shot2 (5-10s), Shot3
+// (10-15s), with the chosen track's audio playing under it. Records the canvas
+// + audio via MediaRecorder to a WebM and downloads it. (MP4 conversion is 5B.)
+// Also copies the product URL to the clipboard for the Instagram link sticker.
+function StoryExporter({ release, track, line }) {
+  const canvasRef = useRef(null);
+  const audioRef = useRef(null);
+  const coverImgRef = useRef(null);
+  const recRef = useRef(null);
+  const rafRef = useRef(null);
+  const [status, setStatus] = useState('idle'); // idle | preparing | recording | done | error
+  const [msg, setMsg] = useState('');
+  const W = 1080, H = 1920, SHOT = 5;
+  // Shot 2 duration depends on the knowledge line's length (reveal + read time).
+  // Compute it once from the layout helper using an offscreen measuring context.
+  const shot2Dur = (() => {
+    try {
+      const mc = document.createElement('canvas').getContext('2d');
+      return shot2Layout(mc, W, H, line).dur;
+    } catch { return 5; }
+  })();
+  const SHOT2_END = SHOT + shot2Dur;       // Shot 2 runs [SHOT, SHOT2_END)
+  const TOTAL = SHOT2_END + SHOT;          // Shot 3 is a fixed 5s after Shot 2
+
+  useEffect(() => {
+    const url = coverSrc(release?.coverUrl);
+    if (!url) { coverImgRef.current = null; return; }
+    const img = new Image(); img.crossOrigin = 'anonymous';
+    img.onload = () => { coverImgRef.current = img; };
+    img.onerror = () => { coverImgRef.current = null; };
+    img.src = url;
+  }, [release?.coverUrl]);
+
+  const drawAt = (ctx, elapsed) => {
+    if (elapsed < SHOT) exDrawShot1(ctx, W, H, release, coverImgRef.current, elapsed);
+    else if (elapsed < SHOT2_END) exDrawShot2(ctx, W, H, release, line, elapsed - SHOT);
+    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT2_END);
+  };
+
+  const copyProductUrl = async () => {
+    // Real product route is https://houseonly.store/products/{slug}/ — build it
+    // robustly (strip leading/trailing slashes and a leading "products/").
+    let s = (release?.slug || release?.handle || '').trim();
+    s = s.replace(/^\/+/, '').replace(/\/+$/, '').replace(/^products\//, '');
+    const url = s ? `https://houseonly.store/products/${s}/` : 'https://houseonly.store';
+    try { await navigator.clipboard.writeText(url); } catch {}
+    return url;
+  };
+
+  const exportStory = async () => {
+    if (!track?.url) { setStatus('error'); setMsg('No track selected'); return; }
+    setStatus('preparing'); setMsg('Setting up…');
+    const cv = canvasRef.current;
+    const ctx = cv.getContext('2d');
+
+    // Audio graph: route the <audio> element through Web Audio so we can both
+    // hear nothing extra and feed it into the recording stream.
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const a = audioRef.current;
+    a.currentTime = 0;
+    let srcNode;
+    try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
+    const dest = ac.createMediaStreamDestination();
+    srcNode.connect(dest);
+    // (Intentionally NOT connecting to ac.destination — we don't need to blast
+    // the audio out loud during export; the recording captures it from dest.)
+
+    // Combine canvas video + audio into one stream.
+    const canvasStream = cv.captureStream(30);
+    const mixed = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...dest.stream.getAudioTracks(),
+    ]);
+
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? 'video/webm;codecs=vp9,opus'
+      : 'video/webm';
+    const rec = new MediaRecorder(mixed, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+    recRef.current = rec;
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const aTag = document.createElement('a');
+      const safe = (release?.catalog || 'story').replace(/[^a-z0-9]+/gi, '-');
+      aTag.href = url; aTag.download = `houseonly-${safe}.webm`;
+      document.body.appendChild(aTag); aTag.click(); aTag.remove();
+      const purl = await copyProductUrl();
+      try { ac.close(); } catch {}
+      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}`);
+    };
+
+    // Go: start audio + recorder, drive the canvas for the full (variable) length.
+    setStatus('recording'); setMsg(`Recording ${TOTAL.toFixed(1)}s…`);
+    await ac.resume();
+    a.play().catch(()=>{});
+    const start = performance.now();
+    rec.start();
+    const loop = () => {
+      const elapsed = (performance.now() - start) / 1000;
+      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); a.pause(); rec.stop(); return; }
+      drawAt(ctx, elapsed);
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+  };
+
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  const busy = status === 'preparing' || status === 'recording';
+  return (
+    <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${S.border}` }}>
+      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story</div>
+      <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
+      <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
+      <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
+        {status === 'recording' ? 'Recording 15s…' : status === 'preparing' ? 'Preparing…' : '⬇ Export story (WebM)'}
+      </button>
+      {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
+      {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
+      <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
+        Records the 3 shots with the track audio (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom.
+      </div>
+    </div>
+  );
+}
+
+function StoriesGenerator() {
+  const [query, setQuery]       = useState('');
+  const [results, setResults]   = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState('');
+  const [selected, setSelected] = useState(null);   // the picked release (parseProduct shape)
+  // Shot 2 = AI-generated "knowledge line": genuine musical context, not
+  // marketing bluff. We fetch 3 options from the worker's story-context
+  // endpoint (Anthropic), Eduardo picks one and can edit it before export.
+  const [ctxOptions, setCtxOptions] = useState([]);   // 3 generated lines
+  const [ctxChosen, setCtxChosen]   = useState('');   // the selected/edited line
+  const [ctxLoading, setCtxLoading] = useState(false);
+  const [ctxErr, setCtxErr]         = useState('');
+  // Shot 1 = cover + kick-synced waveform. We analyze every snippet on pick,
+  // auto-select the one with the strongest 4/4 (house store = four-to-the-floor),
+  // and keep its kick timestamps for the waveform pulse (canvas comes in 4A-2).
+  const [kickAnalysis, setKickAnalysis] = useState(null);   // {tracks:[{...,score,bpm,kicks}], bestIndex}
+  const [kickLoading, setKickLoading]   = useState(false);
+  const [chosenTrack, setChosenTrack]   = useState(null);   // index into analyzed tracks
+
+  // Debounced server-side search over the WHOLE catalog (reuses the same
+  // Storefront `search` endpoint the storefront uses). We don't auto-fire on
+  // every keystroke beyond a small debounce to avoid hammering Shopify.
+  const searchTimer = useRef(null);
+  const runSearch = (term) => {
+    setQuery(term);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!term.trim()) { setResults([]); setSearchErr(''); return; }
+    searchTimer.current = setTimeout(async () => {
+      setSearching(true); setSearchErr('');
+      try {
+        const { products } = await fetchShopifyProductSearch({ searchTerm: term.trim() });
+        setResults(products);
+      } catch (e) {
+        setSearchErr('Search failed: ' + (e?.message || 'unknown error'));
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+  };
+
+  // When a release is picked: load it and clear any previous knowledge line.
+  // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
+  const pickRelease = async (r) => {
+    setSelected(r);
+    setCtxOptions([]); setCtxChosen(''); setCtxErr('');
+    setKickAnalysis(null); setChosenTrack(null);
+    // Analyze all snippets for their 4/4 kick and auto-pick the strongest.
+    const tracks = (r.tracks || []).filter(t => t && t.url);
+    if (tracks.length) {
+      setKickLoading(true);
+      try {
+        const result = await pickBestTrack(tracks);
+        setKickAnalysis(result);
+        setChosenTrack(result.bestIndex);
+      } catch (e) {
+        setKickAnalysis({ tracks: tracks.map(t => ({ ...t, score: 0, bpm: 0, kicks: [] })), bestIndex: 0, error: e?.message });
+        setChosenTrack(0);
+      } finally {
+        setKickLoading(false);
+      }
+    }
+  };
+
+  // Generate 3 knowledge-line options from the worker's story-context endpoint
+  // (Anthropic). Genuine musical context, anti-bluff. Eduardo picks/edits.
+  const generateContext = async () => {
+    if (!selected) return;
+    setCtxLoading(true); setCtxErr(''); setCtxOptions([]);
+    try {
+      const res = await fetch(`${WORKER_URL}?action=story-context`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artist: selected.artist || '',
+          title: selected.title || '',
+          label: selected.label || '',
+          catalog: selected.catalog || '',
+          genre: selected.genre || '',
+          year: selected.year || '',
+          description: selected.desc || '',
+          tracks: (selected.tracks || []).map(t => t && t.name).filter(Boolean),
+        }),
+      });
+      const data = await res.json();
+      if (data && Array.isArray(data.options) && data.options.length) {
+        setCtxOptions(data.options);
+        setCtxChosen(data.options[0]);
+      } else {
+        setCtxErr(data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
+      }
+    } catch (e) {
+      setCtxErr('Generation failed: ' + (e?.message || 'unknown'));
+    } finally {
+      setCtxLoading(false);
+    }
+  };
+
+  const lbl = { fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 };
+  const audioTracks = (selected?.tracks || []).filter(t => t && t.url);
+
+  return (
+    <div>
+      {/* Search box */}
+      <div style={lbl}>Find a release</div>
+      <input
+        value={query}
+        onChange={e => runSearch(e.target.value)}
+        placeholder="Search by artist, title, label…"
+        style={{ background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:13, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' }}
+      />
+      {searching && <div style={{ fontSize:10, color:S.muted, marginTop:8 }}>Searching…</div>}
+      {searchErr && <div style={{ fontSize:10, color:S.danger, marginTop:8 }}>{searchErr}</div>}
+
+      {/* Results list */}
+      {results.length > 0 && !selected && (
+        <div style={{ marginTop:12, display:'flex', flexDirection:'column', gap:1, maxHeight:320, overflowY:'auto' }}>
+          {results.map(r => (
+            <div key={r.id} onClick={() => pickRelease(r)} style={{ display:'flex', alignItems:'center', gap:12, background:S.surf, padding:'8px 12px', borderRadius:2, cursor:'pointer' }}>
+              <div style={{ width:40, height:40, borderRadius:2, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', flexShrink:0 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.title}</div>
+                <div style={{ fontSize:9, color:S.muted }}>{r.artist} · {r.label} · {r.catalog}</div>
+              </div>
+              <div style={{ fontSize:9, color:(r.tracks||[]).some(t=>t?.url)?S.accent:S.muted, letterSpacing:1, textTransform:'uppercase' }}>
+                {(r.tracks||[]).filter(t=>t?.url).length} ♫
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Selected release — raw materials preview (Phase 1 endpoint) */}
+      {selected && (
+        <div style={{ marginTop:16, background:S.surf, border:`1px solid ${S.border}`, borderRadius:3, padding:18 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+            <div style={{ fontSize:11, fontWeight:800, color:S.text, letterSpacing:1, textTransform:'uppercase' }}>Story materials</div>
+            <button onClick={() => { setSelected(null); setCtxOptions([]); setCtxChosen(''); }} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'5px 12px', borderRadius:2 }}>← Back to search</button>
+          </div>
+
+          <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
+            {/* Cover */}
+            <div>
+              <div style={lbl}>Cover</div>
+              <div style={{ width:120, height:120, borderRadius:2, background:`linear-gradient(${selected.g})`, backgroundImage:coverSrc(selected.coverUrl)?`url(${coverSrc(selected.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center', border:`1px solid ${S.border}` }} />
+              <div style={{ fontSize:8, color:selected.coverUrl?S.accent:S.danger, marginTop:6, letterSpacing:1, textTransform:'uppercase' }}>{selected.coverUrl ? '✓ loaded' : '✗ no cover'}</div>
+            </div>
+
+            {/* Metadata */}
+            <div style={{ flex:1, minWidth:200 }}>
+              <div style={lbl}>Release</div>
+              <div style={{ fontSize:14, fontWeight:800, color:S.text }}>{selected.title}</div>
+              <div style={{ fontSize:11, color:S.muted, marginBottom:8 }}>{selected.artist}</div>
+              <div style={{ fontSize:10, color:S.muted, lineHeight:1.7 }}>
+                <div><span style={{ color:S.text }}>Label:</span> {selected.label || '—'}</div>
+                <div><span style={{ color:S.text }}>Catno:</span> {selected.catalog || '—'}</div>
+                <div><span style={{ color:S.text }}>Genre:</span> {selected.genre || '—'} · {selected.year || '—'}</div>
+                <div><span style={{ color:S.text }}>Slug:</span> <span style={{ fontFamily:'monospace', fontSize:9 }}>/products/{selected.slug}</span></div>
+              </div>
+            </div>
+          </div>
+
+          {/* Shot 2 — knowledge line (AI-generated context, not bluff) */}
+          <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+              <div style={lbl}>Shot 2 — knowledge line</div>
+              <button onClick={generateContext} disabled={ctxLoading} style={{ background:ctxLoading?S.border:S.accent, color:ctxLoading?S.muted:'#080808', border:'none', borderRadius:2, cursor:ctxLoading?'wait':'pointer', fontSize:9, fontWeight:800, letterSpacing:1.5, textTransform:'uppercase', padding:'7px 14px' }}>
+                {ctxLoading ? 'Generating…' : (ctxOptions.length ? '↻ Regenerate' : '✦ Generate 3 lines')}
+              </button>
+            </div>
+            <div style={{ fontSize:10, color:S.muted, lineHeight:1.6, marginBottom:12 }}>
+              Genuine musical context — artist lineage, label, or era. Not marketing copy. Pick one, edit if needed. You are the final fact-check.
+            </div>
+
+            {ctxErr && <div style={{ fontSize:10, color:S.danger, marginBottom:10 }}>{ctxErr}</div>}
+
+            {ctxOptions.length > 0 && (
+              <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:12 }}>
+                {ctxOptions.map((opt, i) => (
+                  <div key={i} onClick={() => setCtxChosen(opt)} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
+                    <span style={{ fontSize:9, color:ctxChosen===opt?S.accent:S.muted, fontWeight:800, marginTop:2 }}>{ctxChosen===opt?'●':'○'}</span>
+                    <span style={{ fontSize:12, color:S.text, lineHeight:1.5 }}>{opt}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {ctxChosen && (
+              <div>
+                <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Final line (editable)</div>
+                <textarea
+                  value={ctxChosen}
+                  onChange={e => setCtxChosen(e.target.value)}
+                  rows={2}
+                  style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+                />
+                <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>{ctxChosen.length} chars · {ctxChosen.trim().split(/\s+/).filter(Boolean).length} words</div>
+              </div>
+            )}
+          </div>
+
+          {/* Shot 1 — audio + kick analysis */}
+          <div style={{ marginTop:16 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <div style={lbl}>Shot 1 — audio (auto-picks the strongest 4/4)</div>
+              {kickLoading && <span style={{ fontSize:9, color:S.accent, letterSpacing:1, textTransform:'uppercase' }}>Analyzing kicks…</span>}
+            </div>
+            {audioTracks.length === 0 && <div style={{ fontSize:10, color:S.danger }}>No audio snippets found for this release — story needs audio.</div>}
+
+            {(kickAnalysis?.tracks || audioTracks).map((t, i) => {
+              const analyzed = !!kickAnalysis;
+              const isTop = analyzed && i === 0; // sorted by score: first is the soft suggestion
+              const isChosen = chosenTrack === i;
+              const score = analyzed ? (t.score || 0) : null;
+              // Bar of 5 blocks to visualize the kick strength.
+              const blocks = analyzed ? Math.round((score / 100) * 5) : 0;
+              return (
+                <div key={i} onClick={() => analyzed && setChosenTrack(i)} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 10px', marginTop:4, borderRadius:2, cursor:analyzed?'pointer':'default', background:isChosen?S.bg:'transparent', border:`1px solid ${isChosen?S.accent:'transparent'}` }}>
+                  <span style={{ fontSize:9, color:isChosen?S.accent:S.muted, width:14 }}>{isChosen?'●':'○'}</span>
+                  <span style={{ fontSize:11, color:S.text, flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{t.name || `Track ${i+1}`}</span>
+                  {analyzed && (
+                    <span style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <span style={{ fontFamily:'monospace', fontSize:9, color:S.muted, width:54, textAlign:'right' }}>{t.bpm ? `${t.bpm} bpm` : 'no kick'}</span>
+                      <span style={{ display:'flex', gap:2 }}>
+                        {[0,1,2,3,4].map(b => <span key={b} style={{ width:5, height:12, borderRadius:1, background:b<blocks?S.accent:S.border }} />)}
+                      </span>
+                      {isTop && <span style={{ fontSize:7, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:800 }}>suggested</span>}
+                    </span>
+                  )}
+                  <AudioPlayer src={t.url} />
+                </div>
+              );
+            })}
+
+            {kickAnalysis && (
+              <div style={{ fontSize:9, color:S.muted, marginTop:10, fontStyle:'italic', lineHeight:1.6 }}>
+                {kickAnalysis.tracks.some(t => t.score > 0)
+                  ? `Sorted by punch + energy — strongest at top, pre-selected as a suggestion. Your ear decides: play a few and tap the one you want.`
+                  : 'No clear kick detected in any snippet — the waveform will animate without a pulse. Tap whichever you prefer.'}
+              </div>
+            )}
+          </div>
+
+          {/* Shots 1 & 2 — canvas previews side by side */}
+          {kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack] && (
+            <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
+              <div style={lbl}>Shot previews</div>
+              <div style={{ display:'flex', gap:24, flexWrap:'wrap' }}>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 1 — cover + pulse</div>
+                  <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+                </div>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 2 — knowledge line</div>
+                  <Shot2Canvas release={selected} line={ctxChosen} />
+                </div>
+                <div>
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 3 — tap to shop</div>
+                  <Shot3Canvas release={selected} />
+                </div>
+              </div>
+              <StoryExporter release={selected} track={kickAnalysis.tracks[chosenTrack]} line={ctxChosen} />
+            </div>
+          )}
+
+          {/* Description (reference) */}
+          <div style={{ marginTop:16 }}>
+            <div style={lbl}>Description (label marketing — reference only)</div>
+            <div style={{ fontSize:11, color:S.muted, lineHeight:1.6, maxHeight:80, overflowY:'auto', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, padding:'8px 10px' }}>
+              {selected.desc || '(no description)'}
+            </div>
+          </div>
+
+          <div style={{ marginTop:18, padding:'10px 12px', background:S.bg, border:`1px dashed ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
+            <strong style={{ color:S.accent }}>Checkpoint 4A-1.</strong> Tracks scored on punch + energy (tempo-folded BPM), sorted strongest-first, top pre-selected as a soft suggestion. Next (4A-2): render Shot 1 on canvas with the cover punching on each detected kick.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -4644,6 +5793,10 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+      </div>
+      <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>📸 Content · Instagram Stories</div>
+        <StoriesGenerator />
       </div>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase'}}>Inventory</div>

@@ -22,6 +22,9 @@ interface Env {
   // Shopify Storefront API token, used by customerIdFromToken() for wishlist auth.
   // Previously hardcoded; moved to wrangler secrets May 19 2026.
   STOREFRONT_TOKEN: string;
+  // Anthropic API key for the Stories knowledge-line generator (?action=story-context).
+  // Set via `wrangler secret put ANTHROPIC_API_KEY` (separately for staging).
+  ANTHROPIC_API_KEY: string;
 }
 
 const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -34,6 +37,30 @@ const CORS = {
 
 const clean = (s: string) =>
   s.replace(/\(.*?\)/g, '').replace(/feat\.?.*/i, '').trim();
+
+// ── SPOTIFY TOKEN HELPER ────────────────────────────────────────
+// Client-credentials OAuth token, shared by the cover-art lookup and the
+// Stories generator endpoints (spotify-artist, spotify-tracks). Tokens last
+// ~1h; we don't cache across requests (Workers are stateless per invocation
+// and a token fetch is cheap), but reusing this helper avoids duplicating the
+// btoa/grant_type boilerplate. Returns '' on any failure so callers can fall
+// through gracefully rather than throwing.
+async function getSpotifyToken(env: Env): Promise<string> {
+  try {
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`),
+      },
+      body: 'grant_type=client_credentials',
+    });
+    const data = await res.json() as any;
+    return data?.access_token || '';
+  } catch {
+    return '';
+  }
+}
 
 function jsonRes(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -508,6 +535,246 @@ export default {
         return jsonRes({ error: 'invalid json' }, 400);
       }
       return await handleMirror(body, env);
+    }
+
+    // ── STORY CONTEXT (Stories knowledge line) ──────────────
+    // POST ?action=story-context
+    // body: { artist, title, label, catalog, genre, year, description, tracks:[names] }
+    //
+    // Generates 3 short lines of GENUINE musical context for Shot 2 of an
+    // Instagram Story — the "House Only knows its stuff" line. Anti-bluff:
+    // no marketing language, no fabricated specifics. If the model doesn't
+    // know an artist, it writes about the sound/scene/era instead of inventing
+    // biography. The human (Eduardo) picks/edits before publishing — this is a
+    // draft aid, not an unreviewed source of truth.
+    if (action === 'story-context' && request.method === 'POST') {
+      if (!env.ANTHROPIC_API_KEY) return jsonRes({ error: 'ANTHROPIC_API_KEY not configured' }, 500);
+      let body: any = {};
+      try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      const artist = String(body?.artist || '').trim();
+      const title  = String(body?.title || '').trim();
+      const label  = String(body?.label || '').trim();
+      const catalog= String(body?.catalog || '').trim();
+      const genre  = String(body?.genre || '').trim();
+      const year   = String(body?.year || '').trim();
+      const desc   = String(body?.description || '').trim().slice(0, 1200);
+      const tracks = Array.isArray(body?.tracks) ? body.tracks.slice(0, 12).join(', ') : '';
+      if (!artist && !title) return jsonRes({ error: 'missing artist/title' }, 400);
+
+      const sys = [
+        'You are the buyer at House Only, a specialist house music record store. You write the context line for an Instagram Story — the line that shows the shop genuinely KNOWS this music, the way a respected record-shop owner talks to a regular who trusts their taste.',
+        '',
+        'WHAT YOU WRITE:',
+        '2-3 sentences, 30-50 words total. Develop ONE concrete point of context — do not list several shallow ones. Confident, knowledgeable, specific. The reader should finish it thinking "these people actually know their stuff."',
+        '',
+        'HARD RULES:',
+        '1. NEVER fabricate specifics. No invented labels, dates, cities, real names, or collaborators. If you are not sure of a fact, do not state it as fact.',
+        '2. If you do not know this exact artist, write with authority about the SOUND, the SCENE, the LABEL catalog, or the ERA instead — never invent biography.',
+        '3. BANNED — the generic record-review / online-comment register. Never use: "essential", "must-have", "a must for fans of", "timeless", "classic", "masterpiece", "highly recommended", "fire", "heater", "stunning", "beautiful", "perfect for", "if you like X you will love Y". These empty phrases are exactly what makes text sound like an internet comment. Avoid them and the vibe behind them.',
+        '4. The supplied description is the LABEL own marketing copy. Do NOT echo or paraphrase it. Find the real context it leaves out.',
+        '5. Give the angle a knowledgeable shop owner would — something a buyer would NOT already find in the label blurb: artist lineage and where they sit in the scene, the label/series and what it stands for, the production approach, or the historical/regional moment the record comes from.',
+        '',
+        'GOOD vs GENERIC (match the GOOD voice):',
+        'GENERIC (never): "A beautiful deep house record with soulful vibes — essential for any collection."',
+        'GOOD: "Rawax Motor City Edition exists to document Detroit functional, stripped-back lineage — these are tools for DJs, not showpieces, and this sits squarely in that tradition of restraint over flash."',
+        'GENERIC (never): "Louie Vega delivers another timeless house anthem with this stunning release."',
+        'GOOD: "Vega built Nervous into one of New York house defining catalogs across three decades; his remix work here is less about reinvention than about carrying that NYC dancefloor sensibility into the room."',
+        '',
+        'Write 3 DIFFERENT options, each taking a different real angle (e.g. one on the artist, one on the label, one on the scene/era). Return ONLY a JSON array of exactly 3 strings — no preamble, no markdown.',
+        '["option one", "option two", "option three"]',
+      ].join('\n');
+
+      const userMsg = [
+        `Artist: ${artist || '(unknown)'}`,
+        `Title: ${title || '(unknown)'}`,
+        label ? `Label: ${label}` : '',
+        catalog ? `Catalog: ${catalog}` : '',
+        genre ? `Genre: ${genre}` : '',
+        year ? `Year: ${year}` : '',
+        tracks ? `Tracklist: ${tracks}` : '',
+        desc ? `Label marketing copy (do NOT repeat, for reference only): ${desc}` : '',
+      ].filter(Boolean).join('\n');
+
+      try {
+        // Retry on transient overload (529) / rate-limit (429). Anthropic
+        // returns 529 when momentarily saturated; these are NOT billed (the
+        // request isn't processed). A short backoff almost always clears it.
+        // Up to 4 attempts at 0ms, 600ms, 1500ms, 3000ms.
+        const backoffs = [0, 600, 1500, 3000];
+        let aiRes: Response | null = null;
+        let lastStatus = 0;
+        for (let attempt = 0; attempt < backoffs.length; attempt++) {
+          if (backoffs[attempt]) await new Promise((r) => setTimeout(r, backoffs[attempt]));
+          aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': env.ANTHROPIC_API_KEY,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+              model: 'claude-sonnet-4-6',
+              max_tokens: 700,
+              system: sys,
+              messages: [{ role: 'user', content: userMsg }],
+            }),
+          });
+          lastStatus = aiRes.status;
+          // Retry only on transient statuses; otherwise stop and handle below.
+          if (aiRes.status !== 529 && aiRes.status !== 429) break;
+        }
+        if (!aiRes || !aiRes.ok) {
+          const errText = aiRes ? await aiRes.text().catch(() => '') : '';
+          const overloaded = lastStatus === 529 || lastStatus === 429;
+          return jsonRes({
+            error: `anthropic ${lastStatus}`,
+            detail: errText.slice(0, 300),
+            retryable: overloaded,
+            hint: overloaded ? 'Anthropic busy after retries — press Regenerate' : undefined,
+          }, 502);
+        }
+        const aiData = await aiRes.json() as any;
+        const text = (aiData?.content || []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
+        // Parse the JSON array; strip code fences defensively.
+        const clean = text.replace(/```json|```/g, '').trim();
+        let options: string[] = [];
+        try {
+          const parsed = JSON.parse(clean);
+          if (Array.isArray(parsed)) options = parsed.filter((x) => typeof x === 'string').slice(0, 3);
+        } catch {
+          // Fallback: split lines if the model didn't return clean JSON.
+          options = clean.split('\n').map((l: string) => l.replace(/^[-*\d.\s]+/, '').replace(/^["']|["']$/g, '').trim()).filter(Boolean).slice(0, 3);
+        }
+        if (!options.length) return jsonRes({ options: [], error: 'no options parsed', raw: clean.slice(0, 300) });
+        return jsonRes({ options });
+      } catch (e: any) {
+        return jsonRes({ options: [], error: e?.message || 'generation failed' }, 502);
+      }
+    }
+
+    // ── SPOTIFY ARTIST (Stories generator) ──────────────────
+    // GET ?action=spotify-artist&q=<artist name>
+    //
+    // Returns the top artist match for the Instagram Stories generator:
+    //   { name, imageUrl, spotifyId, popularity, followers, genres }
+    // imageUrl is the largest available artist image (press photo). Empty
+    // strings on miss so the frontend can fall back to manual upload.
+    if (action === 'spotify-artist' && request.method === 'GET') {
+      const q = url.searchParams.get('q') || '';
+      if (!q.trim()) return jsonRes({ error: 'missing q' }, 400);
+      try {
+        const token = await getSpotifyToken(env);
+        if (!token) return jsonRes({ name: '', imageUrl: '', spotifyId: '', popularity: 0, followers: 0, genres: [] });
+        const res = await fetch(
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(clean(q))}&type=artist&limit=5`,
+          { headers: { 'Authorization': `Bearer ${token}` } },
+        );
+        const data = await res.json() as any;
+        const items = (data?.artists?.items || []) as any[];
+        // Prefer the most-followed exact-ish name match; fall back to the
+        // first result (Spotify already ranks by relevance/popularity).
+        const wanted = clean(q).toLowerCase();
+        const scored = items.map((a) => {
+          let score = 0;
+          if ((a.name || '').toLowerCase() === wanted) score += 5;
+          else if ((a.name || '').toLowerCase().includes(wanted)) score += 2;
+          score += Math.min(3, (a.followers?.total || 0) / 100000); // popularity nudge
+          return { a, score };
+        });
+        scored.sort((x, y) => y.score - x.score);
+        const top = scored[0]?.a;
+        if (!top) return jsonRes({ name: '', imageUrl: '', spotifyId: '', popularity: 0, followers: 0, genres: [] });
+        // Spotify returns images largest-first; take the largest.
+        const imageUrl = top.images?.[0]?.url || '';
+        return jsonRes({
+          name: top.name || '',
+          imageUrl,
+          spotifyId: top.id || '',
+          popularity: top.popularity || 0,
+          followers: top.followers?.total || 0,
+          genres: top.genres || [],
+        });
+      } catch (e: any) {
+        return jsonRes({ name: '', imageUrl: '', spotifyId: '', popularity: 0, followers: 0, genres: [], error: e?.message || 'spotify error' });
+      }
+    }
+
+    // ── SPOTIFY TRACKS (Stories generator best-track pick) ──
+    // GET ?action=spotify-tracks&artist=<artist>&album=<title>[&year=<yyyy>]
+    //
+    // Finds the best-matching album for a release, returns its tracks sorted
+    // by Spotify popularity so the Stories tool can auto-pick the lead track:
+    //   { albumName, albumImage, tracks: [{ name, trackNumber, popularity, durationMs, spotifyId }] }
+    // NOTE: Spotify's album-tracks endpoint does NOT include per-track
+    // popularity. We fetch popularity via the /tracks batch endpoint, which
+    // does. Empty tracks array on miss → frontend falls back to A1.
+    if (action === 'spotify-tracks' && request.method === 'GET') {
+      const artist = url.searchParams.get('artist') || '';
+      const album  = url.searchParams.get('album')  || '';
+      const year   = url.searchParams.get('year')   || '';
+      if (!artist.trim() && !album.trim()) return jsonRes({ error: 'missing artist/album' }, 400);
+      try {
+        const token = await getSpotifyToken(env);
+        if (!token) return jsonRes({ albumName: '', albumImage: '', tracks: [] });
+        // 1. Find the best album match (reuse the cover-art scoring approach).
+        let q = `${clean(album)} ${clean(artist)}`.trim();
+        if (year) q += ` year:${year}`;
+        const albRes = await fetch(
+          `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album&limit=5`,
+          { headers: { 'Authorization': `Bearer ${token}` } },
+        );
+        const albData = await albRes.json() as any;
+        const albums = (albData?.albums?.items || []) as any[];
+        const wantTitle = clean(album).toLowerCase();
+        const wantArtist = clean(artist).toLowerCase();
+        const scored = albums.map((it) => {
+          let score = 0;
+          if ((it.name || '').toLowerCase().includes(wantTitle) && wantTitle) score += 3;
+          if (year && it.release_date?.slice(0, 4) === String(year)) score += 2;
+          if ((it.artists?.[0]?.name || '').toLowerCase().includes(wantArtist) && wantArtist) score += 1;
+          return { it, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        const bestAlbum = scored[0]?.it;
+        if (!bestAlbum?.id) return jsonRes({ albumName: '', albumImage: '', tracks: [] });
+        // 2. Get the album's tracks (id, name, track_number, duration_ms).
+        const trkRes = await fetch(
+          `https://api.spotify.com/v1/albums/${bestAlbum.id}/tracks?limit=50`,
+          { headers: { 'Authorization': `Bearer ${token}` } },
+        );
+        const trkData = await trkRes.json() as any;
+        const rawTracks = (trkData?.items || []) as any[];
+        if (!rawTracks.length) return jsonRes({ albumName: bestAlbum.name || '', albumImage: bestAlbum.images?.[0]?.url || '', tracks: [] });
+        // 3. Batch-fetch full track objects to get per-track popularity.
+        const ids = rawTracks.map((t) => t.id).filter(Boolean).slice(0, 50).join(',');
+        let popById: Record<string, number> = {};
+        try {
+          const popRes = await fetch(
+            `https://api.spotify.com/v1/tracks?ids=${ids}`,
+            { headers: { 'Authorization': `Bearer ${token}` } },
+          );
+          const popData = await popRes.json() as any;
+          for (const t of (popData?.tracks || [])) {
+            if (t?.id) popById[t.id] = t.popularity || 0;
+          }
+        } catch { /* popularity is best-effort; fall back to track order */ }
+        const tracks = rawTracks.map((t) => ({
+          name: t.name || '',
+          trackNumber: t.track_number || 0,
+          popularity: popById[t.id] ?? 0,
+          durationMs: t.duration_ms || 0,
+          spotifyId: t.id || '',
+        }));
+        // Sort by popularity desc; ties keep album order (stable).
+        tracks.sort((a, b) => b.popularity - a.popularity);
+        return jsonRes({
+          albumName: bestAlbum.name || '',
+          albumImage: bestAlbum.images?.[0]?.url || '',
+          tracks,
+        });
+      } catch (e: any) {
+        return jsonRes({ albumName: '', albumImage: '', tracks: [], error: e?.message || 'spotify error' });
+      }
     }
 
     // ── WISHLIST ENDPOINTS ──────────────────────────────────
