@@ -20,8 +20,12 @@ import {
   getInventory,
   updateListingStatus,
   getOrders,
+  createListing,
+  searchRelease,
   type DiscogsListing,
   type DiscogsOrder,
+  type DiscogsListingInput,
+  type MatchResult,
 } from './discogs';
 import {
   validateShopifyWebhookHmac,
@@ -35,6 +39,19 @@ import {
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
+const SHOPIFY_PRODUCTS_CREATE_TOPIC = 'PRODUCTS_CREATE';
+
+// ── FASE 3.5B: AUTO-LIST CONSTANTS ──────────────────────────────────
+// Discogs price = Shopify price × this multiplier (Discogs sells a bit
+// higher to account for marketplace fees + the collector channel).
+const DISCOGS_PRICE_MULTIPLIER = 1.18;
+// Listing condition for new stock — all our vinyl is new/sealed.
+const DISCOGS_DEFAULT_CONDITION = 'Near Mint (NM or M-)' as const;
+// Weights (grams) for shipping; 2LP heavier than single.
+const WEIGHT_SINGLE_LP = 500;
+const WEIGHT_DOUBLE_LP = 900;
+// Only auto-process products from this source (Fase 3.5B scope: DBH only).
+const AUTO_LIST_SOURCE_TAG = 'source:dbh';
 
 // Status values from Discogs we consider "firm sale" — we reduce Shopify
 // inventory when an order reaches one of these. Earlier states ("New Order",
@@ -586,6 +603,18 @@ async function getSyncMode(env: SyncEnv): Promise<SyncMode> {
 }
 
 /**
+ * Read current AUTO-LIST mode (Fase 3.5B). Independent of the 3E inventory
+ * sync mode — controls whether the products/create webhook actually creates
+ * Discogs listings ('live') or just records what it would do ('dry').
+ * Defaults to 'dry' so deploying + registering the webhook is safe; nothing
+ * gets listed until explicitly switched to live.
+ */
+async function getAutoListMode(env: SyncEnv): Promise<SyncMode> {
+  const raw = await env.SYNC_STATE.get('meta:sync_35_mode');
+  return raw === 'live' ? 'live' : 'dry';
+}
+
+/**
  * Main entry point for the cron handler. Called every 15 min.
  *
  * @param env Worker env (needs SYNC_STATE, DISCOGS_TOKEN, Shopify admin secrets)
@@ -827,6 +856,314 @@ export async function handleSyncMode(
 
     await env.SYNC_STATE.put('meta:sync_3e_mode', newMode);
     return jsonResponse({ ok: true, mode: newMode });
+  }
+
+  return jsonResponse({ error: 'method not allowed' }, 405);
+}
+
+// ── FASE 3.5B: PRODUCTS/CREATE WEBHOOK → AUTO-LIST ON DISCOGS ────────
+//
+// When a new product is created in Shopify, Shopify sends a products/create
+// webhook here. We:
+//   1. Validate HMAC (rejects spoofed requests)
+//   2. Idempotency via lock:product-create:{product_id}
+//   3. Filter: only products tagged `source:dbh` (Fase 3.5B scope)
+//   4. Skip if SKU already mapped (already on Discogs)
+//   5. Run the Discogs matcher (searchRelease) in the background
+//   6. HIGH (barcode) match + live mode → create a Draft Discogs listing,
+//      store sku:/listing: mappings + pending-review with status 'listed'
+//   7. Everything else (MED/LOW/NOT_FOUND, or dry mode) → write
+//      pending-review:{SKU} for manual approval via the 3.5C dashboard
+//
+// SAFETY: auto-listing is gated by meta:sync_35_mode (default 'dry'). In dry
+// mode the matcher runs and pending-review is written, but createListing is
+// NEVER called. Flip to live via ?action=sync35-mode once validated.
+//
+// Per the CS001 finding: ONLY HIGH (barcode, single candidate) is ever
+// auto-listed. MED/LOW always route to manual review, never auto-create.
+
+interface ShopifyProductWebhookBody {
+  id?: number;
+  title?: string;
+  vendor?: string;
+  tags?: string;  // comma-separated
+  variants?: Array<{
+    id?: number;
+    sku?: string;
+    price?: string;
+    barcode?: string;
+  }>;
+}
+
+// pending-review:{SKU} record shape (consumed by the 3.5C dashboard)
+interface PendingReview {
+  sku: string;
+  title: string;
+  artist: string;
+  label: string;
+  barcode: string;
+  shopify_price: number | null;
+  discogs_price: number | null;
+  weight: number;
+  confidence: MatchResult['confidence'];
+  match_method: MatchResult['match_method'];
+  release_id: number | null;
+  candidate_count: number;
+  ambiguous: boolean;
+  candidates: MatchResult['candidates'];
+  status: 'pending' | 'would_list' | 'listed' | 'list_failed';
+  listing_id?: number;
+  error?: string;
+  mode: SyncMode;
+  created_at: string;
+}
+
+/** Extract `label:X` value from a comma-separated Shopify tag string. */
+function extractLabelTag(tags: string): string {
+  const parts = tags.split(',').map(t => t.trim());
+  const labelTag = parts.find(t => t.toLowerCase().startsWith('label:'));
+  return labelTag ? labelTag.slice('label:'.length).trim() : '';
+}
+
+/** Detect a 2LP/double release from title + tags → heavier shipping weight. */
+function detectWeight(title: string, tags: string): number {
+  const hay = `${title} ${tags}`.toLowerCase();
+  // common 2LP signals: "2lp", "2 lp", "2x12", "2 x 12", "double"
+  if (/\b2\s*lp\b|\b2\s*x\s*12|\bdouble\b|\b2x12\b/.test(hay)) {
+    return WEIGHT_DOUBLE_LP;
+  }
+  return WEIGHT_SINGLE_LP;
+}
+
+/**
+ * Handle a Shopify products/create webhook (Fase 3.5B).
+ * Validates, filters, dedupes, then runs match + (maybe) auto-list in the
+ * background so we respond <5s as Shopify requires.
+ */
+export async function handleProductCreateWebhook(
+  request: Request,
+  env: SyncAdminEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  // 1. Read body ONCE as text (HMAC needs raw bytes), then validate
+  let rawBody: string;
+  try {
+    rawBody = await request.text();
+  } catch (e: any) {
+    return jsonResponse({ error: 'could not read body', message: e?.message }, 400);
+  }
+
+  const hmacHeader = request.headers.get('x-shopify-hmac-sha256');
+  const valid = await validateShopifyWebhookHmac(
+    rawBody,
+    hmacHeader,
+    env.SHOPIFY_ADMIN_CLIENT_SECRET,
+  );
+  if (!valid) {
+    return jsonResponse({ error: 'invalid hmac' }, 401);
+  }
+
+  // 2. Parse
+  let body: ShopifyProductWebhookBody;
+  try {
+    body = JSON.parse(rawBody);
+  } catch (e: any) {
+    return jsonResponse({ error: 'invalid json', message: e?.message }, 400);
+  }
+
+  const productId = String(body.id ?? '');
+  if (!productId) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'no product id' });
+  }
+
+  // 3. Idempotency lock (60s TTL — dedupes Shopify retries)
+  const lockKey = `lock:product-create:${productId}`;
+  if (await env.SYNC_STATE.get(lockKey)) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+  }
+  await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
+
+  // 4. Filter: only source:dbh products
+  const tags = body.tags || '';
+  if (!tags.split(',').map(t => t.trim()).includes(AUTO_LIST_SOURCE_TAG)) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'not source:dbh' });
+  }
+
+  // 5. Extract identifiers from the first variant
+  const variant = (body.variants || [])[0] || {};
+  const sku = (variant.sku || '').trim();
+  if (!sku) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'no sku' });
+  }
+
+  // 6. Duplicate check — already mapped means already on Discogs
+  const existing = await getSkuMapping(env, sku);
+  if (existing) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'sku already mapped', sku });
+  }
+
+  const barcode = (variant.barcode || '').trim();
+  const shopifyPrice = variant.price ? parseFloat(variant.price) : null;
+  const artist = (body.vendor || '').trim();
+  const title = (body.title || '').trim();
+  const label = extractLabelTag(tags);
+  const weight = detectWeight(title, tags);
+
+  // 7. Do the slow work (Discogs match + maybe create listing) in background
+  ctx.waitUntil(processProductMatch(env, {
+    sku, barcode, artist, title, label, shopifyPrice, weight,
+  }));
+
+  return jsonResponse({
+    ok: true,
+    product_id: productId,
+    sku,
+    queued: true,
+    has_barcode: Boolean(barcode),
+  });
+}
+
+/**
+ * Background: run the matcher, then either auto-list (HIGH + live mode) or
+ * write a pending-review record. Writes to pending-review:{SKU} in all cases
+ * so the 3.5C dashboard always has a record to show.
+ */
+async function processProductMatch(
+  env: SyncAdminEnv,
+  p: {
+    sku: string;
+    barcode: string;
+    artist: string;
+    title: string;
+    label: string;
+    shopifyPrice: number | null;
+    weight: number;
+  },
+): Promise<void> {
+  const mode = await getAutoListMode(env);
+  const now = new Date().toISOString();
+  const discogsPrice = p.shopifyPrice != null
+    ? Math.round(p.shopifyPrice * DISCOGS_PRICE_MULTIPLIER * 100) / 100
+    : null;
+
+  let match: MatchResult;
+  try {
+    match = await searchRelease(env.DISCOGS_TOKEN, {
+      barcode: p.barcode || undefined,
+      catno: p.sku || undefined,
+      label: p.label || undefined,
+      artist: p.artist || undefined,
+      title: p.title || undefined,
+    });
+  } catch (e: any) {
+    await writePendingReview(env, {
+      sku: p.sku, title: p.title, artist: p.artist, label: p.label,
+      barcode: p.barcode, shopify_price: p.shopifyPrice, discogs_price: discogsPrice,
+      weight: p.weight, confidence: 'NOT_FOUND', match_method: 'none',
+      release_id: null, candidate_count: 0, ambiguous: false, candidates: [],
+      status: 'pending', error: `matcher failed: ${e?.message || e}`,
+      mode, created_at: now,
+    });
+    return;
+  }
+
+  const base: PendingReview = {
+    sku: p.sku, title: p.title, artist: p.artist, label: p.label,
+    barcode: p.barcode, shopify_price: p.shopifyPrice, discogs_price: discogsPrice,
+    weight: p.weight,
+    confidence: match.confidence,
+    match_method: match.match_method,
+    release_id: match.release_id,
+    candidate_count: match.candidate_count,
+    ambiguous: match.ambiguous,
+    candidates: match.candidates,
+    status: 'pending',
+    mode,
+    created_at: now,
+  };
+
+  // Only HIGH (barcode, single confident match) is eligible to auto-list.
+  const eligibleToList =
+    match.confidence === 'HIGH' &&
+    match.release_id != null &&
+    discogsPrice != null;
+
+  if (!eligibleToList) {
+    // MED/LOW/NOT_FOUND → manual review queue
+    await writePendingReview(env, base);
+    return;
+  }
+
+  if (mode === 'dry') {
+    // Would list, but dry mode — record intent, create nothing
+    await writePendingReview(env, { ...base, status: 'would_list' });
+    return;
+  }
+
+  // LIVE + HIGH → create the Discogs listing (Draft)
+  try {
+    const input: DiscogsListingInput = {
+      release_id: match.release_id!,
+      condition: DISCOGS_DEFAULT_CONDITION,
+      price: discogsPrice!,
+      status: 'Draft',
+      external_id: p.sku,
+      location: p.sku,
+      weight: p.weight,
+    };
+    const listingId = await createListing(env.DISCOGS_TOKEN, input);
+
+    // Record the sku:/listing: mappings so Fase 3 sync knows about it
+    const skuMapping: SkuMapping = { listing_id: listingId, status: 'Draft', synced_at: now };
+    const listingMapping: ListingMapping = { sku: p.sku, status: 'Draft' };
+    await env.SYNC_STATE.put(`sku:${p.sku}`, JSON.stringify(skuMapping));
+    await env.SYNC_STATE.put(`listing:${listingId}`, JSON.stringify(listingMapping));
+
+    await writePendingReview(env, { ...base, status: 'listed', listing_id: listingId });
+  } catch (e: any) {
+    await writePendingReview(env, {
+      ...base, status: 'list_failed', error: e?.message || String(e),
+    });
+  }
+}
+
+/** Persist a pending-review record (90 day TTL — long enough to act on). */
+async function writePendingReview(env: SyncEnv, rec: PendingReview): Promise<void> {
+  await env.SYNC_STATE.put(
+    `pending-review:${rec.sku}`,
+    JSON.stringify(rec),
+    { expirationTtl: 90 * 24 * 60 * 60 },
+  );
+}
+
+// ── FASE 3.5B: AUTO-LIST MODE ENDPOINT ──────────────────────────────
+//
+// GET  ?action=sync35-mode  → returns current auto-list mode
+// POST ?action=sync35-mode  → set mode (Bearer BOOTSTRAP_AUTH_SECRET)
+//   body: {"mode": "dry"} | {"mode": "live"}
+
+export async function handleAutoListMode(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method === 'GET') {
+    const mode = await getAutoListMode(env);
+    return jsonResponse({ mode });
+  }
+
+  if (request.method === 'POST') {
+    const header = request.headers.get('authorization') || '';
+    const m = header.match(/^Bearer\s+(.+)$/i);
+    if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+      return jsonResponse({ error: 'unauthorized' }, 401);
+    }
+    let body: { mode?: string } = {};
+    try { body = await request.json(); } catch { /* allow missing */ }
+    if (body.mode !== 'dry' && body.mode !== 'live') {
+      return jsonResponse({ error: 'mode must be "dry" or "live"', received: body.mode }, 400);
+    }
+    await env.SYNC_STATE.put('meta:sync_35_mode', body.mode);
+    return jsonResponse({ ok: true, mode: body.mode });
   }
 
   return jsonResponse({ error: 'method not allowed' }, 405);

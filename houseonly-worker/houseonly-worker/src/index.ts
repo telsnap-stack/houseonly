@@ -182,6 +182,8 @@ import {
   handleRegisterWebhook,
   handleShopifyOrderWebhook,
   handleSyncMode,
+  handleProductCreateWebhook,
+  handleAutoListMode,
   pollDiscogsForSales,
 } from './lib/sync';
 
@@ -548,6 +550,25 @@ export default {
         title:   url.searchParams.get('title')   || undefined,
       });
       return jsonRes(result);
+    }
+
+    // ── FASE 3.5B: PRODUCTS/CREATE WEBHOOK ──────────────────
+    // POST ?action=webhook-shopify-product
+    // Headers: X-Shopify-Hmac-SHA256, X-Shopify-Topic: products/create
+    //
+    // Fires when a new product is created in Shopify. For source:dbh
+    // products, runs the Discogs matcher and (in live mode) auto-lists
+    // HIGH/barcode matches as Draft on Discogs. Everything else goes to
+    // the pending-review queue. Gated by meta:sync_35_mode (default dry).
+    if (action === 'webhook-shopify-product' && request.method === 'POST') {
+      return await handleProductCreateWebhook(request, env, ctx);
+    }
+
+    // ── FASE 3.5B: AUTO-LIST MODE (dry/live) ────────────────
+    // GET  ?action=sync35-mode → current mode
+    // POST ?action=sync35-mode → set mode (Bearer BOOTSTRAP_AUTH_SECRET)
+    if (action === 'sync35-mode') {
+      return await handleAutoListMode(request, env);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────
