@@ -1329,12 +1329,18 @@ export async function handlePendingReviewReject(
 
 // ── INTERNAL: JSON response helper ──────────────────────────────────
 //
-// Duplicated from index.ts to avoid cyclic imports. Kept minimal —
-// CORS is irrelevant for admin-only endpoints called by curl.
+// Duplicated from index.ts to avoid cyclic imports. Includes CORS headers
+// because the Fase 3.5C review-dashboard endpoints are called from the
+// browser admin panel (cross-origin: pages.dev → workers.dev), not just curl.
 
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+    },
   });
 }
