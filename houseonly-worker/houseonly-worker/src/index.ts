@@ -185,6 +185,8 @@ import {
   pollDiscogsForSales,
 } from './lib/sync';
 
+import { searchRelease } from './lib/discogs';
+
 
 
 // ── BACKORDER REQUEST HANDLER ─────────────────────────────────────
@@ -519,6 +521,33 @@ export default {
     // (ctx.waitUntil) so we respond <5s as Shopify requires.
     if (action === 'webhook-shopify-order' && request.method === 'POST') {
       return await handleShopifyOrderWebhook(request, env, ctx);
+    }
+
+    // ── FASE 3.5B: MATCHER TEST (read-only, no side effects) ─
+    // GET ?action=discogs-match-test&barcode=...&catno=...&label=...&artist=...&title=...
+    // Auth: Bearer BOOTSTRAP_AUTH_SECRET
+    //
+    // Runs the real-time Discogs matcher (searchRelease) against the given
+    // identifiers and returns the confidence tier + candidates WITHOUT
+    // creating any listing. Used to validate matching quality before wiring
+    // it to the products/create webhook auto-list flow.
+    if (action === 'discogs-match-test' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      if (!env.DISCOGS_TOKEN) {
+        return jsonRes({ error: 'DISCOGS_TOKEN not configured' }, 500);
+      }
+      const result = await searchRelease(env.DISCOGS_TOKEN, {
+        barcode: url.searchParams.get('barcode') || undefined,
+        catno:   url.searchParams.get('catno')   || undefined,
+        label:   url.searchParams.get('label')   || undefined,
+        artist:  url.searchParams.get('artist')  || undefined,
+        title:   url.searchParams.get('title')   || undefined,
+      });
+      return jsonRes(result);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────

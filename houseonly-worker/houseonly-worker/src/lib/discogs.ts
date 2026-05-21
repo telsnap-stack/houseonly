@@ -341,3 +341,173 @@ export async function getListing(
 
   return await r.json() as DiscogsListing;
 }
+
+// ── RELEASE SEARCH / MATCHING (Fase 3.5B) ───────────────────────────
+//
+// Real-time port of the Fase 1+2 batch matcher (backfill_discogs_ids.py),
+// which achieved a ~95.5% match rate over 334 products. Given a new
+// Shopify product, find the best Discogs release_id and classify how
+// confident we are in the match.
+//
+// Confidence is derived from the MATCH METHOD, not a fuzzy score — this
+// mirrors the batch script exactly:
+//   barcode hit            → HIGH   (unique identifier, near-certain)
+//   catno + label hit      → MEDIUM (reliable, but may have variants)
+//   catno alone hit        → MEDIUM (catnos are fairly unique)
+//   artist + title hit     → LOW    (last resort; many false positives)
+//   nothing                → NOT_FOUND
+//
+// Per the batch-script learning: searching by LABEL alongside catno is
+// more reliable than artist+catno, because Shopify Tags carry clean
+// `label:X` values whereas Vendor (artist) is noisier.
+//
+// Endpoint: GET /database/search with params barcode|catno|artist|
+// release_title, type=release, per_page=10.
+
+export type MatchConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'NOT_FOUND';
+
+export type MatchMethod =
+  | 'barcode'
+  | 'catno+label'
+  | 'catno'
+  | 'artist+title'
+  | 'none';
+
+export interface ReleaseCandidate {
+  release_id: number;
+  title: string;       // Discogs "Artist - Title" style string
+  catno: string;
+  year?: number;
+  thumb?: string;      // small cover image, handy for the review dashboard
+  resource_url?: string;
+}
+
+export interface MatchResult {
+  confidence: MatchConfidence;
+  match_method: MatchMethod;
+  release_id: number | null;     // chosen candidate (first hit), null if NOT_FOUND
+  candidates: ReleaseCandidate[]; // up to 10, for manual review of MED/LOW
+  tried: MatchMethod[];          // which methods were attempted, in order
+}
+
+export interface MatchInput {
+  barcode?: string;   // EAN/UPC if present
+  catno?: string;     // catalogue number (often == SKU)
+  label?: string;     // clean label name, e.g. from Shopify tag `label:X`
+  artist?: string;    // Shopify Vendor
+  title?: string;     // Shopify product title
+}
+
+interface DiscogsSearchResponse {
+  pagination?: { items: number; pages: number };
+  results?: Array<{
+    id: number;
+    title?: string;
+    catno?: string;
+    year?: string | number;
+    thumb?: string;
+    cover_image?: string;
+    resource_url?: string;
+    format?: string[];
+  }>;
+}
+
+/**
+ * Run one /database/search query and return normalized candidates.
+ * Always type=release. Returns [] on no hits or any non-2xx (caller decides
+ * how to treat — a failed query just means "this method found nothing").
+ */
+async function runSearch(
+  token: string,
+  params: Record<string, string>,
+): Promise<ReleaseCandidate[]> {
+  const qs = new URLSearchParams({
+    ...params,
+    type: 'release',
+    per_page: '10',
+  });
+  const r = await discogsFetch(token, `/database/search?${qs}`);
+  if (!r.ok) return [];
+
+  const data = await r.json() as DiscogsSearchResponse;
+  const results = data.results || [];
+  return results.map(res => ({
+    release_id: res.id,
+    title: res.title || '',
+    catno: res.catno || '',
+    year: res.year ? parseInt(String(res.year), 10) || undefined : undefined,
+    thumb: res.thumb || res.cover_image || undefined,
+    resource_url: res.resource_url || undefined,
+  })).filter(c => Number.isFinite(c.release_id) && c.release_id > 0);
+}
+
+/**
+ * Find the best Discogs release for a Shopify product, with a confidence tier.
+ *
+ * Cascade (stops at first method that yields ≥1 candidate):
+ *   1. barcode        → HIGH
+ *   2. catno + label  → MEDIUM
+ *   3. catno          → MEDIUM
+ *   4. artist + title → LOW
+ *
+ * The chosen release_id is always the FIRST candidate of the winning method
+ * (same as the batch script). All candidates are returned so the review
+ * dashboard (Fase 3.5C) can show alternatives for MED/LOW matches.
+ *
+ * @param token Discogs personal access token
+ * @param input Product identifiers
+ */
+export async function searchRelease(
+  token: string,
+  input: MatchInput,
+): Promise<MatchResult> {
+  const tried: MatchMethod[] = [];
+  const barcode = (input.barcode || '').trim();
+  const catno   = (input.catno || '').trim();
+  const label   = (input.label || '').trim();
+  const artist  = (input.artist || '').trim();
+  const title   = (input.title || '').trim();
+
+  const make = (
+    confidence: MatchConfidence,
+    method: MatchMethod,
+    candidates: ReleaseCandidate[],
+  ): MatchResult => ({
+    confidence,
+    match_method: method,
+    release_id: candidates.length ? candidates[0].release_id : null,
+    candidates,
+    tried,
+  });
+
+  // 1. Barcode → HIGH
+  if (barcode) {
+    tried.push('barcode');
+    const hits = await runSearch(token, { barcode });
+    if (hits.length) return make('HIGH', 'barcode', hits);
+  }
+
+  // 2. catno + label → MEDIUM
+  if (catno && label) {
+    tried.push('catno+label');
+    const hits = await runSearch(token, { catno, label });
+    if (hits.length) return make('MEDIUM', 'catno+label', hits);
+  }
+
+  // 3. catno alone → MEDIUM
+  if (catno) {
+    tried.push('catno');
+    const hits = await runSearch(token, { catno });
+    if (hits.length) return make('MEDIUM', 'catno', hits);
+  }
+
+  // 4. artist + title → LOW
+  if (artist && title) {
+    tried.push('artist+title');
+    const hits = await runSearch(token, { artist, release_title: title });
+    if (hits.length) return make('LOW', 'artist+title', hits);
+  }
+
+  // Nothing matched
+  return make('NOT_FOUND', 'none', []);
+}
