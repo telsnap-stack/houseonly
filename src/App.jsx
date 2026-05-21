@@ -5761,6 +5761,193 @@ function StoriesGenerator() {
   );
 }
 
+// ── FASE 3.5C: DISCOGS REVIEW DASHBOARD ────────────────────────
+// Consumes the worker review endpoints (pending-review-list/approve/reject).
+// Most underground 12"s lack barcodes and match via catno+label (MEDIUM) →
+// manual review, so this queue is the PRIMARY listing workflow, not a
+// fallback. For ambiguous matches it shows candidates as a picker.
+//
+// Auth: the endpoints are Bearer BOOTSTRAP_AUTH_SECRET. We never bundle the
+// secret — the user pastes it once and it lives only in component state
+// (gone on refresh). During development this calls the STAGING worker;
+// switch REVIEW_WORKER_URL to the prod worker at cutover.
+const REVIEW_WORKER_URL = 'https://houseonly-worker-staging.emontagut.workers.dev';
+
+function confidenceColor(conf) {
+  if (conf === 'HIGH') return S.accent;
+  if (conf === 'MEDIUM') return '#ffd24a';
+  if (conf === 'LOW') return '#ff9a4a';
+  return S.muted; // NOT_FOUND
+}
+
+function DiscogsReviewPanel() {
+  const [secret, setSecret]       = useState('');
+  const [authed, setAuthed]       = useState(false);
+  const [records, setRecords]     = useState([]);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState('');
+  const [busy, setBusy]           = useState({});      // {sku: true} while approving/rejecting
+  const [picked, setPicked]       = useState({});      // {sku: release_id} chosen candidate
+  const [manualId, setManualId]   = useState({});      // {sku: "12345"} manual release_id entry
+
+  const authHeaders = () => ({ 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' });
+
+  async function loadQueue(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=pending-review-list&status=pending`, {
+        headers: { 'Authorization': `Bearer ${useSecret}` },
+      });
+      if (r.status === 401) { setError('Unauthorized — check the admin secret.'); setAuthed(false); setLoading(false); return; }
+      if (!r.ok) { setError(`List failed (HTTP ${r.status})`); setLoading(false); return; }
+      const data = await r.json();
+      const recs = data.records || [];
+      setRecords(recs);
+      setAuthed(true);
+      // pre-select single-candidate matches
+      const pre = {};
+      recs.forEach(rec => {
+        if (rec.release_id) pre[rec.sku] = rec.release_id;
+        else if (rec.candidates && rec.candidates.length === 1) pre[rec.sku] = rec.candidates[0].release_id;
+      });
+      setPicked(p => ({ ...pre, ...p }));
+    } catch (e) {
+      setError(`Network error: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  async function approve(sku) {
+    const releaseId = picked[sku] || (manualId[sku] ? Number(manualId[sku]) : null);
+    if (!releaseId) { setError(`Pick a release for ${sku} first.`); return; }
+    setBusy(b => ({ ...b, [sku]: true })); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=pending-review-approve`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ sku, release_id: releaseId }),
+      });
+      const data = await r.json();
+      if (!r.ok) { setError(`Approve failed for ${sku}: ${data.error || r.status}`); }
+      else { setRecords(rs => rs.filter(x => x.sku !== sku)); }
+    } catch (e) { setError(`Network error: ${e.message}`); }
+    setBusy(b => ({ ...b, [sku]: false }));
+  }
+
+  async function reject(sku) {
+    setBusy(b => ({ ...b, [sku]: true })); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=pending-review-reject`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ sku }),
+      });
+      const data = await r.json();
+      if (!r.ok) { setError(`Reject failed for ${sku}: ${data.error || r.status}`); }
+      else { setRecords(rs => rs.filter(x => x.sku !== sku)); }
+    } catch (e) { setError(`Network error: ${e.message}`); }
+    setBusy(b => ({ ...b, [sku]: false }));
+  }
+
+  // ── Secret gate ──
+  if (!authed) {
+    return (
+      <div style={{maxWidth:340}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Discogs Review · Admin Secret</div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>Paste the worker BOOTSTRAP_AUTH_SECRET. Held in memory only — never stored.</div>
+        <input
+          type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&loadQueue()}
+          placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}}
+        />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadQueue()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  // ── Queue ──
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+        <div style={{fontSize:10,color:S.muted}}>{records.length} pending {records.length===1?'item':'items'} · staging worker</div>
+        <Btn ch={loading?'Refreshing…':'↻ Refresh'} variant="ghost" onClick={()=>loadQueue()} disabled={loading} />
+      </div>
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
+      {records.length===0 && !loading && (
+        <div style={{fontSize:11,color:S.muted,padding:'24px 0',textAlign:'center'}}>Queue empty — no products awaiting review.</div>
+      )}
+      <div style={{display:'flex',flexDirection:'column',gap:14}}>
+        {records.map(rec => {
+          const cands = rec.candidates || [];
+          const hasCands = cands.length > 0;
+          return (
+            <div key={rec.sku} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:16}}>
+              {/* header row */}
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:10}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:700,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{rec.artist} — {rec.title}</div>
+                  <div style={{fontSize:10,color:S.muted,marginTop:3}}>SKU {rec.sku} · {rec.label||'no label'} · {rec.barcode?`barcode ${rec.barcode}`:'no barcode'}</div>
+                </div>
+                <div style={{textAlign:'right',whiteSpace:'nowrap'}}>
+                  <span style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:confidenceColor(rec.confidence),padding:'3px 7px',borderRadius:2}}>{rec.confidence}</span>
+                  <div style={{fontSize:10,color:S.muted,marginTop:5}}>{rec.match_method}</div>
+                </div>
+              </div>
+              {/* price */}
+              <div style={{fontSize:10,color:S.muted,marginBottom:hasCands?12:8}}>
+                Shopify €{rec.shopify_price?.toFixed?.(2) ?? rec.shopify_price} → Discogs €{rec.discogs_price?.toFixed?.(2) ?? rec.discogs_price} · {rec.weight}g
+              </div>
+
+              {/* candidate picker */}
+              {hasCands ? (
+                <div style={{marginBottom:12}}>
+                  <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:8}}>
+                    {rec.ambiguous ? `Pick the correct release (${cands.length} candidates)` : 'Matched release'}
+                  </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                    {cands.map(c => {
+                      const sel = picked[rec.sku] === c.release_id;
+                      return (
+                        <button key={c.release_id} onClick={()=>setPicked(p=>({...p,[rec.sku]:c.release_id}))}
+                          style={{display:'flex',alignItems:'center',gap:10,textAlign:'left',background:sel?S.surf:'transparent',border:`1px solid ${sel?S.accent:S.border}`,borderRadius:2,padding:8,cursor:'pointer',fontFamily:'inherit'}}>
+                          {c.thumb
+                            ? <img src={coverSrc(c.thumb)} alt="" style={{width:38,height:38,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                            : <div style={{width:38,height:38,background:S.border,borderRadius:2,flexShrink:0}} />}
+                          <div style={{minWidth:0,flex:1}}>
+                            <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.title}</div>
+                            <div style={{fontSize:9,color:S.muted,marginTop:2}}>{c.catno||'—'}{c.year?` · ${c.year}`:''} · id {c.release_id}</div>
+                          </div>
+                          {sel && <span style={{fontSize:9,color:S.accent,fontWeight:700,flexShrink:0}}>✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                /* NOT_FOUND — manual release_id entry */
+                <div style={{marginBottom:12}}>
+                  <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:6}}>No match — enter Discogs release ID manually</div>
+                  <input value={manualId[rec.sku]||''} onChange={e=>setManualId(m=>({...m,[rec.sku]:e.target.value.replace(/[^0-9]/g,'')}))}
+                    placeholder="e.g. 37346160"
+                    style={{width:'100%',maxWidth:200,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+                </div>
+              )}
+
+              {/* actions */}
+              <div style={{display:'flex',gap:8}}>
+                <Btn ch={busy[rec.sku]?'…':'✓ Approve & List'} onClick={()=>approve(rec.sku)} disabled={busy[rec.sku]} />
+                <Btn ch="✕ Reject" variant="ghost" onClick={()=>reject(rec.sku)} disabled={busy[rec.sku]} />
+                {(picked[rec.sku]||manualId[rec.sku]) && <span style={{fontSize:9,color:S.muted,alignSelf:'center'}}>→ release {picked[rec.sku]||manualId[rec.sku]}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -5787,12 +5974,14 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('dbh','🏠 DBH Import')}
           {tabBtn('mt','🇮🇹 MT Import')}
           {tabBtn('rh','💎 Rush Hour Import')}
+          {tabBtn('review','💿 Discogs Review')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+        {tab==='review'&& <DiscogsReviewPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>📸 Content · Instagram Stories</div>
