@@ -5769,9 +5769,10 @@ function StoriesGenerator() {
 //
 // Auth: the endpoints are Bearer BOOTSTRAP_AUTH_SECRET. We never bundle the
 // secret — the user pastes it once and it lives only in component state
-// (gone on refresh). During development this calls the STAGING worker;
-// switch REVIEW_WORKER_URL to the prod worker at cutover.
-const REVIEW_WORKER_URL = 'https://houseonly-worker-staging.emontagut.workers.dev';
+// (gone on refresh). Points at the PROD worker (switched at the Fase 3.5
+// cutover, May 22 2026). For local dev against staging, temporarily swap
+// this to houseonly-worker-staging.emontagut.workers.dev.
+const REVIEW_WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
 
 function confidenceColor(conf) {
   if (conf === 'HIGH') return S.accent;
