@@ -2514,15 +2514,19 @@ async function extractSalesPaperText(pdfBlob) {
     };
     const label = extract(/Label[:\s]+([^\n\r]+)/i);
     const genreRaw = extract(/(?:Genre|Style)[:\s]+([^\n\r]+)/i);
-    const GENRE_MAP = {
-      'deep house': 'Deep House', 'tech house': 'Tech House',
-      'afro house': 'Afro House', 'chicago house': 'Chicago House',
-      'soulful house': 'Soulful House', 'acid house': 'Acid House',
-      'detroit house': 'Detroit House', 'disco house': 'Disco House',
-      'electronic': 'Electronic', 'house': 'Deep House',
-    };
-    const genreLower = genreRaw.toLowerCase();
-    const genre = Object.entries(GENRE_MAP).find(([k]) => genreLower.includes(k))?.[1] || '';
+    // Preserve the REAL Word & Sound genre from the SALESPAPER rather than
+    // flattening it. The old GENRE_MAP collapsed anything containing "house"
+    // to "Deep House" and blanked everything else (Disco, Electro, Dub…),
+    // discarding the genre W&S actually wrote. We now return the raw genre
+    // lightly cleaned: take the first genre if it's a slash/comma list, trim,
+    // and title-case. Callers (mapGenrePreorder, the main ZipImporter) handle
+    // any further normalization. This fixes genre tagging for BOTH importers.
+    let genre = '';
+    if (genreRaw) {
+      genre = genreRaw.split(/[\/,;|]/)[0].trim()
+        .replace(/\s+/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase());
+    }
     const descMatch = fullText.match(/Releasetext:\s*([\s\S]+)/i);
     let desc = '';
     if (descMatch) {
@@ -6137,6 +6141,7 @@ function PreorderImporter() {
   const [status, setStatus]         = useState('idle');// idle | processing | review
   const [progress, setProgress]     = useState({ done:0, total:0, current:'' });
   const [results, setResults]       = useState([]);
+  const [excluded, setExcluded]     = useState({}); // catno -> true: dropped from CSV export
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
   const manifestRef = useRef(null);
@@ -6428,6 +6433,8 @@ function PreorderImporter() {
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _zipFound: !!zipFile, _release: release,
+          _genre: genre,                              // editable in review; rebuilds Tags
+          _label: label, _source: (m.source || 'dbh'), _year: year ? String(year) : '',
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -6471,9 +6478,26 @@ function PreorderImporter() {
     }
   };
 
+  // Rebuild the Tags string for a row from its (possibly edited) _genre so a
+  // genre change in the review view flows into the exported CSV.
+  const tagsForRow = (r) => [
+    'vinyl',
+    `source:${r._source || 'dbh'}`,
+    r._label ? `label:${r._label}` : '',
+    r._genre || '',
+    r._year || '',
+    'forthcoming',
+    r._release ? `release:${r._release}` : '',
+  ].filter(Boolean).join(', ');
+
   const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k=>!k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    const kept = results.filter(r => !excluded[r._catno]);
+    if (!kept.length) return;
+    const CSV_KEYS = Object.keys(kept[0]).filter(k=>!k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...kept.map(row=>CSV_KEYS.map(h=>{
+      const val = h==='Tags' ? tagsForRow(row) : row[h];
+      return `"${String(val||'').replace(/"/g,'""')}"`;
+    }).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -6613,10 +6637,11 @@ function PreorderImporter() {
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
             <div>
-              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} pre-orders</span>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]).length} pre-orders</span>
               <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
                 {covered} covers · {withAudio} audio
                 {errors>0?` · ${errors} errors`:''}
+                {Object.values(excluded).filter(Boolean).length>0?` · ${Object.values(excluded).filter(Boolean).length} removed`:''}
               </span>
             </div>
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
@@ -6627,8 +6652,10 @@ function PreorderImporter() {
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
-            {results.map((r,i)=>(
-              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
+            {results.map((r,i)=>{
+              const isOut = !!excluded[r._catno];
+              return (
+              <div key={i} style={{background:S.surf,border:`1px solid ${isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
                 <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
                   {r._coverUrl
                     ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
@@ -6636,19 +6663,22 @@ function PreorderImporter() {
                   }
                   {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
                   <div style={{position:'absolute',top:4,left:4,background:S.accent,borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRE-ORDER</div>
-                  {r._error&&<div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
-                  {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
+                  <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
+                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>
                   <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
                   <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
                   <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
-                  <div style={{fontSize:8,color:S.muted,marginTop:2}}>{formatExpected(addDays(r._release,14))}</div>
-                  <div style={{fontSize:10,color:S.accent,marginTop:3,fontWeight:700}}>€{r['Variant Price']}</div>
+                  <input value={r._genre||''} placeholder="(no genre)" onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  <div style={{fontSize:8,color:S.muted,marginTop:3}}>{formatExpected(addDays(r._release,14))}</div>
+                  <div style={{fontSize:10,color:S.accent,marginTop:2,fontWeight:700}}>€{r['Variant Price']}</div>
                   {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
