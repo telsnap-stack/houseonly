@@ -6736,7 +6736,7 @@ export default function App() {
           </div>
         )}
         {filters.forthcoming && forthcomingView==='list' ? (
-          <div>
+          <div style={{maxWidth:880}}>
             {filtered.map(r=><ForthcomingRow key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
           </div>
         ) : (
