@@ -71,6 +71,13 @@ function parseProduct({ node }) {
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
   const catalog = v?.sku||'';
   const title = node.title||'';
+  // Forthcoming/pre-order support: the `forthcoming` tag marks a release that
+  // hasn't arrived yet (listed from a distributor's pre-sale feed). A
+  // `release:YYYY-MM-DD` tag carries the expected street date. Both are read
+  // off the raw tags, which we now expose on the record so isForthcoming() and
+  // the pre-order UI can use them without re-fetching.
+  const releaseTag = tags.find(t => /^release:/i.test(t));
+  const releaseDate = releaseTag ? releaseTag.slice(releaseTag.indexOf(':') + 1).trim() : '';
   return {
     id: node.id, shopifyVariantId: v?.id,
     title, artist, label,
@@ -80,17 +87,25 @@ function parseProduct({ node }) {
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
+    tags, releaseDate,
   };
 }
 
-async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[] } = {}) {
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
   // Build a tag-AND query string for server-side filtering. Each filterTag is a
-  // raw tag value like "label:Word and Sound" or "year:2025". We escape single
-  // quotes inside values by switching to double quotes around the value.
-  const queryArg = filterTags.length
-    ? `, query: ${JSON.stringify(filterTags.map(t => `tag:'${t}'`).join(' AND '))}`
-    : '';
+  // raw tag value like "label:Word and Sound" or "year:2025".
+  //
+  // Forthcoming handling (mutually exclusive, drives the Forthcoming section vs
+  // the main catalogue):
+  //   - forthcoming=true  → REQUIRE the `forthcoming` tag  → only pre-orders
+  //   - forthcoming=false → EXCLUDE it via `-tag:'forthcoming'` so pre-orders
+  //     never leak into the main catalogue.
+  // Negation ("-tag:...") is supported by Shopify's search query grammar
+  // (verified against docs: a "-" modifier excludes documents with that value).
+  const clauses = filterTags.map(t => `tag:'${t}'`);
+  clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
+  const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
     products(first: 24${after}${sortArg}${queryArg}) {
@@ -132,7 +147,9 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   const after = cursor ? `, after: "${cursor}"` : '';
   // Combine the free-text search with optional tag filters. The search-syntax
   // is space-separated AND, so we append each `tag:'X'` clause inline.
-  const queryParts = [searchTerm.trim()];
+  // Also exclude forthcoming pre-orders — they live only in the Forthcoming
+  // section and should never surface in a normal catalogue search.
+  const queryParts = [searchTerm.trim(), `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
@@ -605,6 +622,47 @@ function isBackorderEligible(r) {
   if (!y) return false; // no year tag = treat as truly sold out
   const currentYear = new Date().getFullYear();
   return y >= currentYear - 1;
+}
+
+// Determine if a release is a PRE-ORDER (forthcoming). Source of truth is the
+// `forthcoming` tag, set by the pre-order importer when a release is listed
+// from a distributor's pre-sale feed before it physically arrives.
+//
+// IMPORTANT — this is intentionally tag-based, NOT stock/date-based, because a
+// forthcoming record and a sold-out backorder record can look identical by
+// stock (both 0) and year (both recent). Only the tag distinguishes them.
+// isForthcoming() takes precedence over isBackorderEligible() everywhere a
+// button renders, so a pre-order shows PRE-ORDER (paid checkout) and never the
+// unpaid backorder REQUEST form.
+//
+// Lifecycle: present = pre-order (paid, Forthcoming section only). When stock
+// arrives, the arrival importer removes this tag and sets inventory, so the
+// record graduates into the main catalogue automatically (the catalogue query
+// excludes `forthcoming`, the Forthcoming query requires it).
+function isForthcoming(r) {
+  return !!(r && Array.isArray(r.tags) && r.tags.includes('forthcoming'));
+}
+
+// Add N days to an ISO date string, returning a new ISO `YYYY-MM-DD`.
+// Used to apply the +14-day buffer (record lands in Madrid, then ships) to the
+// distributor's raw release date at DISPLAY time only — the stored release:
+// tag keeps the true street date so the buffer is a one-line change if needed.
+function addDays(isoDate, days) {
+  if (!isoDate) return '';
+  const d = new Date(isoDate);
+  if (isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Format a release date (ISO `YYYY-MM-DD`) into a friendly full date,
+// "Expected 4 September 2026". Degrades gracefully: bad/missing date →
+// just "Pre-order" (never a fake date).
+function formatExpected(isoDate) {
+  if (!isoDate) return 'Pre-order';
+  const d = new Date(isoDate);
+  if (isNaN(d.getTime())) return 'Pre-order';
+  return 'Expected ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
@@ -1204,6 +1262,14 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               </button>
             )}
             {(() => {
+              // PRE-ORDER takes precedence over everything: a forthcoming
+              // release is purchasable now (paid checkout, oversell enabled),
+              // so it gets a "+ Pre-order" add-to-cart button just like an
+              // in-stock record. The full-width REQUEST button below is for
+              // backorders only and is suppressed for forthcoming (see below).
+              if (isForthcoming(r)) {
+                return <button onClick={e=>{e.stopPropagation();onAdd(r);}} title="Pre-order — pay now, ships when it arrives" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Pre-order</button>;
+              }
               const eligible = isBackorderEligible(r);
               // For backorder-eligible cards, the action goes on its own line below
               // (full-width REQUEST button), so this slot stays empty.
@@ -1215,11 +1281,14 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
             })()}
           </div>
         </div>
-        {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
-        {r.stock===0 && isBackorderEligible(r) && (
+        {r.stock>0&&r.stock<=3&&!isForthcoming(r)&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
+        {isForthcoming(r) && (
+          <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</div>
+        )}
+        {!isForthcoming(r) && r.stock===0 && isBackorderEligible(r) && (
           <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ marginTop:8, width:'100%', background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'7px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', fontFamily:'inherit' }}>Request</button>
         )}
-        {r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
+        {!isForthcoming(r) && r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
       </div>
     </div>
   );
@@ -1454,7 +1523,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
               For in-stock and truly-OOS products, we keep the original order:
                 description → tracks → price/heart/cart row.
             */}
-            {r.stock === 0 && isBackorderEligible(r) ? (
+            {!isForthcoming(r) && r.stock === 0 && isBackorderEligible(r) ? (
               <>
                 <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
                   <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
@@ -1512,7 +1581,15 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
                       <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
                     </button>
                   )}
-                  {r.stock > 0
+                  {isForthcoming(r)
+                    ? (
+                      <div style={{ display:'flex', flexDirection:'column', gap:6, flex:1 }}>
+                        <Btn ch="Pre-order" onClick={()=>{onAdd(r);onClose();}} full />
+                        <span style={{ fontSize:10, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</span>
+                        <span style={{ fontSize:9, color:S.muted, lineHeight:1.5 }}>Pay now to reserve your copy. Ships when it arrives — estimated date above.</span>
+                      </div>
+                    )
+                    : r.stock > 0
                     ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
                     : <Btn ch="Out of Stock" disabled full />
                   }
@@ -6151,7 +6228,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest'});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
   const [search,setSearch]               = useState('');
   // Debounced version of `search`: updated 300ms after the user stops typing.
   // We use this (not `search`) in fetchParams so we don't fire a Shopify
@@ -6400,17 +6477,28 @@ export default function App() {
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
-    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch };
-  }, [filters.genre, filters.label, filters.year, filters.sort, debouncedSearch]);
+    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming };
+  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, debouncedSearch]);
 
   // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
-  // Two code paths:
-  //   - searchTerm present → use Shopify's `search` endpoint (relevance-ranked,
-  //     prefix-matches the last word, searches the WHOLE catalog)
-  //   - no searchTerm → use `products` endpoint (sortable, paginated, also full catalog)
-  // Both honor filter tags. The active code path is encapsulated in
-  // fetchActivePage so loadMore stays simple.
+  // Code paths:
+  //   - forthcoming view → `products` endpoint requiring tag:'forthcoming'
+  //     (free-text search is disabled in the Forthcoming section — the list is
+  //     short and curated, so relevance ranking adds nothing)
+  //   - searchTerm present → `search` endpoint (relevance-ranked, prefix-match)
+  //   - otherwise → `products` endpoint (sortable, paginated), forthcoming
+  //     EXCLUDED so pre-orders never appear in the main catalogue
+  // The active code path is encapsulated in fetchActivePage so loadMore stays simple.
   const fetchActivePage = useCallback((extraOpts={}) => {
+    if (fetchParams.forthcoming) {
+      return fetchShopifyProducts({
+        sortKey: fetchParams.sortKey,
+        reverse: fetchParams.reverse,
+        filterTags: fetchParams.filterTags,
+        forthcoming: true,
+        ...extraOpts,
+      });
+    }
     if (fetchParams.searchTerm) {
       return fetchShopifyProductSearch({
         searchTerm: fetchParams.searchTerm,
@@ -6532,6 +6620,7 @@ export default function App() {
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>setPage('shop')}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
+          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title="Forthcoming pre-orders" style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.muted,border:`1px solid ${filters.forthcoming?S.accent:S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>Forthcoming</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -6548,7 +6637,11 @@ export default function App() {
 
       <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
-        <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
+        {filters.forthcoming
+          ? <p style={{color:S.accent,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',fontWeight:700}}>Forthcoming · Pre-order Now</p>
+          : <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
+        }
+        {filters.forthcoming && <p style={{color:S.muted,fontSize:11,margin:'10px 0 0',lineHeight:1.6,maxWidth:520}}>Records coming soon. Pre-order to reserve your copy — you pay now and we ship as soon as it lands. Estimated arrival shown on each release.</p>}
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
