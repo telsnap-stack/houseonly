@@ -6618,9 +6618,9 @@ export default function App() {
   return (
     <PlayerProvider>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>setPage('shop')}>
+      <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
-          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title="Forthcoming pre-orders" style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>Forthcoming</button>
+          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -6642,6 +6642,7 @@ export default function App() {
           : <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
         }
         {filters.forthcoming && <p style={{color:S.muted,fontSize:11,margin:'10px 0 0',lineHeight:1.6,maxWidth:520}}>The releases we're most excited about, before they drop. Reserve yours now — we ship the moment they land in Madrid. Estimated arrival shown on each release.</p>}
+        {filters.forthcoming && <button onClick={()=>setFilter('forthcoming',false)} style={{marginTop:18,background:'transparent',border:`1px solid ${S.border}`,color:S.text,cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'8px 16px',borderRadius:2,fontFamily:'inherit',transition:'all 0.15s'}}>← Back to all records</button>}
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
