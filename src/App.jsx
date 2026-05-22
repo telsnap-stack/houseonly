@@ -647,21 +647,32 @@ function isForthcoming(r) {
 // Used to apply the +14-day buffer (record lands in Madrid, then ships) to the
 // distributor's raw release date at DISPLAY time only — the stored release:
 // tag keeps the true street date so the buffer is a one-line change if needed.
+// Parse a YYYY-MM-DD string at LOCAL noon, not UTC midnight. A bare
+// `new Date('2026-06-30')` is parsed as UTC midnight, which then renders one
+// calendar day early in any negative-offset timezone (and is fragile at DST
+// boundaries). Anchoring at local noon keeps the calendar day stable in every
+// timezone. Falls back to default parsing if the string isn't a plain date.
+function parseLocalDate(isoDate) {
+  if (!isoDate) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate).trim());
+  const d = m ? new Date(isoDate + 'T12:00:00') : new Date(isoDate);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function addDays(isoDate, days) {
-  if (!isoDate) return '';
-  const d = new Date(isoDate);
-  if (isNaN(d.getTime())) return '';
+  const d = parseLocalDate(isoDate);
+  if (!d) return '';
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear(), mo = String(d.getMonth() + 1).padStart(2, '0'), da = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${da}`;
 }
 
 // Format a release date (ISO `YYYY-MM-DD`) into a friendly full date,
 // "Expected 4 September 2026". Degrades gracefully: bad/missing date →
 // just "Pre-order" (never a fake date).
 function formatExpected(isoDate) {
-  if (!isoDate) return 'Pre-order';
-  const d = new Date(isoDate);
-  if (isNaN(d.getTime())) return 'Pre-order';
+  const d = parseLocalDate(isoDate);
+  if (!d) return 'Pre-order';
   return 'Expected ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
@@ -6150,14 +6161,44 @@ function PreorderImporter() {
   }
 
   // Light title-casing for messy feed values ("various artist" → "Various
-  // Artist", "va_10" → "Va_10"). Operator can override in the reconciliation
-  // view; we never block on cosmetics.
+  // Artists", "houseworx" → "Houseworx"). Operator can override in the
+  // reconciliation view; we never block on cosmetics.
   function titleCaseSoft(s) {
     if (!s) return '';
+    // Normalize "various artist(s)" → "Various Artists" regardless of case.
+    if (/^various\s+artist(s)?$/i.test(s.trim())) return 'Various Artists';
     // Leave strings that already contain an uppercase letter alone (likely
     // already correct, e.g. "M.S.", "Raw House EP").
     if (/[A-Z]/.test(s)) return s;
     return s.replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // Is this release a Various-Artists compilation? VA cat-nos end in _va/-va,
+  // or the artist field is some flavour of "various artist(s)".
+  function isVA(m) {
+    return /[-_]va$/i.test(String(m.catno || '').trim()) ||
+           /^various\s+artist/i.test(String(m.artist || '').trim());
+  }
+
+  // VA titles from the DBH feed are junk ("va_10", "VA_10"). Derive a real
+  // title from the cat-no instead: strip the trailing _va, swap separators for
+  // spaces, uppercase the series token. "stardub_10_va" → "STARDUB 10".
+  // Non-VA releases keep their real title (title-cased softly).
+  function deriveTitle(m) {
+    const raw = String(m.title || '').trim();
+    if (!isVA(m)) return titleCaseSoft(raw);
+    // If the manifest title is itself a junk "va_NN" style value, rebuild it.
+    if (!raw || /^va[\s_-]*\d*$/i.test(raw)) {
+      const base = String(m.catno || '').trim().replace(/[-_]va$/i, '');
+      const derived = base.replace(/[_-]+/g, ' ').trim().toUpperCase();
+      return derived || 'Various';
+    }
+    return titleCaseSoft(raw);
+  }
+
+  function deriveArtist(m) {
+    if (isVA(m)) return 'Various Artists';
+    return titleCaseSoft(String(m.artist || '').trim());
   }
 
   function catnoFromZip(name) {
@@ -6290,8 +6331,8 @@ function PreorderImporter() {
         const m = list[i];
         const catno  = m.catno.toUpperCase().trim();
         const ov     = edits[m.catno] || {};
-        const artist = (ov.artist != null ? ov.artist : titleCaseSoft(m.artist)).trim();
-        const title  = (ov.title  != null ? ov.title  : titleCaseSoft(m.title)).trim();
+        const artist = (ov.artist != null ? ov.artist : deriveArtist(m)).trim();
+        const title  = (ov.title  != null ? ov.title  : deriveTitle(m)).trim();
         const label  = m.label;
         const genre  = mapGenrePreorder(m.genre);
         const release = m.release;                          // YYYY-MM-DD (raw street date)
@@ -6432,7 +6473,7 @@ function PreorderImporter() {
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Pre-order / Forthcoming. Upload a <b style={{color:S.text}}>manifest</b> (CSV or JSON, generated from the distributor "Coming soon" emails) plus the <b style={{color:S.text}}>ZIP folders</b> you downloaded. Matched by catalog number. Listed as <b style={{color:S.accent}}>paid pre-orders</b>: stock 0, oversell on, tagged <code style={{color:S.accent}}>forthcoming</code> + <code style={{color:S.accent}}>release:</code>. Customers reserve now; you ship when it lands.
+        Pre-order / Forthcoming. Upload a <b style={{color:S.text}}>manifest</b> (CSV or JSON, generated from the distributor "Coming soon" emails) plus the <b style={{color:S.text}}>ZIP folders</b> you downloaded. Matched by catalog number. Listed as <b style={{color:S.accent}}>paid pre-orders</b>: stock 0, oversell on, tagged <span style={{background:S.bg,color:S.accent,padding:'1px 6px',borderRadius:3,fontFamily:'monospace',fontSize:9,border:`1px solid ${S.border}`}}>forthcoming</span> + <span style={{background:S.bg,color:S.accent,padding:'1px 6px',borderRadius:3,fontFamily:'monospace',fontSize:9,border:`1px solid ${S.border}`}}>release:</span>. Customers reserve now; you ship when it lands.
       </p>
 
       {/* Drop zone */}
@@ -6500,8 +6541,8 @@ function PreorderImporter() {
               <div style={{maxHeight:280,overflowY:'auto'}}>
                 {recon.ready.map((m,i)=>{
                   const ov = edits[m.catno]||{};
-                  const artistVal = ov.artist!=null?ov.artist:titleCaseSoft(m.artist);
-                  const titleVal  = ov.title!=null?ov.title:titleCaseSoft(m.title);
+                  const artistVal = ov.artist!=null?ov.artist:deriveArtist(m);
+                  const titleVal  = ov.title!=null?ov.title:deriveTitle(m);
                   const previewPrice = (()=>{const dp=m.dealerPrice!=null?m.dealerPrice:0;let p=Math.ceil(dp*(1+margin/100))-0.01;if(p<9.99)p=9.99;return p.toFixed(2);})();
                   return (
                     <div key={i} style={{display:'flex',gap:8,alignItems:'center',padding:'7px 12px',borderTop:`1px solid ${S.border}`,flexWrap:'wrap'}}>
