@@ -2508,24 +2508,32 @@ async function extractSalesPaperText(pdfBlob) {
       const content = await page.getTextContent();
       fullText += content.items.map(i => i.str).join(' ') + '\n';
     }
-    const extract = (pattern) => {
-      const m = fullText.match(pattern);
-      return m ? m[1].trim().split(/\s{2,}|\n/)[0].trim() : '';
+    // pdf.js flattens the SALESPAPER to a single space-joined string with NO
+    // newlines, so a greedy "[^\n\r]+" capture runs PAST the field value into
+    // the next fields (e.g. "Genre: House" would capture
+    // "House Label: … EAN: … Tracklist: …"). Bound each capture at the next
+    // known field marker so we get exactly the field's value. The SALESPAPER
+    // DOES contain the real genre ("House", "House / Techno", "Disco" …); the
+    // bug was the overrun, not the data. Fixes BOTH importers.
+    const FIELD = '(?:Label|EAN|Tracklist|Format|Cat-?No|Release-?Date|Artist|Title|Releasetext|Genre|Style)\\s*:';
+    const extractField = (name) => {
+      const m = fullText.match(new RegExp(name + '\\s*:\\s*(.+?)\\s*(?:' + FIELD + '|$)', 'i'));
+      return m ? m[1].trim() : '';
     };
-    const label = extract(/Label[:\s]+([^\n\r]+)/i);
-    const genreRaw = extract(/(?:Genre|Style)[:\s]+([^\n\r]+)/i);
-    // Preserve the REAL Word & Sound genre from the SALESPAPER rather than
-    // flattening it. The old GENRE_MAP collapsed anything containing "house"
-    // to "Deep House" and blanked everything else (Disco, Electro, Dub…),
-    // discarding the genre W&S actually wrote. We now return the raw genre
-    // lightly cleaned: take the first genre if it's a slash/comma list, trim,
-    // and title-case. Callers (mapGenrePreorder, the main ZipImporter) handle
-    // any further normalization. This fixes genre tagging for BOTH importers.
+    const label    = extractField('Label');
+    const genreRaw = extractField('(?:Genre|Style)');
+    // Preserve the real W&S genre(s). W&S writes multi-genre as "House /
+    // Techno" — we keep BOTH so the record shows under each genre filter and
+    // the operator sees the full classification. Split on slash/comma/semicolon,
+    // title-case each, dedupe, rejoin comma-separated (Shopify treats each
+    // comma-separated value as its own tag). Callers feed this into the Tags
+    // list which is itself comma-joined, so the genres land as separate tags.
     let genre = '';
     if (genreRaw) {
-      genre = genreRaw.split(/[\/,;|]/)[0].trim()
-        .replace(/\s+/g, ' ')
-        .replace(/\b\w/g, c => c.toUpperCase());
+      const parts = genreRaw.split(/[\/,;|]/)
+        .map(s => s.trim().replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
+        .filter(Boolean);
+      genre = [...new Set(parts)].join(', ');
     }
     const descMatch = fullText.match(/Releasetext:\s*([\s\S]+)/i);
     let desc = '';
@@ -6150,7 +6158,8 @@ function PreorderImporter() {
   // ── manifest parsing ────────────────────────────────────────
   // Genre mapping mirrors DBHImporter.mapGenre but keeps non-house genres
   // (e.g. "Techno - Dub") intact rather than forcing them into a house bucket.
-  function mapGenrePreorder(genreStr) {
+  // Maps ONE genre token to a normalized value.
+  function mapOneGenre(genreStr) {
     const g = (genreStr || '').toLowerCase();
     if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
     if (g.includes('tech house')) return 'Tech House';
@@ -6163,6 +6172,15 @@ function PreorderImporter() {
     if (g.includes('house')) return 'House';
     // Non-house: title-case the raw value ("Techno - Dub" → "Techno - Dub").
     return genreStr ? genreStr.replace(/\b\w/g, c => c.toUpperCase()) : '';
+  }
+  // W&S may carry multiple genres ("House, Techno"). Map EACH independently so
+  // both survive as separate tags; dedupe and rejoin comma-separated.
+  function mapGenrePreorder(genreStr) {
+    if (!genreStr) return '';
+    const mapped = String(genreStr).split(',')
+      .map(s => mapOneGenre(s.trim()))
+      .filter(Boolean);
+    return [...new Set(mapped)].join(', ');
   }
 
   // Light title-casing for messy feed values ("various artist" → "Various
