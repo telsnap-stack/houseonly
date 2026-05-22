@@ -6334,7 +6334,7 @@ function PreorderImporter() {
         const artist = (ov.artist != null ? ov.artist : deriveArtist(m)).trim();
         const title  = (ov.title  != null ? ov.title  : deriveTitle(m)).trim();
         const label  = m.label;
-        const genre  = mapGenrePreorder(m.genre);
+        let   genre  = mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
         const release = m.release;                          // YYYY-MM-DD (raw street date)
         const year    = release ? new Date(release).getFullYear() : '';
         const dealer  = m.dealerPrice != null ? m.dealerPrice : 0;
@@ -6354,6 +6354,7 @@ function PreorderImporter() {
         let coverUrl = '';
         let tracks   = [];
         let itemError = '';
+        let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
 
         const zipFile = zipForCatno(catno);
         if (zipFile) {
@@ -6380,6 +6381,24 @@ function PreorderImporter() {
               const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
               tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
             }
+
+            // W&S genre solution: the email never carries genre, but the ZIP's
+            // SALESPAPER.pdf does. Reuse the same extractSalesPaperText helper
+            // the main W&S ZipImporter uses. Only fill genre when the manifest
+            // didn't already provide one (DBH manifests do; W&S don't). The
+            // press text also enriches the description.
+            const pdfFile = files.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || files.find(f => /\.pdf$/i.test(f.name));
+            if (pdfFile) {
+              try {
+                setProgress({ done:i, total, current:`${catno} — reading press text…` });
+                const pblob = await pdfFile.async('blob');
+                const extracted = await extractSalesPaperText(pblob);
+                if (extracted) {
+                  if (!genre && extracted.genre) genre = mapGenrePreorder(extracted.genre);
+                  if (extracted.desc) zipDesc = extracted.desc;
+                }
+              } catch (e) { /* PDF parse is best-effort; never block the import */ }
+            }
           } catch(e) { itemError = e.message; }
         }
 
@@ -6388,7 +6407,7 @@ function PreorderImporter() {
         // a blank pre-order tile until the ZIP lands.
         if (!coverUrl && m.coverUrl) coverUrl = m.coverUrl;
 
-        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: '' });
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         // Tags: the forthcoming markers + release date are what the Part-1
