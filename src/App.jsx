@@ -1305,33 +1305,49 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
 // add-to-cart flow (oversell-enabled), identical to the card's + Pre-order.
 function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const isMobile = useIsMobile(640);
+  const player = usePlayer();
   const wished = isWished?.(r);
   const cover = coverSrc(r.coverUrl);
   const expected = formatExpected(addDays(r.releaseDate, 14));
+  const hasTracks = (r.tracks || []).length > 0;
+  const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
+  const isQueued = player ? player.isReleaseQueued(r) : false;
   const metaRow = (k, v) => v ? (
     <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
       <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
       <span style={{ color:S.text }}>{v}</span>
     </div>
   ) : null;
+  const iconBtn = (active) => ({ background:'transparent', border:`1px solid ${active?S.accent:S.border}`, color:active?S.accent:S.muted, borderRadius:2, padding:'7px 9px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' });
   return (
-    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:isMobile?'stretch':'flex-start' }}>
+    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start' }}>
       {/* Cover */}
       <div onClick={()=>onOpen(r)} style={{ width:isMobile?'100%':120, height:isMobile?200:120, flexShrink:0, background:`linear-gradient(${r.g})`, borderRadius:2, cursor:'pointer', overflow:'hidden', position:'relative' }}>
         {cover && <img src={cover} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
       </div>
 
-      {/* Middle: artist / title / capped description */}
-      <div onClick={()=>onOpen(r)} style={{ flex:1, minWidth:0, cursor:'pointer' }}>
+      {/* Middle: artist / title / capped description — left aligned */}
+      <div onClick={()=>onOpen(r)} style={{ flex:1, minWidth:0, cursor:'pointer', textAlign:'left' }}>
         <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
         <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
         {r.desc && (
           <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:520 }}>{r.desc}</p>
         )}
+        {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
+        {hasTracks && player && (
+          <div style={{ display:'flex', gap:6, marginTop:12 }}>
+            <button onClick={e=>{e.stopPropagation(); isCurrentlyPlaying ? player.togglePlayPause() : player.playRelease(r);}} aria-label={isCurrentlyPlaying?'Pause':'Play preview'} title={isCurrentlyPlaying?'Pause':'Play preview'} style={iconBtn(isCurrentlyPlaying)}>
+              {isCurrentlyPlaying ? <PauseIcon size={12} /> : <PlayIcon size={12} filled />}
+            </button>
+            <button onClick={e=>{e.stopPropagation(); player.addToQueue(r);}} aria-label="Add to queue" title={isQueued?'Already in queue — add again':'Add to queue'} style={iconBtn(isQueued)}>
+              <QueuePlusIcon size={12} />
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Right: metadata block + pre-order */}
-      <div style={{ width:isMobile?'100%':220, flexShrink:0, display:'flex', flexDirection:'column', gap:5 }}>
+      {/* Right: metadata block + pre-order — left aligned */}
+      <div style={{ width:isMobile?'100%':220, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
         <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
@@ -6700,13 +6716,13 @@ export default function App() {
         </div>
       </Nav>
 
-      <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
+      <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto',textAlign:'left'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
         {filters.forthcoming
-          ? <p style={{color:S.accent,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',fontWeight:700}}>Forthcoming · Pre-order Now</p>
-          : <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
+          ? <p style={{color:S.accent,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',fontWeight:700,textAlign:'left'}}>Forthcoming · Pre-order Now</p>
+          : <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',textAlign:'left'}}>Vinyl Delivered Worldwide</p>
         }
-        {filters.forthcoming && <p style={{color:S.muted,fontSize:11,margin:'10px 0 0',lineHeight:1.6,maxWidth:520}}>The releases we're most excited about, before they drop. Reserve yours now — we ship the moment they land in Madrid. Estimated arrival shown on each release.</p>}
+        {filters.forthcoming && <p style={{color:S.muted,fontSize:11,margin:'10px 0 0',lineHeight:1.6,maxWidth:520,textAlign:'left'}}>The releases we're most excited about, before they drop. Reserve yours now — we ship the moment they land in Madrid. Estimated arrival shown on each release.</p>}
         {filters.forthcoming && <button onClick={()=>setFilter('forthcoming',false)} style={{marginTop:18,background:'transparent',border:`1px solid ${S.border}`,color:S.text,cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'8px 16px',borderRadius:2,fontFamily:'inherit',transition:'all 0.15s'}}>← Back to all records</button>}
       </div>
 
