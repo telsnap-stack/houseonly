@@ -1294,7 +1294,66 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   );
 }
 
-// ── BACKORDER REQUEST FORM ─────────────────────────────────────
+// ── FORTHCOMING ROW ────────────────────────────────────────────
+// The default list-layout for the Forthcoming section. Structured like a
+// distributor release list (cover left, artist/title + capped description in
+// the middle, metadata block right) but in the store's own dark/accent theme.
+// Shows the fields that exist on the record today: Label · Cat-No · Expected
+// date · Genre · Price. Barcode/Configuration are deferred until the importer
+// populates them. Description is the same `desc` shown elsewhere, capped to ~2
+// lines (full text on click → modal). Pre-order button reuses the paid
+// add-to-cart flow (oversell-enabled), identical to the card's + Pre-order.
+function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
+  const isMobile = useIsMobile(640);
+  const wished = isWished?.(r);
+  const cover = coverSrc(r.coverUrl);
+  const expected = formatExpected(addDays(r.releaseDate, 14));
+  const metaRow = (k, v) => v ? (
+    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
+      <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
+      <span style={{ color:S.text }}>{v}</span>
+    </div>
+  ) : null;
+  return (
+    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:isMobile?'stretch':'flex-start' }}>
+      {/* Cover */}
+      <div onClick={()=>onOpen(r)} style={{ width:isMobile?'100%':120, height:isMobile?200:120, flexShrink:0, background:`linear-gradient(${r.g})`, borderRadius:2, cursor:'pointer', overflow:'hidden', position:'relative' }}>
+        {cover && <img src={cover} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
+      </div>
+
+      {/* Middle: artist / title / capped description */}
+      <div onClick={()=>onOpen(r)} style={{ flex:1, minWidth:0, cursor:'pointer' }}>
+        <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
+        <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
+        {r.desc && (
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:520 }}>{r.desc}</p>
+        )}
+      </div>
+
+      {/* Right: metadata block + pre-order */}
+      <div style={{ width:isMobile?'100%':220, flexShrink:0, display:'flex', flexDirection:'column', gap:5 }}>
+        {metaRow('Label', r.label)}
+        {metaRow('Cat-No', r.catalog)}
+        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
+          <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
+          <span style={{ color:S.accent, fontWeight:700 }}>{expected.replace(/^Expected\s/, '')}</span>
+        </div>
+        {metaRow('Genre', r.genre)}
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:8 }}>
+          <span style={{ fontSize:18, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+        </div>
+        <div style={{ display:'flex', gap:8, marginTop:6, alignItems:'center' }}>
+          <button onClick={()=>onAdd(r)} title="Pre-order — pay now, ships when it arrives" style={{ flex:1, background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Pre-order</button>
+          {onWishlistToggle && (
+            <button onClick={()=>onWishlistToggle(r)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 10px', cursor:'pointer', display:'flex', alignItems:'center' }}>
+              <HeartIcon wished={wished} size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 //
 // Renders inside the Modal when a release is backorder-eligible (stock=0 AND
 // year >= currentYear-1). Customer fills email + name + shipping address +
@@ -6239,6 +6298,9 @@ export default function App() {
     return ()=>clearTimeout(handle);
   },[search]);
   const [page,setPage]                   = useState('shop');
+  // Forthcoming view mode: 'list' (default, rich rows) or 'grid' (cards).
+  // Resets to 'list' every time the user enters the Forthcoming section.
+  const [forthcomingView,setForthcomingView] = useState('list');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
@@ -6250,6 +6312,9 @@ export default function App() {
 
   // Persist anonymous wishlist to localStorage on every change
   useEffect(()=>{ saveLocalWishlist(wishItems); }, [wishItems]);
+
+  // Reset Forthcoming to the default list view each time it's entered.
+  useEffect(()=>{ if (filters.forthcoming) setForthcomingView('list'); }, [filters.forthcoming]);
 
   // When auth changes: load profile, sync wishlist
   useEffect(()=>{
@@ -6647,9 +6712,22 @@ export default function App() {
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
-        </div>
+        {filters.forthcoming && (
+          <div style={{display:'flex',justifyContent:'flex-end',gap:6,marginBottom:14}}>
+            {['list','grid'].map(v=>(
+              <button key={v} onClick={()=>setForthcomingView(v)} style={{background:forthcomingView===v?S.accent:'transparent',color:forthcomingView===v?'#080808':S.muted,border:`1px solid ${forthcomingView===v?S.accent:S.border}`,borderRadius:2,padding:'5px 14px',cursor:'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',transition:'all 0.15s'}}>{v}</button>
+            ))}
+          </div>
+        )}
+        {filters.forthcoming && forthcomingView==='list' ? (
+          <div>
+            {filtered.map(r=><ForthcomingRow key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          </div>
+        ) : (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
+            {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          </div>
+        )}
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
           <div style={{textAlign:'center',marginTop:32}}>
