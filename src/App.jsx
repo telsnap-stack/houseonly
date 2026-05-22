@@ -6101,6 +6101,505 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
+// Lists distributor-announced records that have NOT yet arrived as paid
+// pre-orders. Differs from the invoice-driven DBHImporter in its FRONT half:
+//   • input is a MANIFEST (cat-no → artist/title/label/genre/release/price),
+//     generated from the distributor "Coming soon" emails (CSV or JSON), not an
+//     order invoice CSV. Pre-orders have no invoice.
+//   • each release is matched to a ZIP folder (operator-downloaded) by cat-no.
+//   • a RECONCILIATION view shows: ready (manifest+ZIP), manifest-but-no-ZIP
+//     ("download these"), and ZIP-but-no-manifest ("need date/price").
+// The BACK half (ZIP → R2 assets → row → Shopify CSV) reuses the existing
+// machinery: uploadToR2, buildDescriptionHtml, loadJSZip, mapGenre, catnoFromZip.
+//
+// Pre-order rows carry the markers the Part-1 display layer reads:
+//   • Variant Inventory Qty   : 0
+//   • Variant Inventory Policy: continue   (oversell → negative stock = demand)
+//   • Tags                    : + forthcoming + release:YYYY-MM-DD
+// After bulk-upload to Shopify, the Forthcoming section shows them automatically.
+function PreorderImporter() {
+  const [manifest, setManifest]     = useState([]);   // [{catno, artist, title, label, genre, release, dealerPrice, tracks, format, coverUrl, zipUrl, source}]
+  const [manifestName, setManifestName] = useState(null);
+  const [zipFiles, setZipFiles]     = useState([]);
+  const [edits, setEdits]           = useState({});   // catno -> {artist?, title?} operator overrides
+  const [status, setStatus]         = useState('idle');// idle | processing | review
+  const [progress, setProgress]     = useState({ done:0, total:0, current:'' });
+  const [results, setResults]       = useState([]);
+  const [error, setError]           = useState('');
+  const [margin, setMargin]         = useState(60);
+  const manifestRef = useRef(null);
+  const zipRef = useRef(null);
+
+  // ── manifest parsing ────────────────────────────────────────
+  // Genre mapping mirrors DBHImporter.mapGenre but keeps non-house genres
+  // (e.g. "Techno - Dub") intact rather than forcing them into a house bucket.
+  function mapGenrePreorder(genreStr) {
+    const g = (genreStr || '').toLowerCase();
+    if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
+    if (g.includes('tech house')) return 'Tech House';
+    if (g.includes('afro')) return 'Afro House';
+    if (g.includes('chicago')) return 'Chicago House';
+    if (g.includes('soulful')) return 'Soulful House';
+    if (g.includes('acid')) return 'Acid House';
+    if (g.includes('detroit')) return 'Detroit House';
+    if (g.includes('disco')) return 'Disco House';
+    if (g.includes('house')) return 'House';
+    // Non-house: title-case the raw value ("Techno - Dub" → "Techno - Dub").
+    return genreStr ? genreStr.replace(/\b\w/g, c => c.toUpperCase()) : '';
+  }
+
+  // Light title-casing for messy feed values ("various artist" → "Various
+  // Artist", "va_10" → "Va_10"). Operator can override in the reconciliation
+  // view; we never block on cosmetics.
+  function titleCaseSoft(s) {
+    if (!s) return '';
+    // Leave strings that already contain an uppercase letter alone (likely
+    // already correct, e.g. "M.S.", "Raw House EP").
+    if (/[A-Z]/.test(s)) return s;
+    return s.replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  function catnoFromZip(name) {
+    return name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,'').trim().toUpperCase();
+  }
+
+  function parseManifestCsv(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    // Standard comma-delimited CSV with quoted fields (matches build_manifest output).
+    const rows = []; let cur = [], field = '', inQ = false, i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"' && text[i+1] === '"') { field += '"'; i += 2; continue; }
+        if (ch === '"') { inQ = false; i++; continue; }
+        field += ch; i++; continue;
+      }
+      if (ch === '"') { inQ = true; i++; continue; }
+      if (ch === ',') { cur.push(field); field = ''; i++; continue; }
+      if (ch === '\r') { i++; continue; }
+      if (ch === '\n') { cur.push(field); rows.push(cur); cur = []; field = ''; i++; continue; }
+      field += ch; i++;
+    }
+    if (field || cur.length) { cur.push(field); rows.push(cur); }
+    if (rows.length < 2) return [];
+    const headers = rows[0].map(h => h.trim());
+    return rows.slice(1).map(vals => {
+      const obj = {};
+      headers.forEach((h, idx) => obj[h] = (vals[idx] || '').trim());
+      return obj;
+    }).filter(r => r.catno);
+  }
+
+  // Normalize a parsed row (from CSV or JSON) into the canonical manifest shape.
+  function normalizeRow(r) {
+    const dp = r.dealerPrice;
+    return {
+      catno: String(r.catno || '').trim(),
+      artist: String(r.artist || '').trim(),
+      title: String(r.title || '').trim(),
+      label: String(r.label || '').trim(),
+      genre: String(r.genre || '').trim(),
+      release: String(r.release || '').trim(),
+      dealerPrice: dp === '' || dp == null ? null : Number(dp),
+      tracks: r.tracks === '' || r.tracks == null ? null : Number(r.tracks),
+      format: String(r.format || '').trim(),
+      coverUrl: String(r.coverUrl || '').trim(),
+      zipUrl: String(r.zipUrl || '').trim(),
+      source: String(r.source || 'dbh').trim(),
+    };
+  }
+
+  const loadManifest = (file) => {
+    const rd = new FileReader();
+    rd.onload = () => {
+      try {
+        let rows;
+        const txt = rd.result;
+        const isJson = /\.json$/i.test(file.name) || /^\s*[[{]/.test(txt);
+        if (isJson) {
+          const parsed = JSON.parse(txt);
+          rows = Array.isArray(parsed) ? parsed : (parsed.releases || parsed.items || []);
+        } else {
+          rows = parseManifestCsv(txt);
+        }
+        const norm = rows.map(normalizeRow).filter(r => r.catno);
+        setManifest(norm);
+        setManifestName(file.name);
+        setError('');
+      } catch (e) {
+        setError(`Manifest parse failed: ${e.message}`);
+      }
+    };
+    rd.readAsText(file, 'UTF-8');
+  };
+
+  const assignZips = (files) => {
+    const zips = [...files].filter(f => /\.zip$/i.test(f.name));
+    setZipFiles(prev => {
+      const existing = new Set(prev.map(f=>f.name));
+      return [...prev, ...zips.filter(f=>!existing.has(f.name))];
+    });
+  };
+
+  // ── reconciliation ──────────────────────────────────────────
+  // Build a map of ZIP-by-catno (uppercased), and classify each side.
+  const zipMap = useMemo(() => {
+    const m = {};
+    zipFiles.forEach(f => { m[catnoFromZip(f.name)] = f; });
+    return m;
+  }, [zipFiles]);
+
+  function zipForCatno(catno) {
+    const up = catno.toUpperCase();
+    return zipMap[up] || zipFiles.find(f => {
+      const zc = catnoFromZip(f.name);
+      return zc.includes(up) || up.includes(zc);
+    }) || null;
+  }
+
+  const recon = useMemo(() => {
+    const ready = [], needZip = [], orphanZip = [];
+    const matchedZipNames = new Set();
+    for (const m of manifest) {
+      const zf = zipForCatno(m.catno);
+      if (zf) { ready.push({ ...m, _zip: zf.name }); matchedZipNames.add(zf.name); }
+      else needZip.push(m);
+    }
+    for (const f of zipFiles) {
+      if (!matchedZipNames.has(f.name)) {
+        const zc = catnoFromZip(f.name);
+        const inManifest = manifest.some(m => m.catno.toUpperCase() === zc || zc.includes(m.catno.toUpperCase()) || m.catno.toUpperCase().includes(zc));
+        if (!inManifest) orphanZip.push({ catno: zc, name: f.name });
+      }
+    }
+    return { ready, needZip, orphanZip };
+  }, [manifest, zipFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── processing (back half — mirrors DBHImporter) ────────────
+  const process = async () => {
+    if (!recon.ready.length) return;
+    setError(''); setStatus('processing'); setResults([]);
+    try {
+      const JSZip = await loadJSZip();
+      const list = recon.ready;
+      const total = list.length;
+      const processed = [];
+
+      for (let i = 0; i < list.length; i++) {
+        const m = list[i];
+        const catno  = m.catno.toUpperCase().trim();
+        const ov     = edits[m.catno] || {};
+        const artist = (ov.artist != null ? ov.artist : titleCaseSoft(m.artist)).trim();
+        const title  = (ov.title  != null ? ov.title  : titleCaseSoft(m.title)).trim();
+        const label  = m.label;
+        const genre  = mapGenrePreorder(m.genre);
+        const release = m.release;                          // YYYY-MM-DD (raw street date)
+        const year    = release ? new Date(release).getFullYear() : '';
+        const dealer  = m.dealerPrice != null ? m.dealerPrice : 0;
+        const rawPrice = dealer * (1 + margin / 100);
+        let price = Math.ceil(rawPrice) - 0.01;
+        // €9.99 floor (per existing pricing rules).
+        if (price < 9.99) price = 9.99;
+        price = price.toFixed(2);
+        const format = m.format || '';
+        const is2LP  = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
+        const grams  = is2LP ? '900' : '500';
+        const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+
+        setProgress({ done:i, total, current:`${catno} — processing…` });
+
+        let coverUrl = '';
+        let tracks   = [];
+        let itemError = '';
+
+        const zipFile = zipForCatno(catno);
+        if (zipFile) {
+          try {
+            setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f=>!f.dir);
+
+            const imgFiles  = files.filter(f=>/\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile = imgFiles.find(f=>/front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${catno} — uploading cover…` });
+              const blob = await coverFile.async('blob');
+              const ext  = coverFile.name.split('.').pop().toLowerCase();
+              coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            }
+
+            const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
+              setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
+            }
+          } catch(e) { itemError = e.message; }
+        }
+
+        // Fallback cover: if no ZIP cover, use the manifest's distributor cover
+        // URL (img.php). It's an external hotlink, not on R2, but better than
+        // a blank pre-order tile until the ZIP lands.
+        if (!coverUrl && m.coverUrl) coverUrl = m.coverUrl;
+
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: '' });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
+
+        // Tags: the forthcoming markers + release date are what the Part-1
+        // display layer keys off. release: tag stores the RAW street date;
+        // the +14-day buffer is applied at display time only.
+        const tagList = [
+          'vinyl',
+          `source:${m.source || 'dbh'}`,
+          label ? `label:${label}` : '',
+          genre,
+          year ? String(year) : '',
+          'forthcoming',
+          release ? `release:${release}` : '',
+        ].filter(Boolean);
+        const shopifyTags = tagList.join(', ');
+
+        processed.push({
+          _catno: catno, _title: title, _artist: artist,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _zipFound: !!zipFile, _release: release,
+          'Handle': handle,
+          'Title': title || catno,
+          'Body (HTML)': `${descHtml}${audioHtml}`,
+          'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+          'Type': '',
+          'Tags': shopifyTags,
+          'Published': 'TRUE',
+          'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
+          'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
+          'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
+          'Variant SKU': catno,
+          'Variant Grams': grams,
+          'Variant Inventory Tracker': 'shopify',
+          'Variant Inventory Qty': '0',                 // pre-order: no stock yet
+          'Variant Inventory Policy': 'continue',        // oversell on → demand ledger
+          'Variant Fulfillment Service': 'manual',
+          'Variant Price': price,
+          'Variant Compare At Price': '',
+          'Variant Requires Shipping': 'TRUE',
+          'Variant Taxable': 'TRUE',
+          'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
+          'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
+          'Variant Barcode': '',
+          'Image Src': coverUrl,
+          'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
+          'Variant Image':'','Variant Weight Unit':'kg',
+          'Variant Tax Code':'','Cost per item': dealer ? dealer.toFixed(2) : '','Status':'active',
+        });
+
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch(e) {
+      setError(e.message);
+      setStatus('idle');
+    }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k=>!k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...results.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'preorder_shopify_import.csv';
+    a.click();
+  };
+
+  const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+  const covered   = results.filter(r=>r._coverUrl).length;
+  const withAudio = results.filter(r=>r._tracks?.length>0).length;
+  const errors    = results.filter(r=>r._error).length;
+
+  const setEdit = (catno, key, val) =>
+    setEdits(prev => ({ ...prev, [catno]: { ...(prev[catno]||{}), [key]: val } }));
+
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
+        Pre-order / Forthcoming. Upload a <b style={{color:S.text}}>manifest</b> (CSV or JSON, generated from the distributor "Coming soon" emails) plus the <b style={{color:S.text}}>ZIP folders</b> you downloaded. Matched by catalog number. Listed as <b style={{color:S.accent}}>paid pre-orders</b>: stock 0, oversell on, tagged <code style={{color:S.accent}}>forthcoming</code> + <code style={{color:S.accent}}>release:</code>. Customers reserve now; you ship when it lands.
+      </p>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e=>e.preventDefault()}
+        onDrop={e=>{e.preventDefault();const files=[...e.dataTransfer.files];const mf=files.find(f=>/\.(csv|json)$/i.test(f.name));if(mf)loadManifest(mf);assignZips(files);}}
+        style={{border:`2px dashed ${(manifestName||zipFiles.length)?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',marginBottom:14,transition:'border 0.15s'}}
+      >
+        <div style={{fontSize:28,marginBottom:6}}>📅</div>
+        <div style={{fontSize:11,color:(manifestName||zipFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
+          Drag manifest (CSV/JSON) + ZIPs here
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+          <input ref={manifestRef} type="file" accept=".csv,.json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])loadManifest(e.target.files[0]);e.target.value='';}} />
+          <input ref={zipRef} type="file" accept=".zip" multiple style={{display:'none'}} onChange={e=>{assignZips(e.target.files);e.target.value='';}} />
+          <button onClick={()=>manifestRef.current.click()} style={{background:manifestName?S.accent:S.border,border:'none',color:manifestName?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {manifestName?`✓ ${manifestName}`:'+ Manifest'}
+          </button>
+          <button onClick={()=>zipRef.current.click()} style={{background:zipFiles.length?S.accent:S.border,border:'none',color:zipFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}
+          </button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
+        </div>
+      </div>
+
+      {/* Reconciliation view */}
+      {manifest.length>0&&status==='idle'&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
+            <span>Manifest: <b style={{color:S.text}}>{manifest.length}</b></span>
+            <span>✅ Ready: <b style={{color:S.accent}}>{recon.ready.length}</b></span>
+            <span>⚠ Need ZIP: <b style={{color:'#ff8800'}}>{recon.needZip.length}</b></span>
+            <span>⚠ Orphan ZIP: <b style={{color:'#ff8800'}}>{recon.orphanZip.length}</b></span>
+          </div>
+
+          {/* Need-ZIP list: tell the operator exactly what to download */}
+          {recon.needZip.length>0&&(
+            <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({recon.needZip.length})</div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                {recon.needZip.map((m,i)=>(
+                  <div key={i} style={{fontSize:10,color:S.text,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <span style={{fontFamily:'monospace',color:'#ff8800'}}>{m.catno}</span>
+                    <span style={{color:S.muted}}>{m.artist} — {m.title}</span>
+                    {m.zipUrl&&<a href={m.zipUrl} target="_blank" rel="noreferrer" style={{fontSize:9,color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'2px 8px'}}>↓ ZIP link</a>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Orphan-ZIP list: ZIPs with no manifest entry */}
+          {recon.orphanZip.length>0&&(
+            <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>ZIPs with no manifest entry ({recon.orphanZip.length})</div>
+              <div style={{fontSize:10,color:S.muted}}>{recon.orphanZip.map(z=>z.catno).join(' · ')}</div>
+              <div style={{fontSize:9,color:S.muted,marginTop:4}}>These need a manifest row (release date + price) before they can be listed.</div>
+            </div>
+          )}
+
+          {/* Ready list: editable artist/title for messy feed values */}
+          {recon.ready.length>0&&(
+            <div style={{border:`1px solid ${S.border}`,borderRadius:4,overflow:'hidden',marginBottom:10}}>
+              <div style={{fontSize:9,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'8px 12px',background:S.bg}}>Ready to list ({recon.ready.length}) — edit artist/title if needed</div>
+              <div style={{maxHeight:280,overflowY:'auto'}}>
+                {recon.ready.map((m,i)=>{
+                  const ov = edits[m.catno]||{};
+                  const artistVal = ov.artist!=null?ov.artist:titleCaseSoft(m.artist);
+                  const titleVal  = ov.title!=null?ov.title:titleCaseSoft(m.title);
+                  const previewPrice = (()=>{const dp=m.dealerPrice!=null?m.dealerPrice:0;let p=Math.ceil(dp*(1+margin/100))-0.01;if(p<9.99)p=9.99;return p.toFixed(2);})();
+                  return (
+                    <div key={i} style={{display:'flex',gap:8,alignItems:'center',padding:'7px 12px',borderTop:`1px solid ${S.border}`,flexWrap:'wrap'}}>
+                      <span style={{fontFamily:'monospace',fontSize:10,color:S.accent,minWidth:90}}>{m.catno}</span>
+                      <input value={artistVal} onChange={e=>setEdit(m.catno,'artist',e.target.value)} placeholder="Artist" style={{flex:1,minWidth:90,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      <input value={titleVal} onChange={e=>setEdit(m.catno,'title',e.target.value)} placeholder="Title" style={{flex:1,minWidth:90,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      <span style={{fontSize:9,color:S.muted,minWidth:120}}>{formatExpected(addDays(m.release,14))}</span>
+                      <span style={{fontSize:10,color:S.accent,fontWeight:700,minWidth:48,textAlign:'right'}}>€{previewPrice}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Margin + process */}
+      {recon.ready.length>0&&status==='idle'&&(
+        <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <span style={{fontSize:10,color:S.muted}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)} style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
+          </div>
+          <span style={{fontSize:9,color:S.muted}}>dealer €8.00 × {(1+margin/100).toFixed(2)} = €{(8*(1+margin/100)).toFixed(2)} → €{(Math.ceil(8*(1+margin/100))-0.01).toFixed(2)} (floor €9.99)</span>
+          <div style={{flex:1}}/>
+          <Btn ch={`📅 List ${recon.ready.length} pre-orders`} onClick={process} full />
+        </div>
+      )}
+
+      {/* Progress */}
+      {status==='processing'&&(
+        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>LISTING PRE-ORDERS…</span>
+            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
+            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
+          </div>
+          {progress.current&&<div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {error&&<div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>}
+
+      {/* Results */}
+      {status==='review'&&results.length>0&&(
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.length} pre-orders</span>
+              <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
+                {covered} covers · {withAudio} audio
+                {errors>0?` · ${errors} errors`:''}
+              </span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+
+          <div style={{padding:'8px 12px',background:'#0a1200',border:`1px solid ${S.accent}33`,borderRadius:4,marginBottom:12,fontSize:9,color:S.muted,lineHeight:1.6}}>
+            After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
+            {results.map((r,i)=>(
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
+                <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
+                  {r._coverUrl
+                    ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
+                    :<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
+                  }
+                  {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
+                  <div style={{position:'absolute',top:4,left:4,background:S.accent,borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRE-ORDER</div>
+                  {r._error&&<div style={{position:'absolute',top:4,right:4,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:4,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
+                </div>
+                <div style={{padding:'8px 8px 6px'}}>
+                  <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
+                  <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
+                  <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
+                  <div style={{fontSize:8,color:S.muted,marginTop:2}}>{formatExpected(addDays(r._release,14))}</div>
+                  <div style={{fontSize:10,color:S.accent,marginTop:3,fontWeight:700}}>€{r['Variant Price']}</div>
+                  {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -6127,6 +6626,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('dbh','🏠 DBH Import')}
           {tabBtn('mt','🇮🇹 MT Import')}
           {tabBtn('rh','💎 Rush Hour Import')}
+          {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
         </div>
         {tab==='zip'   && <ZipImporter />}
@@ -6134,6 +6634,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+        {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
