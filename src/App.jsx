@@ -6152,6 +6152,7 @@ function PreorderImporter() {
   const [excluded, setExcluded]     = useState({}); // catno -> true: dropped from CSV export
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
+  const [downloading, setDownloading] = useState(false);
   const manifestRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -6296,6 +6297,21 @@ function PreorderImporter() {
       }
     };
     rd.readAsText(file, 'UTF-8');
+  };
+
+  // Download every pre-sale ZIP the manifest references. Anchor-click per URL on
+  // a 2.5s stagger (the proven mechanism — pop-up blockers kill window.open).
+  const downloadAllZips = async () => {
+    const urls = manifest.map(m => m.zipUrl).filter(Boolean);
+    if (!urls.length) { setError('No zip URLs in the manifest to download.'); return; }
+    setDownloading(true);
+    for (let i = 0; i < urls.length; i++) {
+      const a = document.createElement('a');
+      a.href = urls[i]; a.download = '';
+      document.body.appendChild(a); a.click(); a.remove();
+      await new Promise(r => setTimeout(r, 2500));
+    }
+    setDownloading(false);
   };
 
   const assignZips = (files) => {
@@ -6557,6 +6573,11 @@ function PreorderImporter() {
             {zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
+          {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(
+            <button onClick={downloadAllZips} disabled={downloading} style={{background:'none',border:`1px solid ${S.accent}`,color:S.accent,cursor:downloading?'default':'pointer',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+              {downloading?'Downloading…':`↓ Download all ZIPs (${manifest.filter(m=>m.zipUrl).length})`}
+            </button>
+          )}
         </div>
       </div>
 
