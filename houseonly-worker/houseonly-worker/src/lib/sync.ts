@@ -985,8 +985,20 @@ export async function handleProductCreateWebhook(
 
   // 4. Filter: only source:dbh products
   const tags = body.tags || '';
-  if (!tags.split(',').map(t => t.trim()).includes(AUTO_LIST_SOURCE_TAG)) {
+  const tagList = tags.split(',').map(t => t.trim());
+  if (!tagList.includes(AUTO_LIST_SOURCE_TAG)) {
     return jsonResponse({ ok: true, processed: 0, reason: 'not source:dbh' });
+  }
+
+  // 4b. NEVER list pre-orders on Discogs. A `forthcoming` product has stock 0
+  // and no physical copy — listing it would let a Discogs buyer purchase a
+  // record we don't hold. This is the SINGLE entry point that feeds both the
+  // auto-list path AND the pending-review queue, so guarding here protects
+  // both. Graduation is symmetric: when the record physically arrives, the
+  // arrival step removes the `forthcoming` tag, and a later products/update
+  // (or manual re-trigger) makes it Discogs-eligible again.
+  if (tagList.includes('forthcoming')) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'forthcoming pre-order — not listed on Discogs', sku: (((body.variants || [])[0] || {}).sku || '').trim() });
   }
 
   // 5. Extract identifiers from the first variant
