@@ -206,6 +206,36 @@ async function fetchAllProductMetadata() {
   return all;
 }
 
+// Fetch the set of handles + variant SKUs of every LIVE product, lowercased.
+// Used by the pre-order importer to auto-exclude records that already exist in
+// the catalogue (an exact cat-no match would otherwise re-import a live, in-stock
+// product as a stock-0 "forthcoming" pre-order). Small payload: handle + first
+// variant SKU only. Returns a Set for O(1) exact-match lookup.
+async function fetchLiveHandles() {
+  const set = new Set();
+  let cursor = null;
+  let safety = 25; // up to 25 × 250 = 6250 products
+  while (safety-- > 0) {
+    const after = cursor ? `, after: "${cursor}"` : '';
+    const data = await shopifyQuery(`{
+      products(first: 250${after}) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { handle variants(first: 1) { edges { node { sku } } } } }
+      }
+    }`);
+    const { edges, pageInfo } = data.products;
+    for (const e of edges) {
+      const h = (e.node.handle || '').trim().toLowerCase();
+      if (h) set.add(h);
+      const sku = (e.node.variants?.edges?.[0]?.node?.sku || '').trim().toLowerCase();
+      if (sku) set.add(sku);
+    }
+    if (!pageInfo.hasNextPage) break;
+    cursor = pageInfo.endCursor;
+  }
+  return set;
+}
+
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
 // where the record may not be in our paginated `records` array yet.
 async function fetchShopifyProductByHandle(handle) {
@@ -6150,6 +6180,7 @@ function PreorderImporter() {
   const [progress, setProgress]     = useState({ done:0, total:0, current:'' });
   const [results, setResults]       = useState([]);
   const [excluded, setExcluded]     = useState({}); // catno -> true: dropped from CSV export
+  const [liveHandles, setLiveHandles] = useState(null); // Set of lowercased live handles+SKUs (null = not yet fetched)
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
   const [downloading, setDownloading] = useState(false);
@@ -6292,6 +6323,12 @@ function PreorderImporter() {
         setManifest(norm);
         setManifestName(file.name);
         setError('');
+        // Fetch live catalogue handles/SKUs so the reconciliation view can
+        // auto-exclude any pre-order whose cat-no already exists as a product.
+        setLiveHandles(null);
+        fetchLiveHandles()
+          .then(setLiveHandles)
+          .catch(() => setLiveHandles(new Set())); // on failure: no exclusions, never blocks the import
       } catch (e) {
         setError(`Manifest parse failed: ${e.message}`);
       }
@@ -6341,10 +6378,12 @@ function PreorderImporter() {
   const recon = useMemo(() => {
     const ready = [], needZip = [], orphanZip = [];
     const matchedZipNames = new Set();
+    const isLive = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
     for (const m of manifest) {
+      const alreadyLive = isLive(m.catno);
       const zf = zipForCatno(m.catno);
-      if (zf) { ready.push({ ...m, _zip: zf.name }); matchedZipNames.add(zf.name); }
-      else needZip.push(m);
+      if (zf) { ready.push({ ...m, _zip: zf.name, _alreadyLive: alreadyLive }); matchedZipNames.add(zf.name); }
+      else needZip.push({ ...m, _alreadyLive: alreadyLive });
     }
     for (const f of zipFiles) {
       if (!matchedZipNames.has(f.name)) {
@@ -6354,7 +6393,7 @@ function PreorderImporter() {
       }
     }
     return { ready, needZip, orphanZip };
-  }, [manifest, zipFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── processing (back half — mirrors DBHImporter) ────────────
   const process = async () => {
@@ -6467,6 +6506,7 @@ function PreorderImporter() {
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _zipFound: !!zipFile, _release: release,
+          _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
           _genre: genre,                              // editable in review; rebuilds Tags
           _label: label, _source: (m.source || 'dbh'), _year: year ? String(year) : '',
           'Handle': handle,
@@ -6525,7 +6565,7 @@ function PreorderImporter() {
   ].filter(Boolean).join(', ');
 
   const downloadCSV = () => {
-    const kept = results.filter(r => !excluded[r._catno]);
+    const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
     const CSV_KEYS = Object.keys(kept[0]).filter(k=>!k.startsWith('_'));
     const lines = [CSV_KEYS.join(','), ...kept.map(row=>CSV_KEYS.map(h=>{
@@ -6589,6 +6629,10 @@ function PreorderImporter() {
             <span>✅ Ready: <b style={{color:S.accent}}>{recon.ready.length}</b></span>
             <span>⚠ Need ZIP: <b style={{color:'#ff8800'}}>{recon.needZip.length}</b></span>
             <span>⚠ Orphan ZIP: <b style={{color:'#ff8800'}}>{recon.orphanZip.length}</b></span>
+            {liveHandles===null
+              ? <span style={{color:S.muted}}>⊘ Already live: <b>checking…</b></span>
+              : (()=>{const n=[...recon.ready,...recon.needZip].filter(r=>r._alreadyLive).length; return <span>⊘ Already live: <b style={{color:n>0?'#ff8800':S.muted}}>{n}</b>{n>0?' (auto-excluded)':''}</span>;})()
+            }
           </div>
 
           {/* Need-ZIP list: tell the operator exactly what to download */}
@@ -6676,7 +6720,7 @@ function PreorderImporter() {
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
             <div>
-              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]).length} pre-orders</span>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]&&!r._alreadyLive).length} pre-orders</span>
               <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
                 {covered} covers · {withAudio} audio
                 {errors>0?` · ${errors} errors`:''}
@@ -6692,9 +6736,9 @@ function PreorderImporter() {
 
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>{
-              const isOut = !!excluded[r._catno];
+              const isOut = !!excluded[r._catno] || r._alreadyLive;
               return (
-              <div key={i} style={{background:S.surf,border:`1px solid ${isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._alreadyLive?'#ff8800':isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
                 <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
                   {r._coverUrl
                     ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
@@ -6702,9 +6746,12 @@ function PreorderImporter() {
                   }
                   {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
                   <div style={{position:'absolute',top:4,left:4,background:S.accent,borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRE-ORDER</div>
-                  <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
+                  {r._alreadyLive
+                    ? <div title="Already a live product — excluded from export" style={{position:'absolute',top:4,right:4,background:'#ff8800',border:'none',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700,lineHeight:1}}>ALREADY LIVE</div>
+                    : <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
+                  }
                   {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
-                  {!r._coverUrl&&!r._error&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
+                  {!r._coverUrl&&!r._error&&!r._alreadyLive&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>
                   <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
