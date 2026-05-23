@@ -6345,8 +6345,10 @@ function PreorderImporter() {
   // Download every pre-sale ZIP the manifest references. Anchor-click per URL on
   // a 2.5s stagger (the proven mechanism — pop-up blockers kill window.open).
   const downloadAllZips = async () => {
-    const urls = manifest.map(m => m.zipUrl).filter(Boolean);
-    if (!urls.length) { setError('No zip URLs in the manifest to download.'); return; }
+    const rows = manifest
+      .map(m => ({ id: (m.zipUrl || '').match(/\/release_zip\/(\d+)/)?.[1], catno: m.catno }))
+      .filter(r => r.id);
+    if (!rows.length) { setError('No DBH zip URLs in the manifest to download.'); return; }
     setDownloadDone(false);
     setDownloadProgress(0);
     setDownloadStats({ ok: 0, missing: 0, failed: 0 });
@@ -6354,61 +6356,45 @@ function PreorderImporter() {
 
     let ok = 0, missing = 0, failed = 0;
 
-    const filenameFromUrl = (url, i) => {
-      const m = url.match(/\/release_zip\/(\d+)/);
-      return m ? `dbh_${m[1]}.zip` : `release_${i + 1}.zip`;
-    };
-
-    for (let i = 0; i < urls.length; i++) {
-      const url = urls[i];
+    for (let i = 0; i < rows.length; i++) {
+      const { id } = rows[i];
       try {
-        // Fetch the whole ZIP as a blob and WAIT for it to fully arrive before
-        // moving to the next URL. This is the key fix: a fixed delay fired the
-        // next download before the previous finished, so larger ZIPs were cut
-        // off mid-stream. Awaiting res.blob() paces the loop to DBH's actual
-        // speed — each file completes before the next begins. credentials:
-        // 'include' sends the DBH session cookie so authenticated ZIPs work.
-        const res = await fetch(url, { credentials: 'include' });
-        if (!res.ok) {
-          // 404 / 403 etc. — release has no ZIP yet (waiting on distributor
-          // assets). Skip it; it will reappear in the next manifest build.
+        // Fetch via our OWN Worker proxy (?action=dbh-zip&id=...), not DBH
+        // directly. DBH sends no CORS headers, so a direct browser fetch is
+        // blocked. The Worker fetches the public ZIP server-side and streams it
+        // back from our origin WITH CORS, so we can await the blob to full
+        // completion before starting the next — true one-at-a-time downloading,
+        // no cut-offs. If the release has no ZIP yet the proxy returns JSON
+        // {ok:false, missing:true}; a real ZIP comes back as application/zip.
+        const res = await fetch(`${WORKER_URL}?action=dbh-zip&id=${id}`);
+        const ctype = res.headers.get('content-type') || '';
+        if (!res.ok || ctype.includes('application/json')) {
+          // No asset uploaded yet (waiting on distributor). Skip; it reappears
+          // in the next manifest build and downloads once DBH adds the ZIP.
           missing++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
+          await new Promise(r => setTimeout(r, 200));
           continue;
         }
-        const blob = await res.blob();
+        const blob = await res.blob();      // waits for the FULL file
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = filenameFromUrl(url, i);
+        a.download = `dbh_${id}.zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
-        // Release the object URL shortly after the save dialog has consumed it.
         setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
         ok++;
         setDownloadStats({ ok, missing, failed });
       } catch (e) {
-        // Cross-origin fetch blocked (CORS), network error, etc. Fall back to a
-        // plain anchor click — opens in a throwaway tab so it can't navigate or
-        // abort the importer page. We can't confirm success this way, so count
-        // it separately as "failed/uncertain" rather than ok.
-        try {
-          const a = document.createElement('a');
-          a.href = url;
-          a.target = '_blank';
-          a.rel = 'noopener';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        } catch (e2) { /* ignore */ }
+        // Network/proxy error for this one — count and continue, never abort.
         failed++;
         setDownloadStats({ ok, missing, failed });
       }
       setDownloadProgress(i + 1);
-      // Small breather between files to be polite to the server.
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 300)); // brief breather between files
     }
     setDownloading(false);
     setDownloadDone(true);
@@ -6681,7 +6667,7 @@ function PreorderImporter() {
             const label = downloading
               ? `Downloading… ${downloadProgress}/${total}`
               : downloadDone
-                ? `✓ Done — ${downloadStats.ok} downloaded${downloadStats.missing?`, ${downloadStats.missing} no ZIP yet`:''}${downloadStats.failed?`, ${downloadStats.failed} via tab`:''}`
+                ? `✓ Done — ${downloadStats.ok} downloaded${downloadStats.missing?`, ${downloadStats.missing} no ZIP yet`:''}${downloadStats.failed?`, ${downloadStats.failed} failed`:''}`
                 : `↓ Download all ZIPs (${total})`;
             const col = downloadDone && !downloading ? S.accent : S.accent;
             return (
