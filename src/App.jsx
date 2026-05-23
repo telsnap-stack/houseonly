@@ -6357,7 +6357,7 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { id } = rows[i];
+      const { id, catno } = rows[i];
       try {
         // Fetch via our OWN Worker proxy (?action=dbh-zip&id=...), not DBH
         // directly. DBH sends no CORS headers, so a direct browser fetch is
@@ -6381,7 +6381,12 @@ function PreorderImporter() {
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = `dbh_${id}.zip`;
+        // Name the file by CAT-NO, not release id — the importer matches ZIPs
+        // to manifest rows via catnoFromZip() (strips .zip, uppercases). DBH's
+        // own content-disposition already uses the cat-no (e.g. CWX09.zip); we
+        // mirror that so dropped ZIPs match. Sanitize only path separators.
+        const safeCatno = (catno || `dbh_${id}`).replace(/[\/\\]/g, '_');
+        a.download = `${safeCatno}.zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
