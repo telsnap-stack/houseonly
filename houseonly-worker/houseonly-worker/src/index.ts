@@ -555,6 +555,64 @@ export default {
       return jsonRes(result);
     }
 
+    // ── DBH ZIP PROXY ───────────────────────────────────────
+    // GET ?action=dbh-zip&id=16224
+    //
+    // DBH release asset ZIPs (dbh-music.com/shop/release_zip/{id}) are public
+    // (confirmed: download in a logged-out incognito window) but the browser
+    // cannot fetch() them cross-origin — DBH sends no CORS headers, so a direct
+    // client-side fetch is blocked and the importer can't await completion.
+    // This proxy fetches the ZIP server-side (no CORS in Worker-land) and
+    // streams it back from our own origin with CORS, so the pre-order importer
+    // can fetch → await blob → save → next, downloading strictly one at a time.
+    //
+    // Locked to DBH release_zip only: id must be all-digits, prefix hardcoded.
+    // Not an open proxy. No auth needed (public asset); no Shopify/Discogs touch.
+    if (action === 'dbh-zip' && request.method === 'GET') {
+      const id = url.searchParams.get('id') || '';
+      if (!/^\d+$/.test(id)) {
+        return jsonRes({ ok: false, error: 'id must be numeric' }, 400);
+      }
+      try {
+        const upstream = await fetch(`https://dbh-music.com/shop/release_zip/${id}`, {
+          redirect: 'follow',
+          // Use a normal browser User-Agent. DBH's nginx appears to reject/redirect
+          // unknown agents (a custom UA returned no file; a default curl-style UA
+          // returns the ZIP). Send browser-like headers so DBH serves the asset.
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept': '*/*',
+          },
+        });
+        const ct = (upstream.headers.get('content-type') || '').toLowerCase();
+        const cd = (upstream.headers.get('content-disposition') || '').toLowerCase();
+        // Treat as a real file if DBH returns a zip-ish content-type OR an
+        // attachment disposition. DBH serves "application/x-zip" (non-standard)
+        // with `content-disposition: attachment; filename=...zip`, so accept
+        // both the x-zip variant and the attachment header. Anything else
+        // (html login page, error) is "no asset yet".
+        const looksLikeZip =
+          ct.includes('zip') || ct.includes('octet-stream') || cd.includes('attachment');
+        if (!upstream.ok || !upstream.body || !looksLikeZip) {
+          return jsonRes({
+            ok: false, missing: true,
+            status: upstream.status, contentType: ct,
+          }, 200);
+        }
+        // Stream the ZIP straight back with CORS so the browser can read+await it.
+        return new Response(upstream.body, {
+          status: 200,
+          headers: {
+            ...CORS,
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="dbh_${id}.zip"`,
+          },
+        });
+      } catch (e: any) {
+        return jsonRes({ ok: false, error: e.message }, 502);
+      }
+    }
+
     // ── FASE 3.5B: PRODUCTS/CREATE WEBHOOK ──────────────────
     // POST ?action=webhook-shopify-product
     // Headers: X-Shopify-Hmac-SHA256, X-Shopify-Topic: products/create
