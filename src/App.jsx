@@ -1372,7 +1372,7 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
         <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
         {r.desc && (
-          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:520 }}>{r.desc}</p>
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:460 }}>{r.desc}</p>
         )}
         {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
         {hasTracks && player && (
@@ -1387,8 +1387,8 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         )}
       </div>
 
-      {/* Right: metadata block + pre-order — left aligned */}
-      <div style={{ width:isMobile?'100%':220, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
+      {/* Right: metadata block + pre-order — flush to the container right edge */}
+      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
         <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
