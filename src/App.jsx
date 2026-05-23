@@ -6349,9 +6349,19 @@ function PreorderImporter() {
     setDownloadProgress(0);
     setDownloading(true);
     for (let i = 0; i < urls.length; i++) {
-      const a = document.createElement('a');
-      a.href = urls[i]; a.download = '';
-      document.body.appendChild(a); a.click(); a.remove();
+      // Use a transient hidden iframe rather than an <a> click. A real ZIP
+      // triggers the browser download; a 404 or text/html response just loads
+      // harmlessly into the throwaway iframe instead of navigating (and aborting)
+      // the importer page. DBH's release_zip endpoint does not reliably send
+      // Content-Disposition: attachment, and not every release has a ZIP, so an
+      // <a download> would otherwise navigate the top window on the first miss.
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = urls[i];
+      document.body.appendChild(iframe);
+      // Remove the iframe a moment later; the download has already been kicked off
+      // by then. Keeping it briefly avoids cancelling an in-flight download.
+      setTimeout(() => { try { iframe.remove(); } catch (e) {} }, 2000);
       setDownloadProgress(i + 1);
       await new Promise(r => setTimeout(r, 2500));
     }
