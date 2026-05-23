@@ -1372,7 +1372,7 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
         <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
         {r.desc && (
-          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:460 }}>{r.desc}</p>
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:620 }}>{r.desc}</p>
         )}
         {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
         {hasTracks && player && (
@@ -1387,7 +1387,8 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         )}
       </div>
 
-      {/* Right: metadata block + pre-order — flush to the container right edge */}
+      {/* Right: metadata at top (left-aligned), price + pre-order flush to the
+          right margin below — lines up under the LIST/GRID toggle. */}
       <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
@@ -1396,10 +1397,10 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
           <span style={{ color:S.accent, fontWeight:700 }}>{expected.replace(/^Expected\s/, '')}</span>
         </div>
         {metaRow('Genre', r.genre)}
-        <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:8 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:10, marginTop:8 }}>
           <span style={{ fontSize:18, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
         </div>
-        <div style={{ display:'flex', gap:8, marginTop:6, alignItems:'center' }}>
+        <div style={{ display:'flex', gap:8, marginTop:6, alignItems:'center', justifyContent:'flex-end' }}>
           <button onClick={()=>onAdd(r)} title="Pre-order — pay now, ships when it arrives" style={{ flex:1, background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Pre-order</button>
           {onWishlistToggle && (
             <button onClick={()=>onWishlistToggle(r)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 10px', cursor:'pointer', display:'flex', alignItems:'center' }}>
@@ -7476,7 +7477,7 @@ export default function App() {
           </div>
         )}
         {filters.forthcoming && forthcomingView==='list' ? (
-          <div style={{maxWidth:880}}>
+          <div>
             {filtered.map(r=><ForthcomingRow key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
           </div>
         ) : (
