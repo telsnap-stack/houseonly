@@ -6186,6 +6186,7 @@ function PreorderImporter() {
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
+  const [downloadStats, setDownloadStats] = useState({ ok: 0, missing: 0, failed: 0 }); // download-all outcome breakdown
   const manifestRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -6327,6 +6328,7 @@ function PreorderImporter() {
         setError('');
         setDownloadDone(false);     // new manifest → clear any prior "done" signal
         setDownloadProgress(0);
+        setDownloadStats({ ok: 0, missing: 0, failed: 0 });
         // Fetch live catalogue handles/SKUs so the reconciliation view can
         // auto-exclude any pre-order whose cat-no already exists as a product.
         setLiveHandles(null);
@@ -6347,23 +6349,66 @@ function PreorderImporter() {
     if (!urls.length) { setError('No zip URLs in the manifest to download.'); return; }
     setDownloadDone(false);
     setDownloadProgress(0);
+    setDownloadStats({ ok: 0, missing: 0, failed: 0 });
     setDownloading(true);
+
+    let ok = 0, missing = 0, failed = 0;
+
+    const filenameFromUrl = (url, i) => {
+      const m = url.match(/\/release_zip\/(\d+)/);
+      return m ? `dbh_${m[1]}.zip` : `release_${i + 1}.zip`;
+    };
+
     for (let i = 0; i < urls.length; i++) {
-      // Use a transient hidden iframe rather than an <a> click. A real ZIP
-      // triggers the browser download; a 404 or text/html response just loads
-      // harmlessly into the throwaway iframe instead of navigating (and aborting)
-      // the importer page. DBH's release_zip endpoint does not reliably send
-      // Content-Disposition: attachment, and not every release has a ZIP, so an
-      // <a download> would otherwise navigate the top window on the first miss.
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = urls[i];
-      document.body.appendChild(iframe);
-      // Remove the iframe a moment later; the download has already been kicked off
-      // by then. Keeping it briefly avoids cancelling an in-flight download.
-      setTimeout(() => { try { iframe.remove(); } catch (e) {} }, 2000);
+      const url = urls[i];
+      try {
+        // Fetch the whole ZIP as a blob and WAIT for it to fully arrive before
+        // moving to the next URL. This is the key fix: a fixed delay fired the
+        // next download before the previous finished, so larger ZIPs were cut
+        // off mid-stream. Awaiting res.blob() paces the loop to DBH's actual
+        // speed — each file completes before the next begins. credentials:
+        // 'include' sends the DBH session cookie so authenticated ZIPs work.
+        const res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) {
+          // 404 / 403 etc. — release has no ZIP yet (waiting on distributor
+          // assets). Skip it; it will reappear in the next manifest build.
+          missing++;
+          setDownloadStats({ ok, missing, failed });
+          setDownloadProgress(i + 1);
+          continue;
+        }
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filenameFromUrl(url, i);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Release the object URL shortly after the save dialog has consumed it.
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
+        ok++;
+        setDownloadStats({ ok, missing, failed });
+      } catch (e) {
+        // Cross-origin fetch blocked (CORS), network error, etc. Fall back to a
+        // plain anchor click — opens in a throwaway tab so it can't navigate or
+        // abort the importer page. We can't confirm success this way, so count
+        // it separately as "failed/uncertain" rather than ok.
+        try {
+          const a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } catch (e2) { /* ignore */ }
+        failed++;
+        setDownloadStats({ ok, missing, failed });
+      }
       setDownloadProgress(i + 1);
-      await new Promise(r => setTimeout(r, 2500));
+      // Small breather between files to be polite to the server.
+      await new Promise(r => setTimeout(r, 400));
     }
     setDownloading(false);
     setDownloadDone(true);
@@ -6636,7 +6681,7 @@ function PreorderImporter() {
             const label = downloading
               ? `Downloading… ${downloadProgress}/${total}`
               : downloadDone
-                ? `✓ Done — ${total} sent to Downloads`
+                ? `✓ Done — ${downloadStats.ok} downloaded${downloadStats.missing?`, ${downloadStats.missing} no ZIP yet`:''}${downloadStats.failed?`, ${downloadStats.failed} via tab`:''}`
                 : `↓ Download all ZIPs (${total})`;
             const col = downloadDone && !downloading ? S.accent : S.accent;
             return (
