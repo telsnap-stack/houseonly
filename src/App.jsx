@@ -6184,6 +6184,8 @@ function PreorderImporter() {
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
   const [downloading, setDownloading] = useState(false);
+  const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
+  const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
   const manifestRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -6323,6 +6325,8 @@ function PreorderImporter() {
         setManifest(norm);
         setManifestName(file.name);
         setError('');
+        setDownloadDone(false);     // new manifest → clear any prior "done" signal
+        setDownloadProgress(0);
         // Fetch live catalogue handles/SKUs so the reconciliation view can
         // auto-exclude any pre-order whose cat-no already exists as a product.
         setLiveHandles(null);
@@ -6341,14 +6345,18 @@ function PreorderImporter() {
   const downloadAllZips = async () => {
     const urls = manifest.map(m => m.zipUrl).filter(Boolean);
     if (!urls.length) { setError('No zip URLs in the manifest to download.'); return; }
+    setDownloadDone(false);
+    setDownloadProgress(0);
     setDownloading(true);
     for (let i = 0; i < urls.length; i++) {
       const a = document.createElement('a');
       a.href = urls[i]; a.download = '';
       document.body.appendChild(a); a.click(); a.remove();
+      setDownloadProgress(i + 1);
       await new Promise(r => setTimeout(r, 2500));
     }
     setDownloading(false);
+    setDownloadDone(true);
   };
 
   const assignZips = (files) => {
@@ -6613,11 +6621,20 @@ function PreorderImporter() {
             {zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
-          {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(
-            <button onClick={downloadAllZips} disabled={downloading} style={{background:'none',border:`1px solid ${S.accent}`,color:S.accent,cursor:downloading?'default':'pointer',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-              {downloading?'Downloading…':`↓ Download all ZIPs (${manifest.filter(m=>m.zipUrl).length})`}
+          {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
+            const total = manifest.filter(m=>m.zipUrl).length;
+            const label = downloading
+              ? `Downloading… ${downloadProgress}/${total}`
+              : downloadDone
+                ? `✓ Done — ${total} sent to Downloads`
+                : `↓ Download all ZIPs (${total})`;
+            const col = downloadDone && !downloading ? S.accent : S.accent;
+            return (
+            <button onClick={downloadAllZips} disabled={downloading} title={downloadDone?'Click to download again':''} style={{background:downloadDone&&!downloading?`${S.accent}22`:'none',border:`1px solid ${col}`,color:col,cursor:downloading?'default':'pointer',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+              {label}
             </button>
-          )}
+            );
+          })()}
         </div>
       </div>
 
