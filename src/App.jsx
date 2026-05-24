@@ -7024,8 +7024,9 @@ function PolicyDrawer({ slug, onClose }) {
   );
 }
 function Nav({ onLogo, children }) {
+  const isMobile = useIsMobile(720);
   return (
-    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:isMobile?'8px 14px':'0 16px',minHeight:52,height:isMobile?'auto':52,display:'flex',flexWrap:isMobile?'wrap':'nowrap',alignItems:'center',justifyContent:'space-between',gap:isMobile?8:8}}>
       <Logo scale={0.65} onClick={onLogo} />
       {children}
     </nav>
@@ -7047,6 +7048,7 @@ export default function App() {
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
   const [search,setSearch]               = useState('');
+  const navMobile = useIsMobile(720); // drives the two-row mobile header layout
   // Debounced version of `search`: updated 300ms after the user stops typing.
   // We use this (not `search`) in fetchParams so we don't fire a Shopify
   // search request on every keystroke.
@@ -7464,9 +7466,8 @@ export default function App() {
     <PlayerProvider>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
-        <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
-          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
+        {/* Icon buttons — row 1, top-right beside the logo on mobile */}
+        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </button>
@@ -7474,9 +7475,14 @@ export default function App() {
             <HeartIcon wished={wishItems.length>0} size={13} />
             {wishItems.length>0 && <span style={{fontSize:10,fontWeight:700,letterSpacing:1}}>{wishItems.length}</span>}
           </button>
-          <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
+          <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',flexShrink:0}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
+        </div>
+        {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
+        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
+          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
 
