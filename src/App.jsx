@@ -253,15 +253,39 @@ async function fetchShopifyProductByHandle(handle) {
 }
 
 // ── CHECKOUT ───────────────────────────────────────────────────
-async function shopifyCheckout(cartItems, customerAccessToken=null) {
+async function shopifyCheckout(cartItems, session=null) {
   const lines = cartItems
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
   if (!lines.length) throw new Error('No items in cart.');
-  const input = { lines };
-  if (customerAccessToken) {
-    input.buyerIdentity = { customerAccessToken };
+
+  // Authenticated path: when the buyer is logged in, create the cart in the
+  // Worker so it can attach the CAAPI access token (held server-side) as the
+  // cart's buyerIdentity. The buyer then stays logged in through to checkout —
+  // their details, saved cards and store credit carry over. The access token
+  // never touches the browser.
+  if (session) {
+    try {
+      const r = await fetch(`${WORKER_URL}?action=create-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session, lines }),
+      });
+      const d = await r.json();
+      if (r.ok && d.checkoutUrl) {
+        window.open(d.checkoutUrl, '_blank');
+        return;
+      }
+      // If the Worker couldn't build an authenticated cart, fall through to the
+      // guest path below rather than failing the purchase.
+    } catch {
+      // Network/Worker error → fall through to guest checkout.
+    }
   }
+
+  // Guest path (anonymous buyer, or authenticated path fell through): create
+  // the cart directly via the Storefront API, exactly as before.
+  const input = { lines };
   const data = await shopifyQuery(
     `mutation cartCreate($input: CartInput!) {
       cartCreate(input: $input) {
@@ -355,9 +379,15 @@ async function fetchCoverArt(title, artist, ean, label='', year='', catno='') {
 
 // ── CUSTOMER AUTH ──────────────────────────────────────────────
 //
-// Customer accounts use Shopify Storefront API. Access tokens are stored
-// in localStorage. Anonymous users still get a working wishlist via local
-// storage (the useWishlist hook below).
+// Customer accounts use Shopify's New Customer Accounts (NCA) via the Customer
+// Account API. Auth is a confidential OAuth flow handled entirely by the Worker
+// (/auth/login, /auth/callback, /auth/logout). The browser never sees a Shopify
+// token — only an opaque SESSION id minted by the Worker, kept in localStorage
+// and sent to the Worker on each request (same way the old Storefront token was
+// sent). The Worker resolves session → customerId and holds the real CAAPI
+// access/refresh tokens server-side in KV.
+//
+// Anonymous users still get a working wishlist via localStorage (below).
 
 const AUTH_KEY  = 'houseonly_customer_auth';
 const WISH_KEY  = 'houseonly_wishlist';
@@ -367,11 +397,9 @@ function loadAuth() {
     const raw = localStorage.getItem(AUTH_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed?.token || !parsed?.expiresAt) return null;
-    if (new Date(parsed.expiresAt).getTime() < Date.now()) {
-      localStorage.removeItem(AUTH_KEY);
-      return null;
-    }
+    // New model: { session }. Reject legacy { token } shapes so a stale
+    // pre-migration auth blob can't be mistaken for a valid session.
+    if (!parsed?.session) return null;
     return parsed;
   } catch { return null; }
 }
@@ -379,6 +407,41 @@ function loadAuth() {
 function saveAuth(auth) {
   if (auth) localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
   else localStorage.removeItem(AUTH_KEY);
+}
+
+// After the Worker's /auth/callback redirects back to the site, the opaque
+// session id arrives in the URL fragment as #session=XXX. Capture it, persist
+// it as our auth, and strip the fragment from the URL (so it isn't left in the
+// address bar / history). Returns the new auth object, or null if no session
+// fragment was present.
+function captureSessionFromUrl() {
+  try {
+    const hash = window.location.hash || '';
+    const m = hash.match(/[#&]session=([^&]+)/);
+    if (!m) return null;
+    const session = decodeURIComponent(m[1]);
+    if (!session) return null;
+    const auth = { session };
+    saveAuth(auth);
+    // Remove the fragment without reloading or adding a history entry.
+    const clean = window.location.pathname + window.location.search;
+    window.history.replaceState(null, '', clean);
+    return auth;
+  } catch {
+    return null;
+  }
+}
+
+// Build the Worker auth URLs for this environment. WORKER_URL already points at
+// the right env (prod vs staging) via VITE_WORKER_URL, so login/logout follow.
+function workerLoginUrl(returnToPath) {
+  const rt = encodeURIComponent(returnToPath || (typeof window !== 'undefined' ? window.location.pathname : '/'));
+  return `${WORKER_URL}/auth/login?return_to=${rt}`;
+}
+function workerLogoutUrl(session, returnToPath) {
+  const rt = encodeURIComponent(returnToPath || '/');
+  const s = encodeURIComponent(session || '');
+  return `${WORKER_URL}/auth/logout?session=${s}&return_to=${rt}`;
 }
 
 async function customerLogin(email, password) {
@@ -471,74 +534,26 @@ async function customerActivateByUrl(activationUrl, password) {
   return result.customerAccessToken;
 }
 
-async function customerProfile(token) {
-  if (!token) return null;
+async function customerProfile(session) {
+  if (!session) return null;
   try {
-    const d = await shopifyQuery(`
-      query($t: String!) {
-        customer(customerAccessToken: $t) {
-          id email firstName lastName
-        }
-      }`, { t: token });
-    return d.customer || null;
+    const r = await fetch(`${WORKER_URL}?action=account-profile&session=${encodeURIComponent(session)}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (d.error) return null;
+    return d; // { id, email, firstName, lastName, displayName }
   } catch { return null; }
 }
 
-async function customerOrders(token) {
-  if (!token) return [];
+async function customerOrders(session) {
+  if (!session) return [];
   try {
-    const d = await shopifyQuery(`
-      query($t: String!) {
-        customer(customerAccessToken: $t) {
-          orders(first: 25, sortKey: PROCESSED_AT, reverse: true) {
-            edges {
-              node {
-                id
-                orderNumber
-                processedAt
-                financialStatus
-                fulfillmentStatus
-                statusUrl
-                totalPrice { amount currencyCode }
-                lineItems(first: 25) {
-                  edges {
-                    node {
-                      title
-                      quantity
-                      variant {
-                        title
-                        image { url(transform: {maxWidth:120, maxHeight:120}) }
-                        product { handle }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }`, { t: token });
-    const edges = d?.customer?.orders?.edges || [];
-    return edges.map(e => {
-      const o = e.node;
-      return {
-        id: o.id,
-        number: o.orderNumber,
-        date: o.processedAt,
-        financialStatus: o.financialStatus,
-        fulfillmentStatus: o.fulfillmentStatus,
-        statusUrl: o.statusUrl,
-        total: o.totalPrice ? `${Number(o.totalPrice.amount).toFixed(2)} ${o.totalPrice.currencyCode}` : '',
-        items: (o.lineItems?.edges || []).map(le => ({
-          title: le.node.title,
-          quantity: le.node.quantity,
-          variantTitle: le.node.variant?.title || '',
-          imageUrl: le.node.variant?.image?.url || '',
-          handle: le.node.variant?.product?.handle || '',
-        })),
-      };
-    });
-  } catch (e) {
+    const r = await fetch(`${WORKER_URL}?action=account-orders&session=${encodeURIComponent(session)}`);
+    if (!r.ok) return [];
+    const d = await r.json();
+    if (d.error) return [];
+    return Array.isArray(d.orders) ? d.orders : [];
+  } catch {
     return [];
   }
 }
@@ -570,19 +585,19 @@ function recordToWishlistItem(r) {
   };
 }
 
-async function fetchServerWishlist(token) {
-  const r = await fetch(`${WORKER_URL}?action=wishlist&token=${encodeURIComponent(token)}`);
+async function fetchServerWishlist(session) {
+  const r = await fetch(`${WORKER_URL}?action=wishlist&session=${encodeURIComponent(session)}`);
   if (!r.ok) return null;
   const d = await r.json();
   if (d.error) return null;
   return d.items || [];
 }
 
-async function postServerWishlistItem(token, item) {
+async function postServerWishlistItem(session, item) {
   const r = await fetch(`${WORKER_URL}?action=wishlist`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, item }),
+    body: JSON.stringify({ session, item }),
   });
   if (!r.ok) return null;
   const d = await r.json();
@@ -590,11 +605,11 @@ async function postServerWishlistItem(token, item) {
   return d.items || null;
 }
 
-async function deleteServerWishlistItem(token, handle) {
+async function deleteServerWishlistItem(session, handle) {
   const r = await fetch(`${WORKER_URL}?action=wishlist`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, handle }),
+    body: JSON.stringify({ session, handle }),
   });
   if (!r.ok) return null;
   const d = await r.json();
@@ -602,11 +617,11 @@ async function deleteServerWishlistItem(token, handle) {
   return d.items || null;
 }
 
-async function mergeServerWishlist(token, items) {
+async function mergeServerWishlist(session, items) {
   const r = await fetch(`${WORKER_URL}?action=wishlist-merge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, items }),
+    body: JSON.stringify({ session, items }),
   });
   if (!r.ok) return null;
   const d = await r.json();
@@ -1771,32 +1786,22 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
 }
 
 // ── ACCOUNT DRAWER ─────────────────────────────────────────────
-function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogout, onRecover }) {
-  const [mode, setMode] = useState('login'); // login | signup | recover
-  const [email, setEmail] = useState('');
-  const [pw, setPw] = useState('');
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const [info, setInfo] = useState('');
-
+function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout }) {
   // Orders panel state
   const [view, setView] = useState('home'); // home | orders
   const [orders, setOrders] = useState(null); // null = not loaded, [] = empty
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersErr, setOrdersErr] = useState('');
 
-  useEffect(() => { setErr(''); setInfo(''); }, [mode]);
   // Reset to home view when drawer closes or auth changes
   useEffect(() => { if (!open) setView('home'); }, [open]);
-  useEffect(() => { setOrders(null); setView('home'); }, [auth?.token]);
+  useEffect(() => { setOrders(null); setView('home'); }, [auth?.session]);
 
   const loadOrders = async () => {
-    if (!auth?.token) return;
+    if (!auth?.session) return;
     setOrdersLoading(true); setOrdersErr('');
     try {
-      const list = await customerOrders(auth.token);
+      const list = await customerOrders(auth.session);
       setOrders(list);
     } catch (e) {
       setOrdersErr('Could not load orders.');
@@ -1809,30 +1814,6 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
     setView('orders');
     if (orders === null) loadOrders();
   };
-
-  const submit = async (e) => {
-    e?.preventDefault?.();
-    setErr(''); setInfo(''); setBusy(true);
-    try {
-      if (mode === 'login') {
-        await onLogin(email.trim(), pw);
-        setEmail(''); setPw('');
-      } else if (mode === 'signup') {
-        await onSignup(email.trim(), pw, firstName.trim(), lastName.trim());
-        setEmail(''); setPw(''); setFirstName(''); setLastName('');
-      } else if (mode === 'recover') {
-        await onRecover(email.trim());
-        setInfo('Check your email for a reset link.');
-      }
-    } catch (e) {
-      setErr(e?.message || 'Something went wrong.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const inputStyle = { background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'9px 12px', fontSize:12, fontFamily:'inherit', outline:'none', width:'100%', boxSizing:'border-box' };
-  const tabStyle = (active) => ({ flex:1, background:'none', border:'none', borderBottom:`2px solid ${active?S.accent:'transparent'}`, color:active?S.text:S.muted, padding:'10px 0', fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' });
 
   // Header text varies by view
   const headerLabel = !auth ? 'Sign In' : (view === 'orders' ? 'My Orders' : 'My Account');
@@ -1856,42 +1837,27 @@ function AccountDrawer({ open, onClose, auth, profile, onLogin, onSignup, onLogo
             <OrdersView orders={orders} loading={ordersLoading} err={ordersErr} onRefresh={loadOrders} />
           ) : auth ? (
             <div>
-              <div style={{ fontSize:14, fontWeight:700, color:S.text, marginBottom:6 }}>{profile?.firstName ? `${profile.firstName} ${profile.lastName||''}`.trim() : 'Welcome'}</div>
+              <div style={{ fontSize:14, fontWeight:700, color:S.text, marginBottom:6 }}>{profile?.firstName ? `${profile.firstName} ${profile.lastName||''}`.trim() : (profile?.displayName || 'Welcome')}</div>
               <div style={{ fontSize:11, color:S.muted, marginBottom:24 }}>{profile?.email || ''}</div>
               <button onClick={goToOrders} style={{ display:'block', width:'100%', textAlign:'center', padding:'10px 14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, color:S.text, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit', marginBottom:10 }}>My Orders →</button>
               <button onClick={onLogout} style={{ width:'100%', padding:'10px 14px', background:'transparent', border:`1px solid ${S.border}`, borderRadius:2, color:S.muted, fontSize:10, letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>Sign Out</button>
             </div>
           ) : (
             <>
-              {mode !== 'recover' && (
-                <div style={{ marginBottom:20, paddingBottom:14, borderBottom:`1px solid ${S.border}` }}>
-                  <div style={{ fontSize:10, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Sign In</div>
-                </div>
-              )}
+              <div style={{ marginBottom:20, paddingBottom:14, borderBottom:`1px solid ${S.border}` }}>
+                <div style={{ fontSize:10, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700 }}>Sign In</div>
+              </div>
 
-              <form onSubmit={submit} style={{ display:'flex', flexDirection:'column', gap:10 }}>
-                <input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" autoComplete="email" style={inputStyle} />
-                {mode !== 'recover' && (
-                  <input type="password" required value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password" autoComplete="current-password" style={inputStyle} />
-                )}
+              <div style={{ fontSize:11, color:S.muted, lineHeight:1.6, marginBottom:18 }}>
+                Sign in to sync your wishlist across devices and view your order history. No password needed — we'll email you a code.
+              </div>
 
-                {err && <div style={{ fontSize:10, color:S.danger, padding:'4px 0' }}>{err}</div>}
-                {info && <div style={{ fontSize:10, color:S.accent, padding:'4px 0' }}>{info}</div>}
-
-                <button type="submit" disabled={busy} style={{ marginTop:6, padding:'12px 14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:busy?'wait':'pointer', fontFamily:'inherit', opacity:busy?0.6:1 }}>
-                  {busy ? '…' : (mode==='login' ? 'Sign In' : 'Send Reset Link')}
-                </button>
-
-                {mode === 'login' && (
-                  <button type="button" onClick={()=>setMode('recover')} style={{ background:'none', border:'none', color:S.muted, fontSize:10, cursor:'pointer', textAlign:'center', padding:6, fontFamily:'inherit', textDecoration:'underline' }}>Forgot password?</button>
-                )}
-                {mode === 'recover' && (
-                  <button type="button" onClick={()=>setMode('login')} style={{ background:'none', border:'none', color:S.muted, fontSize:10, cursor:'pointer', textAlign:'center', padding:6, fontFamily:'inherit', textDecoration:'underline' }}>← Back to sign in</button>
-                )}
-              </form>
+              <button onClick={onSignIn} style={{ width:'100%', padding:'12px 14px', background:S.accent, border:'none', borderRadius:2, color:'#080808', fontSize:11, letterSpacing:1.5, textTransform:'uppercase', fontWeight:800, cursor:'pointer', fontFamily:'inherit' }}>
+                Sign In / Create Account
+              </button>
 
               <div style={{ marginTop:24, padding:'14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2, fontSize:10, color:S.muted, lineHeight:1.6 }}>
-                New here? Your account is created automatically when you place your first order. No separate sign-up needed.
+                New here? An account is created automatically the first time you sign in or place an order. No separate sign-up needed.
               </div>
             </>
           )}
@@ -7064,7 +7030,9 @@ export default function App() {
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
-  const [auth, setAuth]                   = useState(()=>loadAuth());
+  // On first mount, prefer a session arriving in the URL fragment (just
+  // returned from the Worker's /auth/callback); otherwise load the stored one.
+  const [auth, setAuth]                   = useState(()=> captureSessionFromUrl() || loadAuth());
   const [profile, setProfile]             = useState(null);
   const [accountOpen, setAccountOpen]     = useState(false);
   const [wishItems, setWishItems]         = useState(()=>loadLocalWishlist());
@@ -7081,16 +7049,20 @@ export default function App() {
   // with a forthcoming-only sort that only reorders the loaded page.
   useEffect(()=>{ if (!filters.forthcoming && filters.sort === 'release-asc') setFilter('sort','newest'); }, [filters.forthcoming, filters.sort]);
 
-  // When auth changes: load profile, sync wishlist
+  // When auth (session) changes: load profile, sync wishlist.
+  // The merge flow is preserved exactly: if there's a local anonymous list,
+  // merge it into the account server-side, otherwise pull the authoritative
+  // server list. The customerId behind the session is the SAME numeric id the
+  // old token resolved to, so the wishlist record (wl:{customerId}) is identical.
   useEffect(()=>{
     let cancelled = false;
-    if (!auth?.token) { setProfile(null); return; }
+    if (!auth?.session) { setProfile(null); return; }
 
     (async () => {
-      const p = await customerProfile(auth.token);
+      const p = await customerProfile(auth.session);
       if (cancelled) return;
       if (!p) {
-        // Token rejected → log out
+        // Session rejected/expired → log out locally.
         saveAuth(null); setAuth(null); setProfile(null);
         return;
       }
@@ -7099,9 +7071,9 @@ export default function App() {
       const localItems = loadLocalWishlist();
       let serverItems = null;
       if (localItems.length > 0) {
-        serverItems = await mergeServerWishlist(auth.token, localItems);
+        serverItems = await mergeServerWishlist(auth.session, localItems);
       } else {
-        serverItems = await fetchServerWishlist(auth.token);
+        serverItems = await fetchServerWishlist(auth.session);
       }
       if (cancelled) return;
       if (Array.isArray(serverItems)) {
@@ -7109,21 +7081,23 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [auth?.token]);
+  }, [auth?.session]);
 
-  // Auth actions
-  const handleLogin = async (email, password) => {
-    const tk = await customerLogin(email, password);
-    const a = { token: tk.accessToken, expiresAt: tk.expiresAt };
-    saveAuth(a); setAuth(a);
+  // Auth actions. Login/logout are now full-page redirects to the Worker's
+  // hosted OAuth flow (NCA passwordless). There is no in-app email/password
+  // form anymore.
+  const handleSignIn = () => {
+    window.location.href = workerLoginUrl(typeof window !== 'undefined' ? window.location.pathname : '/');
   };
-  const handleSignup = async (email, password, firstName, lastName) => {
-    const tk = await customerSignup(email, password, firstName, lastName);
-    const a = { token: tk.accessToken, expiresAt: tk.expiresAt };
-    saveAuth(a); setAuth(a);
+  const handleLogout = () => {
+    const session = auth?.session;
+    // Clear local state first so the UI updates immediately, then redirect to
+    // the Worker logout (which clears the Shopify-side session too).
+    saveAuth(null); setAuth(null); setProfile(null);
+    if (session) {
+      window.location.href = workerLogoutUrl(session, '/');
+    }
   };
-  const handleLogout = () => { saveAuth(null); setAuth(null); setProfile(null); };
-  const handleRecover = async (email) => { await customerRecover(email); };
 
   // Wishlist actions
   const isWished = (r) => {
@@ -7137,21 +7111,21 @@ export default function App() {
     if (wished) {
       // Remove
       setWishItems(items => items.filter(it => it.handle !== item.handle));
-      if (auth?.token) {
-        deleteServerWishlistItem(auth.token, item.handle).catch(()=>{});
+      if (auth?.session) {
+        deleteServerWishlistItem(auth.session, item.handle).catch(()=>{});
       }
     } else {
       // Add (optimistic)
       setWishItems(items => [item, ...items.filter(it=>it.handle!==item.handle)]);
-      if (auth?.token) {
-        postServerWishlistItem(auth.token, item).catch(()=>{});
+      if (auth?.session) {
+        postServerWishlistItem(auth.session, item).catch(()=>{});
       }
     }
   };
   const wishlistRemove = (handle) => {
     setWishItems(items => items.filter(it => it.handle !== handle));
-    if (auth?.token) {
-      deleteServerWishlistItem(auth.token, handle).catch(()=>{});
+    if (auth?.session) {
+      deleteServerWishlistItem(auth.session, handle).catch(()=>{});
     }
   };
   // When a wishlist item is clicked, find the corresponding record (if loaded) and open it
@@ -7422,31 +7396,22 @@ export default function App() {
     };
   }, [catalogMeta]);
 
-  // Password reset / account activation deep-link from Shopify's emails.
-  // URL shapes:
-  //   /account/reset/<customer-id>/<token>?syclid=...     (forgot password)
-  //   /account/activate/<customer-id>/<token>?syclid=...  (new account invitation)
-  // We pass the full URL (origin + path + query) to the relevant mutation;
-  // Shopify validates it server-side, so we don't parse the token ourselves.
+  // Legacy password-reset / account-activation deep-links from Shopify's OLD
+  // (pre-NCA) emails:
+  //   /account/reset/<customer-id>/<token>
+  //   /account/activate/<customer-id>/<token>
+  // New Customer Accounts is passwordless and no longer issues these. If someone
+  // follows an old link from their inbox, send them to the new sign-in flow
+  // instead of showing a dead password form.
   const isResetPage    = /^\/account\/reset\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
   const isActivatePage = /^\/account\/activate\/\d+\/[A-Za-z0-9-]+\/?$/.test(path);
 
-  if(isResetPage || isActivatePage) return (
-    <ResetPasswordPage
-      mode={isActivatePage ? 'activate' : 'reset'}
-      resetUrl={typeof window!=='undefined' ? window.location.href : ''}
-      onSuccess={(tk)=>{
-        setAuth(tk);
-        saveAuth(tk);
-        window.history.replaceState({}, '', '/');
-        setPath('/');
-      }}
-      onCancel={()=>{
-        window.history.replaceState({}, '', '/');
-        setPath('/');
-      }}
-    />
-  );
+  if (isResetPage || isActivatePage) {
+    if (typeof window !== 'undefined') {
+      window.location.href = workerLoginUrl('/');
+    }
+    return null;
+  }
 
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
@@ -7536,8 +7501,8 @@ export default function App() {
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
       <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
-      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.token||null); setCart([]); setCartOpen(false); }} />
-      <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onLogin={handleLogin} onSignup={handleSignup} onLogout={()=>{handleLogout();setAccountOpen(false);}} onRecover={handleRecover} />
+      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
+      <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
