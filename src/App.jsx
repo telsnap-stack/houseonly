@@ -71,6 +71,13 @@ function parseProduct({ node }) {
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
   const catalog = v?.sku||'';
   const title = node.title||'';
+  // Forthcoming/pre-order support: the `forthcoming` tag marks a release that
+  // hasn't arrived yet (listed from a distributor's pre-sale feed). A
+  // `release:YYYY-MM-DD` tag carries the expected street date. Both are read
+  // off the raw tags, which we now expose on the record so isForthcoming() and
+  // the pre-order UI can use them without re-fetching.
+  const releaseTag = tags.find(t => /^release:/i.test(t));
+  const releaseDate = releaseTag ? releaseTag.slice(releaseTag.indexOf(':') + 1).trim() : '';
   return {
     id: node.id, shopifyVariantId: v?.id,
     title, artist, label,
@@ -80,17 +87,25 @@ function parseProduct({ node }) {
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
+    tags, releaseDate,
   };
 }
 
-async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[] } = {}) {
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
   // Build a tag-AND query string for server-side filtering. Each filterTag is a
-  // raw tag value like "label:Word and Sound" or "year:2025". We escape single
-  // quotes inside values by switching to double quotes around the value.
-  const queryArg = filterTags.length
-    ? `, query: ${JSON.stringify(filterTags.map(t => `tag:'${t}'`).join(' AND '))}`
-    : '';
+  // raw tag value like "label:Word and Sound" or "year:2025".
+  //
+  // Forthcoming handling (mutually exclusive, drives the Forthcoming section vs
+  // the main catalogue):
+  //   - forthcoming=true  → REQUIRE the `forthcoming` tag  → only pre-orders
+  //   - forthcoming=false → EXCLUDE it via `-tag:'forthcoming'` so pre-orders
+  //     never leak into the main catalogue.
+  // Negation ("-tag:...") is supported by Shopify's search query grammar
+  // (verified against docs: a "-" modifier excludes documents with that value).
+  const clauses = filterTags.map(t => `tag:'${t}'`);
+  clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
+  const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
     products(first: 24${after}${sortArg}${queryArg}) {
@@ -132,7 +147,9 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   const after = cursor ? `, after: "${cursor}"` : '';
   // Combine the free-text search with optional tag filters. The search-syntax
   // is space-separated AND, so we append each `tag:'X'` clause inline.
-  const queryParts = [searchTerm.trim()];
+  // Also exclude forthcoming pre-orders — they live only in the Forthcoming
+  // section and should never surface in a normal catalogue search.
+  const queryParts = [searchTerm.trim(), `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
@@ -187,6 +204,36 @@ async function fetchAllProductMetadata() {
     cursor = pageInfo.endCursor;
   }
   return all;
+}
+
+// Fetch the set of handles + variant SKUs of every LIVE product, lowercased.
+// Used by the pre-order importer to auto-exclude records that already exist in
+// the catalogue (an exact cat-no match would otherwise re-import a live, in-stock
+// product as a stock-0 "forthcoming" pre-order). Small payload: handle + first
+// variant SKU only. Returns a Set for O(1) exact-match lookup.
+async function fetchLiveHandles() {
+  const set = new Set();
+  let cursor = null;
+  let safety = 25; // up to 25 × 250 = 6250 products
+  while (safety-- > 0) {
+    const after = cursor ? `, after: "${cursor}"` : '';
+    const data = await shopifyQuery(`{
+      products(first: 250${after}) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { handle variants(first: 1) { edges { node { sku } } } } }
+      }
+    }`);
+    const { edges, pageInfo } = data.products;
+    for (const e of edges) {
+      const h = (e.node.handle || '').trim().toLowerCase();
+      if (h) set.add(h);
+      const sku = (e.node.variants?.edges?.[0]?.node?.sku || '').trim().toLowerCase();
+      if (sku) set.add(sku);
+    }
+    if (!pageInfo.hasNextPage) break;
+    cursor = pageInfo.endCursor;
+  }
+  return set;
 }
 
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
@@ -605,6 +652,58 @@ function isBackorderEligible(r) {
   if (!y) return false; // no year tag = treat as truly sold out
   const currentYear = new Date().getFullYear();
   return y >= currentYear - 1;
+}
+
+// Determine if a release is a PRE-ORDER (forthcoming). Source of truth is the
+// `forthcoming` tag, set by the pre-order importer when a release is listed
+// from a distributor's pre-sale feed before it physically arrives.
+//
+// IMPORTANT — this is intentionally tag-based, NOT stock/date-based, because a
+// forthcoming record and a sold-out backorder record can look identical by
+// stock (both 0) and year (both recent). Only the tag distinguishes them.
+// isForthcoming() takes precedence over isBackorderEligible() everywhere a
+// button renders, so a pre-order shows PRE-ORDER (paid checkout) and never the
+// unpaid backorder REQUEST form.
+//
+// Lifecycle: present = pre-order (paid, Forthcoming section only). When stock
+// arrives, the arrival importer removes this tag and sets inventory, so the
+// record graduates into the main catalogue automatically (the catalogue query
+// excludes `forthcoming`, the Forthcoming query requires it).
+function isForthcoming(r) {
+  return !!(r && Array.isArray(r.tags) && r.tags.includes('forthcoming'));
+}
+
+// Add N days to an ISO date string, returning a new ISO `YYYY-MM-DD`.
+// Used to apply the +14-day buffer (record lands in Madrid, then ships) to the
+// distributor's raw release date at DISPLAY time only — the stored release:
+// tag keeps the true street date so the buffer is a one-line change if needed.
+// Parse a YYYY-MM-DD string at LOCAL noon, not UTC midnight. A bare
+// `new Date('2026-06-30')` is parsed as UTC midnight, which then renders one
+// calendar day early in any negative-offset timezone (and is fragile at DST
+// boundaries). Anchoring at local noon keeps the calendar day stable in every
+// timezone. Falls back to default parsing if the string isn't a plain date.
+function parseLocalDate(isoDate) {
+  if (!isoDate) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate).trim());
+  const d = m ? new Date(isoDate + 'T12:00:00') : new Date(isoDate);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function addDays(isoDate, days) {
+  const d = parseLocalDate(isoDate);
+  if (!d) return '';
+  d.setDate(d.getDate() + days);
+  const y = d.getFullYear(), mo = String(d.getMonth() + 1).padStart(2, '0'), da = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${da}`;
+}
+
+// Format a release date (ISO `YYYY-MM-DD`) into a friendly full date,
+// "Expected 4 September 2026". Degrades gracefully: bad/missing date →
+// just "Pre-order" (never a fake date).
+function formatExpected(isoDate) {
+  const d = parseLocalDate(isoDate);
+  if (!d) return 'Pre-order';
+  return 'Expected ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 // ── LOGO ──────────────────────────────────────────────────────
@@ -1204,6 +1303,14 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               </button>
             )}
             {(() => {
+              // PRE-ORDER takes precedence over everything: a forthcoming
+              // release is purchasable now (paid checkout, oversell enabled),
+              // so it gets a "+ Pre-order" add-to-cart button just like an
+              // in-stock record. The full-width REQUEST button below is for
+              // backorders only and is suppressed for forthcoming (see below).
+              if (isForthcoming(r)) {
+                return <button onClick={e=>{e.stopPropagation();onAdd(r);}} title="Pre-order — pay now, ships when it arrives" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Pre-order</button>;
+              }
               const eligible = isBackorderEligible(r);
               // For backorder-eligible cards, the action goes on its own line below
               // (full-width REQUEST button), so this slot stays empty.
@@ -1215,17 +1322,96 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
             })()}
           </div>
         </div>
-        {r.stock>0&&r.stock<=3&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
-        {r.stock===0 && isBackorderEligible(r) && (
+        {r.stock>0&&r.stock<=3&&!isForthcoming(r)&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
+        {isForthcoming(r) && (
+          <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</div>
+        )}
+        {!isForthcoming(r) && r.stock===0 && isBackorderEligible(r) && (
           <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ marginTop:8, width:'100%', background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'7px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', fontFamily:'inherit' }}>Request</button>
         )}
-        {r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
+        {!isForthcoming(r) && r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
       </div>
     </div>
   );
 }
 
-// ── BACKORDER REQUEST FORM ─────────────────────────────────────
+// ── FORTHCOMING ROW ────────────────────────────────────────────
+// The default list-layout for the Forthcoming section. Structured like a
+// distributor release list (cover left, artist/title + capped description in
+// the middle, metadata block right) but in the store's own dark/accent theme.
+// Shows the fields that exist on the record today: Label · Cat-No · Expected
+// date · Genre · Price. Barcode/Configuration are deferred until the importer
+// populates them. Description is the same `desc` shown elsewhere, capped to ~2
+// lines (full text on click → modal). Pre-order button reuses the paid
+// add-to-cart flow (oversell-enabled), identical to the card's + Pre-order.
+function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
+  const isMobile = useIsMobile(640);
+  const player = usePlayer();
+  const wished = isWished?.(r);
+  const cover = coverSrc(r.coverUrl);
+  const expected = formatExpected(addDays(r.releaseDate, 14));
+  const hasTracks = (r.tracks || []).length > 0;
+  const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
+  const isQueued = player ? player.isReleaseQueued(r) : false;
+  const metaRow = (k, v) => v ? (
+    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
+      <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
+      <span style={{ color:S.text }}>{v}</span>
+    </div>
+  ) : null;
+  const iconBtn = (active) => ({ background:'transparent', border:`1px solid ${active?S.accent:S.border}`, color:active?S.accent:S.muted, borderRadius:2, padding:'7px 9px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' });
+  return (
+    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start' }}>
+      {/* Cover */}
+      <div onClick={()=>onOpen(r)} style={{ width:isMobile?'100%':120, height:isMobile?200:120, flexShrink:0, background:`linear-gradient(${r.g})`, borderRadius:2, cursor:'pointer', overflow:'hidden', position:'relative' }}>
+        {cover && <img src={cover} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
+      </div>
+
+      {/* Middle: artist / title / capped description — left aligned */}
+      <div onClick={()=>onOpen(r)} style={{ flex:1, minWidth:0, cursor:'pointer', textAlign:'left' }}>
+        <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
+        <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
+        {r.desc && (
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:620 }}>{r.desc}</p>
+        )}
+        {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
+        {hasTracks && player && (
+          <div style={{ display:'flex', gap:6, marginTop:12 }}>
+            <button onClick={e=>{e.stopPropagation(); isCurrentlyPlaying ? player.togglePlayPause() : player.playRelease(r);}} aria-label={isCurrentlyPlaying?'Pause':'Play preview'} title={isCurrentlyPlaying?'Pause':'Play preview'} style={iconBtn(isCurrentlyPlaying)}>
+              {isCurrentlyPlaying ? <PauseIcon size={12} /> : <PlayIcon size={12} filled />}
+            </button>
+            <button onClick={e=>{e.stopPropagation(); player.addToQueue(r);}} aria-label="Add to queue" title={isQueued?'Already in queue — add again':'Add to queue'} style={iconBtn(isQueued)}>
+              <QueuePlusIcon size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Right: metadata at top (left-aligned), price + pre-order flush to the
+          right margin below — lines up under the LIST/GRID toggle. */}
+      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
+        {metaRow('Label', r.label)}
+        {metaRow('Cat-No', r.catalog)}
+        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
+          <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
+          <span style={{ color:S.accent, fontWeight:700 }}>{expected.replace(/^Expected\s/, '')}</span>
+        </div>
+        {metaRow('Genre', r.genre)}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:10, marginTop:8 }}>
+          <span style={{ fontSize:18, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+        </div>
+        <div style={{ display:'flex', gap:8, marginTop:6, alignItems:'center', justifyContent:'flex-end' }}>
+          <button onClick={()=>onAdd(r)} title="Pre-order — pay now, ships when it arrives" style={{ flex:1, background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Pre-order</button>
+          {onWishlistToggle && (
+            <button onClick={()=>onWishlistToggle(r)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 10px', cursor:'pointer', display:'flex', alignItems:'center' }}>
+              <HeartIcon wished={wished} size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 //
 // Renders inside the Modal when a release is backorder-eligible (stock=0 AND
 // year >= currentYear-1). Customer fills email + name + shipping address +
@@ -1454,7 +1640,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
               For in-stock and truly-OOS products, we keep the original order:
                 description → tracks → price/heart/cart row.
             */}
-            {r.stock === 0 && isBackorderEligible(r) ? (
+            {!isForthcoming(r) && r.stock === 0 && isBackorderEligible(r) ? (
               <>
                 <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
                   <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
@@ -1512,7 +1698,15 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
                       <span style={{ display:'none' }}>{wished?'Wished':'Wishlist'}</span>
                     </button>
                   )}
-                  {r.stock > 0
+                  {isForthcoming(r)
+                    ? (
+                      <div style={{ display:'flex', flexDirection:'column', gap:6, flex:1 }}>
+                        <Btn ch="Pre-order" onClick={()=>{onAdd(r);onClose();}} full />
+                        <span style={{ fontSize:10, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</span>
+                        <span style={{ fontSize:9, color:S.muted, lineHeight:1.5 }}>Pay now to reserve your copy. Ships when it arrives — estimated date above.</span>
+                      </div>
+                    )
+                    : r.stock > 0
                     ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
                     : <Btn ch="Out of Stock" disabled full />
                   }
@@ -2345,21 +2539,33 @@ async function extractSalesPaperText(pdfBlob) {
       const content = await page.getTextContent();
       fullText += content.items.map(i => i.str).join(' ') + '\n';
     }
-    const extract = (pattern) => {
-      const m = fullText.match(pattern);
-      return m ? m[1].trim().split(/\s{2,}|\n/)[0].trim() : '';
+    // pdf.js flattens the SALESPAPER to a single space-joined string with NO
+    // newlines, so a greedy "[^\n\r]+" capture runs PAST the field value into
+    // the next fields (e.g. "Genre: House" would capture
+    // "House Label: … EAN: … Tracklist: …"). Bound each capture at the next
+    // known field marker so we get exactly the field's value. The SALESPAPER
+    // DOES contain the real genre ("House", "House / Techno", "Disco" …); the
+    // bug was the overrun, not the data. Fixes BOTH importers.
+    const FIELD = '(?:Label|EAN|Tracklist|Format|Cat-?No|Release-?Date|Artist|Title|Releasetext|Genre|Style)\\s*:';
+    const extractField = (name) => {
+      const m = fullText.match(new RegExp(name + '\\s*:\\s*(.+?)\\s*(?:' + FIELD + '|$)', 'i'));
+      return m ? m[1].trim() : '';
     };
-    const label = extract(/Label[:\s]+([^\n\r]+)/i);
-    const genreRaw = extract(/(?:Genre|Style)[:\s]+([^\n\r]+)/i);
-    const GENRE_MAP = {
-      'deep house': 'Deep House', 'tech house': 'Tech House',
-      'afro house': 'Afro House', 'chicago house': 'Chicago House',
-      'soulful house': 'Soulful House', 'acid house': 'Acid House',
-      'detroit house': 'Detroit House', 'disco house': 'Disco House',
-      'electronic': 'Electronic', 'house': 'Deep House',
-    };
-    const genreLower = genreRaw.toLowerCase();
-    const genre = Object.entries(GENRE_MAP).find(([k]) => genreLower.includes(k))?.[1] || '';
+    const label    = extractField('Label');
+    const genreRaw = extractField('(?:Genre|Style)');
+    // Preserve the real W&S genre(s). W&S writes multi-genre as "House /
+    // Techno" — we keep BOTH so the record shows under each genre filter and
+    // the operator sees the full classification. Split on slash/comma/semicolon,
+    // title-case each, dedupe, rejoin comma-separated (Shopify treats each
+    // comma-separated value as its own tag). Callers feed this into the Tags
+    // list which is itself comma-joined, so the genres land as separate tags.
+    let genre = '';
+    if (genreRaw) {
+      const parts = genreRaw.split(/[\/,;|]/)
+        .map(s => s.trim().replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
+        .filter(Boolean);
+      genre = [...new Set(parts)].join(', ');
+    }
     const descMatch = fullText.match(/Releasetext:\s*([\s\S]+)/i);
     let desc = '';
     if (descMatch) {
@@ -5949,6 +6155,691 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
+// Lists distributor-announced records that have NOT yet arrived as paid
+// pre-orders. Differs from the invoice-driven DBHImporter in its FRONT half:
+//   • input is a MANIFEST (cat-no → artist/title/label/genre/release/price),
+//     generated from the distributor "Coming soon" emails (CSV or JSON), not an
+//     order invoice CSV. Pre-orders have no invoice.
+//   • each release is matched to a ZIP folder (operator-downloaded) by cat-no.
+//   • a RECONCILIATION view shows: ready (manifest+ZIP), manifest-but-no-ZIP
+//     ("download these"), and ZIP-but-no-manifest ("need date/price").
+// The BACK half (ZIP → R2 assets → row → Shopify CSV) reuses the existing
+// machinery: uploadToR2, buildDescriptionHtml, loadJSZip, mapGenre, catnoFromZip.
+//
+// Pre-order rows carry the markers the Part-1 display layer reads:
+//   • Variant Inventory Qty   : 0
+//   • Variant Inventory Policy: continue   (oversell → negative stock = demand)
+//   • Tags                    : + forthcoming + release:YYYY-MM-DD
+// After bulk-upload to Shopify, the Forthcoming section shows them automatically.
+function PreorderImporter() {
+  const [manifest, setManifest]     = useState([]);   // [{catno, artist, title, label, genre, release, dealerPrice, tracks, format, coverUrl, zipUrl, source}]
+  const [manifestName, setManifestName] = useState(null);
+  const [zipFiles, setZipFiles]     = useState([]);
+  const [edits, setEdits]           = useState({});   // catno -> {artist?, title?} operator overrides
+  const [status, setStatus]         = useState('idle');// idle | processing | review
+  const [progress, setProgress]     = useState({ done:0, total:0, current:'' });
+  const [results, setResults]       = useState([]);
+  const [excluded, setExcluded]     = useState({}); // catno -> true: dropped from CSV export
+  const [liveHandles, setLiveHandles] = useState(null); // Set of lowercased live handles+SKUs (null = not yet fetched)
+  const [error, setError]           = useState('');
+  const [margin, setMargin]         = useState(60);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
+  const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
+  const [downloadStats, setDownloadStats] = useState({ ok: 0, missing: 0, failed: 0 }); // download-all outcome breakdown
+  const manifestRef = useRef(null);
+  const zipRef = useRef(null);
+
+  // ── manifest parsing ────────────────────────────────────────
+  // Genre mapping mirrors DBHImporter.mapGenre but keeps non-house genres
+  // (e.g. "Techno - Dub") intact rather than forcing them into a house bucket.
+  // Maps ONE genre token to a normalized value.
+  function mapOneGenre(genreStr) {
+    const g = (genreStr || '').toLowerCase();
+    if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
+    if (g.includes('tech house')) return 'Tech House';
+    if (g.includes('afro')) return 'Afro House';
+    if (g.includes('chicago')) return 'Chicago House';
+    if (g.includes('soulful')) return 'Soulful House';
+    if (g.includes('acid')) return 'Acid House';
+    if (g.includes('detroit')) return 'Detroit House';
+    if (g.includes('disco')) return 'Disco House';
+    if (g.includes('house')) return 'House';
+    // Non-house: title-case the raw value ("Techno - Dub" → "Techno - Dub").
+    return genreStr ? genreStr.replace(/\b\w/g, c => c.toUpperCase()) : '';
+  }
+  // W&S may carry multiple genres ("House, Techno"). Map EACH independently so
+  // both survive as separate tags; dedupe and rejoin comma-separated.
+  function mapGenrePreorder(genreStr) {
+    if (!genreStr) return '';
+    const mapped = String(genreStr).split(',')
+      .map(s => mapOneGenre(s.trim()))
+      .filter(Boolean);
+    return [...new Set(mapped)].join(', ');
+  }
+
+  // Light title-casing for messy feed values ("various artist" → "Various
+  // Artists", "houseworx" → "Houseworx"). Operator can override in the
+  // reconciliation view; we never block on cosmetics.
+  function titleCaseSoft(s) {
+    if (!s) return '';
+    // Normalize "various artist(s)" → "Various Artists" regardless of case.
+    if (/^various\s+artist(s)?$/i.test(s.trim())) return 'Various Artists';
+    // Leave strings that already contain an uppercase letter alone (likely
+    // already correct, e.g. "M.S.", "Raw House EP").
+    if (/[A-Z]/.test(s)) return s;
+    return s.replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // Is this release a Various-Artists compilation? VA cat-nos end in _va/-va,
+  // or the artist field is some flavour of "various artist(s)".
+  function isVA(m) {
+    return /[-_]va$/i.test(String(m.catno || '').trim()) ||
+           /^various\s+artist/i.test(String(m.artist || '').trim());
+  }
+
+  // VA titles from the DBH feed are junk ("va_10", "VA_10"). Derive a real
+  // title from the cat-no instead: strip the trailing _va, swap separators for
+  // spaces, uppercase the series token. "stardub_10_va" → "STARDUB 10".
+  // Non-VA releases keep their real title (title-cased softly).
+  function deriveTitle(m) {
+    const raw = String(m.title || '').trim();
+    if (!isVA(m)) return titleCaseSoft(raw);
+    // If the manifest title is itself a junk "va_NN" style value, rebuild it.
+    if (!raw || /^va[\s_-]*\d*$/i.test(raw)) {
+      const base = String(m.catno || '').trim().replace(/[-_]va$/i, '');
+      const derived = base.replace(/[_-]+/g, ' ').trim().toUpperCase();
+      return derived || 'Various';
+    }
+    return titleCaseSoft(raw);
+  }
+
+  function deriveArtist(m) {
+    if (isVA(m)) return 'Various Artists';
+    return titleCaseSoft(String(m.artist || '').trim());
+  }
+
+  function catnoFromZip(name) {
+    return name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,'').trim().toUpperCase();
+  }
+
+  function parseManifestCsv(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    // Standard comma-delimited CSV with quoted fields (matches build_manifest output).
+    const rows = []; let cur = [], field = '', inQ = false, i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (inQ) {
+        if (ch === '"' && text[i+1] === '"') { field += '"'; i += 2; continue; }
+        if (ch === '"') { inQ = false; i++; continue; }
+        field += ch; i++; continue;
+      }
+      if (ch === '"') { inQ = true; i++; continue; }
+      if (ch === ',') { cur.push(field); field = ''; i++; continue; }
+      if (ch === '\r') { i++; continue; }
+      if (ch === '\n') { cur.push(field); rows.push(cur); cur = []; field = ''; i++; continue; }
+      field += ch; i++;
+    }
+    if (field || cur.length) { cur.push(field); rows.push(cur); }
+    if (rows.length < 2) return [];
+    const headers = rows[0].map(h => h.trim());
+    return rows.slice(1).map(vals => {
+      const obj = {};
+      headers.forEach((h, idx) => obj[h] = (vals[idx] || '').trim());
+      return obj;
+    }).filter(r => r.catno);
+  }
+
+  // Normalize a parsed row (from CSV or JSON) into the canonical manifest shape.
+  function normalizeRow(r) {
+    const dp = r.dealerPrice;
+    return {
+      catno: String(r.catno || '').trim(),
+      artist: String(r.artist || '').trim(),
+      title: String(r.title || '').trim(),
+      label: String(r.label || '').trim(),
+      genre: String(r.genre || '').trim(),
+      release: String(r.release || '').trim(),
+      dealerPrice: dp === '' || dp == null ? null : Number(dp),
+      tracks: r.tracks === '' || r.tracks == null ? null : Number(r.tracks),
+      format: String(r.format || '').trim(),
+      coverUrl: String(r.coverUrl || '').trim(),
+      zipUrl: String(r.zipUrl || '').trim(),
+      source: String(r.source || 'dbh').trim(),
+    };
+  }
+
+  const loadManifest = (file) => {
+    const rd = new FileReader();
+    rd.onload = () => {
+      try {
+        let rows;
+        const txt = rd.result;
+        const isJson = /\.json$/i.test(file.name) || /^\s*[[{]/.test(txt);
+        if (isJson) {
+          const parsed = JSON.parse(txt);
+          rows = Array.isArray(parsed) ? parsed : (parsed.releases || parsed.items || []);
+        } else {
+          rows = parseManifestCsv(txt);
+        }
+        const norm = rows.map(normalizeRow).filter(r => r.catno);
+        setManifest(norm);
+        setManifestName(file.name);
+        setError('');
+        setDownloadDone(false);     // new manifest → clear any prior "done" signal
+        setDownloadProgress(0);
+        setDownloadStats({ ok: 0, missing: 0, failed: 0 });
+        // Fetch live catalogue handles/SKUs so the reconciliation view can
+        // auto-exclude any pre-order whose cat-no already exists as a product.
+        setLiveHandles(null);
+        fetchLiveHandles()
+          .then(setLiveHandles)
+          .catch(() => setLiveHandles(new Set())); // on failure: no exclusions, never blocks the import
+      } catch (e) {
+        setError(`Manifest parse failed: ${e.message}`);
+      }
+    };
+    rd.readAsText(file, 'UTF-8');
+  };
+
+  // Download every pre-sale ZIP the manifest references. Anchor-click per URL on
+  // a 2.5s stagger (the proven mechanism — pop-up blockers kill window.open).
+  const downloadAllZips = async () => {
+    const rows = manifest
+      .map(m => ({ id: (m.zipUrl || '').match(/\/release_zip\/(\d+)/)?.[1], catno: m.catno }))
+      .filter(r => r.id);
+    if (!rows.length) { setError('No DBH zip URLs in the manifest to download.'); return; }
+    setDownloadDone(false);
+    setDownloadProgress(0);
+    setDownloadStats({ ok: 0, missing: 0, failed: 0 });
+    setDownloading(true);
+
+    let ok = 0, missing = 0, failed = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const { id, catno } = rows[i];
+      try {
+        // Fetch via our OWN Worker proxy (?action=dbh-zip&id=...), not DBH
+        // directly. DBH sends no CORS headers, so a direct browser fetch is
+        // blocked. The Worker fetches the public ZIP server-side and streams it
+        // back from our origin WITH CORS, so we can await the blob to full
+        // completion before starting the next — true one-at-a-time downloading,
+        // no cut-offs. If the release has no ZIP yet the proxy returns JSON
+        // {ok:false, missing:true}; a real ZIP comes back as application/zip.
+        const res = await fetch(`${WORKER_URL}?action=dbh-zip&id=${id}`);
+        const ctype = res.headers.get('content-type') || '';
+        if (!res.ok || ctype.includes('application/json')) {
+          // No asset uploaded yet (waiting on distributor). Skip; it reappears
+          // in the next manifest build and downloads once DBH adds the ZIP.
+          missing++;
+          setDownloadStats({ ok, missing, failed });
+          setDownloadProgress(i + 1);
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+        const blob = await res.blob();      // waits for the FULL file
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        // Name the file by CAT-NO, not release id — the importer matches ZIPs
+        // to manifest rows via catnoFromZip() (strips .zip, uppercases). DBH's
+        // own content-disposition already uses the cat-no (e.g. CWX09.zip); we
+        // mirror that so dropped ZIPs match. Sanitize only path separators.
+        const safeCatno = (catno || `dbh_${id}`).replace(/[\/\\]/g, '_');
+        a.download = `${safeCatno}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
+        ok++;
+        setDownloadStats({ ok, missing, failed });
+      } catch (e) {
+        // Network/proxy error for this one — count and continue, never abort.
+        failed++;
+        setDownloadStats({ ok, missing, failed });
+      }
+      setDownloadProgress(i + 1);
+      await new Promise(r => setTimeout(r, 300)); // brief breather between files
+    }
+    setDownloading(false);
+    setDownloadDone(true);
+  };
+
+  const assignZips = (files) => {
+    const zips = [...files].filter(f => /\.zip$/i.test(f.name));
+    setZipFiles(prev => {
+      const existing = new Set(prev.map(f=>f.name));
+      return [...prev, ...zips.filter(f=>!existing.has(f.name))];
+    });
+  };
+
+  // ── reconciliation ──────────────────────────────────────────
+  // Build a map of ZIP-by-catno (uppercased), and classify each side.
+  const zipMap = useMemo(() => {
+    const m = {};
+    zipFiles.forEach(f => { m[catnoFromZip(f.name)] = f; });
+    return m;
+  }, [zipFiles]);
+
+  function zipForCatno(catno) {
+    const up = catno.toUpperCase();
+    return zipMap[up] || zipFiles.find(f => {
+      const zc = catnoFromZip(f.name);
+      return zc.includes(up) || up.includes(zc);
+    }) || null;
+  }
+
+  const recon = useMemo(() => {
+    const ready = [], needZip = [], orphanZip = [];
+    const matchedZipNames = new Set();
+    const isLive = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+    for (const m of manifest) {
+      const alreadyLive = isLive(m.catno);
+      const zf = zipForCatno(m.catno);
+      if (zf) { ready.push({ ...m, _zip: zf.name, _alreadyLive: alreadyLive }); matchedZipNames.add(zf.name); }
+      else needZip.push({ ...m, _alreadyLive: alreadyLive });
+    }
+    for (const f of zipFiles) {
+      if (!matchedZipNames.has(f.name)) {
+        const zc = catnoFromZip(f.name);
+        const inManifest = manifest.some(m => m.catno.toUpperCase() === zc || zc.includes(m.catno.toUpperCase()) || m.catno.toUpperCase().includes(zc));
+        if (!inManifest) orphanZip.push({ catno: zc, name: f.name });
+      }
+    }
+    return { ready, needZip, orphanZip };
+  }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── processing (back half — mirrors DBHImporter) ────────────
+  const process = async () => {
+    if (!recon.ready.length) return;
+    setError(''); setStatus('processing'); setResults([]);
+    try {
+      const JSZip = await loadJSZip();
+      const list = recon.ready;
+      const total = list.length;
+      const processed = [];
+
+      for (let i = 0; i < list.length; i++) {
+        const m = list[i];
+        const catno  = m.catno.toUpperCase().trim();
+        const ov     = edits[m.catno] || {};
+        const artist = (ov.artist != null ? ov.artist : deriveArtist(m)).trim();
+        const title  = (ov.title  != null ? ov.title  : deriveTitle(m)).trim();
+        const label  = m.label;
+        let   genre  = mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
+        const release = m.release;                          // YYYY-MM-DD (raw street date)
+        const year    = release ? new Date(release).getFullYear() : '';
+        const dealer  = m.dealerPrice != null ? m.dealerPrice : 0;
+        const rawPrice = dealer * (1 + margin / 100);
+        let price = Math.ceil(rawPrice) - 0.01;
+        // €9.99 floor (per existing pricing rules).
+        if (price < 9.99) price = 9.99;
+        price = price.toFixed(2);
+        const format = m.format || '';
+        const is2LP  = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
+        const grams  = is2LP ? '900' : '500';
+        const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+        const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+
+        setProgress({ done:i, total, current:`${catno} — processing…` });
+
+        let coverUrl = '';
+        let tracks   = [];
+        let itemError = '';
+        let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
+
+        const zipFile = zipForCatno(catno);
+        if (zipFile) {
+          try {
+            setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f=>!f.dir);
+
+            const imgFiles  = files.filter(f=>/\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile = imgFiles.find(f=>/front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${catno} — uploading cover…` });
+              const blob = await coverFile.async('blob');
+              const ext  = coverFile.name.split('.').pop().toLowerCase();
+              coverUrl = await uploadToR2(blob, `covers/${safeKey}.${ext}`, ext==='png'?'image/png':'image/jpeg');
+            }
+
+            const audioFiles = files.filter(f=>/\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g, '-');
+              setProgress({ done:i, total, current:`${catno} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              tracks.push({ name: filename.replace(/\.[^.]+$/,''), url });
+            }
+
+            // W&S genre solution: the email never carries genre, but the ZIP's
+            // SALESPAPER.pdf does. Reuse the same extractSalesPaperText helper
+            // the main W&S ZipImporter uses. Only fill genre when the manifest
+            // didn't already provide one (DBH manifests do; W&S don't). The
+            // press text also enriches the description.
+            const pdfFile = files.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || files.find(f => /\.pdf$/i.test(f.name));
+            if (pdfFile) {
+              try {
+                setProgress({ done:i, total, current:`${catno} — reading press text…` });
+                const pblob = await pdfFile.async('blob');
+                const extracted = await extractSalesPaperText(pblob);
+                if (extracted) {
+                  if (!genre && extracted.genre) genre = mapGenrePreorder(extracted.genre);
+                  if (extracted.desc) zipDesc = extracted.desc;
+                }
+              } catch (e) { /* PDF parse is best-effort; never block the import */ }
+            }
+          } catch(e) { itemError = e.message; }
+        }
+
+        // Fallback cover: if no ZIP cover, use the manifest's distributor cover
+        // URL (img.php). It's an external hotlink, not on R2, but better than
+        // a blank pre-order tile until the ZIP lands.
+        if (!coverUrl && m.coverUrl) coverUrl = m.coverUrl;
+
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
+
+        // Tags: the forthcoming markers + release date are what the Part-1
+        // display layer keys off. release: tag stores the RAW street date;
+        // the +14-day buffer is applied at display time only.
+        const tagList = [
+          'vinyl',
+          `source:${m.source || 'dbh'}`,
+          label ? `label:${label}` : '',
+          genre,
+          year ? String(year) : '',
+          'forthcoming',
+          release ? `release:${release}` : '',
+        ].filter(Boolean);
+        const shopifyTags = tagList.join(', ');
+
+        processed.push({
+          _catno: catno, _title: title, _artist: artist,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _zipFound: !!zipFile, _release: release,
+          _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
+          _genre: genre,                              // editable in review; rebuilds Tags
+          _label: label, _source: (m.source || 'dbh'), _year: year ? String(year) : '',
+          'Handle': handle,
+          'Title': title || catno,
+          'Body (HTML)': `${descHtml}${audioHtml}`,
+          'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl',
+          'Type': '',
+          'Tags': shopifyTags,
+          'Published': 'TRUE',
+          'Option1 Name':'Title','Option1 Value':'Default Title','Option1 Linked To':'',
+          'Option2 Name':'','Option2 Value':'','Option2 Linked To':'',
+          'Option3 Name':'','Option3 Value':'','Option3 Linked To':'',
+          'Variant SKU': catno,
+          'Variant Grams': grams,
+          'Variant Inventory Tracker': 'shopify',
+          'Variant Inventory Qty': '0',                 // pre-order: no stock yet
+          'Variant Inventory Policy': 'continue',        // oversell on → demand ledger
+          'Variant Fulfillment Service': 'manual',
+          'Variant Price': price,
+          'Variant Compare At Price': '',
+          'Variant Requires Shipping': 'TRUE',
+          'Variant Taxable': 'TRUE',
+          'Unit Price Total Measure':'','Unit Price Total Measure Unit':'',
+          'Unit Price Base Measure':'','Unit Price Base Measure Unit':'',
+          'Variant Barcode': '',
+          'Image Src': coverUrl,
+          'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE','SEO Title':'','SEO Description':'',
+          'Variant Image':'','Variant Weight Unit':'kg',
+          'Variant Tax Code':'','Cost per item': dealer ? dealer.toFixed(2) : '','Status':'active',
+        });
+
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch(e) {
+      setError(e.message);
+      setStatus('idle');
+    }
+  };
+
+  // Rebuild the Tags string for a row from its (possibly edited) _genre so a
+  // genre change in the review view flows into the exported CSV.
+  const tagsForRow = (r) => [
+    'vinyl',
+    `source:${r._source || 'dbh'}`,
+    r._label ? `label:${r._label}` : '',
+    r._genre || '',
+    r._year || '',
+    'forthcoming',
+    r._release ? `release:${r._release}` : '',
+  ].filter(Boolean).join(', ');
+
+  const downloadCSV = () => {
+    const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
+    if (!kept.length) return;
+    const CSV_KEYS = Object.keys(kept[0]).filter(k=>!k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...kept.map(row=>CSV_KEYS.map(h=>{
+      const val = h==='Tags' ? tagsForRow(row) : row[h];
+      return `"${String(val||'').replace(/"/g,'""')}"`;
+    }).join(','))];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'preorder_shopify_import.csv';
+    a.click();
+  };
+
+  const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
+  const covered   = results.filter(r=>r._coverUrl).length;
+  const withAudio = results.filter(r=>r._tracks?.length>0).length;
+  const errors    = results.filter(r=>r._error).length;
+
+  const setEdit = (catno, key, val) =>
+    setEdits(prev => ({ ...prev, [catno]: { ...(prev[catno]||{}), [key]: val } }));
+
+  return (
+    <div>
+      <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
+        Pre-order / Forthcoming. Upload a <b style={{color:S.text}}>manifest</b> (CSV or JSON, generated from the distributor "Coming soon" emails) plus the <b style={{color:S.text}}>ZIP folders</b> you downloaded. Matched by catalog number. Listed as <b style={{color:S.accent}}>paid pre-orders</b>: stock 0, oversell on, tagged <span style={{background:S.bg,color:S.accent,padding:'1px 6px',borderRadius:3,fontFamily:'monospace',fontSize:9,border:`1px solid ${S.border}`}}>forthcoming</span> + <span style={{background:S.bg,color:S.accent,padding:'1px 6px',borderRadius:3,fontFamily:'monospace',fontSize:9,border:`1px solid ${S.border}`}}>release:</span>. Customers reserve now; you ship when it lands.
+      </p>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e=>e.preventDefault()}
+        onDrop={e=>{e.preventDefault();const files=[...e.dataTransfer.files];const mf=files.find(f=>/\.(csv|json)$/i.test(f.name));if(mf)loadManifest(mf);assignZips(files);}}
+        style={{border:`2px dashed ${(manifestName||zipFiles.length)?S.accent:S.border}`,borderRadius:3,padding:'20px',textAlign:'center',marginBottom:14,transition:'border 0.15s'}}
+      >
+        <div style={{fontSize:28,marginBottom:6}}>📅</div>
+        <div style={{fontSize:11,color:(manifestName||zipFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
+          Drag manifest (CSV/JSON) + ZIPs here
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+          <input ref={manifestRef} type="file" accept=".csv,.json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])loadManifest(e.target.files[0]);e.target.value='';}} />
+          <input ref={zipRef} type="file" accept=".zip" multiple style={{display:'none'}} onChange={e=>{assignZips(e.target.files);e.target.value='';}} />
+          <button onClick={()=>manifestRef.current.click()} style={{background:manifestName?S.accent:S.border,border:'none',color:manifestName?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {manifestName?`✓ ${manifestName}`:'+ Manifest'}
+          </button>
+          <button onClick={()=>zipRef.current.click()} style={{background:zipFiles.length?S.accent:S.border,border:'none',color:zipFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+            {zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}
+          </button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
+          {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
+            const total = manifest.filter(m=>m.zipUrl).length;
+            const label = downloading
+              ? `Downloading… ${downloadProgress}/${total}`
+              : downloadDone
+                ? `✓ Done — ${downloadStats.ok} downloaded${downloadStats.missing?`, ${downloadStats.missing} no ZIP yet`:''}${downloadStats.failed?`, ${downloadStats.failed} failed`:''}`
+                : `↓ Download all ZIPs (${total})`;
+            const col = downloadDone && !downloading ? S.accent : S.accent;
+            return (
+            <button onClick={downloadAllZips} disabled={downloading} title={downloadDone?'Click to download again':''} style={{background:downloadDone&&!downloading?`${S.accent}22`:'none',border:`1px solid ${col}`,color:col,cursor:downloading?'default':'pointer',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+              {label}
+            </button>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* Reconciliation view */}
+      {manifest.length>0&&status==='idle'&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
+            <span>Manifest: <b style={{color:S.text}}>{manifest.length}</b></span>
+            <span>✅ Ready: <b style={{color:S.accent}}>{recon.ready.length}</b></span>
+            <span>⚠ Need ZIP: <b style={{color:'#ff8800'}}>{recon.needZip.length}</b></span>
+            <span>⚠ Orphan ZIP: <b style={{color:'#ff8800'}}>{recon.orphanZip.length}</b></span>
+            {liveHandles===null
+              ? <span style={{color:S.muted}}>⊘ Already live: <b>checking…</b></span>
+              : (()=>{const n=[...recon.ready,...recon.needZip].filter(r=>r._alreadyLive).length; return <span>⊘ Already live: <b style={{color:n>0?'#ff8800':S.muted}}>{n}</b>{n>0?' (auto-excluded)':''}</span>;})()
+            }
+          </div>
+
+          {/* Need-ZIP list: tell the operator exactly what to download */}
+          {recon.needZip.length>0&&(
+            <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({recon.needZip.length})</div>
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                {recon.needZip.map((m,i)=>(
+                  <div key={i} style={{fontSize:10,color:S.text,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <span style={{fontFamily:'monospace',color:'#ff8800'}}>{m.catno}</span>
+                    <span style={{color:S.muted}}>{m.artist} — {m.title}</span>
+                    {m.zipUrl&&<a href={m.zipUrl} target="_blank" rel="noreferrer" style={{fontSize:9,color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'2px 8px'}}>↓ ZIP link</a>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Orphan-ZIP list: ZIPs with no manifest entry */}
+          {recon.orphanZip.length>0&&(
+            <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>ZIPs with no manifest entry ({recon.orphanZip.length})</div>
+              <div style={{fontSize:10,color:S.muted}}>{recon.orphanZip.map(z=>z.catno).join(' · ')}</div>
+              <div style={{fontSize:9,color:S.muted,marginTop:4}}>These need a manifest row (release date + price) before they can be listed.</div>
+            </div>
+          )}
+
+          {/* Ready list: editable artist/title for messy feed values */}
+          {recon.ready.length>0&&(
+            <div style={{border:`1px solid ${S.border}`,borderRadius:4,overflow:'hidden',marginBottom:10}}>
+              <div style={{fontSize:9,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'8px 12px',background:S.bg}}>Ready to list ({recon.ready.length}) — edit artist/title if needed</div>
+              <div style={{maxHeight:280,overflowY:'auto'}}>
+                {recon.ready.map((m,i)=>{
+                  const ov = edits[m.catno]||{};
+                  const artistVal = ov.artist!=null?ov.artist:deriveArtist(m);
+                  const titleVal  = ov.title!=null?ov.title:deriveTitle(m);
+                  const previewPrice = (()=>{const dp=m.dealerPrice!=null?m.dealerPrice:0;let p=Math.ceil(dp*(1+margin/100))-0.01;if(p<9.99)p=9.99;return p.toFixed(2);})();
+                  return (
+                    <div key={i} style={{display:'flex',gap:8,alignItems:'center',padding:'7px 12px',borderTop:`1px solid ${S.border}`,flexWrap:'wrap'}}>
+                      <span style={{fontFamily:'monospace',fontSize:10,color:S.accent,minWidth:90}}>{m.catno}</span>
+                      <input value={artistVal} onChange={e=>setEdit(m.catno,'artist',e.target.value)} placeholder="Artist" style={{flex:1,minWidth:90,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      <input value={titleVal} onChange={e=>setEdit(m.catno,'title',e.target.value)} placeholder="Title" style={{flex:1,minWidth:90,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      <span style={{fontSize:9,color:S.muted,minWidth:120}}>{formatExpected(addDays(m.release,14))}</span>
+                      <span style={{fontSize:10,color:S.accent,fontWeight:700,minWidth:48,textAlign:'right'}}>€{previewPrice}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Margin + process */}
+      {recon.ready.length>0&&status==='idle'&&(
+        <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <span style={{fontSize:10,color:S.muted}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)} style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
+          </div>
+          <span style={{fontSize:9,color:S.muted}}>dealer €8.00 × {(1+margin/100).toFixed(2)} = €{(8*(1+margin/100)).toFixed(2)} → €{(Math.ceil(8*(1+margin/100))-0.01).toFixed(2)} (floor €9.99)</span>
+          <div style={{flex:1}}/>
+          <Btn ch={`📅 List ${recon.ready.length} pre-orders`} onClick={process} full />
+        </div>
+      )}
+
+      {/* Progress */}
+      {status==='processing'&&(
+        <div style={{padding:14,background:S.bg,borderRadius:2,border:`1px solid ${S.border}`,marginBottom:12}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>LISTING PRE-ORDERS…</span>
+            <span style={{fontSize:10,color:S.muted}}>{progress.done} / {progress.total} · {pct}%</span>
+          </div>
+          <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden',marginBottom:8}}>
+            <div style={{height:'100%',background:S.accent,width:`${pct}%`,transition:'width 0.3s'}} />
+          </div>
+          {progress.current&&<div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>→ {progress.current}</div>}
+        </div>
+      )}
+
+      {error&&<div style={{marginBottom:12,padding:10,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{error}</div>}
+
+      {/* Results */}
+      {status==='review'&&results.length>0&&(
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+            <div>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]&&!r._alreadyLive).length} pre-orders</span>
+              <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
+                {covered} covers · {withAudio} audio
+                {errors>0?` · ${errors} errors`:''}
+                {Object.values(excluded).filter(Boolean).length>0?` · ${Object.values(excluded).filter(Boolean).length} removed`:''}
+              </span>
+            </div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+
+          <div style={{padding:'8px 12px',background:'#0a1200',border:`1px solid ${S.accent}33`,borderRadius:4,marginBottom:12,fontSize:9,color:S.muted,lineHeight:1.6}}>
+            After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
+            {results.map((r,i)=>{
+              const isOut = !!excluded[r._catno] || r._alreadyLive;
+              return (
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._alreadyLive?'#ff8800':isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
+                <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
+                  {r._coverUrl
+                    ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
+                    :<div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24}}>🎵</div>
+                  }
+                  {r._tracks?.length>0&&<div style={{position:'absolute',bottom:4,left:4,background:'rgba(0,0,0,0.75)',borderRadius:2,fontSize:8,color:S.accent,padding:'2px 6px'}}>▶ {r._tracks.length}</div>}
+                  <div style={{position:'absolute',top:4,left:4,background:S.accent,borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>PRE-ORDER</div>
+                  {r._alreadyLive
+                    ? <div title="Already a live product — excluded from export" style={{position:'absolute',top:4,right:4,background:'#ff8800',border:'none',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700,lineHeight:1}}>ALREADY LIVE</div>
+                    : <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
+                  }
+                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {!r._coverUrl&&!r._error&&!r._alreadyLive&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
+                </div>
+                <div style={{padding:'8px 8px 6px'}}>
+                  <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
+                  <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
+                  <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
+                  <input value={r._genre||''} placeholder="(no genre)" onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  <div style={{fontSize:8,color:S.muted,marginTop:3}}>{formatExpected(addDays(r._release,14))}</div>
+                  <div style={{fontSize:10,color:S.accent,marginTop:2,fontWeight:700}}>€{r['Variant Price']}</div>
+                  {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
+                </div>
+              </div>
+              );
+            })}
+          </div>
+
+          <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -5975,6 +6866,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('dbh','🏠 DBH Import')}
           {tabBtn('mt','🇮🇹 MT Import')}
           {tabBtn('rh','💎 Rush Hour Import')}
+          {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
         </div>
         {tab==='zip'   && <ZipImporter />}
@@ -5982,6 +6874,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+        {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
@@ -6151,7 +7044,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest'});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
   const [search,setSearch]               = useState('');
   // Debounced version of `search`: updated 300ms after the user stops typing.
   // We use this (not `search`) in fetchParams so we don't fire a Shopify
@@ -6162,6 +7055,9 @@ export default function App() {
     return ()=>clearTimeout(handle);
   },[search]);
   const [page,setPage]                   = useState('shop');
+  // Forthcoming view mode: 'list' (default, rich rows) or 'grid' (cards).
+  // Resets to 'list' every time the user enters the Forthcoming section.
+  const [forthcomingView,setForthcomingView] = useState('list');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
@@ -6173,6 +7069,9 @@ export default function App() {
 
   // Persist anonymous wishlist to localStorage on every change
   useEffect(()=>{ saveLocalWishlist(wishItems); }, [wishItems]);
+
+  // Reset Forthcoming to the default list view each time it's entered.
+  useEffect(()=>{ if (filters.forthcoming) setForthcomingView('list'); }, [filters.forthcoming]);
 
   // When auth changes: load profile, sync wishlist
   useEffect(()=>{
@@ -6400,17 +7299,28 @@ export default function App() {
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
-    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch };
-  }, [filters.genre, filters.label, filters.year, filters.sort, debouncedSearch]);
+    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming };
+  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, debouncedSearch]);
 
   // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
-  // Two code paths:
-  //   - searchTerm present → use Shopify's `search` endpoint (relevance-ranked,
-  //     prefix-matches the last word, searches the WHOLE catalog)
-  //   - no searchTerm → use `products` endpoint (sortable, paginated, also full catalog)
-  // Both honor filter tags. The active code path is encapsulated in
-  // fetchActivePage so loadMore stays simple.
+  // Code paths:
+  //   - forthcoming view → `products` endpoint requiring tag:'forthcoming'
+  //     (free-text search is disabled in the Forthcoming section — the list is
+  //     short and curated, so relevance ranking adds nothing)
+  //   - searchTerm present → `search` endpoint (relevance-ranked, prefix-match)
+  //   - otherwise → `products` endpoint (sortable, paginated), forthcoming
+  //     EXCLUDED so pre-orders never appear in the main catalogue
+  // The active code path is encapsulated in fetchActivePage so loadMore stays simple.
   const fetchActivePage = useCallback((extraOpts={}) => {
+    if (fetchParams.forthcoming) {
+      return fetchShopifyProducts({
+        sortKey: fetchParams.sortKey,
+        reverse: fetchParams.reverse,
+        filterTags: fetchParams.filterTags,
+        forthcoming: true,
+        ...extraOpts,
+      });
+    }
     if (fetchParams.searchTerm) {
       return fetchShopifyProductSearch({
         searchTerm: fetchParams.searchTerm,
@@ -6530,8 +7440,9 @@ export default function App() {
   return (
     <PlayerProvider>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>setPage('shop')}>
+      <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
         <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
+          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -6546,16 +7457,34 @@ export default function App() {
         </div>
       </Nav>
 
-      <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto'}}>
+      <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto',textAlign:'left'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
-        <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase'}}>Vinyl Delivered Worldwide</p>
+        {filters.forthcoming
+          ? <p style={{color:S.accent,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',fontWeight:700,textAlign:'left'}}>Forthcoming · Pre-order Now</p>
+          : <p style={{color:S.muted,fontSize:11,margin:'16px 0 0',letterSpacing:3,textTransform:'uppercase',textAlign:'left'}}>Vinyl Delivered Worldwide</p>
+        }
+        {filters.forthcoming && <p style={{color:S.muted,fontSize:11,margin:'10px 0 0',lineHeight:1.6,maxWidth:520,textAlign:'left'}}>The releases we're most excited about, before they drop. Reserve yours now — we ship the moment they land in Madrid. Estimated arrival shown on each release.</p>}
+        {filters.forthcoming && <button onClick={()=>setFilter('forthcoming',false)} style={{marginTop:18,background:'transparent',border:`1px solid ${S.border}`,color:S.text,cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',padding:'8px 16px',borderRadius:2,fontFamily:'inherit',transition:'all 0.15s'}}>← Back to all records</button>}
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
         <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-          {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
-        </div>
+        {filters.forthcoming && (
+          <div style={{display:'flex',justifyContent:'flex-end',gap:6,marginBottom:14}}>
+            {['list','grid'].map(v=>(
+              <button key={v} onClick={()=>setForthcomingView(v)} style={{background:forthcomingView===v?S.accent:'transparent',color:forthcomingView===v?'#080808':S.muted,border:`1px solid ${forthcomingView===v?S.accent:S.border}`,borderRadius:2,padding:'5px 14px',cursor:'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',transition:'all 0.15s'}}>{v}</button>
+            ))}
+          </div>
+        )}
+        {filters.forthcoming && forthcomingView==='list' ? (
+          <div>
+            {filtered.map(r=><ForthcomingRow key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          </div>
+        ) : (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
+            {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+          </div>
+        )}
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
         {hasMore&&(
           <div style={{textAlign:'center',marginTop:32}}>
