@@ -1372,7 +1372,7 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
         <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
         {r.desc && (
-          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:620 }}>{r.desc}</p>
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', width:'100%', maxWidth:620 }}>{r.desc}</p>
         )}
         {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
         {hasTracks && player && (
@@ -2191,6 +2191,7 @@ function Filters({ filters, onChange, records, allLabels, allGenres, allYears })
         <div style={{ position:'relative', flexShrink:0 }}>
           <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:120 }}>
             <option value="newest">New Arrivals</option>
+            {filters.forthcoming && <option value="release-asc">Soonest Release</option>}
             <option value="price-asc">Price: Low → High</option>
             <option value="price-desc">Price: High → Low</option>
           </select>
@@ -7073,6 +7074,11 @@ export default function App() {
   // Reset Forthcoming to the default list view each time it's entered.
   useEffect(()=>{ if (filters.forthcoming) setForthcomingView('list'); }, [filters.forthcoming]);
 
+  // "Soonest Release" sort is a Forthcoming-only option. If we leave Forthcoming
+  // while it's selected, fall back to 'newest' so the main catalogue isn't left
+  // with a forthcoming-only sort that only reorders the loaded page.
+  useEffect(()=>{ if (!filters.forthcoming && filters.sort === 'release-asc') setFilter('sort','newest'); }, [filters.forthcoming, filters.sort]);
+
   // When auth changes: load profile, sync wishlist
   useEffect(()=>{
     let cancelled = false;
@@ -7374,7 +7380,24 @@ export default function App() {
 
   // Free-text search is now server-side via fetchShopifyProductSearch (above).
   // Records arrives already filtered & sorted by relevance, so we render directly.
-  const filtered = records;
+  // "Soonest Release" (filters.sort === 'release-asc') is a client-side sort by
+  // release date ascending — it can't be server-side because release:YYYY-MM-DD
+  // is a free-text tag, not a Shopify sortKey. It's offered only in the
+  // Forthcoming view, where all records are loaded (no pagination), so the sort
+  // is complete. Records with no release date sort to the bottom (guard).
+  const filtered = useMemo(() => {
+    if (filters.forthcoming && filters.sort === 'release-asc') {
+      return [...records].sort((a, b) => {
+        const da = a.releaseDate || '';
+        const db = b.releaseDate || '';
+        if (!da && !db) return 0;
+        if (!da) return 1;   // missing date → bottom
+        if (!db) return -1;
+        return da.localeCompare(db); // ISO YYYY-MM-DD sorts correctly as string
+      });
+    }
+    return records;
+  }, [records, filters.forthcoming, filters.sort]);
 
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
