@@ -33,6 +33,10 @@ interface Env {
   // (separately for staging). See Fase 1A (May 2026).
   CAAPI_CLIENT_ID: string;
   CAAPI_CLIENT_SECRET: string;
+  // Resend API key for the newsletter double opt-in (?action=newsletter-subscribe
+  // / newsletter-confirm) and Broadcasts. Sending-access key scoped to the account.
+  // Set via `wrangler secret put RESEND_API_KEY` (separately for staging).
+  RESEND_API_KEY: string;
 }
 
 const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -76,6 +80,71 @@ function jsonRes(data: any, status = 200): Response {
     headers: { ...CORS, 'Content-Type': 'application/json' },
   });
 }
+
+// ── NEWSLETTER HELPERS (double opt-in via Resend) ───────────────
+// The "from" the customer sees; Resend handles the technical Return-Path on
+// send.houseonly.store under the hood.
+const NEWSLETTER_FROM = 'House Only <newsletter@houseonly.store>';
+const NEWSLETTER_SITE = 'https://houseonly.store';
+const NL_PENDING_PREFIX = 'newsletter-pending:';
+const NL_PENDING_TTL_S = 48 * 60 * 60; // 48h
+
+function newNlToken(): string {
+  return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+}
+
+async function sendNewsletterConfirmation(env: Env, email: string, confirmUrl: string): Promise<boolean> {
+  try {
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#080808;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="max-width:520px;margin:0 auto;padding:48px 28px;">
+    <div style="font-weight:800;font-size:22px;letter-spacing:-0.5px;color:#ffffff;margin-bottom:4px;">HOUSE<span style="color:#c8ff00;">ONLY</span></div>
+    <div style="color:#8a8a8a;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-bottom:36px;">Vinyl delivered worldwide</div>
+    <h1 style="color:#ffffff;font-size:24px;font-weight:700;line-height:1.25;margin:0 0 16px;">Confirm your subscription</h1>
+    <p style="color:#bdbdbd;font-size:15px;line-height:1.6;margin:0 0 28px;">Tap below to confirm and you're in. You'll get first access to pre-orders before they go public, plus the records we think actually matter \u2014 no noise.</p>
+    <a href="${confirmUrl}" style="display:inline-block;background:#c8ff00;color:#080808;font-weight:700;font-size:15px;text-decoration:none;padding:14px 32px;border-radius:6px;">Confirm subscription</a>
+    <p style="color:#6a6a6a;font-size:13px;line-height:1.6;margin:32px 0 0;">If you didn't sign up, just ignore this email \u2014 nothing happens without your confirmation. This link expires in 48 hours.</p>
+  </div>
+</body></html>`;
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
+      body: JSON.stringify({ from: NEWSLETTER_FROM, to: email, subject: 'Confirm your House Only subscription', html }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function createResendContact(env: Env, email: string): Promise<boolean> {
+  try {
+    const res = await fetch('https://api.resend.com/contacts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
+      body: JSON.stringify({ email, unsubscribed: false }),
+    });
+    return res.ok || res.status === 409;
+  } catch {
+    return false;
+  }
+}
+
+function newsletterResultPage(ok: boolean): Response {
+  const title = ok ? "You're in." : 'Link expired';
+  const msg = ok
+    ? "You'll get first access to pre-orders and the records that matter. Welcome to House Only."
+    : "This confirmation link has expired or already been used. Head back and sign up again \u2014 it only takes a second.";
+  const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${title} \u2014 House Only</title>
+<meta http-equiv="refresh" content="6;url=${NEWSLETTER_SITE}/">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#080808;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}.card{max-width:440px;text-align:center;}.logo{font-weight:800;font-size:26px;letter-spacing:-0.5px;margin-bottom:28px;}.logo span{color:#c8ff00;}h1{font-size:30px;font-weight:700;margin-bottom:14px;letter-spacing:-0.5px;}p{color:#bdbdbd;font-size:15px;line-height:1.6;margin-bottom:28px;}a{display:inline-block;background:#c8ff00;color:#080808;font-weight:700;font-size:14px;text-decoration:none;padding:13px 30px;border-radius:6px;}.sub{color:#6a6a6a;font-size:12px;margin-top:24px;}</style></head>
+<body><div class="card"><div class="logo">HOUSE<span>ONLY</span></div><h1>${title}</h1><p>${msg}</p><a href="${NEWSLETTER_SITE}/">Back to the shop</a><div class="sub">Redirecting you home\u2026</div></div></body></html>`;
+  return new Response(html, { status: 200, headers: { ...CORS, 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
 
 // ── WISHLIST HELPERS ────────────────────────────────────────────
 //
@@ -1262,6 +1331,55 @@ export default {
       }));
       return jsonRes({ orders });
     }
+
+    // ── NEWSLETTER: double opt-in subscribe ──────────────────────
+    // POST ?action=newsletter-subscribe  body:{ email, source? }
+    // Stores a pending token in KV and sends a confirmation email. Always
+    // returns a generic 200 (we do NOT reveal whether the email already exists).
+    if (action === 'newsletter-subscribe' && request.method === 'POST') {
+      if (!env.RESEND_API_KEY) return jsonRes({ error: 'RESEND_API_KEY not configured' }, 500);
+      let nlBody: any = {};
+      try { nlBody = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      const nlEmail = String(nlBody?.email || '').trim().toLowerCase();
+      const nlSource = String(nlBody?.source || 'footer').trim().slice(0, 32);
+      if (!isValidEmail(nlEmail)) return jsonRes({ error: 'invalid email' }, 400);
+
+      const nlToken = newNlToken();
+      await env.WISHLIST.put(
+        `${NL_PENDING_PREFIX}${nlToken}`,
+        JSON.stringify({ email: nlEmail, source: nlSource, createdAt: Date.now() }),
+        { expirationTtl: NL_PENDING_TTL_S },
+      );
+
+      const confirmUrl = `${url.origin}/?action=newsletter-confirm&token=${encodeURIComponent(nlToken)}`;
+      const nlSent = await sendNewsletterConfirmation(env, nlEmail, confirmUrl);
+      if (!nlSent) {
+        await env.WISHLIST.delete(`${NL_PENDING_PREFIX}${nlToken}`);
+        return jsonRes({ error: 'send_failed' }, 502);
+      }
+      return jsonRes({ ok: true, status: 'confirmation_sent' });
+    }
+
+    // ── NEWSLETTER: confirm (double opt-in) ──────────────────────
+    // GET ?action=newsletter-confirm&token=...  (link clicked from email)
+    if (action === 'newsletter-confirm' && request.method === 'GET') {
+      const nlcToken = url.searchParams.get('token') || '';
+      if (!nlcToken) return newsletterResultPage(false);
+      const nlcKey = `${NL_PENDING_PREFIX}${nlcToken}`;
+      const nlcRaw = await env.WISHLIST.get(nlcKey);
+      if (!nlcRaw) return newsletterResultPage(false);
+      let nlcPending: any = {};
+      try { nlcPending = JSON.parse(nlcRaw); } catch { nlcPending = {}; }
+      const nlcEmail = String(nlcPending?.email || '').trim().toLowerCase();
+      if (!isValidEmail(nlcEmail)) {
+        await env.WISHLIST.delete(nlcKey);
+        return newsletterResultPage(false);
+      }
+      const nlcCreated = await createResendContact(env, nlcEmail);
+      await env.WISHLIST.delete(nlcKey);
+      return newsletterResultPage(nlcCreated);
+    }
+
 
     // ── AUTHENTICATED CHECKOUT (CAAPI → Storefront cart) ───────────
     // POST ?action=create-checkout  body: { session?, lines: [{merchandiseId, quantity}] }
