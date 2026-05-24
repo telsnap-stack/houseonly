@@ -395,6 +395,20 @@ async function getValidSession(env: AuthEnv, sessionId: string): Promise<Session
   return sess;
 }
 
+// Return a fresh CAAPI access token for a session (refreshing if needed), or
+// null if the session is invalid. Used to attach buyerIdentity.customerAccessToken
+// to a Storefront cart so the buyer stays authenticated through to checkout.
+// NOTE: this token is used ONLY for the cart's buyerIdentity (per Shopify docs,
+// the CAAPI access token's sole Storefront use); it is never returned to the
+// browser — the cart is created server-side in the Worker.
+export async function accessTokenFromSession(
+  env: AuthEnv,
+  sessionId: string,
+): Promise<string | null> {
+  const sess = await getValidSession(env, sessionId);
+  return sess ? sess.accessToken : null;
+}
+
 // Run a CAAPI GraphQL query on behalf of a logged-in session: resolves the
 // session (refreshing the access token if needed) and executes the query with
 // that token. Returns the parsed JSON, or null if the session is invalid.

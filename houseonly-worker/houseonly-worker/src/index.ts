@@ -251,6 +251,7 @@ import {
   consumeAuthState,
   customerIdFromSession,
   caapiQueryBySession,
+  accessTokenFromSession,
 } from './lib/auth';
 
 
@@ -1260,6 +1261,85 @@ export default {
         })),
       }));
       return jsonRes({ orders });
+    }
+
+    // ── AUTHENTICATED CHECKOUT (CAAPI → Storefront cart) ───────────
+    // POST ?action=create-checkout  body: { session?, lines: [{merchandiseId, quantity}] }
+    // Creates a Storefront cart server-side. If the session resolves to a valid
+    // CAAPI access token, that token is attached as buyerIdentity.customerAccessToken
+    // so the buyer stays logged in through to checkout (per Shopify docs). The
+    // token never reaches the browser. Falls back to a guest cart if there's no
+    // session or the token is unavailable — a checkout always succeeds.
+    if (action === 'create-checkout' && request.method === 'POST') {
+      let body: any = {};
+      try { body = await request.json(); } catch { body = {}; }
+      const session: string = body?.session || '';
+      const rawLines = Array.isArray(body?.lines) ? body.lines : [];
+      // Replicate the frontend's exact filter: only lines with a merchandiseId.
+      const lines = rawLines
+        .filter((l: any) => l && l.merchandiseId)
+        .map((l: any) => ({ merchandiseId: l.merchandiseId, quantity: l.quantity || 1 }));
+      if (!lines.length) return jsonRes({ error: 'no-lines' }, 400);
+
+      const input: any = { lines };
+
+      // Try to authenticate the cart. Best-effort: a failure here degrades to a
+      // guest cart rather than blocking the sale.
+      if (session) {
+        const accessToken = await accessTokenFromSession(env, session);
+        if (accessToken) {
+          input.buyerIdentity = { customerAccessToken: accessToken };
+        }
+      }
+
+      // Forward the buyer's IP for correct throttling/risk signals on server-side
+      // Storefront calls, as recommended by Shopify for headless flows.
+      const buyerIp =
+        request.headers.get('cf-connecting-ip') ||
+        request.headers.get('x-forwarded-for') ||
+        '';
+
+      const sfHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': env.STOREFRONT_TOKEN,
+      };
+      if (buyerIp) sfHeaders['Shopify-Storefront-Buyer-IP'] = buyerIp;
+
+      let checkoutUrl = '';
+      try {
+        const r = await fetch(`https://${SHOPIFY_DOMAIN}/api/2024-04/graphql.json`, {
+          method: 'POST',
+          headers: sfHeaders,
+          body: JSON.stringify({
+            query: `mutation cartCreate($input: CartInput!) {
+              cartCreate(input: $input) {
+                cart { checkoutUrl }
+                userErrors { field message }
+              }
+            }`,
+            variables: { input },
+          }),
+        });
+        const d: any = await r.json().catch(() => ({}));
+        const errs = d?.data?.cartCreate?.userErrors;
+        if (errs?.length) {
+          return jsonRes({ error: errs.map((e: any) => e.message).join(', ') }, 400);
+        }
+        checkoutUrl = d?.data?.cartCreate?.cart?.checkoutUrl || '';
+      } catch (e: any) {
+        return jsonRes({ error: 'cart-failed', detail: String(e?.message || e) }, 502);
+      }
+
+      if (!checkoutUrl) return jsonRes({ error: 'no-checkout-url' }, 502);
+
+      // Append logged_in=true so the buyer stays authenticated at checkout (CAAPI
+      // docs). Rewrite the domain to the store's checkout subdomain, matching the
+      // frontend's existing behavior.
+      let finalUrl = checkoutUrl.replace('houseonly.store', 'checkout.houseonly.store');
+      if (input.buyerIdentity) {
+        finalUrl += (finalUrl.includes('?') ? '&' : '?') + 'logged_in=true';
+      }
+      return jsonRes({ checkoutUrl: finalUrl, authenticated: !!input.buyerIdentity });
     }
 
     if (action === 'wishlist' || action === 'wishlist-merge') {
