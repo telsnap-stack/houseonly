@@ -1354,14 +1354,14 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
   const metaRow = (k, v) => v ? (
-    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
-      <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
-      <span style={{ color:S.text }}>{v}</span>
+    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5, minWidth:0 }}>
+      <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
+      <span style={{ color:S.text, minWidth:0, wordBreak:'break-word' }}>{v}</span>
     </div>
   ) : null;
   const iconBtn = (active) => ({ background:'transparent', border:`1px solid ${active?S.accent:S.border}`, color:active?S.accent:S.muted, borderRadius:2, padding:'7px 9px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' });
   return (
-    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start' }}>
+    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start', width:'100%', boxSizing:'border-box', minWidth:0 }}>
       {/* Cover */}
       <div onClick={()=>onOpen(r)} style={{ width:isMobile?'100%':120, height:isMobile?200:120, flexShrink:0, background:`linear-gradient(${r.g})`, borderRadius:2, cursor:'pointer', overflow:'hidden', position:'relative' }}>
         {cover && <img src={cover} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
@@ -1389,12 +1389,12 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
 
       {/* Right: metadata at top (left-aligned), price + pre-order flush to the
           right margin below — lines up under the LIST/GRID toggle. */}
-      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
+      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left', boxSizing:'border-box', minWidth:0 }}>
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
-        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
-          <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
-          <span style={{ color:S.accent, fontWeight:700 }}>{expected.replace(/^Expected\s/, '')}</span>
+        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5, minWidth:0 }}>
+          <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
+          <span style={{ color:S.accent, fontWeight:700, minWidth:0, wordBreak:'break-word' }}>{expected.replace(/^Expected\s/, '')}</span>
         </div>
         {metaRow('Genre', r.genre)}
         <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:10, marginTop:8 }}>
@@ -1734,7 +1734,7 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   return (
     <>
       {open&&<div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:900 }} />}
-      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:Math.min(340,window.innerWidth), background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column' }}>
+      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:340, maxWidth:'100vw', background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column', boxSizing:'border-box' }}>
         <div style={{ padding:'18px 22px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
           <span style={{ fontWeight:800, fontSize:11, letterSpacing:2, textTransform:'uppercase' }}>Cart ({count})</span>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
@@ -6995,7 +6995,7 @@ function PolicyDrawer({ slug, onClose }) {
   return (
     <>
       {open && <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:900}} />}
-      <div style={{position:'fixed',top:0,right:0,bottom:0,width:Math.min(560,window.innerWidth),background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column'}}>
+      <div style={{position:'fixed',top:0,right:0,bottom:0,width:560,maxWidth:'100vw',background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column',boxSizing:'border-box'}}>
         <div style={{padding:'18px 22px',borderBottom:`1px solid ${S.border}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
           <span style={{fontWeight:800,fontSize:11,letterSpacing:2,textTransform:'uppercase',color:S.text}}>{content?.title || '…'}</span>
           <button onClick={onClose} style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:20}}>×</button>
