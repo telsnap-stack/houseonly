@@ -1354,14 +1354,14 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
   const metaRow = (k, v) => v ? (
-    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
-      <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
-      <span style={{ color:S.text }}>{v}</span>
+    <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5, minWidth:0 }}>
+      <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{k}</span>
+      <span style={{ color:S.text, minWidth:0, wordBreak:'break-word' }}>{v}</span>
     </div>
   ) : null;
   const iconBtn = (active) => ({ background:'transparent', border:`1px solid ${active?S.accent:S.border}`, color:active?S.accent:S.muted, borderRadius:2, padding:'7px 9px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.15s' });
   return (
-    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start' }}>
+    <div style={{ display:'flex', flexDirection:isMobile?'column':'row', gap:isMobile?12:18, padding:'18px 0', borderBottom:`1px solid ${S.border}`, alignItems:'flex-start', width:'100%', boxSizing:'border-box', minWidth:0 }}>
       {/* Cover */}
       <div onClick={()=>onOpen(r)} style={{ width:isMobile?'100%':120, height:isMobile?200:120, flexShrink:0, background:`linear-gradient(${r.g})`, borderRadius:2, cursor:'pointer', overflow:'hidden', position:'relative' }}>
         {cover && <img src={cover} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
@@ -1372,7 +1372,7 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         <div style={{ fontSize:15, fontWeight:800, color:S.text, lineHeight:1.2 }}>{r.artist}</div>
         <div style={{ fontSize:13, color:S.muted, marginTop:2, marginBottom:8 }}>{r.title}</div>
         {r.desc && (
-          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', maxWidth:620 }}>{r.desc}</p>
+          <p style={{ fontSize:11, color:S.muted, lineHeight:1.6, margin:0, display:'-webkit-box', WebkitLineClamp:4, WebkitBoxOrient:'vertical', overflow:'hidden', width:'100%', maxWidth:620 }}>{r.desc}</p>
         )}
         {/* Play / queue — same functionality as the grid card; only shown when the release has audio */}
         {hasTracks && player && (
@@ -1389,12 +1389,12 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
 
       {/* Right: metadata at top (left-aligned), price + pre-order flush to the
           right margin below — lines up under the LIST/GRID toggle. */}
-      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left' }}>
+      <div style={{ width:isMobile?'100%':240, flexShrink:0, display:'flex', flexDirection:'column', gap:5, textAlign:'left', boxSizing:'border-box', minWidth:0 }}>
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
-        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5 }}>
-          <span style={{ color:S.muted, minWidth:74, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
-          <span style={{ color:S.accent, fontWeight:700 }}>{expected.replace(/^Expected\s/, '')}</span>
+        <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5, minWidth:0 }}>
+          <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
+          <span style={{ color:S.accent, fontWeight:700, minWidth:0, wordBreak:'break-word' }}>{expected.replace(/^Expected\s/, '')}</span>
         </div>
         {metaRow('Genre', r.genre)}
         <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:10, marginTop:8 }}>
@@ -1734,7 +1734,7 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
   return (
     <>
       {open&&<div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', zIndex:900 }} />}
-      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:Math.min(340,window.innerWidth), background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column' }}>
+      <div style={{ position:'fixed', top:0, right:0, bottom:0, width:340, maxWidth:'100vw', background:S.surf, borderLeft:`1px solid ${S.border}`, zIndex:1000, transform:open?'translateX(0)':'translateX(100%)', transition:'transform 0.25s ease', display:'flex', flexDirection:'column', boxSizing:'border-box' }}>
         <div style={{ padding:'18px 22px', borderBottom:`1px solid ${S.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
           <span style={{ fontWeight:800, fontSize:11, letterSpacing:2, textTransform:'uppercase' }}>Cart ({count})</span>
           <button onClick={onClose} style={{ background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
@@ -2191,6 +2191,7 @@ function Filters({ filters, onChange, records, allLabels, allGenres, allYears })
         <div style={{ position:'relative', flexShrink:0 }}>
           <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:120 }}>
             <option value="newest">New Arrivals</option>
+            {filters.forthcoming && <option value="release-asc">Soonest Release</option>}
             <option value="price-asc">Price: Low → High</option>
             <option value="price-desc">Price: High → Low</option>
           </select>
@@ -6994,7 +6995,7 @@ function PolicyDrawer({ slug, onClose }) {
   return (
     <>
       {open && <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:900}} />}
-      <div style={{position:'fixed',top:0,right:0,bottom:0,width:Math.min(560,window.innerWidth),background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column'}}>
+      <div style={{position:'fixed',top:0,right:0,bottom:0,width:560,maxWidth:'100vw',background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column',boxSizing:'border-box'}}>
         <div style={{padding:'18px 22px',borderBottom:`1px solid ${S.border}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
           <span style={{fontWeight:800,fontSize:11,letterSpacing:2,textTransform:'uppercase',color:S.text}}>{content?.title || '…'}</span>
           <button onClick={onClose} style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:20}}>×</button>
@@ -7023,8 +7024,9 @@ function PolicyDrawer({ slug, onClose }) {
   );
 }
 function Nav({ onLogo, children }) {
+  const isMobile = useIsMobile(720);
   return (
-    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:'0 16px',height:52,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+    <nav style={{position:'sticky',top:0,zIndex:200,background:'rgba(8,8,8,0.96)',backdropFilter:'blur(8px)',borderBottom:`1px solid ${S.border}`,padding:isMobile?'8px 14px':'0 16px',minHeight:52,height:isMobile?'auto':52,display:'flex',flexWrap:isMobile?'wrap':'nowrap',alignItems:'center',justifyContent:'space-between',gap:isMobile?8:8}}>
       <Logo scale={0.65} onClick={onLogo} />
       {children}
     </nav>
@@ -7046,6 +7048,7 @@ export default function App() {
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
   const [search,setSearch]               = useState('');
+  const navMobile = useIsMobile(720); // drives the two-row mobile header layout
   // Debounced version of `search`: updated 300ms after the user stops typing.
   // We use this (not `search`) in fetchParams so we don't fire a Shopify
   // search request on every keystroke.
@@ -7072,6 +7075,11 @@ export default function App() {
 
   // Reset Forthcoming to the default list view each time it's entered.
   useEffect(()=>{ if (filters.forthcoming) setForthcomingView('list'); }, [filters.forthcoming]);
+
+  // "Soonest Release" sort is a Forthcoming-only option. If we leave Forthcoming
+  // while it's selected, fall back to 'newest' so the main catalogue isn't left
+  // with a forthcoming-only sort that only reorders the loaded page.
+  useEffect(()=>{ if (!filters.forthcoming && filters.sort === 'release-asc') setFilter('sort','newest'); }, [filters.forthcoming, filters.sort]);
 
   // When auth changes: load profile, sync wishlist
   useEffect(()=>{
@@ -7374,7 +7382,24 @@ export default function App() {
 
   // Free-text search is now server-side via fetchShopifyProductSearch (above).
   // Records arrives already filtered & sorted by relevance, so we render directly.
-  const filtered = records;
+  // "Soonest Release" (filters.sort === 'release-asc') is a client-side sort by
+  // release date ascending — it can't be server-side because release:YYYY-MM-DD
+  // is a free-text tag, not a Shopify sortKey. It's offered only in the
+  // Forthcoming view, where all records are loaded (no pagination), so the sort
+  // is complete. Records with no release date sort to the bottom (guard).
+  const filtered = useMemo(() => {
+    if (filters.forthcoming && filters.sort === 'release-asc') {
+      return [...records].sort((a, b) => {
+        const da = a.releaseDate || '';
+        const db = b.releaseDate || '';
+        if (!da && !db) return 0;
+        if (!da) return 1;   // missing date → bottom
+        if (!db) return -1;
+        return da.localeCompare(db); // ISO YYYY-MM-DD sorts correctly as string
+      });
+    }
+    return records;
+  }, [records, filters.forthcoming, filters.sort]);
 
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
@@ -7441,9 +7466,8 @@ export default function App() {
     <PlayerProvider>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
-        <div style={{display:'flex',gap:6,alignItems:'center',flex:1,justifyContent:'flex-end'}}>
-          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit'}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',width:'100%',maxWidth:180,minWidth:80}} />
+        {/* Icon buttons — row 1, top-right beside the logo on mobile */}
+        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </button>
@@ -7451,9 +7475,14 @@ export default function App() {
             <HeartIcon wished={wishItems.length>0} size={13} />
             {wishItems.length>0 && <span style={{fontSize:10,fontWeight:700,letterSpacing:1}}>{wishItems.length}</span>}
           </button>
-          <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>
+          <button onClick={()=>{setCartOpen(true);}} style={{background:cartCount>0?S.accent:S.surf,color:cartCount>0?'#080808':S.muted,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',flexShrink:0}}>
             {cartCount>0?`Cart (${cartCount})`:'Cart'}
           </button>
+        </div>
+        {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
+        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
+          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
 
