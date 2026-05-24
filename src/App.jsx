@@ -1093,6 +1093,24 @@ function NewsletterSignup({ variant = 'footer', source = 'footer' }) {
   const [status, setStatus] = useState('idle'); // idle | loading | success | error
   const [errMsg, setErrMsg] = useState('');
 
+  // Chrome paints autofilled inputs with its own light background, ignoring inline
+  // styles. The only reliable override is an inset box-shadow + forced text colour
+  // on :-webkit-autofill, which can't be done inline — so inject it once.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById('nl-input-style')) return;
+    const el = document.createElement('style');
+    el.id = 'nl-input-style';
+    el.textContent =
+      '.nl-input:-webkit-autofill,.nl-input:-webkit-autofill:hover,.nl-input:-webkit-autofill:focus{' +
+      '-webkit-text-fill-color:' + S.text + ';' +
+      '-webkit-box-shadow:0 0 0 1000px ' + S.bg + ' inset;' +
+      'box-shadow:0 0 0 1000px ' + S.bg + ' inset;' +
+      'caret-color:' + S.text + ';transition:background-color 9999s ease-in-out 0s;}' +
+      '.nl-input::placeholder{color:' + S.muted + ';}';
+    document.head.appendChild(el);
+  }, []);
+
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
   async function submit() {
@@ -1124,13 +1142,16 @@ function NewsletterSignup({ variant = 'footer', source = 'footer' }) {
         background: isGrid ? S.surf : 'transparent',
         border: isGrid ? `1px solid ${S.accent}` : undefined,
         borderRadius: 2,
-        padding: isGrid ? '28px 22px' : '0',
-        textAlign: isGrid ? 'center' : 'left',
+        borderTop: isGrid ? undefined : `1px solid ${S.border}`,
+        padding: isGrid ? '28px 22px' : (isMobile ? '40px 20px' : '52px 20px'),
+        maxWidth: isGrid ? undefined : 560,
+        margin: isGrid ? undefined : '0 auto',
+        textAlign: 'center',
       }}>
-        <div style={{ fontSize: isGrid ? 13 : 12, fontWeight: 800, color: S.accent, letterSpacing: 1, marginBottom: 6 }}>
+        <div style={{ fontSize: isGrid ? 13 : 18, fontWeight: 800, color: S.accent, letterSpacing: 0.5, marginBottom: 8 }}>
           Almost there — check your inbox.
         </div>
-        <div style={{ fontSize: isGrid ? 12 : 11, color: S.muted, lineHeight: 1.6, maxWidth: 420, margin: isGrid ? '0 auto' : 0 }}>
+        <div style={{ fontSize: isGrid ? 12 : 12, color: S.muted, lineHeight: 1.6, maxWidth: 420, margin: '0 auto' }}>
           We sent you a confirmation link. Click it to lock in early access to pre-orders.
         </div>
       </div>
@@ -1141,6 +1162,7 @@ function NewsletterSignup({ variant = 'footer', source = 'footer' }) {
   const inputEl = (
     <input
       type="email"
+      className="nl-input"
       value={email}
       onChange={(ev) => { setEmail(ev.target.value); if (status === 'error') setStatus('idle'); }}
       onKeyDown={onKey}
