@@ -25,6 +25,14 @@ interface Env {
   // Anthropic API key for the Stories knowledge-line generator (?action=story-context).
   // Set via `wrangler secret put ANTHROPIC_API_KEY` (separately for staging).
   ANTHROPIC_API_KEY: string;
+  // Customer Account API (NCA) confidential-client credentials, used by the
+  // OAuth flow in src/lib/auth.ts (/auth/login, /auth/callback, /auth/logout).
+  // CLIENT_ID is the UUID from Headless → Customer Account API settings;
+  // CLIENT_SECRET appears only after switching the client type to Confidential.
+  // Set via `wrangler secret put CAAPI_CLIENT_ID` / `CAAPI_CLIENT_SECRET`
+  // (separately for staging). See Fase 1A (May 2026).
+  CAAPI_CLIENT_ID: string;
+  CAAPI_CLIENT_SECRET: string;
 }
 
 const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -124,6 +132,45 @@ async function customerIdFromToken(env: Env, token: string): Promise<string | nu
   }
 }
 
+// ── UNIFIED IDENTITY RESOLVER (Fase 1B — coexistence) ──────────────────────
+//
+// The wishlist (and, later, every account-hub feature) calls THIS instead of
+// customerIdFromToken directly. During the migration both auth systems work:
+//
+//   1. NEW (CAAPI): the frontend sends an opaque `session` id. We resolve it
+//      via customerIdFromSession() — which also transparently refreshes the
+//      CAAPI access token from KV when needed.
+//   2. OLD (legacy Storefront): the frontend sends a Storefront `token`. We
+//      resolve it via the legacy customerIdFromToken().
+//
+// Both paths return the SAME numeric Shopify customer id, so they map to the
+// SAME wl:{customerId} record. This is what guarantees the wishlist never
+// breaks across the migration — no data move, no dual storage, just two ways
+// to learn the same id. Once the frontend is fully on CAAPI (Fase 2) and we've
+// confirmed it, the legacy branch (and customerIdFromToken) can be removed
+// (Fase 3).
+//
+// Inputs are read from whatever the caller has: a `session` id and/or a legacy
+// `token`. Session is preferred when both are present.
+async function resolveCustomerId(
+  env: Env,
+  opts: { session?: string | null; token?: string | null },
+): Promise<string | null> {
+  const session = (opts.session || '').trim();
+  if (session) {
+    const cid = await customerIdFromSession(env, session);
+    if (cid) return cid;
+    // Session present but invalid/expired → fall through to legacy token if any
+    // (lets a stale CAAPI session degrade gracefully rather than hard-fail).
+  }
+  const token = (opts.token || '').trim();
+  if (token) {
+    const cid = await customerIdFromToken(env, token);
+    if (cid) return cid;
+  }
+  return null;
+}
+
 async function loadWishlist(env: Env, customerId: string): Promise<WishlistData> {
   const raw = await env.WISHLIST.get(`wl:${customerId}`);
   if (!raw) return { items: [], updatedAt: 0 };
@@ -193,6 +240,18 @@ import {
 import { searchRelease } from './lib/discogs';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
+
+import {
+  buildAuthorizeUrl,
+  exchangeCodeForTokens,
+  customerIdFromAccessToken,
+  createSession,
+  deleteSession,
+  buildLogoutUrl,
+  consumeAuthState,
+  customerIdFromSession,
+  caapiQueryBySession,
+} from './lib/auth';
 
 
 
@@ -454,6 +513,122 @@ export default {
 
     const url = new URL(request.url);
     const action = url.searchParams.get('action');
+
+    // ── CUSTOMER ACCOUNT API AUTH (NCA, confidential) ──────────────
+    //
+    // Path-based routes (NOT ?action=) because the Callback URIs registered in
+    // the Shopify Customer Account API settings point at `/auth/callback`.
+    //
+    // Flow (Fase 1A):
+    //   GET /auth/login           → redirect the browser to Shopify's hosted
+    //                               login (passwordless). ?return_to=<path>
+    //                               remembers where to send the user after.
+    //   GET /auth/callback        → Shopify redirects here with ?code&state.
+    //                               We verify state, exchange the code for tokens
+    //                               (server-to-server), resolve the numeric
+    //                               customerId, mint an opaque session, and
+    //                               redirect to the site with the session id in
+    //                               the URL fragment for the frontend to store.
+    //   GET /auth/logout          → end the Shopify session + delete our session.
+    //
+    // The Worker's own callback URL is derived from request.url so prod and
+    // staging each use their own registered callback automatically. The site we
+    // bounce the user back to is derived from the Worker hostname (the
+    // "-staging" worker → staging site; otherwise → production site).
+    if (url.pathname === '/auth/login' || url.pathname === '/auth/callback' || url.pathname === '/auth/logout') {
+      const workerOrigin = url.origin; // e.g. https://houseonly-worker.emontagut.workers.dev
+      const isStaging = url.hostname.includes('-staging');
+      const siteOrigin = isStaging ? 'https://staging.houseonly.pages.dev' : 'https://houseonly.store';
+      const callbackUri = `${workerOrigin}/auth/callback`;
+
+      // Only allow returning to a same-site path (defense against open redirect).
+      const safeReturnTo = (raw: string | null): string => {
+        if (!raw) return '/';
+        // Accept only root-relative paths beginning with a single slash.
+        if (/^\/(?!\/)/.test(raw)) return raw;
+        return '/';
+      };
+
+      // ── /auth/login ──
+      if (url.pathname === '/auth/login' && request.method === 'GET') {
+        const returnTo = safeReturnTo(url.searchParams.get('return_to'));
+        const loginHint = url.searchParams.get('login_hint') || undefined;
+        try {
+          const authorizeUrl = await buildAuthorizeUrl(env, callbackUri, returnTo, loginHint);
+          return Response.redirect(authorizeUrl, 302);
+        } catch (e: any) {
+          return jsonRes({ error: 'login_init_failed', detail: e?.message || String(e) }, 500);
+        }
+      }
+
+      // ── /auth/callback ──
+      if (url.pathname === '/auth/callback' && request.method === 'GET') {
+        const code = url.searchParams.get('code') || '';
+        const state = url.searchParams.get('state') || '';
+        const oauthError = url.searchParams.get('error');
+
+        // Shopify can redirect back with an error (e.g. login_required when
+        // prompt=none, or user cancelled). Bounce to the site cleanly.
+        if (oauthError) {
+          return Response.redirect(`${siteOrigin}/?auth_error=${encodeURIComponent(oauthError)}`, 302);
+        }
+        if (!code || !state) {
+          return Response.redirect(`${siteOrigin}/?auth_error=missing_code_or_state`, 302);
+        }
+
+        // Verify + consume the state (CSRF) and recover the return-to path.
+        const returnTo = await consumeAuthState(env, state);
+        if (returnTo === null) {
+          return Response.redirect(`${siteOrigin}/?auth_error=bad_state`, 302);
+        }
+
+        try {
+          const tokens = await exchangeCodeForTokens(env, code, callbackUri);
+          const customerId = await customerIdFromAccessToken(tokens.access_token);
+          if (!customerId) {
+            return Response.redirect(`${siteOrigin}/?auth_error=no_customer`, 302);
+          }
+          const sessionId = await createSession(env, {
+            customerId,
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            idToken: tokens.id_token,
+            expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+          });
+          // Hand the opaque session id to the frontend via the URL fragment
+          // (fragments are not sent to servers nor stored in logs). The
+          // frontend reads it, saves it to localStorage, and strips it.
+          const dest = `${siteOrigin}${returnTo}#session=${encodeURIComponent(sessionId)}`;
+          return Response.redirect(dest, 302);
+        } catch (e: any) {
+          return Response.redirect(
+            `${siteOrigin}/?auth_error=${encodeURIComponent('exchange_failed')}`,
+            302,
+          );
+        }
+      }
+
+      // ── /auth/logout ──
+      // Accepts the session id as ?session=. Deletes our session, then redirects
+      // to Shopify's end-session endpoint (which clears the Shopify-side session)
+      // with the id_token_hint, finally landing back on the site.
+      if (url.pathname === '/auth/logout' && request.method === 'GET') {
+        const sessionId = url.searchParams.get('session') || '';
+        const returnTo = safeReturnTo(url.searchParams.get('return_to'));
+        const postLogout = `${siteOrigin}${returnTo}`;
+        try {
+          const removed = await deleteSession(env, sessionId);
+          const logoutUrl = await buildLogoutUrl(env, removed?.idToken, postLogout);
+          return Response.redirect(logoutUrl, 302);
+        } catch {
+          // Even if the Shopify logout URL build fails, our session is gone;
+          // just send the user home.
+          return Response.redirect(postLogout, 302);
+        }
+      }
+
+      return jsonRes({ error: 'method not allowed' }, 405);
+    }
 
     // ── BACKORDER REQUEST ──────────────────────────────────
     // POST ?action=backorder-request body:{variantId, email, name, address1, ...}
@@ -1008,11 +1183,93 @@ export default {
     // DELETE ?action=wishlist  body:{token,handle}       → remove item
     // POST   ?action=wishlist-merge body:{token,items}   → merge anon list on login
 
+    // ── ACCOUNT PROFILE (CAAPI) ────────────────────────────────────
+    // GET ?action=account-profile&session=<sessionId>
+    // Returns { id, email, firstName, lastName } — same shape the frontend's
+    // legacy customerProfile() returned, so the AccountDrawer is unchanged.
+    if (action === 'account-profile' && request.method === 'GET') {
+      const session = url.searchParams.get('session') || '';
+      const d = await caapiQueryBySession(env, session,
+        `query { customer { id displayName firstName lastName emailAddress { emailAddress } } }`);
+      const c = d?.data?.customer;
+      if (!c) return jsonRes({ error: 'auth' }, 401);
+      return jsonRes({
+        id: c.id,
+        email: c.emailAddress?.emailAddress || '',
+        firstName: c.firstName || '',
+        lastName: c.lastName || '',
+        displayName: c.displayName || '',
+      });
+    }
+
+    // ── ACCOUNT ORDERS (CAAPI) ─────────────────────────────────────
+    // GET ?action=account-orders&session=<sessionId>
+    // Returns { orders: [...] } normalized to the same shape the frontend's
+    // legacy customerOrders() produced, so OrdersView renders unchanged.
+    if (action === 'account-orders' && request.method === 'GET') {
+      const session = url.searchParams.get('session') || '';
+      const d = await caapiQueryBySession(env, session, `
+        query {
+          customer {
+            orders(first: 25, sortKey: PROCESSED_AT, reverse: true) {
+              nodes {
+                id
+                name
+                number
+                processedAt
+                financialStatus
+                fulfillmentStatus
+                totalPrice { amount currencyCode }
+                lineItems(first: 25) {
+                  nodes {
+                    title
+                    quantity
+                    image { url }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+      // CAAPI returns 200 with an errors[] on auth/permission issues, or null on
+      // transport failure. Either way, if there's no orders connection, treat as
+      // unauthenticated rather than crashing the drawer.
+      const nodes = d?.data?.customer?.orders?.nodes;
+      if (!Array.isArray(nodes)) {
+        // Distinguish "logged out" from "logged in, zero orders": if the
+        // customer object itself is missing we 401; otherwise return empty.
+        if (!d?.data?.customer) return jsonRes({ error: 'auth' }, 401);
+        return jsonRes({ orders: [] });
+      }
+      const orders = nodes.map((o: any) => ({
+        id: o.id,
+        // CAAPI exposes both name ("#1001") and a numeric `number`. Prefer number.
+        number: o.number != null ? o.number : (typeof o.name === 'string' ? o.name.replace(/^#/, '') : o.name),
+        date: o.processedAt,
+        financialStatus: o.financialStatus || '',
+        fulfillmentStatus: o.fulfillmentStatus || '',
+        statusUrl: '',
+        total: o.totalPrice ? `${Number(o.totalPrice.amount).toFixed(2)} ${o.totalPrice.currencyCode}` : '',
+        items: (o.lineItems?.nodes || []).map((li: any) => ({
+          title: li.title,
+          quantity: li.quantity,
+          variantTitle: '',
+          imageUrl: li.image?.url || '',
+          handle: '',
+        })),
+      }));
+      return jsonRes({ orders });
+    }
+
     if (action === 'wishlist' || action === 'wishlist-merge') {
       // GET: return wishlist
       if (request.method === 'GET') {
+        // Fase 1B coexistence: accept a CAAPI `session` (new) or a legacy
+        // Storefront `token` (old). resolveCustomerId prefers session.
+        const session = url.searchParams.get('session') || '';
         const token = url.searchParams.get('token') || '';
-        const cid = await customerIdFromToken(env, token);
+        const cid = await resolveCustomerId(env, { session, token });
         if (!cid) return jsonRes({ error: 'auth' }, 401);
         const data = await loadWishlist(env, cid);
         return jsonRes(data);
@@ -1025,7 +1282,7 @@ export default {
       } catch {
         return jsonRes({ error: 'invalid json' }, 400);
       }
-      const cid = await customerIdFromToken(env, body.token || '');
+      const cid = await resolveCustomerId(env, { session: body.session || '', token: body.token || '' });
       if (!cid) return jsonRes({ error: 'auth' }, 401);
 
       // POST: add or merge
