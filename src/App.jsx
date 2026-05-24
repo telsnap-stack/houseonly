@@ -253,15 +253,39 @@ async function fetchShopifyProductByHandle(handle) {
 }
 
 // ── CHECKOUT ───────────────────────────────────────────────────
-async function shopifyCheckout(cartItems, customerAccessToken=null) {
+async function shopifyCheckout(cartItems, session=null) {
   const lines = cartItems
     .filter(i => i.shopifyVariantId)
     .map(i => ({ merchandiseId: i.shopifyVariantId, quantity: i.qty }));
   if (!lines.length) throw new Error('No items in cart.');
-  const input = { lines };
-  if (customerAccessToken) {
-    input.buyerIdentity = { customerAccessToken };
+
+  // Authenticated path: when the buyer is logged in, create the cart in the
+  // Worker so it can attach the CAAPI access token (held server-side) as the
+  // cart's buyerIdentity. The buyer then stays logged in through to checkout —
+  // their details, saved cards and store credit carry over. The access token
+  // never touches the browser.
+  if (session) {
+    try {
+      const r = await fetch(`${WORKER_URL}?action=create-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session, lines }),
+      });
+      const d = await r.json();
+      if (r.ok && d.checkoutUrl) {
+        window.open(d.checkoutUrl, '_blank');
+        return;
+      }
+      // If the Worker couldn't build an authenticated cart, fall through to the
+      // guest path below rather than failing the purchase.
+    } catch {
+      // Network/Worker error → fall through to guest checkout.
+    }
   }
+
+  // Guest path (anonymous buyer, or authenticated path fell through): create
+  // the cart directly via the Storefront API, exactly as before.
+  const input = { lines };
   const data = await shopifyQuery(
     `mutation cartCreate($input: CartInput!) {
       cartCreate(input: $input) {
@@ -7477,7 +7501,7 @@ export default function App() {
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
       <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
-      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, null); setCart([]); setCartOpen(false); }} />
+      <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
