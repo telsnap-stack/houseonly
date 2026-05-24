@@ -1082,6 +1082,159 @@ function useIsMobile(threshold = 720) {
   return isMobile;
 }
 
+// ── NEWSLETTER SIGNUP (double opt-in via Worker → Resend) ───────
+// One component, two looks via `variant`: 'footer' (full block at the bottom
+// of the page) and 'grid' (a card that drops into the catalogue grid, spanning
+// the full row). Both POST ?action=newsletter-subscribe and then ask the user
+// to check their inbox — confirmation happens by clicking the email link.
+function NewsletterSignup({ variant = 'footer', source = 'footer' }) {
+  const isMobile = useIsMobile(640);
+  const [email, setEmail] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | loading | success | error
+  const [errMsg, setErrMsg] = useState('');
+
+  const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+  async function submit() {
+    const e = email.trim().toLowerCase();
+    if (!validEmail(e)) { setStatus('error'); setErrMsg('Enter a valid email address.'); return; }
+    setStatus('loading'); setErrMsg('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=newsletter-subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: e, source }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) { setStatus('success'); }
+      else { setStatus('error'); setErrMsg('Something went wrong. Please try again.'); }
+    } catch {
+      setStatus('error'); setErrMsg('Network error. Please try again.');
+    }
+  }
+
+  const onKey = (ev) => { if (ev.key === 'Enter') submit(); };
+  const isGrid = variant === 'grid';
+
+  // Success state — same message for both variants (double opt-in: check inbox).
+  if (status === 'success') {
+    return (
+      <div style={{
+        gridColumn: isGrid ? '1 / -1' : undefined,
+        background: isGrid ? S.surf : 'transparent',
+        border: isGrid ? `1px solid ${S.accent}` : undefined,
+        borderRadius: 2,
+        padding: isGrid ? '28px 22px' : '0',
+        textAlign: isGrid ? 'center' : 'left',
+      }}>
+        <div style={{ fontSize: isGrid ? 13 : 12, fontWeight: 800, color: S.accent, letterSpacing: 1, marginBottom: 6 }}>
+          Almost there — check your inbox.
+        </div>
+        <div style={{ fontSize: isGrid ? 12 : 11, color: S.muted, lineHeight: 1.6, maxWidth: 420, margin: isGrid ? '0 auto' : 0 }}>
+          We sent you a confirmation link. Click it to lock in early access to pre-orders.
+        </div>
+      </div>
+    );
+  }
+
+  // The shared input + button row.
+  const inputEl = (
+    <input
+      type="email"
+      value={email}
+      onChange={(ev) => { setEmail(ev.target.value); if (status === 'error') setStatus('idle'); }}
+      onKeyDown={onKey}
+      placeholder="your@email.com"
+      disabled={status === 'loading'}
+      style={{
+        background: S.bg, border: `1px solid ${S.border}`, color: S.text,
+        borderRadius: 2, padding: '10px 12px', fontSize: 12, fontFamily: 'inherit',
+        outline: 'none', flex: 1, minWidth: 0, boxSizing: 'border-box',
+      }}
+    />
+  );
+  const buttonEl = (
+    <button
+      onClick={submit}
+      disabled={status === 'loading'}
+      style={{
+        background: S.accent, color: '#080808', border: 'none', borderRadius: 2,
+        padding: '10px 18px', fontSize: 10, fontWeight: 800, letterSpacing: 1.5,
+        textTransform: 'uppercase', fontFamily: 'inherit',
+        cursor: status === 'loading' ? 'wait' : 'pointer',
+        opacity: status === 'loading' ? 0.6 : 1, whiteSpace: 'nowrap', flexShrink: 0,
+      }}
+    >
+      {status === 'loading' ? 'Joining…' : 'Get early access'}
+    </button>
+  );
+
+  // ----- GRID variant: a full-row card inside the catalogue grid -----
+  if (isGrid) {
+    return (
+      <div style={{
+        gridColumn: '1 / -1',
+        background: S.surf,
+        border: `1px solid ${S.border}`,
+        borderLeft: `2px solid ${S.accent}`,
+        borderRadius: 2,
+        padding: isMobile ? '20px 18px' : '24px 26px',
+        display: 'flex',
+        flexDirection: isMobile ? 'column' : 'row',
+        alignItems: isMobile ? 'stretch' : 'center',
+        gap: isMobile ? 14 : 28,
+      }}>
+        <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: S.text, letterSpacing: 0.3, marginBottom: 5 }}>
+            First access to pre-orders.
+          </div>
+          <div style={{ fontSize: 11, color: S.muted, lineHeight: 1.6 }}>
+            Join the list — we tell you before the records that matter go public. No noise.
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flex: isMobile ? '1 1 auto' : '0 0 auto', width: isMobile ? '100%' : 360, maxWidth: '100%' }}>
+          {inputEl}
+          {buttonEl}
+        </div>
+        {status === 'error' && (
+          <div style={{ gridColumn: '1 / -1', flexBasis: '100%', fontSize: 10, color: S.danger, marginTop: isMobile ? 0 : 4 }}>{errMsg}</div>
+        )}
+      </div>
+    );
+  }
+
+  // ----- FOOTER variant: a centered block above the bottom bar -----
+  return (
+    <div style={{
+      borderTop: `1px solid ${S.border}`,
+      padding: isMobile ? '40px 20px' : '52px 20px',
+      maxWidth: 560, margin: '0 auto', textAlign: 'center',
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+    }}>
+      <div style={{ fontSize: 9, color: S.accent, letterSpacing: 3, textTransform: 'uppercase', fontWeight: 700, marginBottom: 12 }}>
+        Join the list
+      </div>
+      <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 800, color: S.text, letterSpacing: -0.3, lineHeight: 1.25, marginBottom: 10 }}>
+        First access to pre-orders.
+      </div>
+      <div style={{ fontSize: 12, color: S.muted, lineHeight: 1.6, maxWidth: 420, marginBottom: 22 }}>
+        We tell you before the records that matter go public — plus the ones we think you should hear. No noise.
+      </div>
+      <div style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 420, flexDirection: isMobile ? 'column' : 'row' }}>
+        {inputEl}
+        {buttonEl}
+      </div>
+      {status === 'error' && (
+        <div style={{ fontSize: 10, color: S.danger, marginTop: 10 }}>{errMsg}</div>
+      )}
+      <div style={{ fontSize: 9, color: S.muted, marginTop: 16, letterSpacing: 0.5, lineHeight: 1.5 }}>
+        Double opt-in. Unsubscribe anytime. We never share your email.
+      </div>
+    </div>
+  );
+}
+
+
 // ── PLAYER BAR (sticky bottom) ──────────────────────────────────
 function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const p = usePlayer();
@@ -7476,7 +7629,15 @@ export default function App() {
           </div>
         ) : (
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-            {filtered.map(r=><RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
+            {filtered.flatMap((r, i) => {
+              const card = <RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />;
+              // Drop a newsletter card into the row after the 12th record, but only
+              // when there are enough records that it doesn't look out of place.
+              if (i === 11 && filtered.length > 14) {
+                return [card, <NewsletterSignup key="nl-grid" variant="grid" source="grid" />];
+              }
+              return [card];
+            })}
           </div>
         )}
         {!filtered.length&&<div style={{textAlign:'center',color:S.muted,fontSize:12,padding:'60px 0'}}>No records found.</div>}
@@ -7488,6 +7649,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      <NewsletterSignup variant="footer" source="footer" />
 
       <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
