@@ -175,7 +175,7 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 //
 // See src/lib/shopify-admin.ts for full docs.
 
-import { shopifyAdminGraphQL } from './lib/shopify-admin';
+import { shopifyAdminGraphQL, getShopifyAdminToken } from './lib/shopify-admin';
 import {
   handleSyncBootstrap,
   handleSyncStatus,
@@ -191,6 +191,8 @@ import {
 } from './lib/sync';
 
 import { searchRelease } from './lib/discogs';
+
+import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 
 
 
@@ -553,6 +555,103 @@ export default {
         title:   url.searchParams.get('title')   || undefined,
       });
       return jsonRes(result);
+    }
+
+    // ── GRADUATION SCOPE TEST (read-only, verifies write_products) ──
+    // GET ?action=graduation-scope-test
+    // Auth: Bearer BOOTSTRAP_AUTH_SECRET
+    //
+    // Force-refreshes the Admin token (to pick up scopes granted AFTER the
+    // last cached token was issued), then reads the live granted access
+    // scopes via currentAppInstallation. Pure read — no mutation. Used once
+    // to confirm `write_products` is on the token before building the
+    // forthcoming-graduation logic that calls tagsRemove.
+    if (action === 'graduation-scope-test' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      // Force a fresh token so we reflect the post-grant scope set, not a
+      // stale cached token issued before write_products was granted.
+      await getShopifyAdminToken(env, true);
+      const data = await shopifyAdminGraphQL(
+        env,
+        `query { currentAppInstallation { accessScopes { handle } } }`,
+      );
+      const scopes = (data?.data?.currentAppInstallation?.accessScopes || [])
+        .map((s: any) => s.handle)
+        .sort();
+      return jsonRes({
+        scopes,
+        has_write_products: scopes.includes('write_products'),
+      });
+    }
+
+    // ── GRADUATION MODE (view / set dry|live) ───────────────
+    // GET  ?action=graduation-mode → { mode: "dry"|"live" } (no auth — read only)
+    // POST ?action=graduation-mode → set mode. Auth: Bearer BOOTSTRAP_AUTH_SECRET
+    //   Body: { mode: "dry" | "live" }
+    //
+    // 'dry' (default) logs intended graduations to KV without writing to
+    // Shopify. 'live' actually removes the `forthcoming` tag from overdue
+    // pre-orders. Switching takes effect on the next cron run (≤15 min) or
+    // immediately via ?action=graduation-run.
+    if (action === 'graduation-mode') {
+      if (request.method === 'GET') {
+        const mode = await getGraduationMode(env);
+        return jsonRes({ mode });
+      }
+      if (request.method === 'POST') {
+        const auth = request.headers.get('authorization') || '';
+        const m = auth.match(/^Bearer\s+(.+)$/i);
+        if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+          return jsonRes({ error: 'unauthorized' }, 401);
+        }
+        let body: any = {};
+        try { body = await request.json(); } catch { /* empty body */ }
+        const mode = await setGraduationMode(env, String(body?.mode || ''));
+        return jsonRes({ mode });
+      }
+      return jsonRes({ error: 'method not allowed' }, 405);
+    }
+
+    // ── GRADUATION RUN (manual trigger) ─────────────────────
+    // POST ?action=graduation-run → run the graduation scan now.
+    // Auth: Bearer BOOTSTRAP_AUTH_SECRET
+    //   Optional body: { mode: "dry" | "live" } to override KV mode for this
+    //   run only (does NOT change the stored mode). Useful for testing.
+    //
+    // Returns the full GraduationResult (scanned / overdue / graduated /
+    // skipped_no_date / errors / details). Use this to verify the scan picks
+    // the right products before relying on the cron.
+    if (action === 'graduation-run' && request.method === 'POST') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      let body: any = {};
+      try { body = await request.json(); } catch { /* empty body */ }
+      const override = body?.mode === 'live' ? 'live' : body?.mode === 'dry' ? 'dry' : undefined;
+      const result = await runGraduation(env, override);
+      return jsonRes(result);
+    }
+
+    // ── GRADUATION STATUS (last run summary) ────────────────
+    // GET ?action=graduation-status → last run summary + current mode.
+    // Auth: Bearer BOOTSTRAP_AUTH_SECRET
+    if (action === 'graduation-status' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      const mode = await getGraduationMode(env);
+      const lastRaw = await env.SYNC_STATE.get('meta:graduation_last_run');
+      let last_run: any = null;
+      if (lastRaw) { try { last_run = JSON.parse(lastRaw); } catch { /* ignore */ } }
+      return jsonRes({ mode, last_run });
     }
 
     // ── DBH ZIP PROXY ───────────────────────────────────────
@@ -1091,6 +1190,29 @@ export default {
           // Network error or similar — log to KV so we can see it.
           return env.SYNC_STATE.put(
             'meta:last_poll_result',
+            JSON.stringify({
+              scheduled_at: new Date(event.scheduledTime).toISOString(),
+              ok: false,
+              error: err?.message || String(err),
+            }),
+          );
+        },
+      ),
+    );
+
+    // ── FORTHCOMING GRADUATION ──────────────────────────────
+    // Independent of the Discogs poll above (separate waitUntil) so a failure
+    // in one never affects the other. Reads its own mode from KV
+    // (meta:graduation_mode, default 'dry'). In dry mode it only logs intended
+    // graduations to KV; in live mode it removes the `forthcoming` tag from
+    // products whose release date has passed. The summary is written to
+    // meta:graduation_last_run (see ?action=graduation-status).
+    ctx.waitUntil(
+      runGraduation(env).then(
+        () => { /* summary persisted inside runGraduation */ },
+        (err) => {
+          return env.SYNC_STATE.put(
+            'meta:graduation_last_run',
             JSON.stringify({
               scheduled_at: new Date(event.scheduledTime).toISOString(),
               ok: false,
