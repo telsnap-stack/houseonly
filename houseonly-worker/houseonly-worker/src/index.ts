@@ -643,7 +643,10 @@ async function nlCreateBroadcastDraft(env: Env, subject: string, html: string): 
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
       body: JSON.stringify({
-        segmentId: NEWSLETTER_SEGMENT_ID,
+        // REST API uses snake_case (the SDKs translate camelCase → this on the
+        // wire). Sending `segmentId` is silently ignored → "missing required
+        // field". Verified against Resend's API reference / Go SDK json tags.
+        segment_id: NEWSLETTER_SEGMENT_ID,
         from: NEWSLETTER_FROM,
         subject,
         html,
@@ -1960,10 +1963,11 @@ export default {
         try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
         const days = Math.max(1, Math.min(90, parseInt(String(body?.days || '7'), 10) || 7));
         // included: productIds the user chose to put in the email (any section).
-        // blurbs:   subset of included (≤NL_MAX_FEATURED) that get an editorial blurb.
+        // blurbs:   subset of included that get an editorial blurb. Capped to
+        //           NL_MAX_FEATURED PER SECTION (not globally) below.
         const included: string[] = Array.isArray(body?.included) ? body.included.map(String) : [];
         const blurbs: string[] = Array.isArray(body?.blurbs)
-          ? body.blurbs.map(String).filter((id: string) => included.includes(id)).slice(0, NL_MAX_FEATURED)
+          ? body.blurbs.map(String).filter((id: string) => included.includes(id))
           : [];
         const subject = String(body?.subject || 'New this week at House Only').slice(0, 200);
 
@@ -1985,16 +1989,23 @@ export default {
           return jsonRes({ error: 'nothing_to_send', detail: 'None of the selected records are still in the window — reload and try again.' }, 400);
         }
 
-        // Generate blurbs (≤NL_MAX_FEATURED Sonnet calls), 2nd takes a different
-        // angle from the 1st. Order follows section order (pre → arr → bak).
-        const blurbCandidates = [...pre, ...arr, ...bak].filter((p) => blurbSet.has(p.productId));
+        // Generate blurbs PER SECTION: up to NL_MAX_FEATURED per section, and
+        // within a section the 2nd blurb is told the 1st's angle so they differ.
+        // (Anti-repetition resets per section — a pre-order and an arrival can
+        // legitimately share an angle; two records in the SAME section shouldn't.)
         const blurbById = new Map<string, string>();
-        let prevBlurb = '';
-        for (const p of blurbCandidates) {
-          const blurb = await nlGenerateBlurb(env, p, prevBlurb);
-          blurbById.set(p.productId, blurb);
-          if (blurb) prevBlurb = blurb;
-        }
+        const genSectionBlurbs = async (chosen: NLProduct[]) => {
+          const picks = chosen.filter((p) => blurbSet.has(p.productId)).slice(0, NL_MAX_FEATURED);
+          let prev = '';
+          for (const p of picks) {
+            const blurb = await nlGenerateBlurb(env, p, prev);
+            blurbById.set(p.productId, blurb);
+            if (blurb) prev = blurb;
+          }
+        };
+        await genSectionBlurbs(pre);
+        await genSectionBlurbs(arr);
+        await genSectionBlurbs(bak);
 
         // Build a section from exactly the chosen records: blurbed ones become
         // feature cards (at the top of their section), the rest compact rows.
