@@ -197,7 +197,8 @@ function newsletterResultPage(ok: boolean): Response {
 //
 // Email shows up to 5 per section; everything else → "see all" link to the site.
 
-const NL_MAX_FEATURED = 2;       // max records that get an editorial blurb
+// (Newsletter selection model: the user picks which records are included and
+// which are shown large; everything is explicit, no auto top-N.)
 
 interface NLProduct {
   productId: string;   // gid://shopify/Product/...
@@ -445,88 +446,6 @@ function nlSectionize(
   for (const p of recent) classify(p);
   for (const g of graduated) classify(g);
   return { preorders, arrivals, backorders };
-}
-
-// ── Editorial blurb (NEWSLETTER voice — distinct from Stories) ──
-// Key differences from the Stories prompt (which Eduardo finds monotonous):
-//   - The angle menu is OPEN, not a closed list of 4. We explicitly forbid
-//     defaulting to artist-bio / label-history / scene-era every time.
-//   - We feed the model the tracklist + description so it can say something
-//     specific to THIS record, not generalities.
-//   - When generating the 2nd blurb we tell it which angle the 1st used, so the
-//     two blurbs in one email never rhyme. Variation is enforced, not hoped for.
-
-const NL_BLURB_SYS = [
-  'You are the buyer at House Only, a specialist house music record store, writing the editorial note for ONE record in the weekly newsletter. It should read like a record-shop owner who actually listened — specific, confident, never like marketing copy or an online review.',
-  '',
-  'LENGTH: 1-2 sentences, 20-40 words. Develop ONE concrete idea well rather than several shallow ones.',
-  '',
-  'FIND THE MOST INTERESTING TRUE THING about THIS record and lead with it. The angle is wide open — it could be:',
-  '- how the groove actually moves / what it does on a floor',
-  '- a specific textural or production choice (the drums, a bassline, a sample, the mix)',
-  '- the moment of the night or the kind of set it belongs in',
-  '- a format or pressing detail that matters',
-  '- a contrast: what you would expect from this name/label vs what this record actually does',
-  '- an unexpected connection or lineage — ONLY if it is genuinely the most interesting thing',
-  '',
-  'DO NOT default to the safe trio of (artist biography) / (label history) / (scene-and-era). Those are the easy answers and they make every blurb sound the same. Reach past them unless one is unmistakably the real story here.',
-  '',
-  'HARD RULES:',
-  '1. NEVER fabricate specifics — no invented dates, names, labels, collaborators, chart positions. If unsure of a fact, do not state it.',
-  '2. If you do not know this exact record, write about what is concretely in front of you (the sound the title/tracklist/description imply, the format) rather than inventing biography.',
-  '3. The supplied description is the label\'s own marketing copy — do NOT echo or paraphrase it. Find what it leaves out.',
-  '4. BANNED hype register: "essential", "must-have", "timeless", "classic", "masterpiece", "fire", "heater", "stunning", "perfect for", "if you like X you\'ll love Y". Avoid the empty-praise voice entirely.',
-  '',
-  'Return ONLY the blurb text — no preamble, no quotes, no markdown.',
-].join('\n');
-
-// Label the angle a blurb took (rough heuristic) so the 2nd blurb can avoid it.
-function nlBlurbInput(p: NLProduct): string {
-  const desc = nlStripHtml(p.descriptionHtml).slice(0, 800);
-  return [
-    `Title: ${p.title || '(unknown)'}`,
-    p.vendor ? `Artist: ${p.vendor}` : '',
-    p.label ? `Label: ${p.label}` : '',
-    p.tracks.length ? `Tracklist: ${p.tracks.join(', ')}` : '',
-    desc ? `Label marketing copy (do NOT repeat, reference only): ${desc}` : '',
-  ].filter(Boolean).join('\n');
-}
-
-// Generate one blurb. `avoid` is a short instruction about the previous blurb's
-// angle so consecutive blurbs in one email don't rhyme. Returns '' on failure.
-async function nlGenerateBlurb(env: Env, p: NLProduct, avoid: string): Promise<string> {
-  if (!env.ANTHROPIC_API_KEY) return '';
-  const userMsg = avoid
-    ? `${nlBlurbInput(p)}\n\nThe previous record's note already used this angle: "${avoid}". Take a DIFFERENT angle for this one.`
-    : nlBlurbInput(p);
-  try {
-    const backoffs = [0, 600, 1500, 3000];
-    let aiRes: Response | null = null;
-    for (let attempt = 0; attempt < backoffs.length; attempt++) {
-      if (backoffs[attempt]) await new Promise((r) => setTimeout(r, backoffs[attempt]));
-      aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 220,
-          system: NL_BLURB_SYS,
-          messages: [{ role: 'user', content: userMsg }],
-        }),
-      });
-      if (aiRes.status !== 529 && aiRes.status !== 429) break;
-    }
-    if (!aiRes || !aiRes.ok) return '';
-    const aiData = await aiRes.json() as any;
-    const text = (aiData?.content || []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
-    return text.replace(/^["']|["']$/g, '').trim();
-  } catch {
-    return '';
-  }
 }
 
 // Escape user/product text for safe HTML embedding.
@@ -1948,12 +1867,11 @@ export default {
         });
         return jsonRes({
           window_days: days,
-          max_blurbs: NL_MAX_FEATURED,
           preorders: preorders.map(fmt),
           new_arrivals: arrivals.map(fmt),
           backorders: backorders.map(fmt),
           counts: { preorders: preorders.length, new_arrivals: arrivals.length, backorders: backorders.length },
-          note: `POST body.included = productIds to put in the email (any section, you choose). body.blurbs = up to ${NL_MAX_FEATURED} of those that get an editorial blurb. The email shows exactly what's in body.included — no auto top-N, no "see all".`,
+          note: `POST body.included = productIds to put in the email (any section, you choose). body.large = subset of included shown as big cards (the rest are compact rows). The email shows exactly what's in body.included — no auto top-N, no "see all".`,
         });
       }
 
@@ -1963,11 +1881,11 @@ export default {
         try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
         const days = Math.max(1, Math.min(90, parseInt(String(body?.days || '7'), 10) || 7));
         // included: productIds the user chose to put in the email (any section).
-        // blurbs:   subset of included that get an editorial blurb. Capped to
-        //           NL_MAX_FEATURED PER SECTION (not globally) below.
+        // large:    subset of included shown as a big card (prominent cover);
+        //           everything else included shows as a compact row.
         const included: string[] = Array.isArray(body?.included) ? body.included.map(String) : [];
-        const blurbs: string[] = Array.isArray(body?.blurbs)
-          ? body.blurbs.map(String).filter((id: string) => included.includes(id))
+        const large: string[] = Array.isArray(body?.large)
+          ? body.large.map(String).filter((id: string) => included.includes(id))
           : [];
         const subject = String(body?.subject || 'New this week at House Only').slice(0, 200);
 
@@ -1977,7 +1895,7 @@ export default {
 
         const { preorders, arrivals, backorders } = await gatherSections(days);
         const includedSet = new Set(included);
-        const blurbSet = new Set(blurbs);
+        const largeSet = new Set(large);
 
         // Keep only the user's chosen records, preserving each section's order.
         const pick = (arr: NLProduct[]) => arr.filter((p) => includedSet.has(p.productId));
@@ -1989,32 +1907,14 @@ export default {
           return jsonRes({ error: 'nothing_to_send', detail: 'None of the selected records are still in the window — reload and try again.' }, 400);
         }
 
-        // Generate blurbs PER SECTION: up to NL_MAX_FEATURED per section, and
-        // within a section the 2nd blurb is told the 1st's angle so they differ.
-        // (Anti-repetition resets per section — a pre-order and an arrival can
-        // legitimately share an angle; two records in the SAME section shouldn't.)
-        const blurbById = new Map<string, string>();
-        const genSectionBlurbs = async (chosen: NLProduct[]) => {
-          const picks = chosen.filter((p) => blurbSet.has(p.productId)).slice(0, NL_MAX_FEATURED);
-          let prev = '';
-          for (const p of picks) {
-            const blurb = await nlGenerateBlurb(env, p, prev);
-            blurbById.set(p.productId, blurb);
-            if (blurb) prev = blurb;
-          }
-        };
-        await genSectionBlurbs(pre);
-        await genSectionBlurbs(arr);
-        await genSectionBlurbs(bak);
-
-        // Build a section from exactly the chosen records: blurbed ones become
-        // feature cards (at the top of their section), the rest compact rows.
-        // No top-N cap, no "see all" — the email is exactly what was selected.
+        // Build a section from the chosen records: the ones marked "large" become
+        // big cards (prominent cover) at the top of their section; the rest are
+        // compact rows. No blurbs, no top-N cap, no "see all".
         const buildSection = (
           chosen: NLProduct[], header: string, sub: string, cta: string,
         ): NLSectionRender => {
-          const feat = chosen.filter((p) => blurbById.has(p.productId))
-            .map((p) => ({ p, blurb: blurbById.get(p.productId) || '' }));
+          const feat = chosen.filter((p) => largeSet.has(p.productId))
+            .map((p) => ({ p, blurb: '' }));
           const featIds = new Set(feat.map((f) => f.p.productId));
           const rows = chosen.filter((p) => !featIds.has(p.productId));
           return { header, sub, cta, seeAllLabel: '', seeAllUrl: '', featured: feat, rows, extraCount: 0 };
@@ -2035,7 +1935,7 @@ export default {
           status: 'draft',
           subject,
           window_days: days,
-          blurb_count: blurbById.size,
+          large_count: largeSet.size,
           shown: { preorders: pre.length, new_arrivals: arr.length, backorders: bak.length },
           totals: { preorders: preorders.length, new_arrivals: arrivals.length, backorders: backorders.length },
           next: 'Review and send the draft in the Resend dashboard (Broadcasts).',
