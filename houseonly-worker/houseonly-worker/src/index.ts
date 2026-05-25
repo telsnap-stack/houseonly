@@ -88,6 +88,14 @@ const NEWSLETTER_FROM = 'House Only <newsletter@houseonly.store>';
 const NEWSLETTER_SITE = 'https://houseonly.store';
 const NL_PENDING_PREFIX = 'newsletter-pending:';
 const NL_PENDING_TTL_S = 48 * 60 * 60; // 48h
+// Resend Segment that the Broadcasts target. Confirmed subscribers are added
+// here on double-opt-in confirmation (see newsletter-confirm). The Create
+// Broadcast API requires a segmentId; "General" is the catch-all segment for
+// all newsletter subscribers. This is an ID, not a credential, so it lives in
+// code rather than a secret.
+const NEWSLETTER_SEGMENT_ID = '2b12533a-d823-4b05-9804-5cd370d201c3';
+const FORTHCOMING_TAG = 'forthcoming';
+const GRADUATION_DONE_PREFIX = 'graduation-done:'; // mirrors lib/graduation.ts
 
 function newNlToken(): string {
   return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
@@ -120,12 +128,33 @@ async function sendNewsletterConfirmation(env: Env, email: string, confirmUrl: s
 
 async function createResendContact(env: Env, email: string): Promise<boolean> {
   try {
+    // The Create Contact API accepts a `segments` array, so we create the
+    // contact AND add it to the newsletter segment ("General") in one call.
+    // The segment is what the Broadcast API targets — a contact that isn't in
+    // the segment would never receive a broadcast. (Per Resend docs: each
+    // object in `segments` just needs the segment id.)
     const res = await fetch('https://api.resend.com/contacts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
-      body: JSON.stringify({ email, unsubscribed: false }),
+      body: JSON.stringify({
+        email,
+        unsubscribed: false,
+        segments: [{ id: NEWSLETTER_SEGMENT_ID }],
+      }),
     });
-    return res.ok || res.status === 409;
+    // 409 = contact already exists. In that case the create (and its segment
+    // assignment) is a no-op, so we best-effort add the existing contact to the
+    // segment by email to cover contacts created before this change.
+    if (res.status === 409) {
+      try {
+        await fetch(
+          `https://api.resend.com/contacts/${encodeURIComponent(email)}/segments/${NEWSLETTER_SEGMENT_ID}`,
+          { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}` } },
+        );
+      } catch { /* best-effort: contact already exists, segment add is bonus */ }
+      return true;
+    }
+    return res.ok;
   } catch {
     return false;
   }
@@ -143,6 +172,370 @@ function newsletterResultPage(ok: boolean): Response {
 <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#080808;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}.card{max-width:440px;text-align:center;}.logo{font-weight:800;font-size:26px;letter-spacing:-0.5px;margin-bottom:28px;}.logo span{color:#c8ff00;}h1{font-size:30px;font-weight:700;margin-bottom:14px;letter-spacing:-0.5px;}p{color:#bdbdbd;font-size:15px;line-height:1.6;margin-bottom:28px;}a{display:inline-block;background:#c8ff00;color:#080808;font-weight:700;font-size:14px;text-decoration:none;padding:13px 30px;border-radius:6px;}.sub{color:#6a6a6a;font-size:12px;margin-top:24px;}</style></head>
 <body><div class="card"><div class="logo">HOUSE<span>ONLY</span></div><h1>${title}</h1><p>${msg}</p><a href="${NEWSLETTER_SITE}/">Back to the shop</a><div class="sub">Redirecting you home\u2026</div></div></body></html>`;
   return new Response(html, { status: 200, headers: { ...CORS, 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+
+// ── NEWSLETTER BROADCAST (build a draft in Resend) ──────────────
+//
+// Two-phase flow:
+//   1. PREVIEW (GET ?action=newsletter-build-broadcast&preview=1&days=7)
+//      Returns two numbered lists — PRE-ORDERS and NEW ARRIVALS — so Eduardo
+//      can pick which 2+2 to feature with an editorial blurb.
+//   2. BUILD (POST, body: { days, featuredForthcoming:[productId], featuredNewArrivals:[productId], subject? })
+//      Generates Sonnet blurbs for the featured picks, assembles the HTML,
+//      and creates a DRAFT broadcast in Resend (send:false). Eduardo reviews
+//      and sends from the Resend dashboard.
+//
+// Sectioning rule (Eduardo's spec):
+//   PRE-ORDERS   = tag `forthcoming` AND created within the window.
+//   NEW ARRIVALS = (NOT forthcoming AND created within the window)
+//                  OR (graduated within the window — read from KV
+//                      `graduation-done:` records, whose CREATED_AT is old
+//                      because they were created as pre-orders weeks ago).
+
+interface NLProduct {
+  productId: string;   // gid://shopify/Product/...
+  handle: string;
+  title: string;       // full Shopify title ("Title - Artist" in this catalog)
+  vendor: string;      // artist (Shopify vendor)
+  label: string;       // parsed from label: tag
+  price: string;       // e.g. "12.99"
+  currency: string;    // e.g. "EUR"
+  imageUrl: string;    // Shopify featuredImage
+  createdAt: string;   // ISO
+  forthcoming: boolean;
+  releaseDate: string; // parsed from release: tag, '' if none
+}
+
+// Parse label / release out of the Shopify tag array (mirrors the frontend).
+function nlLabelFromTags(tags: string[]): string {
+  const t = tags.find((x) => x.toLowerCase().startsWith('label:'));
+  return t ? t.slice(t.indexOf(':') + 1).trim() : '';
+}
+function nlReleaseFromTags(tags: string[]): string {
+  const t = tags.find((x) => /^release:/i.test(x));
+  if (!t) return '';
+  const raw = t.slice(t.indexOf(':') + 1).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+}
+
+// Map a raw Shopify product node → NLProduct (best-effort; skips if no id).
+function nlMapNode(node: any): NLProduct | null {
+  if (!node?.id) return null;
+  const tags: string[] = Array.isArray(node.tags) ? node.tags : [];
+  const variant = node?.variants?.edges?.[0]?.node || node?.variants?.nodes?.[0] || null;
+  const priceAmount = variant?.price ?? node?.priceRangeV2?.minVariantPrice?.amount ?? '';
+  const currency = node?.priceRangeV2?.minVariantPrice?.currencyCode || 'EUR';
+  return {
+    productId: node.id,
+    handle: node.handle || '',
+    title: node.title || '',
+    vendor: node.vendor || '',
+    label: nlLabelFromTags(tags),
+    price: priceAmount ? String(priceAmount) : '',
+    currency,
+    imageUrl: node?.featuredImage?.url || '',
+    createdAt: node.createdAt || '',
+    forthcoming: tags.some((t) => t.toLowerCase() === FORTHCOMING_TAG),
+    releaseDate: nlReleaseFromTags(tags),
+  };
+}
+
+// Fetch products created within the last `days` days (sorted newest first).
+// We do NOT trust Shopify's created_at: query filter (it can fail silently);
+// instead we sortKey CREATED_AT desc and cut the window in code.
+async function nlFetchRecentProducts(env: Env, days: number): Promise<NLProduct[]> {
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const out: NLProduct[] = [];
+  let cursor: string | null = null;
+  const PAGE = 100;
+  const MAX_PAGES = 10; // 1000 products back is far more than any 30-day window
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const after: string = cursor ? `, after: "${cursor}"` : '';
+    const query = `
+      query {
+        products(first: ${PAGE}, sortKey: CREATED_AT, reverse: true${after}) {
+          pageInfo { hasNextPage endCursor }
+          edges {
+            node {
+              id handle title vendor tags createdAt
+              featuredImage { url }
+              priceRangeV2 { minVariantPrice { amount currencyCode } }
+              variants(first: 1) { edges { node { sku price } } }
+            }
+          }
+        }
+      }
+    `;
+    const data: any = await shopifyAdminGraphQL(env, query);
+    const conn = data?.data?.products;
+    if (!conn) break;
+    let reachedOld = false;
+    for (const edge of conn.edges || []) {
+      const mapped = nlMapNode(edge?.node);
+      if (!mapped) continue;
+      const createdMs = mapped.createdAt ? Date.parse(mapped.createdAt) : NaN;
+      if (!Number.isNaN(createdMs) && createdMs < cutoffMs) {
+        // Sorted desc, so once we pass the cutoff everything after is older.
+        reachedOld = true;
+        break;
+      }
+      out.push(mapped);
+    }
+    if (reachedOld || !conn.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+  return out;
+}
+
+// Read graduation-done KV records and return productIds graduated within the
+// window. KV list() is paginated; we walk all pages under the prefix.
+async function nlRecentlyGraduatedIds(env: Env, days: number): Promise<Set<string>> {
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+  const ids = new Set<string>();
+  let listCursor: string | undefined = undefined;
+  for (let i = 0; i < 20; i++) {
+    const listing: any = await env.SYNC_STATE.list({ prefix: GRADUATION_DONE_PREFIX, cursor: listCursor });
+    for (const k of listing.keys || []) {
+      const raw = await env.SYNC_STATE.get(k.name);
+      if (!raw) continue;
+      try {
+        const rec = JSON.parse(raw);
+        const gMs = rec?.graduated_at ? Date.parse(rec.graduated_at) : NaN;
+        if (!Number.isNaN(gMs) && gMs >= cutoffMs && rec?.productId) ids.add(rec.productId);
+      } catch { /* skip malformed */ }
+    }
+    if (listing.list_complete) break;
+    listCursor = listing.cursor;
+  }
+  return ids;
+}
+
+// Fetch specific products by id (for recently-graduated whose CREATED_AT is
+// outside the window so they weren't in nlFetchRecentProducts).
+async function nlFetchProductsByIds(env: Env, ids: string[]): Promise<NLProduct[]> {
+  const out: NLProduct[] = [];
+  for (const id of ids) {
+    const query = `
+      query {
+        product(id: "${id}") {
+          id handle title vendor tags createdAt
+          featuredImage { url }
+          priceRangeV2 { minVariantPrice { amount currencyCode } }
+          variants(first: 1) { edges { node { sku price } } }
+        }
+      }
+    `;
+    try {
+      const data: any = await shopifyAdminGraphQL(env, query);
+      const mapped = nlMapNode(data?.data?.product);
+      if (mapped) out.push(mapped);
+    } catch { /* skip unfetchable */ }
+  }
+  return out;
+}
+
+// Split a product set into the two newsletter sections per Eduardo's rule.
+// `graduatedIds` are forced into NEW ARRIVALS regardless of created date.
+function nlSectionize(
+  recent: NLProduct[],
+  graduated: NLProduct[],
+): { preorders: NLProduct[]; arrivals: NLProduct[] } {
+  const seen = new Set<string>();
+  const preorders: NLProduct[] = [];
+  const arrivals: NLProduct[] = [];
+  for (const p of recent) {
+    if (seen.has(p.productId)) continue;
+    seen.add(p.productId);
+    if (p.forthcoming) preorders.push(p);
+    else arrivals.push(p);
+  }
+  for (const g of graduated) {
+    if (seen.has(g.productId)) continue; // already counted (graduated within window AND created within window)
+    seen.add(g.productId);
+    // A graduated product has had forthcoming removed → it belongs in arrivals.
+    arrivals.push(g);
+  }
+  return { preorders, arrivals };
+}
+
+// Generate ONE editorial blurb for a featured record, reusing the Stories
+// "House Only knows its stuff" voice. Anti-bluff: never fabricate. Returns ''
+// on any failure so the build never blocks on a blurb.
+async function nlGenerateBlurb(env: Env, p: NLProduct): Promise<string> {
+  if (!env.ANTHROPIC_API_KEY) return '';
+  const sys = [
+    'You are the buyer at House Only, a specialist house music record store, writing the one-line editorial note for a record in the weekly newsletter — the line that shows the shop genuinely KNOWS this music.',
+    '',
+    'WHAT YOU WRITE:',
+    '1-2 sentences, 20-40 words. Develop ONE concrete point of context. Confident, specific, knowledgeable. The reader should think "these people know their stuff."',
+    '',
+    'HARD RULES:',
+    '1. NEVER fabricate specifics — no invented labels, dates, cities, names, or collaborators. If unsure of a fact, do not state it.',
+    '2. If you do not know this exact record, write with authority about the SOUND, the LABEL, or the ERA — never invent biography.',
+    '3. BANNED generic register: "essential", "must-have", "timeless", "classic", "masterpiece", "fire", "heater", "stunning", "perfect for", "if you like X you will love Y". Avoid the empty-hype voice entirely.',
+    '4. Give the angle a knowledgeable shop owner would: artist lineage, the label/series and what it stands for, the production approach, or the regional/historical moment.',
+    '',
+    'Return ONLY the blurb text — no preamble, no quotes, no markdown.',
+  ].join('\n');
+  const userMsg = [
+    `Title: ${p.title || '(unknown)'}`,
+    p.vendor ? `Artist: ${p.vendor}` : '',
+    p.label ? `Label: ${p.label}` : '',
+  ].filter(Boolean).join('\n');
+  try {
+    const backoffs = [0, 600, 1500, 3000];
+    let aiRes: Response | null = null;
+    for (let attempt = 0; attempt < backoffs.length; attempt++) {
+      if (backoffs[attempt]) await new Promise((r) => setTimeout(r, backoffs[attempt]));
+      aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 200,
+          system: sys,
+          messages: [{ role: 'user', content: userMsg }],
+        }),
+      });
+      if (aiRes.status !== 529 && aiRes.status !== 429) break;
+    }
+    if (!aiRes || !aiRes.ok) return '';
+    const aiData = await aiRes.json() as any;
+    const text = (aiData?.content || []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
+    return text.replace(/^["']|["']$/g, '').trim();
+  } catch {
+    return '';
+  }
+}
+
+// Escape user/product text for safe HTML embedding.
+function nlEsc(s: string): string {
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Product → store URL. Shopify handle is authoritative (we read it from the
+// API rather than deriving it from the SKU, which is not reliably guessable).
+function nlProductUrl(p: NLProduct): string {
+  return p.handle ? `${NEWSLETTER_SITE}/products/${p.handle}` : NEWSLETTER_SITE;
+}
+
+function nlPriceLabel(p: NLProduct): string {
+  if (!p.price) return '';
+  const sym = p.currency === 'EUR' ? '\u20ac' : (p.currency ? p.currency + ' ' : '');
+  return `${sym}${p.price}`;
+}
+
+// A featured card (with editorial blurb). Big cover, title, blurb, price/CTA.
+function nlFeaturedCard(p: NLProduct, blurb: string, ctaLabel: string): string {
+  const url = nlProductUrl(p);
+  const price = nlPriceLabel(p);
+  const img = p.imageUrl
+    ? `<img src="${nlEsc(p.imageUrl)}" alt="${nlEsc(p.title)}" width="540" style="display:block;width:100%;max-width:540px;height:auto;border-radius:8px;">`
+    : '';
+  const blurbHtml = blurb
+    ? `<p style="color:#bdbdbd;font-size:14px;line-height:1.6;margin:14px 0 0;">${nlEsc(blurb)}</p>`
+    : '';
+  const labelLine = p.label ? `<div style="color:#8a8a8a;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;margin:14px 0 2px;">${nlEsc(p.label)}</div>` : '';
+  return `
+  <a href="${url}" style="text-decoration:none;color:inherit;display:block;">${img}</a>
+  ${labelLine}
+  <div style="color:#ffffff;font-size:18px;font-weight:700;line-height:1.3;margin:6px 0 0;">${nlEsc(p.title)}</div>
+  ${blurbHtml}
+  <a href="${url}" style="display:inline-block;background:#c8ff00;color:#080808;font-weight:700;font-size:13px;text-decoration:none;padding:10px 22px;border-radius:6px;margin-top:16px;">${nlEsc(ctaLabel)}${price ? ' \u2014 ' + price : ''}</a>`;
+}
+
+// A compact row (no blurb): small cover + title + price.
+function nlCompactRow(p: NLProduct): string {
+  const url = nlProductUrl(p);
+  const price = nlPriceLabel(p);
+  const img = p.imageUrl
+    ? `<img src="${nlEsc(p.imageUrl)}" alt="${nlEsc(p.title)}" width="64" height="64" style="display:block;width:64px;height:64px;border-radius:5px;object-fit:cover;">`
+    : `<div style="width:64px;height:64px;border-radius:5px;background:#1a1a1a;"></div>`;
+  return `
+  <a href="${url}" style="text-decoration:none;color:inherit;display:block;padding:10px 0;border-top:1px solid #1e1e1e;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+      <td width="64" valign="middle">${img}</td>
+      <td valign="middle" style="padding-left:14px;">
+        ${p.label ? `<div style="color:#7a7a7a;font-size:11px;letter-spacing:0.5px;text-transform:uppercase;">${nlEsc(p.label)}</div>` : ''}
+        <div style="color:#efefef;font-size:14px;font-weight:600;line-height:1.35;">${nlEsc(p.title)}</div>
+      </td>
+      <td valign="middle" align="right" style="white-space:nowrap;color:#c8ff00;font-size:14px;font-weight:700;padding-left:10px;">${price}</td>
+    </tr></table>
+  </a>`;
+}
+
+function nlSectionHeader(label: string, sub: string): string {
+  return `
+  <div style="margin:40px 0 18px;">
+    <div style="color:#c8ff00;font-size:13px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">${nlEsc(label)}</div>
+    <div style="color:#7a7a7a;font-size:13px;margin-top:3px;">${nlEsc(sub)}</div>
+  </div>`;
+}
+
+// Assemble the full broadcast HTML from the sectioned + featured products.
+interface NLBuildSections {
+  preFeatured: Array<{ p: NLProduct; blurb: string }>;
+  preRest: NLProduct[];
+  arrFeatured: Array<{ p: NLProduct; blurb: string }>;
+  arrRest: NLProduct[];
+}
+function nlBuildBroadcastHtml(s: NLBuildSections): string {
+  const blocks: string[] = [];
+
+  if (s.preFeatured.length || s.preRest.length) {
+    blocks.push(nlSectionHeader('Pre-orders', 'First access \u2014 reserve before they go public'));
+    for (const f of s.preFeatured) blocks.push(`<div style="margin-bottom:34px;">${nlFeaturedCard(f.p, f.blurb, 'Pre-order')}</div>`);
+    if (s.preRest.length) blocks.push(s.preRest.map(nlCompactRow).join(''));
+  }
+
+  if (s.arrFeatured.length || s.arrRest.length) {
+    blocks.push(nlSectionHeader('New arrivals', 'In stock now \u2014 in the shop this week'));
+    for (const f of s.arrFeatured) blocks.push(`<div style="margin-bottom:34px;">${nlFeaturedCard(f.p, f.blurb, 'Shop')}</div>`);
+    if (s.arrRest.length) blocks.push(s.arrRest.map(nlCompactRow).join(''));
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#080808;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:40px 24px;">
+    <div style="font-weight:800;font-size:22px;letter-spacing:-0.5px;color:#ffffff;">HOUSE<span style="color:#c8ff00;">ONLY</span></div>
+    <div style="color:#8a8a8a;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:4px;">Vinyl delivered worldwide</div>
+    ${blocks.join('\n')}
+    <div style="margin-top:48px;padding-top:24px;border-top:1px solid #1e1e1e;color:#6a6a6a;font-size:12px;line-height:1.6;">
+      You're getting this because you signed up at houseonly.store.
+      <a href="{{{RESEND_UNSUBSCRIBE_URL}}}" style="color:#8a8a8a;">Unsubscribe</a>.
+    </div>
+  </div>
+</body></html>`;
+}
+
+// Create the DRAFT broadcast in Resend (send:false). Returns the broadcast id.
+async function nlCreateBroadcastDraft(env: Env, subject: string, html: string): Promise<{ id?: string; error?: string }> {
+  try {
+    const res = await fetch('https://api.resend.com/broadcasts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
+      body: JSON.stringify({
+        segmentId: NEWSLETTER_SEGMENT_ID,
+        from: NEWSLETTER_FROM,
+        subject,
+        html,
+        // send omitted → stays a draft for review in the Resend dashboard.
+      }),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: `resend ${res.status}: ${JSON.stringify(body).slice(0, 200)}` };
+    return { id: body?.id };
+  } catch (e: any) {
+    return { error: e?.message || 'broadcast create failed' };
+  }
 }
 
 
@@ -1378,6 +1771,107 @@ export default {
       const nlcCreated = await createResendContact(env, nlcEmail);
       await env.WISHLIST.delete(nlcKey);
       return newsletterResultPage(nlcCreated);
+    }
+
+    // ── NEWSLETTER: build broadcast draft (admin) ────────────────
+    // Auth: Bearer BOOTSTRAP_AUTH_SECRET (admin-only; never called by clients).
+    //
+    // PREVIEW: GET ?action=newsletter-build-broadcast&preview=1&days=7
+    //   Returns numbered PRE-ORDERS and NEW ARRIVALS lists for Eduardo to
+    //   choose 2+2 featured picks. No Resend write, no blurb generation.
+    //
+    // BUILD:   POST ?action=newsletter-build-broadcast
+    //   body: { days?, featuredForthcoming?:[productId], featuredNewArrivals?:[productId], subject? }
+    //   Generates Sonnet blurbs for the featured picks, assembles the HTML, and
+    //   creates a DRAFT broadcast in Resend (send:false). Returns broadcast id.
+    if (action === 'newsletter-build-broadcast') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      if (!env.RESEND_API_KEY) return jsonRes({ error: 'RESEND_API_KEY not configured' }, 500);
+
+      // ---- PREVIEW ----
+      if (request.method === 'GET' && url.searchParams.get('preview')) {
+        const days = Math.max(1, Math.min(90, parseInt(url.searchParams.get('days') || '7', 10) || 7));
+        const recent = await nlFetchRecentProducts(env, days);
+        const gradIds = await nlRecentlyGraduatedIds(env, days);
+        // Graduated products whose CREATED_AT is outside the window won't be in
+        // `recent`; fetch those by id so they still appear in arrivals.
+        const recentIds = new Set(recent.map((p) => p.productId));
+        const missingGradIds = [...gradIds].filter((id) => !recentIds.has(id));
+        const gradProducts = missingGradIds.length ? await nlFetchProductsByIds(env, missingGradIds) : [];
+        const { preorders, arrivals } = nlSectionize(recent, gradProducts);
+        const fmt = (p: NLProduct) => ({
+          productId: p.productId,
+          title: p.title,
+          artist: p.vendor,
+          label: p.label,
+          price: nlPriceLabel(p),
+          imageUrl: p.imageUrl,
+          handle: p.handle,
+          createdAt: p.createdAt,
+          releaseDate: p.releaseDate,
+        });
+        return jsonRes({
+          window_days: days,
+          preorders: preorders.map(fmt),
+          new_arrivals: arrivals.map(fmt),
+          counts: { preorders: preorders.length, new_arrivals: arrivals.length },
+          note: 'Pick up to 2 productId from each list to feature with an editorial blurb, then POST to build.',
+        });
+      }
+
+      // ---- BUILD ----
+      if (request.method === 'POST') {
+        let body: any = {};
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+        const days = Math.max(1, Math.min(90, parseInt(String(body?.days || '7'), 10) || 7));
+        const featPre: string[] = Array.isArray(body?.featuredForthcoming) ? body.featuredForthcoming.map(String).slice(0, 2) : [];
+        const featArr: string[] = Array.isArray(body?.featuredNewArrivals) ? body.featuredNewArrivals.map(String).slice(0, 2) : [];
+        const subject = String(body?.subject || 'New this week at House Only').slice(0, 200);
+
+        const recent = await nlFetchRecentProducts(env, days);
+        const gradIds = await nlRecentlyGraduatedIds(env, days);
+        const recentIds = new Set(recent.map((p) => p.productId));
+        const missingGradIds = [...gradIds].filter((id) => !recentIds.has(id));
+        const gradProducts = missingGradIds.length ? await nlFetchProductsByIds(env, missingGradIds) : [];
+        const { preorders, arrivals } = nlSectionize(recent, gradProducts);
+
+        if (!preorders.length && !arrivals.length) {
+          return jsonRes({ error: 'nothing_to_send', detail: `No products in the last ${days} days.` }, 400);
+        }
+
+        // Split each section into featured (chosen) vs rest.
+        const isFeat = (set: string[]) => (p: NLProduct) => set.includes(p.productId);
+        const preFeaturedProducts = preorders.filter(isFeat(featPre));
+        const preRest = preorders.filter((p) => !featPre.includes(p.productId));
+        const arrFeaturedProducts = arrivals.filter(isFeat(featArr));
+        const arrRest = arrivals.filter((p) => !featArr.includes(p.productId));
+
+        // Generate blurbs only for featured picks (≤4 Sonnet calls).
+        const preFeatured = [] as Array<{ p: NLProduct; blurb: string }>;
+        for (const p of preFeaturedProducts) preFeatured.push({ p, blurb: await nlGenerateBlurb(env, p) });
+        const arrFeatured = [] as Array<{ p: NLProduct; blurb: string }>;
+        for (const p of arrFeaturedProducts) arrFeatured.push({ p, blurb: await nlGenerateBlurb(env, p) });
+
+        const html = nlBuildBroadcastHtml({ preFeatured, preRest, arrFeatured, arrRest });
+        const created = await nlCreateBroadcastDraft(env, subject, html);
+        if (created.error) return jsonRes({ error: 'broadcast_create_failed', detail: created.error }, 502);
+        return jsonRes({
+          ok: true,
+          broadcast_id: created.id,
+          status: 'draft',
+          subject,
+          window_days: days,
+          featured: { preorders: preFeatured.length, new_arrivals: arrFeatured.length },
+          totals: { preorders: preorders.length, new_arrivals: arrivals.length },
+          next: 'Review and send the draft in the Resend dashboard (Broadcasts).',
+        });
+      }
+
+      return jsonRes({ error: 'method not allowed' }, 405);
     }
 
 
