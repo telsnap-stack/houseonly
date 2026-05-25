@@ -590,7 +590,7 @@ function nlBuildBroadcastHtml(sections: string[]): string {
 }
 
 // Create the DRAFT broadcast in Resend (send:false). Returns the broadcast id.
-async function nlCreateBroadcastDraft(env: Env, subject: string, html: string): Promise<{ id?: string; error?: string }> {
+async function nlCreateBroadcastDraft(env: Env, subject: string, html: string, name?: string): Promise<{ id?: string; error?: string }> {
   try {
     const res = await fetch('https://api.resend.com/broadcasts', {
       method: 'POST',
@@ -603,6 +603,10 @@ async function nlCreateBroadcastDraft(env: Env, subject: string, html: string): 
         from: NEWSLETTER_FROM,
         subject,
         html,
+        // `name` is the broadcast's internal label in the Resend dashboard
+        // (not shown to recipients). Without it, drafts list as "Untitled".
+        // Verified against Resend's Create Broadcast API reference.
+        ...(name ? { name } : {}),
       }),
     });
     const body: any = await res.json().catch(() => ({}));
@@ -1966,7 +1970,11 @@ export default {
         ];
 
         const html = nlBuildBroadcastHtml(sections);
-        const created = await nlCreateBroadcastDraft(env, subject, html);
+        // Internal dashboard label (not shown to recipients): subject + the
+        // creation date, so drafts are distinguishable in Resend's list
+        // instead of all showing as "Untitled".
+        const draftName = `${subject} — ${new Date().toISOString().slice(0, 10)}`;
+        const created = await nlCreateBroadcastDraft(env, subject, html, draftName);
         if (created.error) return jsonRes({ error: 'broadcast_create_failed', detail: created.error }, 502);
         return jsonRes({
           ok: true,
