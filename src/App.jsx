@@ -6306,9 +6306,9 @@ function DiscogsReviewPanel() {
 // Uses WORKER_URL (env-aware via VITE_WORKER_URL) so it follows staging/prod
 // automatically — no hardcoded host.
 
-const NL_MAX_FEATURED_UI = 2;
+const NL_MAX_BLURBS_UI = 2;
 
-function NewsletterSectionList({ title, sub, items, featured, toggleFeatured, featureDisabled }) {
+function NewsletterSectionList({ title, sub, items, included, blurbs, toggleInclude, toggleBlurb, blurbDisabled, onIncludeAll, onClearSection }) {
   if (!items || !items.length) {
     return (
       <div style={{marginBottom:22}}>
@@ -6317,29 +6317,46 @@ function NewsletterSectionList({ title, sub, items, featured, toggleFeatured, fe
       </div>
     );
   }
+  const includedHere = items.filter(p => included.includes(p.productId)).length;
   return (
     <div style={{marginBottom:26}}>
-      <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
-      <div style={{fontSize:10,color:S.muted,margin:'3px 0 12px'}}>{sub} · {items.length} total · top 5 shown in email</div>
-      <div style={{display:'flex',flexDirection:'column',gap:6}}>
-        {items.map((p,i) => {
-          const isFeat = featured.includes(p.productId);
-          const dim = i >= 5; // beyond the 5 shown in the email → "see all" on site
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10}}>
+        <div>
+          <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
+          <div style={{fontSize:10,color:S.muted,margin:'3px 0 0'}}>{sub} · {items.length} in window · {includedHere} selected</div>
+        </div>
+        <div style={{display:'flex',gap:6,flexShrink:0}}>
+          <button onClick={onIncludeAll} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>+ All</button>
+          <button onClick={onClearSection} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>Clear</button>
+        </div>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:12}}>
+        {items.map((p) => {
+          const isIn = included.includes(p.productId);
+          const isBlurb = blurbs.includes(p.productId);
           return (
-            <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isFeat?S.surf:'transparent',border:`1px solid ${isFeat?S.accent:S.border}`,borderRadius:2,padding:8,opacity:dim?0.5:1}}>
+            <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isIn?S.surf:'transparent',border:`1px solid ${isIn?S.accent:S.border}`,borderRadius:2,padding:8,opacity:isIn?1:0.72}}>
+              {/* include checkbox */}
+              <button
+                onClick={()=>toggleInclude(p.productId)}
+                title={isIn?'Remove from email':'Include in email'}
+                style={{flexShrink:0,width:22,height:22,borderRadius:3,border:`1px solid ${isIn?S.accent:S.border}`,background:isIn?S.accent:'transparent',color:'#080808',cursor:'pointer',fontSize:13,fontWeight:900,lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'inherit'}}>
+                {isIn?'✓':''}
+              </button>
               {p.imageUrl
                 ? <img src={p.imageUrl} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} />
                 : <div style={{width:40,height:40,background:S.border,borderRadius:2,flexShrink:0}} />}
               <div style={{minWidth:0,flex:1}}>
                 <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
-                <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}{dim?' · (see-all link only)':''}</div>
+                <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}</div>
               </div>
+              {/* blurb toggle — only meaningful if included */}
               <button
-                onClick={()=>toggleFeatured(p.productId)}
-                disabled={!isFeat && featureDisabled}
-                title={!isFeat && featureDisabled ? `Max ${NL_MAX_FEATURED_UI} featured` : 'Toggle editorial blurb'}
-                style={{flexShrink:0,background:isFeat?S.accent:'transparent',color:isFeat?'#080808':S.muted,border:`1px solid ${isFeat?S.accent:S.border}`,borderRadius:2,cursor:(!isFeat&&featureDisabled)?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
-                {isFeat?'★ Blurb':'+ Blurb'}
+                onClick={()=>toggleBlurb(p.productId)}
+                disabled={!isIn || (!isBlurb && blurbDisabled)}
+                title={!isIn ? 'Include it first' : (!isBlurb && blurbDisabled ? `Max ${NL_MAX_BLURBS_UI} blurbs` : 'Toggle editorial blurb')}
+                style={{flexShrink:0,background:isBlurb?S.accent:'transparent',color:isBlurb?'#080808':(isIn?S.muted:S.border),border:`1px solid ${isBlurb?S.accent:S.border}`,borderRadius:2,cursor:(!isIn||(!isBlurb&&blurbDisabled))?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit',opacity:isIn?1:0.5}}>
+                {isBlurb?'★ Blurb':'+ Blurb'}
               </button>
             </div>
           );
@@ -6355,7 +6372,8 @@ function NewsletterPanel() {
   const [days, setDays]       = useState(7);
   const [subject, setSubject] = useState('New this week at House Only');
   const [data, setData]       = useState(null);   // {preorders, new_arrivals, backorders, counts}
-  const [featured, setFeatured] = useState([]);    // [productId] up to 2
+  const [included, setIncluded] = useState([]);    // [productId] — records to put in the email
+  const [blurbs, setBlurbs]   = useState([]);      // [productId] — subset of included, ≤2
   const [loading, setLoading] = useState(false);
   const [building, setBuilding] = useState(false);
   const [error, setError]     = useState('');
@@ -6375,19 +6393,47 @@ function NewsletterPanel() {
       const d = await r.json();
       setData(d);
       setAuthed(true);
-      setFeatured([]); // reset picks on a fresh load
+      setIncluded([]); setBlurbs([]); // reset selection on a fresh load
     } catch (e) {
       setError(`Network error: ${e.message}`);
     }
     setLoading(false);
   }
 
-  function toggleFeatured(productId) {
-    setFeatured(f => {
-      if (f.includes(productId)) return f.filter(x => x !== productId);
-      if (f.length >= NL_MAX_FEATURED_UI) return f; // cap at 2
-      return [...f, productId];
+  function toggleInclude(productId) {
+    setIncluded(inc => {
+      if (inc.includes(productId)) {
+        // removing from email also removes its blurb
+        setBlurbs(b => b.filter(x => x !== productId));
+        return inc.filter(x => x !== productId);
+      }
+      return [...inc, productId];
     });
+  }
+
+  function toggleBlurb(productId) {
+    // only togglable when included (UI enforces, but guard anyway)
+    setBlurbs(b => {
+      if (b.includes(productId)) return b.filter(x => x !== productId);
+      if (b.length >= NL_MAX_BLURBS_UI) return b;
+      if (!included.includes(productId)) return b;
+      return [...b, productId];
+    });
+  }
+
+  function includeAll(items) {
+    setIncluded(inc => {
+      const ids = items.map(p => p.productId);
+      const set = new Set(inc);
+      ids.forEach(id => set.add(id));
+      return [...set];
+    });
+  }
+
+  function clearSection(items) {
+    const ids = new Set(items.map(p => p.productId));
+    setIncluded(inc => inc.filter(x => !ids.has(x)));
+    setBlurbs(b => b.filter(x => !ids.has(x)));
   }
 
   async function createDraft() {
@@ -6395,7 +6441,7 @@ function NewsletterPanel() {
     try {
       const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ days, featured, subject }),
+        body: JSON.stringify({ days, included, blurbs, subject }),
       });
       const d = await r.json();
       if (!r.ok) { setError(`Build failed: ${d.error || r.status}${d.detail?` — ${d.detail}`:''}`); }
@@ -6423,7 +6469,8 @@ function NewsletterPanel() {
   }
 
   // ── Builder ──
-  const featureDisabled = featured.length >= NL_MAX_FEATURED_UI;
+  const blurbDisabled = blurbs.length >= NL_MAX_BLURBS_UI;
+  const totalIncluded = included.length;
   return (
     <div>
       {/* controls */}
@@ -6442,27 +6489,28 @@ function NewsletterPanel() {
       </div>
 
       <div style={{fontSize:10,color:S.muted,marginBottom:16,lineHeight:1.5}}>
-        Tick up to {NL_MAX_FEATURED_UI} records to feature with an AI editorial blurb (the 2nd takes a different angle from the 1st). {featured.length}/{NL_MAX_FEATURED_UI} selected. Everything else shows compact; beyond the top 5 per section goes to a "see all" link.
+        Tick the records you want in the email (✓), from any section. The email shows exactly what you pick — nothing else. Then ★ up to {NL_MAX_BLURBS_UI} of them for an AI editorial blurb (the 2nd takes a different angle from the 1st). <strong style={{color:S.text}}>{totalIncluded} included · {blurbs.length}/{NL_MAX_BLURBS_UI} blurbs</strong>.
       </div>
 
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
 
       {data && (
         <>
-          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
-          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
-          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
+          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} />
+          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} />
+          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} />
         </>
       )}
 
       {/* build */}
       <div style={{borderTop:`1px solid ${S.border}`,paddingTop:16,marginTop:8}}>
-        <Btn ch={building?'Creating draft…':'Create draft in Resend'} onClick={createDraft} disabled={building||!data} />
+        <Btn ch={building?'Creating draft…':`Create draft in Resend${totalIncluded?` (${totalIncluded})`:''}`} onClick={createDraft} disabled={building||!data||!totalIncluded} />
+        {!totalIncluded && data && <span style={{fontSize:10,color:S.muted,marginLeft:12}}>Tick at least one record to include.</span>}
         {result && result.ok && (
           <div style={{fontSize:11,color:S.text,marginTop:12,background:S.surf,border:`1px solid ${S.accent}`,borderRadius:3,padding:14,lineHeight:1.6}}>
             <div style={{color:S.accent,fontWeight:700,marginBottom:4}}>✓ Draft created in Resend</div>
             Subject: <strong>{result.subject}</strong><br/>
-            Shown: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.featured_count||0} with blurb<br/>
+            In email: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.blurb_count||0} with blurb<br/>
             <span style={{color:S.muted}}>Broadcast id {result.broadcast_id}. Review &amp; send it from the Resend dashboard → Broadcasts.</span>
           </div>
         )}
@@ -6470,7 +6518,6 @@ function NewsletterPanel() {
     </div>
   );
 }
-
 
 // ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
 // Lists distributor-announced records that have NOT yet arrived as paid
