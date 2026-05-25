@@ -203,6 +203,7 @@ function newsletterResultPage(ok: boolean): Response {
 interface NLProduct {
   productId: string;   // gid://shopify/Product/...
   handle: string;
+  sku: string;         // variant SKU (slug fallback, mirrors prerender makeSlug)
   title: string;       // full Shopify title
   vendor: string;      // artist (Shopify vendor)
   label: string;       // parsed from label: tag
@@ -279,6 +280,7 @@ function nlMapNode(node: any): NLProduct | null {
   return {
     productId: node.id,
     handle: node.handle || '',
+    sku: variant?.sku || '',
     title: node.title || '',
     vendor: node.vendor || '',
     label: nlLabelFromTags(tags),
@@ -455,8 +457,30 @@ function nlEsc(s: string): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Slug helpers — MUST mirror scripts/prerender.mjs and App.jsx EXACTLY.
+// The site (links, sitemap, prerendered pages) is keyed by this slug, NOT by
+// the Shopify handle. The handle is usually the SKU (e.g. "chiwax027ltd")
+// while the slug is artist+title (e.g. "jakobiin-a-place-called-jack"), so a
+// link built from the handle 404s to home. Build email links from the slug.
+function nlSlugify(str: string): string {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+}
+function nlMakeSlug(artist: string, title: string, catalog: string): string {
+  const base = [artist, title].filter(Boolean).join(' ');
+  const s = nlSlugify(base);
+  if (s) return s;
+  return nlSlugify(catalog) || 'release';
+}
+
 function nlProductUrl(p: NLProduct): string {
-  return p.handle ? `${NEWSLETTER_SITE}/products/${p.handle}` : NEWSLETTER_SITE;
+  const slug = nlMakeSlug(p.vendor, p.title, p.sku);
+  return slug ? `${NEWSLETTER_SITE}/products/${slug}/` : NEWSLETTER_SITE;
 }
 
 function nlPriceLabel(p: NLProduct): string {
