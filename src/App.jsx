@@ -797,7 +797,11 @@ function AudioPlayer({ src }) {
 
 const PlayerCtx = createContext(null);
 
-function PlayerProvider({ children }) {
+function PlayerProvider({ children, gate }) {
+  // `gate(r)` is an optional callback the host (App) passes to control whether a
+  // release may start playing. It returns true to allow, false to block (e.g.
+  // forthcoming previews require an account). Default: always allow.
+  const playGate = useCallback((r) => (typeof gate === 'function' ? gate(r) : true), [gate]);
   const audioRef = useRef(null);
   const [queue, setQueue]       = useState([]);  // [{releaseId, releaseSnap, trackIdx, url, name}]
   const [currentIdx, setCurIdx] = useState(-1);  // index within queue, or -1 if nothing
@@ -844,6 +848,7 @@ function PlayerProvider({ children }) {
   };
 
   const playRelease = useCallback((r, startAtTrackIdx = 0) => {
+    if (!playGate(r)) return; // host blocked playback (e.g. forthcoming needs account)
     const items = itemsFromRelease(r);
     if (!items.length) return;
     const startOffset = Math.max(0, Math.min(items.length - 1, startAtTrackIdx));
@@ -870,9 +875,10 @@ function PlayerProvider({ children }) {
       setPlaying(true);
       return next;
     });
-  }, [currentIdx]);
+  }, [currentIdx, playGate]);
 
   const addToQueue = useCallback((r) => {
+    if (!playGate(r)) return; // host blocked (e.g. forthcoming needs account)
     const items = itemsFromRelease(r);
     if (!items.length) return;
     setQueue(q => {
@@ -884,7 +890,7 @@ function PlayerProvider({ children }) {
       }
       return next;
     });
-  }, [currentIdx]);
+  }, [currentIdx, playGate]);
 
   const removeFromQueue = useCallback((idx) => {
     setQueue(q => {
@@ -6297,6 +6303,239 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── NEWSLETTER PANEL (build a broadcast draft in Resend) ───────
+// Flow: paste BOOTSTRAP_AUTH_SECRET → load preview (3 sections from the Worker)
+// → tick which records go in the email (✓) and which show large → set subject +
+// window → "Create draft". The Worker creates a DRAFT broadcast in Resend
+// (never sends); Eduardo reviews and sends from the Resend dashboard.
+//
+// Uses WORKER_URL (env-aware via VITE_WORKER_URL) so it follows staging/prod
+// automatically — no hardcoded host.
+
+function NewsletterSectionList({ title, sub, items, included, large, toggleInclude, toggleLarge, onIncludeAll, onClearSection, collapsed, onToggleCollapse }) {
+  const count = items ? items.length : 0;
+  const includedHere = items ? items.filter(p => included.includes(p.productId)).length : 0;
+  // Count records in THIS section marked large (no cap).
+  const idsHere = new Set((items || []).map(p => p.productId));
+  const largeHere = large.filter(id => idsHere.has(id)).length;
+
+  return (
+    <div style={{marginBottom:16,border:`1px solid ${S.border}`,borderRadius:3,overflow:'hidden'}}>
+      {/* header — click to collapse/expand */}
+      <div onClick={onToggleCollapse} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'12px 14px',cursor:'pointer',background:S.surf,userSelect:'none'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+          <span style={{fontSize:11,color:S.accent,transform:collapsed?'rotate(0deg)':'rotate(90deg)',transition:'transform 0.15s',display:'inline-block'}}>▶</span>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:11,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
+            <div style={{fontSize:10,color:S.muted,marginTop:2}}>{sub} · {count} in window · {includedHere} selected{largeHere?` · ${largeHere} large`:''}</div>
+          </div>
+        </div>
+        {!collapsed && count > 0 && (
+          <div style={{display:'flex',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+            <button onClick={onIncludeAll} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>+ All</button>
+            <button onClick={onClearSection} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>Clear</button>
+          </div>
+        )}
+      </div>
+
+      {/* body */}
+      {!collapsed && (
+        <div style={{padding:'10px 12px'}}>
+          {count === 0
+            ? <div style={{fontSize:10,color:S.muted,padding:'6px 2px'}}>None in this window.</div>
+            : (
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {items.map((p) => {
+                  const isIn = included.includes(p.productId);
+                  const isLarge = large.includes(p.productId);
+                  return (
+                    <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isIn?S.surf:'transparent',border:`1px solid ${isIn?S.accent:S.border}`,borderRadius:2,padding:8}}>
+                      {/* include checkbox — visible border even when unchecked */}
+                      <button
+                        onClick={()=>toggleInclude(p.productId)}
+                        title={isIn?'Remove from email':'Include in email'}
+                        style={{flexShrink:0,width:24,height:24,borderRadius:4,border:`2px solid ${isIn?S.accent:'#6a6a6a'}`,background:isIn?S.accent:'transparent',color:'#080808',cursor:'pointer',fontSize:14,fontWeight:900,lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'inherit',padding:0}}>
+                        {isIn?'✓':''}
+                      </button>
+                      {p.imageUrl
+                        ? <img src={p.imageUrl} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                        : <div style={{width:40,height:40,background:S.border,borderRadius:2,flexShrink:0}} />}
+                      <div style={{minWidth:0,flex:1}}>
+                        <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
+                        <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}</div>
+                      </div>
+                      {/* large toggle — enabled only if included; no cap */}
+                      <button
+                        onClick={()=>toggleLarge(p.productId)}
+                        disabled={!isIn}
+                        title={!isIn ? 'Include it first' : 'Show this one as a big card'}
+                        style={{flexShrink:0,background:isLarge?S.accent:'transparent',color:isLarge?'#080808':(isIn?S.muted:'#555'),border:`1px solid ${isLarge?S.accent:S.border}`,borderRadius:2,cursor:!isIn?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
+                        {isLarge?'⬆ Large':'Large'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewsletterPanel() {
+  const [secret, setSecret]   = useState('');
+  const [authed, setAuthed]   = useState(false);
+  const [days, setDays]       = useState(7);
+  const [subject, setSubject] = useState('New this week at House Only');
+  const [data, setData]       = useState(null);   // {preorders, new_arrivals, backorders, counts}
+  const [included, setIncluded] = useState([]);    // [productId] — records to put in the email
+  const [large, setLarge]     = useState([]);      // [productId] — records shown as big cards
+  const [collapsed, setCollapsed] = useState({ pre:false, arr:false, bak:false });
+  const [loading, setLoading] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [error, setError]     = useState('');
+  const [result, setResult]   = useState(null);    // {broadcast_id, ...}
+
+  const authHeaders = () => ({ 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' });
+
+  async function loadPreview(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast&preview=1&days=${days}`, {
+        headers: { 'Authorization': `Bearer ${useSecret}` },
+      });
+      if (r.status === 401) { setError('Unauthorized — check the admin secret.'); setAuthed(false); setLoading(false); return; }
+      if (!r.ok) { setError(`Preview failed (HTTP ${r.status})`); setLoading(false); return; }
+      const d = await r.json();
+      setData(d);
+      setAuthed(true);
+      setIncluded([]); setLarge([]); // reset selection on a fresh load
+      // collapse all by default so you see the 3 section headers at once
+      setCollapsed({ pre:true, arr:true, bak:true });
+    } catch (e) {
+      setError(`Network error: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  function toggleInclude(productId) {
+    setIncluded(inc => {
+      if (inc.includes(productId)) {
+        setLarge(l => l.filter(x => x !== productId)); // removing also drops "large"
+        return inc.filter(x => x !== productId);
+      }
+      return [...inc, productId];
+    });
+  }
+
+  // Toggle "large" (big card). Must be included first (UI enforces; guard too).
+  function toggleLarge(productId) {
+    setLarge(l => {
+      if (l.includes(productId)) return l.filter(x => x !== productId);
+      if (!included.includes(productId)) return l;
+      return [...l, productId];
+    });
+  }
+
+  function includeAll(items) {
+    setIncluded(inc => {
+      const set = new Set(inc);
+      items.forEach(p => set.add(p.productId));
+      return [...set];
+    });
+  }
+
+  function clearSection(items) {
+    const ids = new Set(items.map(p => p.productId));
+    setIncluded(inc => inc.filter(x => !ids.has(x)));
+    setLarge(l => l.filter(x => !ids.has(x)));
+  }
+
+  async function createDraft() {
+    setBuilding(true); setError(''); setResult(null);
+    try {
+      const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ days, included, large, subject }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setError(`Build failed: ${d.error || r.status}${d.detail?` — ${d.detail}`:''}`); }
+      else { setResult(d); }
+    } catch (e) { setError(`Network error: ${e.message}`); }
+    setBuilding(false);
+  }
+
+  // ── Secret gate ──
+  if (!authed) {
+    return (
+      <div style={{maxWidth:340}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Newsletter · Admin Secret</div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>Paste the worker BOOTSTRAP_AUTH_SECRET. Held in memory only — never stored.</div>
+        <input
+          type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&loadPreview()}
+          placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}}
+        />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadPreview()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  // ── Builder ──
+  const totalIncluded = included.length;
+  const totalLarge = large.length;
+  return (
+    <div>
+      {/* controls */}
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap',marginBottom:18}}>
+        <div>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Window (days)</div>
+          <input type="number" min="1" max="90" value={days} onChange={e=>setDays(Math.max(1,Math.min(90,Number(e.target.value)||7)))}
+            style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+        </div>
+        <div style={{flex:1,minWidth:200}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Subject</div>
+          <input value={subject} onChange={e=>setSubject(e.target.value)}
+            style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+        </div>
+        <Btn ch={loading?'Loading…':'↻ Reload'} variant="ghost" onClick={()=>loadPreview()} disabled={loading} />
+      </div>
+
+      <div style={{fontSize:10,color:S.muted,marginBottom:16,lineHeight:1.5}}>
+        Click a section to expand it. Tick the records you want in the email (✓), from any section — the email shows exactly what you pick, nothing else. Mark "Large" on the ones you want as a big card (prominent cover); the rest show as compact rows. <strong style={{color:S.text}}>{totalIncluded} included · {totalLarge} large</strong>.
+      </div>
+
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
+
+      {data && (
+        <>
+          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} collapsed={collapsed.pre} onToggleCollapse={()=>setCollapsed(c=>({...c,pre:!c.pre}))} />
+          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} collapsed={collapsed.arr} onToggleCollapse={()=>setCollapsed(c=>({...c,arr:!c.arr}))} />
+          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} collapsed={collapsed.bak} onToggleCollapse={()=>setCollapsed(c=>({...c,bak:!c.bak}))} />
+        </>
+      )}
+
+      {/* build */}
+      <div style={{borderTop:`1px solid ${S.border}`,paddingTop:16,marginTop:8}}>
+        <Btn ch={building?'Creating draft…':`Create draft in Resend${totalIncluded?` (${totalIncluded})`:''}`} onClick={createDraft} disabled={building||!data||!totalIncluded} />
+        {!totalIncluded && data && <span style={{fontSize:10,color:S.muted,marginLeft:12}}>Tick at least one record to include.</span>}
+        {result && result.ok && (
+          <div style={{fontSize:11,color:S.text,marginTop:12,background:S.surf,border:`1px solid ${S.accent}`,borderRadius:3,padding:14,lineHeight:1.6}}>
+            <div style={{color:S.accent,fontWeight:700,marginBottom:4}}>✓ Draft created in Resend</div>
+            Subject: <strong>{result.subject}</strong><br/>
+            In email: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.large_count||0} large<br/>
+            <span style={{color:S.muted}}>Broadcast id {result.broadcast_id}. Review &amp; send it from the Resend dashboard → Broadcasts.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
 // Lists distributor-announced records that have NOT yet arrived as paid
 // pre-orders. Differs from the invoice-driven DBHImporter in its FRONT half:
@@ -7010,6 +7249,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rh','💎 Rush Hour Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
+          {tabBtn('newsletter','✉️ Newsletter')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
@@ -7018,6 +7258,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='rh'    && <RushHourImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
+        {tab==='newsletter'&& <NewsletterPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>📸 Content · Instagram Stories</div>
@@ -7212,6 +7453,20 @@ export default function App() {
   const [accountOpen, setAccountOpen]     = useState(false);
   const [wishItems, setWishItems]         = useState(()=>loadLocalWishlist());
   const [wishOpen, setWishOpen]           = useState(false);
+  // Forthcoming audio gate: clicking play on a forthcoming preview without an
+  // account opens this prompt (login/register to listen). Audio gate ONLY.
+  const [audioGateOpen, setAudioGateOpen] = useState(false);
+
+  // Gate passed to the player: block forthcoming previews unless logged in.
+  // Returns false (and opens the prompt) for forthcoming + no session; else true.
+  // Catalogue (non-forthcoming) audio is never gated.
+  const playGate = useCallback((r) => {
+    if (isForthcoming(r) && !auth?.session) {
+      setAudioGateOpen(true);
+      return false;
+    }
+    return true;
+  }, [auth]);
 
   // Persist anonymous wishlist to localStorage on every change
   useEffect(()=>{ saveLocalWishlist(wishItems); }, [wishItems]);
@@ -7603,7 +7858,7 @@ export default function App() {
   );
 
   return (
-    <PlayerProvider>
+    <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
@@ -7689,6 +7944,17 @@ export default function App() {
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
+      {audioGateOpen && (
+        <div onClick={()=>setAudioGateOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:6,padding:'28px 26px',maxWidth:360,width:'100%',textAlign:'center'}}>
+            <div style={{fontSize:11,color:S.accent,letterSpacing:2,textTransform:'uppercase',fontWeight:700,marginBottom:10}}>Pre-order previews</div>
+            <div style={{fontSize:14,color:S.text,lineHeight:1.55,marginBottom:6}}>Create a free account to listen to forthcoming releases before they drop.</div>
+            <div style={{fontSize:11,color:S.muted,lineHeight:1.5,marginBottom:20}}>The rest of the catalogue plays freely — this is just for the pre-order previews.</div>
+            <button onClick={handleSignIn} style={{width:'100%',background:S.accent,color:'#080808',border:'none',borderRadius:4,padding:'12px 0',cursor:'pointer',fontSize:12,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',marginBottom:10}}>Sign in / Create account</button>
+            <button onClick={()=>setAudioGateOpen(false)} style={{background:'transparent',border:'none',color:S.muted,cursor:'pointer',fontSize:11,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit'}}>Not now</button>
+          </div>
+        </div>
+      )}
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
     </PlayerProvider>
