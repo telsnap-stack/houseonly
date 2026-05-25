@@ -6297,6 +6297,181 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── NEWSLETTER PANEL (build a broadcast draft in Resend) ───────
+// Flow: paste BOOTSTRAP_AUTH_SECRET → load preview (3 sections from the Worker)
+// → tick up to 2 records to feature with an editorial blurb → set subject +
+// window → "Create draft". The Worker creates a DRAFT broadcast in Resend
+// (never sends); Eduardo reviews and sends from the Resend dashboard.
+//
+// Uses WORKER_URL (env-aware via VITE_WORKER_URL) so it follows staging/prod
+// automatically — no hardcoded host.
+
+const NL_MAX_FEATURED_UI = 2;
+
+function NewsletterSectionList({ title, sub, items, featured, toggleFeatured, featureDisabled }) {
+  if (!items || !items.length) {
+    return (
+      <div style={{marginBottom:22}}>
+        <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
+        <div style={{fontSize:10,color:S.muted,marginTop:4}}>None in this window.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{marginBottom:26}}>
+      <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
+      <div style={{fontSize:10,color:S.muted,margin:'3px 0 12px'}}>{sub} · {items.length} total · top 5 shown in email</div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {items.map((p,i) => {
+          const isFeat = featured.includes(p.productId);
+          const dim = i >= 5; // beyond the 5 shown in the email → "see all" on site
+          return (
+            <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isFeat?S.surf:'transparent',border:`1px solid ${isFeat?S.accent:S.border}`,borderRadius:2,padding:8,opacity:dim?0.5:1}}>
+              {p.imageUrl
+                ? <img src={p.imageUrl} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                : <div style={{width:40,height:40,background:S.border,borderRadius:2,flexShrink:0}} />}
+              <div style={{minWidth:0,flex:1}}>
+                <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
+                <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}{dim?' · (see-all link only)':''}</div>
+              </div>
+              <button
+                onClick={()=>toggleFeatured(p.productId)}
+                disabled={!isFeat && featureDisabled}
+                title={!isFeat && featureDisabled ? `Max ${NL_MAX_FEATURED_UI} featured` : 'Toggle editorial blurb'}
+                style={{flexShrink:0,background:isFeat?S.accent:'transparent',color:isFeat?'#080808':S.muted,border:`1px solid ${isFeat?S.accent:S.border}`,borderRadius:2,cursor:(!isFeat&&featureDisabled)?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
+                {isFeat?'★ Blurb':'+ Blurb'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function NewsletterPanel() {
+  const [secret, setSecret]   = useState('');
+  const [authed, setAuthed]   = useState(false);
+  const [days, setDays]       = useState(7);
+  const [subject, setSubject] = useState('New this week at House Only');
+  const [data, setData]       = useState(null);   // {preorders, new_arrivals, backorders, counts}
+  const [featured, setFeatured] = useState([]);    // [productId] up to 2
+  const [loading, setLoading] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [error, setError]     = useState('');
+  const [result, setResult]   = useState(null);    // {broadcast_id, ...}
+
+  const authHeaders = () => ({ 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' });
+
+  async function loadPreview(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast&preview=1&days=${days}`, {
+        headers: { 'Authorization': `Bearer ${useSecret}` },
+      });
+      if (r.status === 401) { setError('Unauthorized — check the admin secret.'); setAuthed(false); setLoading(false); return; }
+      if (!r.ok) { setError(`Preview failed (HTTP ${r.status})`); setLoading(false); return; }
+      const d = await r.json();
+      setData(d);
+      setAuthed(true);
+      setFeatured([]); // reset picks on a fresh load
+    } catch (e) {
+      setError(`Network error: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  function toggleFeatured(productId) {
+    setFeatured(f => {
+      if (f.includes(productId)) return f.filter(x => x !== productId);
+      if (f.length >= NL_MAX_FEATURED_UI) return f; // cap at 2
+      return [...f, productId];
+    });
+  }
+
+  async function createDraft() {
+    setBuilding(true); setError(''); setResult(null);
+    try {
+      const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ days, featured, subject }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setError(`Build failed: ${d.error || r.status}${d.detail?` — ${d.detail}`:''}`); }
+      else { setResult(d); }
+    } catch (e) { setError(`Network error: ${e.message}`); }
+    setBuilding(false);
+  }
+
+  // ── Secret gate ──
+  if (!authed) {
+    return (
+      <div style={{maxWidth:340}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Newsletter · Admin Secret</div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>Paste the worker BOOTSTRAP_AUTH_SECRET. Held in memory only — never stored.</div>
+        <input
+          type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&loadPreview()}
+          placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}}
+        />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadPreview()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  // ── Builder ──
+  const featureDisabled = featured.length >= NL_MAX_FEATURED_UI;
+  return (
+    <div>
+      {/* controls */}
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap',marginBottom:18}}>
+        <div>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Window (days)</div>
+          <input type="number" min="1" max="90" value={days} onChange={e=>setDays(Math.max(1,Math.min(90,Number(e.target.value)||7)))}
+            style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+        </div>
+        <div style={{flex:1,minWidth:200}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:5}}>Subject</div>
+          <input value={subject} onChange={e=>setSubject(e.target.value)}
+            style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+        </div>
+        <Btn ch={loading?'Loading…':'↻ Reload'} variant="ghost" onClick={()=>loadPreview()} disabled={loading} />
+      </div>
+
+      <div style={{fontSize:10,color:S.muted,marginBottom:16,lineHeight:1.5}}>
+        Tick up to {NL_MAX_FEATURED_UI} records to feature with an AI editorial blurb (the 2nd takes a different angle from the 1st). {featured.length}/{NL_MAX_FEATURED_UI} selected. Everything else shows compact; beyond the top 5 per section goes to a "see all" link.
+      </div>
+
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
+
+      {data && (
+        <>
+          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
+          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
+          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} featured={featured} toggleFeatured={toggleFeatured} featureDisabled={featureDisabled} />
+        </>
+      )}
+
+      {/* build */}
+      <div style={{borderTop:`1px solid ${S.border}`,paddingTop:16,marginTop:8}}>
+        <Btn ch={building?'Creating draft…':'Create draft in Resend'} onClick={createDraft} disabled={building||!data} />
+        {result && result.ok && (
+          <div style={{fontSize:11,color:S.text,marginTop:12,background:S.surf,border:`1px solid ${S.accent}`,borderRadius:3,padding:14,lineHeight:1.6}}>
+            <div style={{color:S.accent,fontWeight:700,marginBottom:4}}>✓ Draft created in Resend</div>
+            Subject: <strong>{result.subject}</strong><br/>
+            Shown: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.featured_count||0} with blurb<br/>
+            <span style={{color:S.muted}}>Broadcast id {result.broadcast_id}. Review &amp; send it from the Resend dashboard → Broadcasts.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
 // Lists distributor-announced records that have NOT yet arrived as paid
 // pre-orders. Differs from the invoice-driven DBHImporter in its FRONT half:
@@ -7010,6 +7185,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rh','💎 Rush Hour Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
+          {tabBtn('newsletter','✉️ Newsletter')}
         </div>
         {tab==='zip'   && <ZipImporter />}
         {tab==='kudos' && <KudosImporter />}
@@ -7018,6 +7194,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='rh'    && <RushHourImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
+        {tab==='newsletter'&& <NewsletterPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:14}}>📸 Content · Instagram Stories</div>
