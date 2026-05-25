@@ -6299,22 +6299,19 @@ function DiscogsReviewPanel() {
 
 // ── NEWSLETTER PANEL (build a broadcast draft in Resend) ───────
 // Flow: paste BOOTSTRAP_AUTH_SECRET → load preview (3 sections from the Worker)
-// → tick up to 2 records to feature with an editorial blurb → set subject +
+// → tick which records go in the email (✓) and which show large → set subject +
 // window → "Create draft". The Worker creates a DRAFT broadcast in Resend
 // (never sends); Eduardo reviews and sends from the Resend dashboard.
 //
 // Uses WORKER_URL (env-aware via VITE_WORKER_URL) so it follows staging/prod
 // automatically — no hardcoded host.
 
-const NL_MAX_BLURBS_PER_SECTION = 2;
-
-function NewsletterSectionList({ title, sub, items, included, blurbs, toggleInclude, toggleBlurb, onIncludeAll, onClearSection, collapsed, onToggleCollapse }) {
+function NewsletterSectionList({ title, sub, items, included, large, toggleInclude, toggleLarge, onIncludeAll, onClearSection, collapsed, onToggleCollapse }) {
   const count = items ? items.length : 0;
   const includedHere = items ? items.filter(p => included.includes(p.productId)).length : 0;
-  // Per-section blurb cap: count blurbs whose record is in THIS section.
+  // Count records in THIS section marked large (no cap).
   const idsHere = new Set((items || []).map(p => p.productId));
-  const blurbsHere = blurbs.filter(id => idsHere.has(id)).length;
-  const sectionBlurbDisabled = blurbsHere >= NL_MAX_BLURBS_PER_SECTION;
+  const largeHere = large.filter(id => idsHere.has(id)).length;
 
   return (
     <div style={{marginBottom:16,border:`1px solid ${S.border}`,borderRadius:3,overflow:'hidden'}}>
@@ -6324,7 +6321,7 @@ function NewsletterSectionList({ title, sub, items, included, blurbs, toggleIncl
           <span style={{fontSize:11,color:S.accent,transform:collapsed?'rotate(0deg)':'rotate(90deg)',transition:'transform 0.15s',display:'inline-block'}}>▶</span>
           <div style={{minWidth:0}}>
             <div style={{fontSize:11,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
-            <div style={{fontSize:10,color:S.muted,marginTop:2}}>{sub} · {count} in window · {includedHere} selected{blurbsHere?` · ${blurbsHere} blurb${blurbsHere>1?'s':''}`:''}</div>
+            <div style={{fontSize:10,color:S.muted,marginTop:2}}>{sub} · {count} in window · {includedHere} selected{largeHere?` · ${largeHere} large`:''}</div>
           </div>
         </div>
         {!collapsed && count > 0 && (
@@ -6344,7 +6341,7 @@ function NewsletterSectionList({ title, sub, items, included, blurbs, toggleIncl
               <div style={{display:'flex',flexDirection:'column',gap:6}}>
                 {items.map((p) => {
                   const isIn = included.includes(p.productId);
-                  const isBlurb = blurbs.includes(p.productId);
+                  const isLarge = large.includes(p.productId);
                   return (
                     <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isIn?S.surf:'transparent',border:`1px solid ${isIn?S.accent:S.border}`,borderRadius:2,padding:8}}>
                       {/* include checkbox — visible border even when unchecked */}
@@ -6361,13 +6358,13 @@ function NewsletterSectionList({ title, sub, items, included, blurbs, toggleIncl
                         <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
                         <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}</div>
                       </div>
-                      {/* blurb toggle — enabled only if included and section under cap */}
+                      {/* large toggle — enabled only if included; no cap */}
                       <button
-                        onClick={()=>toggleBlurb(p.productId)}
-                        disabled={!isIn || (!isBlurb && sectionBlurbDisabled)}
-                        title={!isIn ? 'Include it first' : (!isBlurb && sectionBlurbDisabled ? `Max ${NL_MAX_BLURBS_PER_SECTION} blurbs in this section` : 'Toggle editorial blurb')}
-                        style={{flexShrink:0,background:isBlurb?S.accent:'transparent',color:isBlurb?'#080808':(isIn?S.muted:'#555'),border:`1px solid ${isBlurb?S.accent:S.border}`,borderRadius:2,cursor:(!isIn||(!isBlurb&&sectionBlurbDisabled))?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
-                        {isBlurb?'★ Blurb':'+ Blurb'}
+                        onClick={()=>toggleLarge(p.productId)}
+                        disabled={!isIn}
+                        title={!isIn ? 'Include it first' : 'Show this one as a big card'}
+                        style={{flexShrink:0,background:isLarge?S.accent:'transparent',color:isLarge?'#080808':(isIn?S.muted:'#555'),border:`1px solid ${isLarge?S.accent:S.border}`,borderRadius:2,cursor:!isIn?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
+                        {isLarge?'⬆ Large':'Large'}
                       </button>
                     </div>
                   );
@@ -6387,7 +6384,7 @@ function NewsletterPanel() {
   const [subject, setSubject] = useState('New this week at House Only');
   const [data, setData]       = useState(null);   // {preorders, new_arrivals, backorders, counts}
   const [included, setIncluded] = useState([]);    // [productId] — records to put in the email
-  const [blurbs, setBlurbs]   = useState([]);      // [productId] — records that get a blurb (≤2/section)
+  const [large, setLarge]     = useState([]);      // [productId] — records shown as big cards
   const [collapsed, setCollapsed] = useState({ pre:false, arr:false, bak:false });
   const [loading, setLoading] = useState(false);
   const [building, setBuilding] = useState(false);
@@ -6408,7 +6405,7 @@ function NewsletterPanel() {
       const d = await r.json();
       setData(d);
       setAuthed(true);
-      setIncluded([]); setBlurbs([]); // reset selection on a fresh load
+      setIncluded([]); setLarge([]); // reset selection on a fresh load
       // collapse all by default so you see the 3 section headers at once
       setCollapsed({ pre:true, arr:true, bak:true });
     } catch (e) {
@@ -6420,20 +6417,19 @@ function NewsletterPanel() {
   function toggleInclude(productId) {
     setIncluded(inc => {
       if (inc.includes(productId)) {
-        setBlurbs(b => b.filter(x => x !== productId)); // removing also drops its blurb
+        setLarge(l => l.filter(x => x !== productId)); // removing also drops "large"
         return inc.filter(x => x !== productId);
       }
       return [...inc, productId];
     });
   }
 
-  // Per-section blurb cap is enforced in the section component (disabled state),
-  // so here we just toggle; we still guard "must be included".
-  function toggleBlurb(productId) {
-    setBlurbs(b => {
-      if (b.includes(productId)) return b.filter(x => x !== productId);
-      if (!included.includes(productId)) return b;
-      return [...b, productId];
+  // Toggle "large" (big card). Must be included first (UI enforces; guard too).
+  function toggleLarge(productId) {
+    setLarge(l => {
+      if (l.includes(productId)) return l.filter(x => x !== productId);
+      if (!included.includes(productId)) return l;
+      return [...l, productId];
     });
   }
 
@@ -6448,7 +6444,7 @@ function NewsletterPanel() {
   function clearSection(items) {
     const ids = new Set(items.map(p => p.productId));
     setIncluded(inc => inc.filter(x => !ids.has(x)));
-    setBlurbs(b => b.filter(x => !ids.has(x)));
+    setLarge(l => l.filter(x => !ids.has(x)));
   }
 
   async function createDraft() {
@@ -6456,7 +6452,7 @@ function NewsletterPanel() {
     try {
       const r = await fetch(`${WORKER_URL}?action=newsletter-build-broadcast`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ days, included, blurbs, subject }),
+        body: JSON.stringify({ days, included, large, subject }),
       });
       const d = await r.json();
       if (!r.ok) { setError(`Build failed: ${d.error || r.status}${d.detail?` — ${d.detail}`:''}`); }
@@ -6485,7 +6481,7 @@ function NewsletterPanel() {
 
   // ── Builder ──
   const totalIncluded = included.length;
-  const totalBlurbs = blurbs.length;
+  const totalLarge = large.length;
   return (
     <div>
       {/* controls */}
@@ -6504,16 +6500,16 @@ function NewsletterPanel() {
       </div>
 
       <div style={{fontSize:10,color:S.muted,marginBottom:16,lineHeight:1.5}}>
-        Click a section to expand it. Tick the records you want in the email (✓), from any section — the email shows exactly what you pick, nothing else. Then ★ up to {NL_MAX_BLURBS_PER_SECTION} per section for an AI editorial blurb (a 2nd blurb takes a different angle). <strong style={{color:S.text}}>{totalIncluded} included · {totalBlurbs} blurb{totalBlurbs===1?'':'s'}</strong>.
+        Click a section to expand it. Tick the records you want in the email (✓), from any section — the email shows exactly what you pick, nothing else. Mark "Large" on the ones you want as a big card (prominent cover); the rest show as compact rows. <strong style={{color:S.text}}>{totalIncluded} included · {totalLarge} large</strong>.
       </div>
 
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
 
       {data && (
         <>
-          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} collapsed={collapsed.pre} onToggleCollapse={()=>setCollapsed(c=>({...c,pre:!c.pre}))} />
-          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} collapsed={collapsed.arr} onToggleCollapse={()=>setCollapsed(c=>({...c,arr:!c.arr}))} />
-          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} collapsed={collapsed.bak} onToggleCollapse={()=>setCollapsed(c=>({...c,bak:!c.bak}))} />
+          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} collapsed={collapsed.pre} onToggleCollapse={()=>setCollapsed(c=>({...c,pre:!c.pre}))} />
+          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} collapsed={collapsed.arr} onToggleCollapse={()=>setCollapsed(c=>({...c,arr:!c.arr}))} />
+          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} large={large} toggleInclude={toggleInclude} toggleLarge={toggleLarge} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} collapsed={collapsed.bak} onToggleCollapse={()=>setCollapsed(c=>({...c,bak:!c.bak}))} />
         </>
       )}
 
@@ -6525,7 +6521,7 @@ function NewsletterPanel() {
           <div style={{fontSize:11,color:S.text,marginTop:12,background:S.surf,border:`1px solid ${S.accent}`,borderRadius:3,padding:14,lineHeight:1.6}}>
             <div style={{color:S.accent,fontWeight:700,marginBottom:4}}>✓ Draft created in Resend</div>
             Subject: <strong>{result.subject}</strong><br/>
-            In email: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.blurb_count||0} with blurb<br/>
+            In email: {result.shown?.preorders||0} pre-orders · {result.shown?.new_arrivals||0} new arrivals · {result.shown?.backorders||0} backorders · {result.large_count||0} large<br/>
             <span style={{color:S.muted}}>Broadcast id {result.broadcast_id}. Review &amp; send it from the Resend dashboard → Broadcasts.</span>
           </div>
         )}
