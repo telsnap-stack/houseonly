@@ -6306,62 +6306,76 @@ function DiscogsReviewPanel() {
 // Uses WORKER_URL (env-aware via VITE_WORKER_URL) so it follows staging/prod
 // automatically — no hardcoded host.
 
-const NL_MAX_BLURBS_UI = 2;
+const NL_MAX_BLURBS_PER_SECTION = 2;
 
-function NewsletterSectionList({ title, sub, items, included, blurbs, toggleInclude, toggleBlurb, blurbDisabled, onIncludeAll, onClearSection }) {
-  if (!items || !items.length) {
-    return (
-      <div style={{marginBottom:22}}>
-        <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
-        <div style={{fontSize:10,color:S.muted,marginTop:4}}>None in this window.</div>
-      </div>
-    );
-  }
-  const includedHere = items.filter(p => included.includes(p.productId)).length;
+function NewsletterSectionList({ title, sub, items, included, blurbs, toggleInclude, toggleBlurb, onIncludeAll, onClearSection, collapsed, onToggleCollapse }) {
+  const count = items ? items.length : 0;
+  const includedHere = items ? items.filter(p => included.includes(p.productId)).length : 0;
+  // Per-section blurb cap: count blurbs whose record is in THIS section.
+  const idsHere = new Set((items || []).map(p => p.productId));
+  const blurbsHere = blurbs.filter(id => idsHere.has(id)).length;
+  const sectionBlurbDisabled = blurbsHere >= NL_MAX_BLURBS_PER_SECTION;
+
   return (
-    <div style={{marginBottom:26}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10}}>
-        <div>
-          <div style={{fontSize:10,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
-          <div style={{fontSize:10,color:S.muted,margin:'3px 0 0'}}>{sub} · {items.length} in window · {includedHere} selected</div>
+    <div style={{marginBottom:16,border:`1px solid ${S.border}`,borderRadius:3,overflow:'hidden'}}>
+      {/* header — click to collapse/expand */}
+      <div onClick={onToggleCollapse} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,padding:'12px 14px',cursor:'pointer',background:S.surf,userSelect:'none'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+          <span style={{fontSize:11,color:S.accent,transform:collapsed?'rotate(0deg)':'rotate(90deg)',transition:'transform 0.15s',display:'inline-block'}}>▶</span>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:11,color:S.accent,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>{title}</div>
+            <div style={{fontSize:10,color:S.muted,marginTop:2}}>{sub} · {count} in window · {includedHere} selected{blurbsHere?` · ${blurbsHere} blurb${blurbsHere>1?'s':''}`:''}</div>
+          </div>
         </div>
-        <div style={{display:'flex',gap:6,flexShrink:0}}>
-          <button onClick={onIncludeAll} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>+ All</button>
-          <button onClick={onClearSection} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>Clear</button>
-        </div>
+        {!collapsed && count > 0 && (
+          <div style={{display:'flex',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+            <button onClick={onIncludeAll} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>+ All</button>
+            <button onClick={onClearSection} style={{background:'transparent',color:S.muted,border:`1px solid ${S.border}`,borderRadius:2,cursor:'pointer',fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'4px 8px',fontFamily:'inherit'}}>Clear</button>
+          </div>
+        )}
       </div>
-      <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:12}}>
-        {items.map((p) => {
-          const isIn = included.includes(p.productId);
-          const isBlurb = blurbs.includes(p.productId);
-          return (
-            <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isIn?S.surf:'transparent',border:`1px solid ${isIn?S.accent:S.border}`,borderRadius:2,padding:8,opacity:isIn?1:0.72}}>
-              {/* include checkbox */}
-              <button
-                onClick={()=>toggleInclude(p.productId)}
-                title={isIn?'Remove from email':'Include in email'}
-                style={{flexShrink:0,width:22,height:22,borderRadius:3,border:`1px solid ${isIn?S.accent:S.border}`,background:isIn?S.accent:'transparent',color:'#080808',cursor:'pointer',fontSize:13,fontWeight:900,lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'inherit'}}>
-                {isIn?'✓':''}
-              </button>
-              {p.imageUrl
-                ? <img src={p.imageUrl} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} />
-                : <div style={{width:40,height:40,background:S.border,borderRadius:2,flexShrink:0}} />}
-              <div style={{minWidth:0,flex:1}}>
-                <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
-                <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}</div>
+
+      {/* body */}
+      {!collapsed && (
+        <div style={{padding:'10px 12px'}}>
+          {count === 0
+            ? <div style={{fontSize:10,color:S.muted,padding:'6px 2px'}}>None in this window.</div>
+            : (
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {items.map((p) => {
+                  const isIn = included.includes(p.productId);
+                  const isBlurb = blurbs.includes(p.productId);
+                  return (
+                    <div key={p.productId} style={{display:'flex',alignItems:'center',gap:10,background:isIn?S.surf:'transparent',border:`1px solid ${isIn?S.accent:S.border}`,borderRadius:2,padding:8}}>
+                      {/* include checkbox — visible border even when unchecked */}
+                      <button
+                        onClick={()=>toggleInclude(p.productId)}
+                        title={isIn?'Remove from email':'Include in email'}
+                        style={{flexShrink:0,width:24,height:24,borderRadius:4,border:`2px solid ${isIn?S.accent:'#6a6a6a'}`,background:isIn?S.accent:'transparent',color:'#080808',cursor:'pointer',fontSize:14,fontWeight:900,lineHeight:1,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'inherit',padding:0}}>
+                        {isIn?'✓':''}
+                      </button>
+                      {p.imageUrl
+                        ? <img src={p.imageUrl} alt="" style={{width:40,height:40,objectFit:'cover',borderRadius:2,flexShrink:0}} />
+                        : <div style={{width:40,height:40,background:S.border,borderRadius:2,flexShrink:0}} />}
+                      <div style={{minWidth:0,flex:1}}>
+                        <div style={{fontSize:11,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{p.artist} — {p.title}</div>
+                        <div style={{fontSize:9,color:S.muted,marginTop:2}}>{p.label||'—'} · {p.price}</div>
+                      </div>
+                      {/* blurb toggle — enabled only if included and section under cap */}
+                      <button
+                        onClick={()=>toggleBlurb(p.productId)}
+                        disabled={!isIn || (!isBlurb && sectionBlurbDisabled)}
+                        title={!isIn ? 'Include it first' : (!isBlurb && sectionBlurbDisabled ? `Max ${NL_MAX_BLURBS_PER_SECTION} blurbs in this section` : 'Toggle editorial blurb')}
+                        style={{flexShrink:0,background:isBlurb?S.accent:'transparent',color:isBlurb?'#080808':(isIn?S.muted:'#555'),border:`1px solid ${isBlurb?S.accent:S.border}`,borderRadius:2,cursor:(!isIn||(!isBlurb&&sectionBlurbDisabled))?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit'}}>
+                        {isBlurb?'★ Blurb':'+ Blurb'}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
-              {/* blurb toggle — only meaningful if included */}
-              <button
-                onClick={()=>toggleBlurb(p.productId)}
-                disabled={!isIn || (!isBlurb && blurbDisabled)}
-                title={!isIn ? 'Include it first' : (!isBlurb && blurbDisabled ? `Max ${NL_MAX_BLURBS_UI} blurbs` : 'Toggle editorial blurb')}
-                style={{flexShrink:0,background:isBlurb?S.accent:'transparent',color:isBlurb?'#080808':(isIn?S.muted:S.border),border:`1px solid ${isBlurb?S.accent:S.border}`,borderRadius:2,cursor:(!isIn||(!isBlurb&&blurbDisabled))?'not-allowed':'pointer',fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',padding:'6px 10px',fontFamily:'inherit',opacity:isIn?1:0.5}}>
-                {isBlurb?'★ Blurb':'+ Blurb'}
-              </button>
-            </div>
-          );
-        })}
-      </div>
+            )}
+        </div>
+      )}
     </div>
   );
 }
@@ -6373,7 +6387,8 @@ function NewsletterPanel() {
   const [subject, setSubject] = useState('New this week at House Only');
   const [data, setData]       = useState(null);   // {preorders, new_arrivals, backorders, counts}
   const [included, setIncluded] = useState([]);    // [productId] — records to put in the email
-  const [blurbs, setBlurbs]   = useState([]);      // [productId] — subset of included, ≤2
+  const [blurbs, setBlurbs]   = useState([]);      // [productId] — records that get a blurb (≤2/section)
+  const [collapsed, setCollapsed] = useState({ pre:false, arr:false, bak:false });
   const [loading, setLoading] = useState(false);
   const [building, setBuilding] = useState(false);
   const [error, setError]     = useState('');
@@ -6394,6 +6409,8 @@ function NewsletterPanel() {
       setData(d);
       setAuthed(true);
       setIncluded([]); setBlurbs([]); // reset selection on a fresh load
+      // collapse all by default so you see the 3 section headers at once
+      setCollapsed({ pre:true, arr:true, bak:true });
     } catch (e) {
       setError(`Network error: ${e.message}`);
     }
@@ -6403,19 +6420,18 @@ function NewsletterPanel() {
   function toggleInclude(productId) {
     setIncluded(inc => {
       if (inc.includes(productId)) {
-        // removing from email also removes its blurb
-        setBlurbs(b => b.filter(x => x !== productId));
+        setBlurbs(b => b.filter(x => x !== productId)); // removing also drops its blurb
         return inc.filter(x => x !== productId);
       }
       return [...inc, productId];
     });
   }
 
+  // Per-section blurb cap is enforced in the section component (disabled state),
+  // so here we just toggle; we still guard "must be included".
   function toggleBlurb(productId) {
-    // only togglable when included (UI enforces, but guard anyway)
     setBlurbs(b => {
       if (b.includes(productId)) return b.filter(x => x !== productId);
-      if (b.length >= NL_MAX_BLURBS_UI) return b;
       if (!included.includes(productId)) return b;
       return [...b, productId];
     });
@@ -6423,9 +6439,8 @@ function NewsletterPanel() {
 
   function includeAll(items) {
     setIncluded(inc => {
-      const ids = items.map(p => p.productId);
       const set = new Set(inc);
-      ids.forEach(id => set.add(id));
+      items.forEach(p => set.add(p.productId));
       return [...set];
     });
   }
@@ -6469,8 +6484,8 @@ function NewsletterPanel() {
   }
 
   // ── Builder ──
-  const blurbDisabled = blurbs.length >= NL_MAX_BLURBS_UI;
   const totalIncluded = included.length;
+  const totalBlurbs = blurbs.length;
   return (
     <div>
       {/* controls */}
@@ -6489,16 +6504,16 @@ function NewsletterPanel() {
       </div>
 
       <div style={{fontSize:10,color:S.muted,marginBottom:16,lineHeight:1.5}}>
-        Tick the records you want in the email (✓), from any section. The email shows exactly what you pick — nothing else. Then ★ up to {NL_MAX_BLURBS_UI} of them for an AI editorial blurb (the 2nd takes a different angle from the 1st). <strong style={{color:S.text}}>{totalIncluded} included · {blurbs.length}/{NL_MAX_BLURBS_UI} blurbs</strong>.
+        Click a section to expand it. Tick the records you want in the email (✓), from any section — the email shows exactly what you pick, nothing else. Then ★ up to {NL_MAX_BLURBS_PER_SECTION} per section for an AI editorial blurb (a 2nd blurb takes a different angle). <strong style={{color:S.text}}>{totalIncluded} included · {totalBlurbs} blurb{totalBlurbs===1?'':'s'}</strong>.
       </div>
 
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
 
       {data && (
         <>
-          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} />
-          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} />
-          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} blurbDisabled={blurbDisabled} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} />
+          <NewsletterSectionList title="Pre-orders" sub="forthcoming this window" items={data.preorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.preorders)} onClearSection={()=>clearSection(data.preorders)} collapsed={collapsed.pre} onToggleCollapse={()=>setCollapsed(c=>({...c,pre:!c.pre}))} />
+          <NewsletterSectionList title="New arrivals" sub="in stock now" items={data.new_arrivals} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.new_arrivals)} onClearSection={()=>clearSection(data.new_arrivals)} collapsed={collapsed.arr} onToggleCollapse={()=>setCollapsed(c=>({...c,arr:!c.arr}))} />
+          <NewsletterSectionList title="Back in the catalogue" sub="released, awaiting stock" items={data.backorders} included={included} blurbs={blurbs} toggleInclude={toggleInclude} toggleBlurb={toggleBlurb} onIncludeAll={()=>includeAll(data.backorders)} onClearSection={()=>clearSection(data.backorders)} collapsed={collapsed.bak} onToggleCollapse={()=>setCollapsed(c=>({...c,bak:!c.bak}))} />
         </>
       )}
 
