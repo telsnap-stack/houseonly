@@ -212,8 +212,8 @@ interface NLProduct {
   createdAt: string;   // ISO
   forthcoming: boolean;
   releaseDate: string; // parsed from release: tag, '' if none
-  stock: number;       // inventoryQuantity (aggregate); may be 0 with deny policy
-  available: boolean;  // availableForSale (more reliable than stock alone)
+  stock: number;       // quantityAvailable (Storefront) — frontend's +Cart/Request signal
+  year: number;        // parsed from year tag, 0 if none (for backorder eligibility)
   descriptionHtml: string; // for richer blurb input
   tracks: string[];    // best-effort tracklist (parsed from description)
 }
@@ -251,16 +251,31 @@ function nlTracksFromDescription(html: string): string[] {
   return tracks.slice(0, 10);
 }
 
-// Map a raw Shopify product node → NLProduct (best-effort; skips if no id).
+// Parse year out of the tags (mirrors the frontend's `year:` / bare-4-digit tag).
+function nlYearFromTags(tags: string[]): number {
+  // Frontend stores year either as a bare 4-digit tag or `year:YYYY`.
+  const yt = tags.find((x) => /^year:\d{4}$/i.test(x)) || tags.find((x) => /^\d{4}$/.test(x));
+  if (!yt) return 0;
+  const m = yt.match(/(\d{4})/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+// Map a raw Storefront product node → NLProduct (best-effort; skips if no id).
+// IMPORTANT: stock comes from the Storefront `quantityAvailable` field — the
+// SAME source the storefront uses to decide +Cart vs Request. Admin API's
+// inventoryQuantity is unreliable here because the store runs inventoryPolicy
+// "continue" (oversell), so we read stock exactly like the frontend does.
 function nlMapNode(node: any): NLProduct | null {
   if (!node?.id) return null;
   const tags: string[] = Array.isArray(node.tags) ? node.tags : [];
-  const variant = node?.variants?.edges?.[0]?.node || node?.variants?.nodes?.[0] || null;
-  const priceAmount = variant?.price ?? node?.priceRangeV2?.minVariantPrice?.amount ?? '';
-  const currency = node?.priceRangeV2?.minVariantPrice?.currencyCode || 'EUR';
-  const invQty = typeof variant?.inventoryQuantity === 'number' ? variant.inventoryQuantity : 0;
-  const avail = variant?.availableForSale === true;
+  const variant = node?.variants?.edges?.[0]?.node || null;
+  const priceAmount = variant?.price?.amount ?? '';
+  const currency = variant?.price?.currencyCode || 'EUR';
+  // Match the frontend exactly: quantityAvailable ?? 10 (unknown → treat as
+  // in stock). A real backorder reports 0 here.
+  const qa = typeof variant?.quantityAvailable === 'number' ? variant.quantityAvailable : 10;
   const descriptionHtml = String(node?.descriptionHtml || '');
+  const imageUrl = node?.images?.edges?.[0]?.node?.url || node?.featuredImage?.url || '';
   return {
     productId: node.id,
     handle: node.handle || '',
@@ -269,65 +284,86 @@ function nlMapNode(node: any): NLProduct | null {
     label: nlLabelFromTags(tags),
     price: priceAmount ? String(priceAmount) : '',
     currency,
-    imageUrl: node?.featuredImage?.url || '',
+    imageUrl,
     createdAt: node.createdAt || '',
     forthcoming: tags.some((t) => t.toLowerCase() === FORTHCOMING_TAG),
     releaseDate: nlReleaseFromTags(tags),
-    stock: invQty,
-    available: avail,
+    stock: qa,
+    year: nlYearFromTags(tags),
     descriptionHtml,
     tracks: nlTracksFromDescription(descriptionHtml),
   };
 }
 
-// The product fields the newsletter needs (shared by recent + by-id queries).
+// Storefront product fields (NOTE: Storefront API shape — handle, vendor,
+// quantityAvailable, images — differs from Admin API).
 const NL_PRODUCT_FIELDS = `
-  id handle title vendor tags createdAt descriptionHtml
-  featuredImage { url }
-  priceRangeV2 { minVariantPrice { amount currencyCode } }
-  variants(first: 1) { edges { node { sku price inventoryQuantity availableForSale } } }
+  id handle title vendor descriptionHtml tags createdAt
+  images(first:1) { edges { node { url } } }
+  variants(first:1) { edges { node { id sku quantityAvailable price { amount currencyCode } } } }
 `;
 
-// Fetch products created within the last `days` days (sorted newest first).
-// We do NOT trust Shopify's created_at: query filter (it can fail silently);
-// instead we sortKey CREATED_AT desc and cut the window in code.
+// Storefront GraphQL call (same endpoint/token the wishlist + checkout use).
+async function nlStorefront(env: Env, query: string): Promise<any> {
+  const r = await fetch(`https://${SHOPIFY_DOMAIN}/api/2024-04/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Storefront-Access-Token': env.STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query }),
+  });
+  if (!r.ok) return null;
+  return await r.json().catch(() => null);
+}
+
+// Fetch products created within the last `days` days (sorted newest first) via
+// the Storefront API. We sortKey CREATED_AT desc and cut the window in code
+// (the created_at: query filter can fail silently). We EXCLUDE forthcoming here
+// and fetch pre-orders separately, mirroring the frontend's two-query split.
 async function nlFetchRecentProducts(env: Env, days: number): Promise<NLProduct[]> {
   const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
   const out: NLProduct[] = [];
-  let cursor: string | null = null;
-  const PAGE = 100;
-  const MAX_PAGES = 10;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const after: string = cursor ? `, after: "${cursor}"` : '';
-    const query = `
-      query {
-        products(first: ${PAGE}, sortKey: CREATED_AT, reverse: true${after}) {
-          pageInfo { hasNextPage endCursor }
-          edges { node { ${NL_PRODUCT_FIELDS} } }
+  // Two passes: forthcoming=true (pre-orders) and forthcoming=false (catalogue).
+  // Storefront filters forthcoming via tag: / -tag: exactly like the frontend.
+  for (const fc of [true, false]) {
+    let cursor: string | null = null;
+    const PAGE = 50; // Storefront caps first at 250 but 50/page is safe + fast
+    const MAX_PAGES = 12;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const after: string = cursor ? `, after: "${cursor}"` : '';
+      const tagClause = fc ? `tag:'${FORTHCOMING_TAG}'` : `-tag:'${FORTHCOMING_TAG}'`;
+      const query = `
+        query {
+          products(first: ${PAGE}, sortKey: CREATED_AT, reverse: true${after}, query: ${JSON.stringify(tagClause)}) {
+            pageInfo { hasNextPage endCursor }
+            edges { node { ${NL_PRODUCT_FIELDS} } }
+          }
         }
+      `;
+      const data: any = await nlStorefront(env, query);
+      const conn = data?.data?.products;
+      if (!conn) break;
+      let reachedOld = false;
+      for (const edge of conn.edges || []) {
+        const mapped = nlMapNode(edge?.node);
+        if (!mapped) continue;
+        const createdMs = mapped.createdAt ? Date.parse(mapped.createdAt) : NaN;
+        if (!Number.isNaN(createdMs) && createdMs < cutoffMs) { reachedOld = true; break; }
+        out.push(mapped);
       }
-    `;
-    const data: any = await shopifyAdminGraphQL(env, query);
-    const conn = data?.data?.products;
-    if (!conn) break;
-    let reachedOld = false;
-    for (const edge of conn.edges || []) {
-      const mapped = nlMapNode(edge?.node);
-      if (!mapped) continue;
-      const createdMs = mapped.createdAt ? Date.parse(mapped.createdAt) : NaN;
-      if (!Number.isNaN(createdMs) && createdMs < cutoffMs) { reachedOld = true; break; }
-      out.push(mapped);
+      if (reachedOld || !conn.pageInfo?.hasNextPage) break;
+      cursor = conn.pageInfo.endCursor;
     }
-    if (reachedOld || !conn.pageInfo?.hasNextPage) break;
-    cursor = conn.pageInfo.endCursor;
   }
   return out;
 }
 
-// Read graduation-done KV records → productIds graduated within the window.
-async function nlRecentlyGraduatedIds(env: Env, days: number): Promise<Set<string>> {
+// Read graduation-done KV records → {productId, handle} graduated in the window.
+// We need handles to fetch via Storefront (which keys by handle, not Admin GID).
+async function nlRecentlyGraduated(env: Env, days: number): Promise<Array<{ productId: string; handle?: string }>> {
   const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
-  const ids = new Set<string>();
+  const out: Array<{ productId: string; handle?: string }> = [];
   let listCursor: string | undefined = undefined;
   for (let i = 0; i < 20; i++) {
     const listing: any = await env.SYNC_STATE.list({ prefix: GRADUATION_DONE_PREFIX, cursor: listCursor });
@@ -337,40 +373,58 @@ async function nlRecentlyGraduatedIds(env: Env, days: number): Promise<Set<strin
       try {
         const rec = JSON.parse(raw);
         const gMs = rec?.graduated_at ? Date.parse(rec.graduated_at) : NaN;
-        if (!Number.isNaN(gMs) && gMs >= cutoffMs && rec?.productId) ids.add(rec.productId);
+        if (!Number.isNaN(gMs) && gMs >= cutoffMs && rec?.productId) {
+          out.push({ productId: rec.productId, handle: rec.handle });
+        }
       } catch { /* skip malformed */ }
     }
     if (listing.list_complete) break;
     listCursor = listing.cursor;
   }
-  return ids;
+  return out;
 }
 
-// Fetch specific products by id (recently-graduated whose CREATED_AT is old).
-async function nlFetchProductsByIds(env: Env, ids: string[]): Promise<NLProduct[]> {
+// Fetch specific products by handle via Storefront (for recently-graduated
+// products whose CREATED_AT is old, so they're not in nlFetchRecentProducts).
+// The graduation-done record may not store a handle; if missing we skip (the
+// product will still surface if it falls in the recent window).
+async function nlFetchProductsByHandles(env: Env, handles: string[]): Promise<NLProduct[]> {
   const out: NLProduct[] = [];
-  for (const id of ids) {
-    const query = `query { product(id: "${id}") { ${NL_PRODUCT_FIELDS} } }`;
+  for (const handle of handles) {
+    if (!handle) continue;
+    const query = `query { productByHandle(handle: ${JSON.stringify(handle)}) { ${NL_PRODUCT_FIELDS} } }`;
     try {
-      const data: any = await shopifyAdminGraphQL(env, query);
-      const mapped = nlMapNode(data?.data?.product);
+      const data: any = await nlStorefront(env, query);
+      const mapped = nlMapNode(data?.data?.productByHandle);
       if (mapped) out.push(mapped);
     } catch { /* skip unfetchable */ }
   }
   return out;
 }
 
-// A product is "in stock" if it's available for sale OR reports positive stock.
-// (availableForSale is the more reliable signal; stock alone can read 0 under a
-// deny policy even with external stock — see Shopify docs.)
+// In stock = quantityAvailable > 0 (the frontend's +Cart rule). A backorder
+// reports 0. (We do NOT use availableForSale — under oversell it's always true.)
 function nlInStock(p: NLProduct): boolean {
-  return p.available || p.stock > 0;
+  return p.stock > 0;
 }
 
-// Split products into the three newsletter sections per Eduardo's rule.
-//   preorders  = forthcoming (from recent)
-//   arrivals   = NOT forthcoming, in stock (from recent)
-//   backorders = graduated within window, NOT in stock
+// Backorder-eligible = out of stock AND a recent release (year >= currentYear-1).
+// Mirrors the storefront's isBackorderEligible: older sold-out records show
+// "Out of stock" (not Request), so they don't belong in the backorder section.
+function nlBackorderEligible(p: NLProduct): boolean {
+  if (p.stock > 0) return false;
+  if (!p.year) return false;
+  return p.year >= new Date().getFullYear() - 1;
+}
+
+// Split products into the three newsletter sections, mirroring the storefront's
+// own button logic (isForthcoming / stock>0 / isBackorderEligible):
+//   preorders  = forthcoming tag (shows PRE-ORDER)
+//   arrivals   = NOT forthcoming, stock > 0 (shows + Cart)
+//   backorders = NOT forthcoming, stock <= 0, backorder-eligible (shows Request)
+//   (NOT forthcoming, stock <= 0, NOT eligible = "Out of stock" → excluded)
+// `graduated` are recently-graduated products that may sit outside the recent
+// window; they're merged in and classified by the same rule.
 function nlSectionize(
   recent: NLProduct[],
   graduated: NLProduct[],
@@ -380,27 +434,17 @@ function nlSectionize(
   const arrivals: NLProduct[] = [];
   const backorders: NLProduct[] = [];
 
-  // Graduated set wins the "backorder vs arrival" classification by stock.
-  const gradById = new Map<string, NLProduct>();
-  for (const g of graduated) gradById.set(g.productId, g);
-
-  for (const p of recent) {
-    if (seen.has(p.productId)) continue;
+  const classify = (p: NLProduct) => {
+    if (seen.has(p.productId)) return;
     seen.add(p.productId);
-    if (p.forthcoming) { preorders.push(p); continue; }
-    // Not forthcoming. If it's a recently-graduated product with no stock → backorder.
-    if (gradById.has(p.productId) && !nlInStock(p)) { backorders.push(p); continue; }
-    // Otherwise it's a normal arrival if in stock; if somehow out of stock and
-    // not graduated, still show under arrivals (it entered the catalogue fresh).
-    arrivals.push(p);
-  }
-  // Graduated products whose CREATED_AT was outside the window (not in `recent`).
-  for (const g of graduated) {
-    if (seen.has(g.productId)) continue;
-    seen.add(g.productId);
-    if (nlInStock(g)) arrivals.push(g);   // graduated AND restocked → arrival
-    else backorders.push(g);              // graduated, still no stock → backorder
-  }
+    if (p.forthcoming) { preorders.push(p); return; }
+    if (nlInStock(p)) { arrivals.push(p); return; }
+    if (nlBackorderEligible(p)) { backorders.push(p); return; }
+    // else: out of stock + not eligible → "Out of stock" on the site, skip.
+  };
+
+  for (const p of recent) classify(p);
+  for (const g of graduated) classify(g);
   return { preorders, arrivals, backorders };
 }
 
@@ -1872,14 +1916,15 @@ export default {
       // Shared: gather + sectionize products for the window.
       const gatherSections = async (days: number) => {
         const recent = await nlFetchRecentProducts(env, days);
-        const gradIds = await nlRecentlyGraduatedIds(env, days);
+        const graduated = await nlRecentlyGraduated(env, days);
         const recentIds = new Set(recent.map((p) => p.productId));
-        const missingGradIds = [...gradIds].filter((id) => !recentIds.has(id));
-        const gradProducts = missingGradIds.length ? await nlFetchProductsByIds(env, missingGradIds) : [];
-        // Also tag the recent products that ARE in the graduated set, so
-        // sectionize can classify them as backorder vs arrival by stock.
-        const gradInRecent = recent.filter((p) => gradIds.has(p.productId));
-        return nlSectionize(recent, [...gradProducts, ...gradInRecent]);
+        // Recently-graduated products not already in the recent window: fetch
+        // by handle (Storefront keys by handle, not Admin GID) so they appear.
+        const missing = graduated.filter((g) => !recentIds.has(g.productId) && g.handle);
+        const gradProducts = missing.length
+          ? await nlFetchProductsByHandles(env, missing.map((g) => g.handle as string))
+          : [];
+        return nlSectionize(recent, gradProducts);
       };
 
       // ---- PREVIEW ----
@@ -1897,7 +1942,7 @@ export default {
           createdAt: p.createdAt,
           releaseDate: p.releaseDate,
           stock: p.stock,
-          available: p.available,
+          year: p.year,
         });
         return jsonRes({
           window_days: days,
