@@ -197,8 +197,7 @@ function newsletterResultPage(ok: boolean): Response {
 //
 // Email shows up to 5 per section; everything else → "see all" link to the site.
 
-const NL_PER_SECTION = 5;        // records shown per section in the email
-const NL_MAX_FEATURED = 2;       // records that get an editorial blurb
+const NL_MAX_FEATURED = 2;       // max records that get an editorial blurb
 
 interface NLProduct {
   productId: string;   // gid://shopify/Product/...
@@ -600,17 +599,17 @@ function nlSeeAll(label: string, url: string, extraCount: number): string {
   <a href="${url}" style="display:inline-block;color:#c8ff00;font-size:13px;font-weight:600;text-decoration:none;margin-top:14px;">${nlEsc(label)} (+${extraCount}) \u2192</a>`;
 }
 
-// One section: optional featured cards (with blurb), then compact rows up to
-// NL_PER_SECTION, then a "see all" link for the remainder.
+// One section: featured cards (with blurb) at the top, then compact rows.
+// Holds exactly the records the user selected — no cap, no "see all".
 interface NLSectionRender {
   header: string;
   sub: string;
   cta: string;          // CTA label on featured cards ("Pre-order" / "Shop" / "Request")
-  seeAllLabel: string;
-  seeAllUrl: string;
+  seeAllLabel: string;  // unused (kept for struct stability); pass ''
+  seeAllUrl: string;    // unused; pass ''
   featured: Array<{ p: NLProduct; blurb: string }>;
-  rows: NLProduct[];    // already capped to NL_PER_SECTION minus featured
-  extraCount: number;   // how many beyond what's shown
+  rows: NLProduct[];    // the chosen records that don't get a blurb
+  extraCount: number;   // unused; pass 0
 }
 function nlRenderSection(s: NLSectionRender): string {
   if (!s.featured.length && !s.rows.length) return '';
@@ -1946,13 +1945,12 @@ export default {
         });
         return jsonRes({
           window_days: days,
-          per_section_shown: NL_PER_SECTION,
-          max_featured: NL_MAX_FEATURED,
+          max_blurbs: NL_MAX_FEATURED,
           preorders: preorders.map(fmt),
           new_arrivals: arrivals.map(fmt),
           backorders: backorders.map(fmt),
           counts: { preorders: preorders.length, new_arrivals: arrivals.length, backorders: backorders.length },
-          note: `Email shows up to ${NL_PER_SECTION} per section; the rest get a "see all" link. Pick up to ${NL_MAX_FEATURED} productId total (any section) in body.featured to give them an editorial blurb, then POST to build.`,
+          note: `POST body.included = productIds to put in the email (any section, you choose). body.blurbs = up to ${NL_MAX_FEATURED} of those that get an editorial blurb. The email shows exactly what's in body.included — no auto top-N, no "see all".`,
         });
       }
 
@@ -1961,54 +1959,60 @@ export default {
         let body: any = {};
         try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
         const days = Math.max(1, Math.min(90, parseInt(String(body?.days || '7'), 10) || 7));
-        // featured: up to NL_MAX_FEATURED productIds total, from ANY section.
-        const featured: string[] = Array.isArray(body?.featured)
-          ? body.featured.map(String).slice(0, NL_MAX_FEATURED)
+        // included: productIds the user chose to put in the email (any section).
+        // blurbs:   subset of included (≤NL_MAX_FEATURED) that get an editorial blurb.
+        const included: string[] = Array.isArray(body?.included) ? body.included.map(String) : [];
+        const blurbs: string[] = Array.isArray(body?.blurbs)
+          ? body.blurbs.map(String).filter((id: string) => included.includes(id)).slice(0, NL_MAX_FEATURED)
           : [];
         const subject = String(body?.subject || 'New this week at House Only').slice(0, 200);
 
-        const { preorders, arrivals, backorders } = await gatherSections(days);
-        if (!preorders.length && !arrivals.length && !backorders.length) {
-          return jsonRes({ error: 'nothing_to_send', detail: `No products in the last ${days} days.` }, 400);
+        if (!included.length) {
+          return jsonRes({ error: 'nothing_selected', detail: 'Select at least one record to include in the email.' }, 400);
         }
 
-        // Cap each section to NL_PER_SECTION for display; remember the overflow.
-        const cap = (arr: NLProduct[]) => ({
-          shown: arr.slice(0, NL_PER_SECTION),
-          extra: Math.max(0, arr.length - NL_PER_SECTION),
-        });
-        const pre = cap(preorders);
-        const arr = cap(arrivals);
-        const bak = cap(backorders);
+        const { preorders, arrivals, backorders } = await gatherSections(days);
+        const includedSet = new Set(included);
+        const blurbSet = new Set(blurbs);
 
-        // Generate blurbs for the featured picks (≤NL_MAX_FEATURED Sonnet calls),
-        // enforcing a different angle on the 2nd vs the 1st.
-        const allShown = [...pre.shown, ...arr.shown, ...bak.shown];
-        const featuredProducts = allShown.filter((p) => featured.includes(p.productId)).slice(0, NL_MAX_FEATURED);
+        // Keep only the user's chosen records, preserving each section's order.
+        const pick = (arr: NLProduct[]) => arr.filter((p) => includedSet.has(p.productId));
+        const pre = pick(preorders);
+        const arr = pick(arrivals);
+        const bak = pick(backorders);
+
+        if (!pre.length && !arr.length && !bak.length) {
+          return jsonRes({ error: 'nothing_to_send', detail: 'None of the selected records are still in the window — reload and try again.' }, 400);
+        }
+
+        // Generate blurbs (≤NL_MAX_FEATURED Sonnet calls), 2nd takes a different
+        // angle from the 1st. Order follows section order (pre → arr → bak).
+        const blurbCandidates = [...pre, ...arr, ...bak].filter((p) => blurbSet.has(p.productId));
         const blurbById = new Map<string, string>();
         let prevBlurb = '';
-        for (const p of featuredProducts) {
+        for (const p of blurbCandidates) {
           const blurb = await nlGenerateBlurb(env, p, prevBlurb);
           blurbById.set(p.productId, blurb);
           if (blurb) prevBlurb = blurb;
         }
 
-        // Build each section: featured cards (with blurb) first, then compact rows.
+        // Build a section from exactly the chosen records: blurbed ones become
+        // feature cards (at the top of their section), the rest compact rows.
+        // No top-N cap, no "see all" — the email is exactly what was selected.
         const buildSection = (
-          capped: { shown: NLProduct[]; extra: number },
-          header: string, sub: string, cta: string, seeAllLabel: string, seeAllUrl: string,
+          chosen: NLProduct[], header: string, sub: string, cta: string,
         ): NLSectionRender => {
-          const feat = capped.shown.filter((p) => blurbById.has(p.productId))
+          const feat = chosen.filter((p) => blurbById.has(p.productId))
             .map((p) => ({ p, blurb: blurbById.get(p.productId) || '' }));
           const featIds = new Set(feat.map((f) => f.p.productId));
-          const rows = capped.shown.filter((p) => !featIds.has(p.productId));
-          return { header, sub, cta, seeAllLabel, seeAllUrl, featured: feat, rows, extraCount: capped.extra };
+          const rows = chosen.filter((p) => !featIds.has(p.productId));
+          return { header, sub, cta, seeAllLabel: '', seeAllUrl: '', featured: feat, rows, extraCount: 0 };
         };
 
         const sections = [
-          nlRenderSection(buildSection(pre, 'Pre-orders', 'First access \u2014 reserve before they go public', 'Pre-order', 'All pre-orders', `${NEWSLETTER_SITE}/?filter=forthcoming`)),
-          nlRenderSection(buildSection(arr, 'New arrivals', 'In stock now \u2014 in the shop this week', 'Shop', 'All new arrivals', `${NEWSLETTER_SITE}/`)),
-          nlRenderSection(buildSection(bak, 'Back in the catalogue', 'Released \u2014 request yours', 'Request', 'See all', `${NEWSLETTER_SITE}/`)),
+          nlRenderSection(buildSection(pre, 'Pre-orders', 'First access \u2014 reserve before they go public', 'Pre-order')),
+          nlRenderSection(buildSection(arr, 'New arrivals', 'In stock now \u2014 in the shop this week', 'Shop')),
+          nlRenderSection(buildSection(bak, 'Back in the catalogue', 'Released \u2014 request yours', 'Request')),
         ];
 
         const html = nlBuildBroadcastHtml(sections);
@@ -2020,8 +2024,8 @@ export default {
           status: 'draft',
           subject,
           window_days: days,
-          featured_count: featuredProducts.length,
-          shown: { preorders: pre.shown.length, new_arrivals: arr.shown.length, backorders: bak.shown.length },
+          blurb_count: blurbById.size,
+          shown: { preorders: pre.length, new_arrivals: arr.length, backorders: bak.length },
           totals: { preorders: preorders.length, new_arrivals: arrivals.length, backorders: backorders.length },
           next: 'Review and send the draft in the Resend dashboard (Broadcasts).',
         });
