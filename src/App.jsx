@@ -797,7 +797,11 @@ function AudioPlayer({ src }) {
 
 const PlayerCtx = createContext(null);
 
-function PlayerProvider({ children }) {
+function PlayerProvider({ children, gate }) {
+  // `gate(r)` is an optional callback the host (App) passes to control whether a
+  // release may start playing. It returns true to allow, false to block (e.g.
+  // forthcoming previews require an account). Default: always allow.
+  const playGate = useCallback((r) => (typeof gate === 'function' ? gate(r) : true), [gate]);
   const audioRef = useRef(null);
   const [queue, setQueue]       = useState([]);  // [{releaseId, releaseSnap, trackIdx, url, name}]
   const [currentIdx, setCurIdx] = useState(-1);  // index within queue, or -1 if nothing
@@ -844,6 +848,7 @@ function PlayerProvider({ children }) {
   };
 
   const playRelease = useCallback((r, startAtTrackIdx = 0) => {
+    if (!playGate(r)) return; // host blocked playback (e.g. forthcoming needs account)
     const items = itemsFromRelease(r);
     if (!items.length) return;
     const startOffset = Math.max(0, Math.min(items.length - 1, startAtTrackIdx));
@@ -870,9 +875,10 @@ function PlayerProvider({ children }) {
       setPlaying(true);
       return next;
     });
-  }, [currentIdx]);
+  }, [currentIdx, playGate]);
 
   const addToQueue = useCallback((r) => {
+    if (!playGate(r)) return; // host blocked (e.g. forthcoming needs account)
     const items = itemsFromRelease(r);
     if (!items.length) return;
     setQueue(q => {
@@ -884,7 +890,7 @@ function PlayerProvider({ children }) {
       }
       return next;
     });
-  }, [currentIdx]);
+  }, [currentIdx, playGate]);
 
   const removeFromQueue = useCallback((idx) => {
     setQueue(q => {
@@ -7447,6 +7453,20 @@ export default function App() {
   const [accountOpen, setAccountOpen]     = useState(false);
   const [wishItems, setWishItems]         = useState(()=>loadLocalWishlist());
   const [wishOpen, setWishOpen]           = useState(false);
+  // Forthcoming audio gate: clicking play on a forthcoming preview without an
+  // account opens this prompt (login/register to listen). Audio gate ONLY.
+  const [audioGateOpen, setAudioGateOpen] = useState(false);
+
+  // Gate passed to the player: block forthcoming previews unless logged in.
+  // Returns false (and opens the prompt) for forthcoming + no session; else true.
+  // Catalogue (non-forthcoming) audio is never gated.
+  const playGate = useCallback((r) => {
+    if (isForthcoming(r) && !auth?.session) {
+      setAudioGateOpen(true);
+      return false;
+    }
+    return true;
+  }, [auth]);
 
   // Persist anonymous wishlist to localStorage on every change
   useEffect(()=>{ saveLocalWishlist(wishItems); }, [wishItems]);
@@ -7838,7 +7858,7 @@ export default function App() {
   );
 
   return (
-    <PlayerProvider>
+    <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
       <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
@@ -7924,6 +7944,17 @@ export default function App() {
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
+      {audioGateOpen && (
+        <div onClick={()=>setAudioGateOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:6,padding:'28px 26px',maxWidth:360,width:'100%',textAlign:'center'}}>
+            <div style={{fontSize:11,color:S.accent,letterSpacing:2,textTransform:'uppercase',fontWeight:700,marginBottom:10}}>Pre-order previews</div>
+            <div style={{fontSize:14,color:S.text,lineHeight:1.55,marginBottom:6}}>Create a free account to listen to forthcoming releases before they drop.</div>
+            <div style={{fontSize:11,color:S.muted,lineHeight:1.5,marginBottom:20}}>The rest of the catalogue plays freely — this is just for the pre-order previews.</div>
+            <button onClick={handleSignIn} style={{width:'100%',background:S.accent,color:'#080808',border:'none',borderRadius:4,padding:'12px 0',cursor:'pointer',fontSize:12,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',marginBottom:10}}>Sign in / Create account</button>
+            <button onClick={()=>setAudioGateOpen(false)} style={{background:'transparent',border:'none',color:S.muted,cursor:'pointer',fontSize:11,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit'}}>Not now</button>
+          </div>
+        </div>
+      )}
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>
     </PlayerProvider>
