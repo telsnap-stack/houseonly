@@ -544,10 +544,20 @@ function nlBuildBroadcastHtml(sections: string[]): string {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#080808;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
   <div style="max-width:600px;margin:0 auto;padding:40px 24px;">
-    <div style="font-weight:800;font-size:22px;letter-spacing:-0.5px;color:#ffffff;">HOUSE<span style="color:#c8ff00;">ONLY</span></div>
-    <div style="color:#8a8a8a;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:4px;">Vinyl delivered worldwide</div>
+    <a href="${NEWSLETTER_SITE}/" style="text-decoration:none;display:inline-block;">
+      <div style="font-weight:800;font-size:22px;letter-spacing:-0.5px;color:#ffffff;">HOUSE<span style="color:#c8ff00;">ONLY</span></div>
+      <div style="color:#8a8a8a;font-size:12px;letter-spacing:1px;text-transform:uppercase;margin-top:4px;">Vinyl delivered worldwide</div>
+    </a>
+    <div style="margin-top:18px;font-size:12px;letter-spacing:1px;text-transform:uppercase;">
+      <a href="${NEWSLETTER_SITE}/" style="color:#8a8a8a;text-decoration:none;">Shop</a>
+      <span style="color:#3a3a3a;padding:0 8px;">/</span>
+      <a href="${NEWSLETTER_SITE}/#forthcoming" style="color:#c8ff00;text-decoration:none;">Forthcoming</a>
+    </div>
     ${sections.filter(Boolean).join('\n')}
-    <div style="margin-top:48px;padding-top:24px;border-top:1px solid #1e1e1e;color:#6a6a6a;font-size:12px;line-height:1.6;">
+    <div style="margin-top:44px;text-align:center;">
+      <a href="${NEWSLETTER_SITE}/" style="display:inline-block;background:#c8ff00;color:#080808;font-weight:700;font-size:13px;text-decoration:none;padding:12px 28px;border-radius:6px;">Visit the shop \u2192</a>
+    </div>
+    <div style="margin-top:36px;padding-top:24px;border-top:1px solid #1e1e1e;color:#6a6a6a;font-size:12px;line-height:1.6;">
       You're getting this because you signed up at houseonly.store.
       <a href="{{{RESEND_UNSUBSCRIBE_URL}}}" style="color:#8a8a8a;">Unsubscribe</a>.
     </div>
@@ -1920,8 +1930,13 @@ export default {
           return { header, sub, cta, seeAllLabel: '', seeAllUrl: '', featured: feat, rows, extraCount: 0 };
         };
 
+        // A link under Pre-orders that opens the full Forthcoming view on the
+        // site (houseonly.store/#forthcoming — the SPA reads the hash on load).
+        const forthcomingLink = `\n  <a href="${NEWSLETTER_SITE}/#forthcoming" style="display:inline-block;color:#c8ff00;font-size:13px;font-weight:600;text-decoration:none;margin-top:6px;">Browse all forthcoming \u2192</a>`;
+        const preSection = nlRenderSection(buildSection(pre, 'Pre-orders', 'First access \u2014 reserve before they go public', 'Pre-order'));
+
         const sections = [
-          nlRenderSection(buildSection(pre, 'Pre-orders', 'First access \u2014 reserve before they go public', 'Pre-order')),
+          preSection ? preSection + forthcomingLink : '',
           nlRenderSection(buildSection(arr, 'New arrivals', 'In stock now \u2014 in the shop this week', 'Shop')),
           nlRenderSection(buildSection(bak, 'Back in the catalogue', 'Released \u2014 request yours', 'Request')),
         ];
