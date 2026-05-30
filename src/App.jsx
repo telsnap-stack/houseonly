@@ -6727,10 +6727,25 @@ function PreorderImporter() {
   // Download every pre-sale ZIP the manifest references. Anchor-click per URL on
   // a 2.5s stagger (the proven mechanism — pop-up blockers kill window.open).
   const downloadAllZips = async () => {
+    // Source-aware. Two distributor URL shapes need two mechanisms:
+    //   • DBH  → https://.../release_zip/{id}  — no CORS headers, so we CANNOT
+    //     fetch it from the browser. We proxy through our own Worker
+    //     (?action=dbh-zip&id=...) which fetches server-side and re-streams
+    //     WITH CORS, letting us await each blob to full completion.
+    //   • W&S  → https://wordandsound.net/release/{id}-{catno}-.../assets — this
+    //     is a session-authenticated direct ZIP download. A cross-origin fetch()
+    //     would be blocked AND would not carry the W&S session cookies, so we do
+    //     a plain anchor-click on the real URL (same as opening it by hand): the
+    //     browser downloads it with the user's cookies. Pop-up blockers kill
+    //     window.open, but a same-gesture anchor-click on a stagger works.
     const rows = manifest
-      .map(m => ({ id: (m.zipUrl || '').match(/\/release_zip\/(\d+)/)?.[1], catno: m.catno }))
-      .filter(r => r.id);
-    if (!rows.length) { setError('No DBH zip URLs in the manifest to download.'); return; }
+      .filter(m => m.zipUrl)
+      .map(m => {
+        const url = String(m.zipUrl).trim();
+        const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
+        return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
+      });
+    if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
     setDownloadDone(false);
     setDownloadProgress(0);
     setDownloadStats({ ok: 0, missing: 0, failed: 0 });
@@ -6739,49 +6754,62 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { id, catno } = rows[i];
+      const { url, catno, dbhId, isDbh } = rows[i];
       try {
-        // Fetch via our OWN Worker proxy (?action=dbh-zip&id=...), not DBH
-        // directly. DBH sends no CORS headers, so a direct browser fetch is
-        // blocked. The Worker fetches the public ZIP server-side and streams it
-        // back from our origin WITH CORS, so we can await the blob to full
-        // completion before starting the next — true one-at-a-time downloading,
-        // no cut-offs. If the release has no ZIP yet the proxy returns JSON
-        // {ok:false, missing:true}; a real ZIP comes back as application/zip.
-        const res = await fetch(`${WORKER_URL}?action=dbh-zip&id=${id}`);
-        const ctype = res.headers.get('content-type') || '';
-        if (!res.ok || ctype.includes('application/json')) {
-          // No asset uploaded yet (waiting on distributor). Skip; it reappears
-          // in the next manifest build and downloads once DBH adds the ZIP.
-          missing++;
+        if (isDbh) {
+          // DBH: proxy through the Worker so we can await the full blob. If the
+          // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
+          // a real ZIP comes back as application/zip.
+          const res = await fetch(`${WORKER_URL}?action=dbh-zip&id=${dbhId}`);
+          const ctype = res.headers.get('content-type') || '';
+          if (!res.ok || ctype.includes('application/json')) {
+            missing++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+          }
+          const blob = await res.blob();      // waits for the FULL file
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          // Name by CAT-NO so the importer's catnoFromZip() can match the
+          // dropped ZIP back to its manifest row. Sanitize path separators only.
+          const safeCatno = (catno || `dbh_${dbhId}`).replace(/[\/\\]/g, '_');
+          a.download = `${safeCatno}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
+          ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
-          await new Promise(r => setTimeout(r, 200));
-          continue;
+          await new Promise(r => setTimeout(r, 300)); // breather between DBH files
+        } else {
+          // W&S / any direct session-auth URL: anchor-click the real URL. We
+          // can't set a.download to force a name (cross-origin downloads ignore
+          // it for security) — the server's content-disposition decides the
+          // filename, which for W&S already carries the cat-no. We let it open
+          // in the same gesture; the browser saves the ZIP with W&S cookies.
+          const a = document.createElement('a');
+          a.href = url;
+          a.rel = 'noreferrer';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          ok++;
+          setDownloadStats({ ok, missing, failed });
+          setDownloadProgress(i + 1);
+          // Longer stagger for direct downloads — each one is a separate browser
+          // navigation/download; too fast and the browser drops some.
+          await new Promise(r => setTimeout(r, 2500));
         }
-        const blob = await res.blob();      // waits for the FULL file
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        // Name the file by CAT-NO, not release id — the importer matches ZIPs
-        // to manifest rows via catnoFromZip() (strips .zip, uppercases). DBH's
-        // own content-disposition already uses the cat-no (e.g. CWX09.zip); we
-        // mirror that so dropped ZIPs match. Sanitize only path separators.
-        const safeCatno = (catno || `dbh_${id}`).replace(/[\/\\]/g, '_');
-        a.download = `${safeCatno}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
-        ok++;
-        setDownloadStats({ ok, missing, failed });
       } catch (e) {
         // Network/proxy error for this one — count and continue, never abort.
         failed++;
         setDownloadStats({ ok, missing, failed });
+        setDownloadProgress(i + 1);
       }
-      setDownloadProgress(i + 1);
-      await new Promise(r => setTimeout(r, 300)); // brief breather between files
     }
     setDownloading(false);
     setDownloadDone(true);
