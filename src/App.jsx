@@ -49,11 +49,11 @@ function makeSlug(artist, title, catalog) {
 function extractTagMeta(tags) {
   tags = tags || [];
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^release:/i.test(t) && !/^forthcoming$/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
     || '';
   const year = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
+    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^release:/i.test(t) && !/^forthcoming$/i.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
   return { genre, year, label };
 }
 
