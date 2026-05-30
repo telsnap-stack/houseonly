@@ -22,7 +22,7 @@ async function shopifyQuery(query, variables={}) {
   return data.data;
 }
 
-const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','Electronic','Nu-Disco','Funk','Soul','Jazz','Electronica','Ambient','Techno','Drum & Bass','Breakbeat','Reggae','Dub','Hip Hop','R&B'];
+const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House','Acid House','Disco House','Tech House','Deep House','House','Electronic','Nu-Disco','Funk','Soul','Jazz','Electronica','Ambient','Techno','Drum & Bass','Breakbeat','Reggae','Dub','Hip Hop','R&B'];
 const SKIP_TAGS  = ['vinyl','house','kudos',...GENRE_TAGS.map(g=>g.toLowerCase())];
 
 // ── SLUG (industry-standard SEO-friendly URLs: artist-title) ───
@@ -48,12 +48,25 @@ function makeSlug(artist, title, catalog) {
 // agree on what genre/year/label a product belongs to.
 function extractTagMeta(tags) {
   tags = tags || [];
+  // A tag is "structural" (never a genre or a free-text label) if it's a
+  // key:value tag (source:, label:, release:, …), a bare flag (forthcoming),
+  // a 4-digit year, a SKIP_TAGS entry, or a format/marker token. Genre comes
+  // from the GENRE_TAGS whitelist first; the free-text fallback only considers
+  // NON-structural tags, so technical tags (source:ws, forthcoming, release:…)
+  // can never leak into the Genre or Label fields. If nothing qualifies the
+  // field is left blank rather than showing a junk tag.
+  const isStructural = (t) =>
+    /:/.test(t) ||                                    // any key:value tag (source:, label:, release:, …)
+    /^\d{4}$/.test(t) ||                              // year
+    /^forthcoming$/i.test(t) ||                       // pre-order flag
+    SKIP_TAGS.some(s => s.toLowerCase() === t.toLowerCase()) ||
+    /^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t);   // format / marker tokens
   const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^label:/i.test(t) && !/^release:/i.test(t) && !/^forthcoming$/i.test(t) && !/^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t))
+    || tags.find(t => !isStructural(t))
     || '';
   const year = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
   const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
-    || tags.find(t => !SKIP_TAGS.some(s => s.toLowerCase()===t.toLowerCase()) && !/^\d{4}$/.test(t) && !/^release:/i.test(t) && !/^forthcoming$/i.test(t) && !/^(12|excl|lp|ep|single)/i.test(t)) || '';
+    || tags.find(t => !isStructural(t)) || '';
   return { genre, year, label };
 }
 
