@@ -5801,30 +5801,35 @@ function StoryExporter({ release, track, line }) {
   };
 
   const exportStory = async () => {
-    if (!track?.url) { setStatus('error'); setMsg('No track selected'); return; }
     setStatus('preparing'); setMsg('Setting up…');
     const cv = canvasRef.current;
     const ctx = cv.getContext('2d');
 
-    // Audio graph: route the <audio> element through Web Audio so we can both
-    // hear nothing extra and feed it into the recording stream.
-    const AC = window.AudioContext || window.webkitAudioContext;
-    const ac = new AC();
-    const a = audioRef.current;
-    a.currentTime = 0;
-    let srcNode;
-    try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
-    const dest = ac.createMediaStreamDestination();
-    srcNode.connect(dest);
-    // (Intentionally NOT connecting to ac.destination — we don't need to blast
-    // the audio out loud during export; the recording captures it from dest.)
-
-    // Combine canvas video + audio into one stream.
+    // Audio is optional. When the release has a snippet we route the <audio>
+    // element through Web Audio and mix it into the recording. When it doesn't,
+    // we record the canvas video only (silent WebM) — Instagram's own audio can
+    // be added after upload.
+    const hasAudio = !!track?.url;
+    let ac = null, dest = null;
     const canvasStream = cv.captureStream(30);
-    const mixed = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...dest.stream.getAudioTracks(),
-    ]);
+    const streamTracks = [...canvasStream.getVideoTracks()];
+
+    if (hasAudio) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      ac = new AC();
+      const a = audioRef.current;
+      a.currentTime = 0;
+      let srcNode;
+      try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
+      dest = ac.createMediaStreamDestination();
+      srcNode.connect(dest);
+      // (Intentionally NOT connecting to ac.destination — we don't need to blast
+      // the audio out loud during export; the recording captures it from dest.)
+      streamTracks.push(...dest.stream.getAudioTracks());
+    }
+
+    // Combine canvas video + (optional) audio into one stream.
+    const mixed = new MediaStream(streamTracks);
 
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
       ? 'video/webm;codecs=vp9,opus'
@@ -5841,19 +5846,19 @@ function StoryExporter({ release, track, line }) {
       aTag.href = url; aTag.download = `houseonly-${safe}.webm`;
       document.body.appendChild(aTag); aTag.click(); aTag.remove();
       const purl = await copyProductUrl();
-      try { ac.close(); } catch {}
-      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}`);
+      try { if (ac) ac.close(); } catch {}
+      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}${hasAudio ? '' : ' · (silent — add audio in Instagram)'}`);
     };
 
-    // Go: start audio + recorder, drive the canvas for the full (variable) length.
+    // Go: start audio (if any) + recorder, drive the canvas for the full length.
     setStatus('recording'); setMsg(`Recording ${TOTAL.toFixed(1)}s…`);
-    await ac.resume();
-    a.play().catch(()=>{});
+    const a = audioRef.current;
+    if (hasAudio) { await ac.resume(); a.play().catch(()=>{}); }
     const start = performance.now();
     rec.start();
     const loop = () => {
       const elapsed = (performance.now() - start) / 1000;
-      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); a.pause(); rec.stop(); return; }
+      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); if (hasAudio) a.pause(); rec.stop(); return; }
       drawAt(ctx, elapsed);
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -5868,13 +5873,13 @@ function StoryExporter({ release, track, line }) {
       <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story</div>
       <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
       <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
-      <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
+      <button onClick={exportStory} disabled={busy || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
         {status === 'recording' ? 'Recording 15s…' : status === 'preparing' ? 'Preparing…' : '⬇ Export story (WebM)'}
       </button>
       {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
       {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
       <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
-        Records the 3 shots with the track audio (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom.
+        Records the 3 shots{track?.url ? ' with the track audio' : ' (silent — no snippet for this release)'} (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom{track?.url ? '' : ', and add audio in the app'}.
       </div>
     </div>
   );
@@ -6163,14 +6168,25 @@ function StoriesGenerator() {
             )}
           </div>
 
-          {/* Shots 1 & 2 — canvas previews side by side */}
-          {kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack] && (
+          {/* Shots 1, 2 & 3 — canvas previews side by side. Renders whether or
+              not the release has audio: Shot 1's pulse is a synthetic 120bpm
+              grid, so it needs no track. With audio, the chosen snippet drives
+              the preview play button and is recorded into the export; without,
+              the story is silent (you can add Instagram's own audio later). */}
+          {selected && (() => {
+            const exTrack = (kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack]) || null;
+            return (
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
               <div style={lbl}>Shot previews</div>
+              {!exTrack && (
+                <div style={{ fontSize:9, color:S.muted, letterSpacing:0.5, marginBottom:10, lineHeight:1.6 }}>
+                  No audio snippet for this release — the story exports silently. Add audio in the Instagram app after uploading.
+                </div>
+              )}
               <div style={{ display:'flex', gap:24, flexWrap:'wrap' }}>
                 <div>
                   <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 1 — cover + pulse</div>
-                  <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+                  <Shot1Canvas release={selected} track={exTrack} />
                 </div>
                 <div>
                   <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 2 — knowledge line</div>
@@ -6181,9 +6197,10 @@ function StoriesGenerator() {
                   <Shot3Canvas release={selected} />
                 </div>
               </div>
-              <StoryExporter release={selected} track={kickAnalysis.tracks[chosenTrack]} line={ctxChosen} />
+              <StoryExporter release={selected} track={exTrack} line={ctxChosen} />
             </div>
-          )}
+            );
+          })()}
 
           {/* Description (reference) */}
           <div style={{ marginTop:16 }}>
