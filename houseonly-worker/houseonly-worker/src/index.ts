@@ -1481,7 +1481,7 @@ export default {
 
     // ── STORY CONTEXT (Stories knowledge line) ──────────────
     // POST ?action=story-context
-    // body: { artist, title, label, catalog, genre, year, description, tracks:[names] }
+    // body: { artist, title, label, catalog, genre, year, description, tracks:[names], prompt? }
     //
     // Generates 3 short lines of GENUINE musical context for Shot 2 of an
     // Instagram Story — the "House Only knows its stuff" line. Anti-bluff:
@@ -1501,6 +1501,10 @@ export default {
       const year   = String(body?.year || '').trim();
       const desc   = String(body?.description || '').trim().slice(0, 1200);
       const tracks = Array.isArray(body?.tracks) ? body.tracks.slice(0, 12).join(', ') : '';
+      // Optional steer from Eduardo — augments (does NOT replace) the metadata.
+      // The hard rules (no fabrication, no marketing register) still apply; this
+      // only nudges the ANGLE (e.g. "focus on the Detroit lineage").
+      const prompt = String(body?.prompt || '').trim().slice(0, 500);
       if (!artist && !title) return jsonRes({ error: 'missing artist/title' }, 400);
 
       const sys = [
@@ -1535,6 +1539,7 @@ export default {
         year ? `Year: ${year}` : '',
         tracks ? `Tracklist: ${tracks}` : '',
         desc ? `Label marketing copy (do NOT repeat, for reference only): ${desc}` : '',
+        prompt ? `\nThe shop owner asked you to take this angle for all 3 options (a steer, not a fact — still obey every hard rule above, and never invent specifics to satisfy it): ${prompt}` : '',
       ].filter(Boolean).join('\n');
 
       try {
