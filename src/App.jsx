@@ -1276,6 +1276,41 @@ function NewsletterSignup({ variant = 'footer', source = 'footer' }) {
 }
 
 
+// ── JOIN PAGE (/join) ───────────────────────────────────────────
+// Standalone landing rendered at houseonly.store/join — the URL to paste in
+// the Instagram bio, the Discogs seller profile, a QR sticker on the mailer,
+// etc. Reuses the existing <NewsletterSignup> (same Worker → Resend double
+// opt-in flow); only the framing around it is new. source="join" so the
+// Worker/Resend can tell these subscribers apart from footer/grid signups.
+function JoinPage({ onBack }) {
+  const isMobile = useIsMobile(640);
+  return (
+    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",display:'flex',flexDirection:'column'}}>
+      <Nav onLogo={onBack}>
+        <button onClick={onBack} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button>
+      </Nav>
+      <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:isMobile?'48px 20px':'72px 20px'}}>
+        <div style={{maxWidth:560,width:'100%',textAlign:'center'}}>
+          <div style={{marginBottom:28,display:'flex',justifyContent:'center'}}>
+            <Logo scale={isMobile?0.9:1.1} />
+          </div>
+          <h1 style={{fontSize:isMobile?20:26,fontWeight:800,letterSpacing:0.3,lineHeight:1.25,margin:'0 0 18px'}}>
+            Join to receive weekly news from our House Only community.
+          </h1>
+          <p style={{fontSize:isMobile?13:14,color:S.muted,lineHeight:1.7,margin:'0 auto 4px',maxWidth:440}}>
+            Forthcoming releases, new arrivals and more.
+          </p>
+          <p style={{fontSize:isMobile?13:14,color:S.muted,lineHeight:1.7,margin:'0 auto 32px',maxWidth:440}}>
+            Thank you for supporting our store.
+          </p>
+          <NewsletterSignup variant="footer" source="join" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // ── PLAYER BAR (sticky bottom) ──────────────────────────────────
 function PlayerBar({ isWished, onWishlistToggle, onOpenRelease }) {
   const p = usePlayer();
@@ -7883,6 +7918,12 @@ export default function App() {
     }
     return null;
   }
+
+  // /join — standalone newsletter landing (the link to paste in IG bio,
+  // Discogs profile, mailer QR). Trailing slash optional to match the rest
+  // of the site's routing.
+  const isJoinPage = /^\/join\/?$/.test(path);
+  if (isJoinPage) return <JoinPage onBack={()=>navigate('/')} />;
 
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
