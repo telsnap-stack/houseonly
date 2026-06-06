@@ -5893,6 +5893,14 @@ function StoriesGenerator() {
   const [ctxChosen, setCtxChosen]   = useState('');   // the selected/edited line
   const [ctxLoading, setCtxLoading] = useState(false);
   const [ctxErr, setCtxErr]         = useState('');
+  // Optional steer for the generator: your instruction is sent ALONGSIDE the
+  // track metadata (augment, not replace) so Claude writes the 3 lines with
+  // your angle in mind (e.g. "focus on the Detroit lineage").
+  const [ctxPrompt, setCtxPrompt]   = useState('');
+  // Fully manual path: write your own blurb and it goes straight to Shot 2,
+  // bypassing Claude entirely. Whatever lands in ctxChosen is what exports, so
+  // a manual blurb simply overrides the generated one.
+  const [manualBlurb, setManualBlurb] = useState('');
   // Shot 1 = cover + kick-synced waveform. We analyze every snippet on pick,
   // auto-select the one with the strongest 4/4 (house store = four-to-the-floor),
   // and keep its kick timestamps for the waveform pulse (canvas comes in 4A-2).
@@ -5926,7 +5934,7 @@ function StoriesGenerator() {
   // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
   const pickRelease = async (r) => {
     setSelected(r);
-    setCtxOptions([]); setCtxChosen(''); setCtxErr('');
+    setCtxOptions([]); setCtxChosen(''); setCtxErr(''); setCtxPrompt(''); setManualBlurb('');
     setKickAnalysis(null); setChosenTrack(null);
     // Analyze all snippets for their 4/4 kick and auto-pick the strongest.
     const tracks = (r.tracks || []).filter(t => t && t.url);
@@ -5963,6 +5971,7 @@ function StoriesGenerator() {
           year: selected.year || '',
           description: selected.desc || '',
           tracks: (selected.tracks || []).map(t => t && t.name).filter(Boolean),
+          prompt: ctxPrompt.trim(),   // optional steer — augments the metadata above
         }),
       });
       const data = await res.json();
@@ -6055,12 +6064,25 @@ function StoriesGenerator() {
               Genuine musical context — artist lineage, label, or era. Not marketing copy. Pick one, edit if needed. You are the final fact-check.
             </div>
 
+            {/* Optional steer — augments the track metadata sent to Claude */}
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Your prompt (optional) — steers the 3 lines</div>
+              <textarea
+                value={ctxPrompt}
+                onChange={e => setCtxPrompt(e.target.value)}
+                rows={2}
+                placeholder="e.g. focus on the Detroit lineage / keep it to one punchy sentence / mention the label's history…"
+                style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+              />
+              <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>Sent together with artist, title, label & track names — leave blank to let Claude work from the metadata alone.</div>
+            </div>
+
             {ctxErr && <div style={{ fontSize:10, color:S.danger, marginBottom:10 }}>{ctxErr}</div>}
 
             {ctxOptions.length > 0 && (
               <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:12 }}>
                 {ctxOptions.map((opt, i) => (
-                  <div key={i} onClick={() => setCtxChosen(opt)} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
+                  <div key={i} onClick={() => { setCtxChosen(opt); setManualBlurb(''); }} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
                     <span style={{ fontSize:9, color:ctxChosen===opt?S.accent:S.muted, fontWeight:800, marginTop:2 }}>{ctxChosen===opt?'●':'○'}</span>
                     <span style={{ fontSize:12, color:S.text, lineHeight:1.5 }}>{opt}</span>
                   </div>
@@ -6080,6 +6102,23 @@ function StoriesGenerator() {
                 <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>{ctxChosen.length} chars · {ctxChosen.trim().split(/\s+/).filter(Boolean).length} words</div>
               </div>
             )}
+
+            {/* Fully manual path — write your own blurb, skip Claude entirely. */}
+            <div style={{ marginTop:14, paddingTop:14, borderTop:`1px dashed ${S.border}` }}>
+              <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Or write your own blurb</div>
+              <textarea
+                value={manualBlurb}
+                onChange={e => { setManualBlurb(e.target.value); setCtxChosen(e.target.value); }}
+                rows={2}
+                placeholder="Type your own knowledge line here — it goes straight to Shot 2 (overrides any generated line)."
+                style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${manualBlurb.trim() ? S.accent : S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+              />
+              <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>
+                {manualBlurb.trim()
+                  ? <span style={{ color:S.accent }}>● Using your own blurb for Shot 2.</span>
+                  : 'Leave blank to use a generated line above.'}
+              </div>
+            </div>
           </div>
 
           {/* Shot 1 — audio + kick analysis */}
