@@ -5984,7 +5984,14 @@ function StoriesGenerator() {
         setCtxOptions(data.options);
         setCtxChosen(data.options[0]);
       } else {
-        setCtxErr(data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
+        // The worker sends a friendly `hint` + `retryable` for transient
+        // overload/rate-limit (429/529). Prefer that over the raw error code.
+        const friendly = data?.hint
+          ? data.hint
+          : data?.retryable
+            ? 'Anthropic is busy — wait a moment and press Generate again.'
+            : (data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
+        setCtxErr(friendly);
       }
     } catch (e) {
       setCtxErr('Generation failed: ' + (e?.message || 'unknown'));
