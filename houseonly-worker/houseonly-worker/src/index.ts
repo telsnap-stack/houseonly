@@ -81,6 +81,59 @@ function jsonRes(data: any, status = 200): Response {
   });
 }
 
+// ── STORY-CONTEXT PARSER ────────────────────────────────────────
+// Turns the model's reply into a clean list of usable lines. The model is
+// asked for a strict JSON array, but when it misbehaves (web-search prose,
+// stray "[", a meta-reply like "I need to be careful here…") the old naive
+// line-split surfaced garbage cards. This is defensive: parse JSON if we can,
+// otherwise salvage real sentences, and in BOTH paths drop fragments and
+// meta-commentary so only genuine knowledge lines reach the UI.
+function parseStoryOptions(raw: string): string[] {
+  const text = (raw || '').trim();
+  if (!text) return [];
+
+  // A line is only a real option if it's a proper sentence of context — not a
+  // leftover bracket, not the model talking ABOUT the task.
+  const META_RE = /^(i\s|i'?m\s|i'?ll\s|i\s?need|i\s?should|i\s?cannot|i\s?can'?t|i\s?don'?t|here\s?(is|are)|sure[,!.]|okay[,!.]|let me|note:|disclaimer)/i;
+  const isReal = (s: string) =>
+    !!s &&
+    s.replace(/[^a-z0-9]/gi, '').length >= 15 &&   // kill "[", "]", stray punctuation
+    /\s/.test(s) &&                                  // must be more than one token
+    !META_RE.test(s.trim());                         // kill meta-commentary
+
+  const tidy = (s: string) =>
+    s.replace(/^[\s\-*\d.)\]]+/, '')   // leading list/bracket noise
+     .replace(/^["'\[]+/, '')          // leading quotes / [
+     .replace(/["'\],]+$/, '')         // trailing quotes / ] / ,
+     .trim();
+
+  // 1) Try strict JSON (optionally fenced).
+  const fenced = text.replace(/```json|```/g, '').trim();
+  // Grab the first [...] block if there's surrounding prose.
+  const arrMatch = fenced.match(/\[[\s\S]*\]/);
+  for (const candidate of [fenced, arrMatch ? arrMatch[0] : '']) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) {
+        const opts = parsed
+          .filter((x) => typeof x === 'string')
+          .map((s) => tidy(s))
+          .filter(isReal)
+          .slice(0, 3);
+        if (opts.length) return opts;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // 2) Salvage: split on newlines, tidy, keep only real sentences.
+  return fenced
+    .split('\n')
+    .map(tidy)
+    .filter(isReal)
+    .slice(0, 3);
+}
+
 // ── NEWSLETTER HELPERS (double opt-in via Resend) ───────────────
 // The "from" the customer sees; Resend handles the technical Return-Path on
 // send.houseonly.store under the hood.
@@ -1481,7 +1534,11 @@ export default {
 
     // ── STORY CONTEXT (Stories knowledge line) ──────────────
     // POST ?action=story-context
-    // body: { artist, title, label, catalog, genre, year, description, tracks:[names] }
+    // body: { artist, title, label, catalog, genre, year, description, tracks:[names], prompt? }
+    //
+    // Two-stage when a prompt is supplied: (1) web-search research pass for
+    // verified context, (2) tool-free pass that writes the 3 lines as strict
+    // JSON. No prompt → single metadata-only pass (original behaviour).
     //
     // Generates 3 short lines of GENUINE musical context for Shot 2 of an
     // Instagram Story — the "House Only knows its stuff" line. Anti-bluff:
@@ -1501,32 +1558,14 @@ export default {
       const year   = String(body?.year || '').trim();
       const desc   = String(body?.description || '').trim().slice(0, 1200);
       const tracks = Array.isArray(body?.tracks) ? body.tracks.slice(0, 12).join(', ') : '';
+      // Optional steer / research request from Eduardo. Augments the metadata.
+      // If it reads like a request to look something up ("find stories about
+      // this record"), we run a web-search research pass first (stage 1) and
+      // feed the findings into the line writer (stage 2).
+      const prompt = String(body?.prompt || '').trim().slice(0, 500);
       if (!artist && !title) return jsonRes({ error: 'missing artist/title' }, 400);
 
-      const sys = [
-        'You are the buyer at House Only, a specialist house music record store. You write the context line for an Instagram Story — the line that shows the shop genuinely KNOWS this music, the way a respected record-shop owner talks to a regular who trusts their taste.',
-        '',
-        'WHAT YOU WRITE:',
-        '2-3 sentences, 30-50 words total. Develop ONE concrete point of context — do not list several shallow ones. Confident, knowledgeable, specific. The reader should finish it thinking "these people actually know their stuff."',
-        '',
-        'HARD RULES:',
-        '1. NEVER fabricate specifics. No invented labels, dates, cities, real names, or collaborators. If you are not sure of a fact, do not state it as fact.',
-        '2. If you do not know this exact artist, write with authority about the SOUND, the SCENE, the LABEL catalog, or the ERA instead — never invent biography.',
-        '3. BANNED — the generic record-review / online-comment register. Never use: "essential", "must-have", "a must for fans of", "timeless", "classic", "masterpiece", "highly recommended", "fire", "heater", "stunning", "beautiful", "perfect for", "if you like X you will love Y". These empty phrases are exactly what makes text sound like an internet comment. Avoid them and the vibe behind them.',
-        '4. The supplied description is the LABEL own marketing copy. Do NOT echo or paraphrase it. Find the real context it leaves out.',
-        '5. Give the angle a knowledgeable shop owner would — something a buyer would NOT already find in the label blurb: artist lineage and where they sit in the scene, the label/series and what it stands for, the production approach, or the historical/regional moment the record comes from.',
-        '',
-        'GOOD vs GENERIC (match the GOOD voice):',
-        'GENERIC (never): "A beautiful deep house record with soulful vibes — essential for any collection."',
-        'GOOD: "Rawax Motor City Edition exists to document Detroit functional, stripped-back lineage — these are tools for DJs, not showpieces, and this sits squarely in that tradition of restraint over flash."',
-        'GENERIC (never): "Louie Vega delivers another timeless house anthem with this stunning release."',
-        'GOOD: "Vega built Nervous into one of New York house defining catalogs across three decades; his remix work here is less about reinvention than about carrying that NYC dancefloor sensibility into the room."',
-        '',
-        'Write 3 DIFFERENT options, each taking a different real angle (e.g. one on the artist, one on the label, one on the scene/era). Return ONLY a JSON array of exactly 3 strings — no preamble, no markdown.',
-        '["option one", "option two", "option three"]',
-      ].join('\n');
-
-      const userMsg = [
+      const metaLines = [
         `Artist: ${artist || '(unknown)'}`,
         `Title: ${title || '(unknown)'}`,
         label ? `Label: ${label}` : '',
@@ -1534,37 +1573,131 @@ export default {
         genre ? `Genre: ${genre}` : '',
         year ? `Year: ${year}` : '',
         tracks ? `Tracklist: ${tracks}` : '',
-        desc ? `Label marketing copy (do NOT repeat, for reference only): ${desc}` : '',
       ].filter(Boolean).join('\n');
 
-      try {
-        // Retry on transient overload (529) / rate-limit (429). Anthropic
-        // returns 529 when momentarily saturated; these are NOT billed (the
-        // request isn't processed). A short backoff almost always clears it.
-        // Up to 4 attempts at 0ms, 600ms, 1500ms, 3000ms.
+      // Small helper: call the Messages API with transient-status retry.
+      // Anthropic returns 529 when momentarily saturated (not billed); a short
+      // backoff almost always clears it. Up to 4 attempts.
+      const callAnthropic = async (payload: any): Promise<{ res: Response | null; status: number }> => {
         const backoffs = [0, 600, 1500, 3000];
-        let aiRes: Response | null = null;
-        let lastStatus = 0;
+        let res: Response | null = null;
+        let status = 0;
         for (let attempt = 0; attempt < backoffs.length; attempt++) {
           if (backoffs[attempt]) await new Promise((r) => setTimeout(r, backoffs[attempt]));
-          aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+          res = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'x-api-key': env.ANTHROPIC_API_KEY,
               'anthropic-version': '2023-06-01',
             },
-            body: JSON.stringify({
-              model: 'claude-sonnet-4-6',
-              max_tokens: 700,
-              system: sys,
-              messages: [{ role: 'user', content: userMsg }],
-            }),
+            body: JSON.stringify(payload),
           });
-          lastStatus = aiRes.status;
-          // Retry only on transient statuses; otherwise stop and handle below.
-          if (aiRes.status !== 529 && aiRes.status !== 429) break;
+          status = res.status;
+          if (status !== 529 && status !== 429) break;
         }
+        return { res, status };
+      };
+
+      try {
+        // ── STAGE 1 (optional): RESEARCH PASS with web search ─────────
+        // Only when a prompt is supplied. Free-form (no JSON constraint) so the
+        // model can actually search and reason. We capture its text notes and
+        // feed them to stage 2. If web search isn't enabled on the account, or
+        // the pass fails, we degrade gracefully to metadata-only.
+        let research = '';
+        let researchError = '';   // diagnostic only (surfaced when ?debug=1)
+        if (prompt) {
+          const researchSys = [
+            'You are the buyer at House Only, a specialist house music record store, researching a specific record before writing about it.',
+            'Use web search to find GENUINE context about this exact release: the artist and where they sit in the scene, the label and what its catalog stands for, the year/era and regional moment, the production approach, reissue/original history. Prioritise discogs.com, label sites, respected dance-music press, and artist interviews.',
+            'Report only what you can actually verify from the results. If you cannot find something, say so plainly — do NOT guess or fill gaps with invention. Write concise factual notes (not marketing copy, not finished sentences). These notes are for your own use in the next step.',
+          ].join('\n');
+          const researchUser = [
+            metaLines,
+            desc ? `\nLabel marketing copy (for reference, do not trust as neutral fact): ${desc}` : '',
+            `\nThe shop owner's request: ${prompt}`,
+            '\nResearch this record now and write your verified notes.',
+          ].filter(Boolean).join('\n');
+
+          const { res: rRes } = await callAnthropic({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 1500,
+            system: researchSys,
+            messages: [{ role: 'user', content: researchUser }],
+            tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+          });
+          // Web search can return stop_reason "pause_turn" for long turns; loop
+          // the conversation forward until it finishes (cap the loops).
+          if (rRes && rRes.ok) {
+            let data = await rRes.json() as any;
+            const convo: any[] = [{ role: 'user', content: researchUser }];
+            let guard = 0;
+            while (data?.stop_reason === 'pause_turn' && guard < 3) {
+              convo.push({ role: 'assistant', content: data.content });
+              const { res: cRes } = await callAnthropic({
+                model: 'claude-sonnet-4-6',
+                max_tokens: 1500,
+                system: researchSys,
+                messages: convo,
+                tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+              });
+              if (!cRes || !cRes.ok) break;
+              data = await cRes.json() as any;
+              guard++;
+            }
+            research = (data?.content || [])
+              .filter((b: any) => b.type === 'text')
+              .map((b: any) => b.text).join('\n').trim();
+          } else {
+            // Capture WHY it failed (e.g. web search not enabled on the org).
+            const code = rRes ? rRes.status : 0;
+            const detail = rRes ? await rRes.text().catch(() => '') : 'no response';
+            researchError = `research ${code}: ${detail.slice(0, 300)}`;
+          }
+          // Non-OK research (e.g. web search not enabled) is non-fatal: fall
+          // through to stage 2 with empty research.
+        }
+
+        // ── STAGE 2: WRITE THE 3 LINES (no tools → clean JSON) ────────
+        const sys = [
+          'You are the buyer at House Only, a specialist house music record store. You write the context line for an Instagram Story — the line that shows the shop genuinely KNOWS this music, the way a respected record-shop owner talks to a regular who trusts their taste.',
+          '',
+          'WHAT YOU WRITE:',
+          '2-3 sentences, 30-50 words total. Develop ONE concrete point of context — do not list several shallow ones. Confident, knowledgeable, specific. The reader should finish it thinking "these people actually know their stuff."',
+          '',
+          'HARD RULES:',
+          '1. NEVER fabricate specifics. No invented labels, dates, cities, real names, or collaborators. If you are not sure of a fact, do not state it as fact.',
+          '2. If you do not know this exact artist, write with authority about the SOUND, the SCENE, the LABEL catalog, or the ERA instead — never invent biography.',
+          '3. BANNED — the generic record-review / online-comment register. Never use: "essential", "must-have", "a must for fans of", "timeless", "classic", "masterpiece", "highly recommended", "fire", "heater", "stunning", "beautiful", "perfect for", "if you like X you will love Y". These empty phrases are exactly what makes text sound like an internet comment. Avoid them and the vibe behind them.',
+          '4. The supplied description is the LABEL own marketing copy. Do NOT echo or paraphrase it. Find the real context it leaves out.',
+          '5. Give the angle a knowledgeable shop owner would — something a buyer would NOT already find in the label blurb: artist lineage and where they sit in the scene, the label/series and what it stands for, the production approach, or the historical/regional moment the record comes from.',
+          research ? '6. Verified research notes are provided below. Ground the lines in those facts. If the notes say something could not be verified, do NOT state it — write about what IS established (sound, scene, label, era) instead.' : '',
+          '',
+          'GOOD vs GENERIC (match the GOOD voice):',
+          'GENERIC (never): "A beautiful deep house record with soulful vibes — essential for any collection."',
+          'GOOD: "Rawax Motor City Edition exists to document Detroit functional, stripped-back lineage — these are tools for DJs, not showpieces, and this sits squarely in that tradition of restraint over flash."',
+          'GENERIC (never): "Louie Vega delivers another timeless house anthem with this stunning release."',
+          'GOOD: "Vega built Nervous into one of New York house defining catalogs across three decades; his remix work here is less about reinvention than about carrying that NYC dancefloor sensibility into the room."',
+          '',
+          'OUTPUT FORMAT — this is strict and overrides any instinct to explain yourself:',
+          'Return ONLY a raw JSON array of exactly 3 strings. No preamble, no commentary, no markdown, no code fences. Do NOT narrate your reasoning or caveats — if you have a concern, simply write the most defensible lines you can. The entire response must start with [ and end with ].',
+          '["option one", "option two", "option three"]',
+        ].filter(Boolean).join('\n');
+
+        const userMsg = [
+          metaLines,
+          desc ? `Label marketing copy (do NOT repeat, for reference only): ${desc}` : '',
+          prompt ? `\nThe shop owner asked you to take this angle for all 3 options (a steer, not a fact — still obey every hard rule, and never invent specifics to satisfy it): ${prompt}` : '',
+          research ? `\n--- VERIFIED RESEARCH NOTES (ground the lines in these) ---\n${research}` : '',
+        ].filter(Boolean).join('\n');
+
+        const { res: aiRes, status: lastStatus } = await callAnthropic({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 700,
+          system: sys,
+          messages: [{ role: 'user', content: userMsg }],
+        });
         if (!aiRes || !aiRes.ok) {
           const errText = aiRes ? await aiRes.text().catch(() => '') : '';
           const overloaded = lastStatus === 529 || lastStatus === 429;
@@ -1577,18 +1710,15 @@ export default {
         }
         const aiData = await aiRes.json() as any;
         const text = (aiData?.content || []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
-        // Parse the JSON array; strip code fences defensively.
-        const clean = text.replace(/```json|```/g, '').trim();
-        let options: string[] = [];
-        try {
-          const parsed = JSON.parse(clean);
-          if (Array.isArray(parsed)) options = parsed.filter((x) => typeof x === 'string').slice(0, 3);
-        } catch {
-          // Fallback: split lines if the model didn't return clean JSON.
-          options = clean.split('\n').map((l: string) => l.replace(/^[-*\d.\s]+/, '').replace(/^["']|["']$/g, '').trim()).filter(Boolean).slice(0, 3);
-        }
-        if (!options.length) return jsonRes({ options: [], error: 'no options parsed', raw: clean.slice(0, 300) });
-        return jsonRes({ options });
+
+        const options = parseStoryOptions(text);
+        if (!options.length) return jsonRes({ options: [], error: 'no options parsed', raw: text.slice(0, 300) });
+        const debug = url.searchParams.get('debug') === '1';
+        return jsonRes({
+          options,
+          researched: !!research,
+          ...(debug ? { researchError: researchError || null, researchChars: research.length } : {}),
+        });
       } catch (e: any) {
         return jsonRes({ options: [], error: e?.message || 'generation failed' }, 502);
       }

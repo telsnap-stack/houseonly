@@ -5687,13 +5687,12 @@ function shot2Layout(measureCtx, W, H, text) {
   const cadence = 1.0;              // one line per half-bar (constant — no compression)
   const lastLineStart = beat + (rows.length - 1) * cadence;
   const revealDone = lastLineStart + 0.35;            // last line finished fading in
-  // Read pause after the full text is on screen: a short, fixed ~1s beat, then
-  // cut to Shot 3. (Previously this scaled per line, which left long phrases
-  // sitting on screen far too long after the reveal finished.) Reading happens
-  // progressively as each line lands, so once the last line is up, one extra
-  // second is enough before moving on.
-  const readPause = 1.0;
-  const dur = Math.min(22, Math.max(5, revealDone + readPause));
+  // Read pause after the full text is on screen: hold for 4s so the viewer can
+  // actually read the whole knowledge line before cutting to Shot 3. (Reading
+  // also happens progressively as each line lands, but the last line needs real
+  // dwell time — 1s felt far too fast on first play.)
+  const readPause = 4.0;
+  const dur = Math.min(25, Math.max(5, revealDone + readPause));
   return { rows, fontSize, font, beat, cadence, dur, startY: topY, lineH };
 }
 
@@ -5801,30 +5800,35 @@ function StoryExporter({ release, track, line }) {
   };
 
   const exportStory = async () => {
-    if (!track?.url) { setStatus('error'); setMsg('No track selected'); return; }
     setStatus('preparing'); setMsg('Setting up…');
     const cv = canvasRef.current;
     const ctx = cv.getContext('2d');
 
-    // Audio graph: route the <audio> element through Web Audio so we can both
-    // hear nothing extra and feed it into the recording stream.
-    const AC = window.AudioContext || window.webkitAudioContext;
-    const ac = new AC();
-    const a = audioRef.current;
-    a.currentTime = 0;
-    let srcNode;
-    try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
-    const dest = ac.createMediaStreamDestination();
-    srcNode.connect(dest);
-    // (Intentionally NOT connecting to ac.destination — we don't need to blast
-    // the audio out loud during export; the recording captures it from dest.)
-
-    // Combine canvas video + audio into one stream.
+    // Audio is optional. When the release has a snippet we route the <audio>
+    // element through Web Audio and mix it into the recording. When it doesn't,
+    // we record the canvas video only (silent WebM) — Instagram's own audio can
+    // be added after upload.
+    const hasAudio = !!track?.url;
+    let ac = null, dest = null;
     const canvasStream = cv.captureStream(30);
-    const mixed = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...dest.stream.getAudioTracks(),
-    ]);
+    const streamTracks = [...canvasStream.getVideoTracks()];
+
+    if (hasAudio) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      ac = new AC();
+      const a = audioRef.current;
+      a.currentTime = 0;
+      let srcNode;
+      try { srcNode = ac.createMediaElementSource(a); } catch (e) { setStatus('error'); setMsg('Audio routing failed: ' + (e?.message||'')); return; }
+      dest = ac.createMediaStreamDestination();
+      srcNode.connect(dest);
+      // (Intentionally NOT connecting to ac.destination — we don't need to blast
+      // the audio out loud during export; the recording captures it from dest.)
+      streamTracks.push(...dest.stream.getAudioTracks());
+    }
+
+    // Combine canvas video + (optional) audio into one stream.
+    const mixed = new MediaStream(streamTracks);
 
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
       ? 'video/webm;codecs=vp9,opus'
@@ -5841,19 +5845,19 @@ function StoryExporter({ release, track, line }) {
       aTag.href = url; aTag.download = `houseonly-${safe}.webm`;
       document.body.appendChild(aTag); aTag.click(); aTag.remove();
       const purl = await copyProductUrl();
-      try { ac.close(); } catch {}
-      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}`);
+      try { if (ac) ac.close(); } catch {}
+      setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}${hasAudio ? '' : ' · (silent — add audio in Instagram)'}`);
     };
 
-    // Go: start audio + recorder, drive the canvas for the full (variable) length.
+    // Go: start audio (if any) + recorder, drive the canvas for the full length.
     setStatus('recording'); setMsg(`Recording ${TOTAL.toFixed(1)}s…`);
-    await ac.resume();
-    a.play().catch(()=>{});
+    const a = audioRef.current;
+    if (hasAudio) { await ac.resume(); a.play().catch(()=>{}); }
     const start = performance.now();
     rec.start();
     const loop = () => {
       const elapsed = (performance.now() - start) / 1000;
-      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); a.pause(); rec.stop(); return; }
+      if (elapsed >= TOTAL) { drawAt(ctx, TOTAL - 0.001); if (hasAudio) a.pause(); rec.stop(); return; }
       drawAt(ctx, elapsed);
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -5868,13 +5872,13 @@ function StoryExporter({ release, track, line }) {
       <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story</div>
       <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
       <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
-      <button onClick={exportStory} disabled={busy || !track?.url || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
+      <button onClick={exportStory} disabled={busy || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
         {status === 'recording' ? 'Recording 15s…' : status === 'preparing' ? 'Preparing…' : '⬇ Export story (WebM)'}
       </button>
       {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
       {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
       <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
-        Records the 3 shots with the track audio (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom.
+        Records the 3 shots{track?.url ? ' with the track audio' : ' (silent — no snippet for this release)'} (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom{track?.url ? '' : ', and add audio in the app'}.
       </div>
     </div>
   );
@@ -5893,6 +5897,14 @@ function StoriesGenerator() {
   const [ctxChosen, setCtxChosen]   = useState('');   // the selected/edited line
   const [ctxLoading, setCtxLoading] = useState(false);
   const [ctxErr, setCtxErr]         = useState('');
+  // Optional steer for the generator: your instruction is sent ALONGSIDE the
+  // track metadata (augment, not replace) so Claude writes the 3 lines with
+  // your angle in mind (e.g. "focus on the Detroit lineage").
+  const [ctxPrompt, setCtxPrompt]   = useState('');
+  // Fully manual path: write your own blurb and it goes straight to Shot 2,
+  // bypassing Claude entirely. Whatever lands in ctxChosen is what exports, so
+  // a manual blurb simply overrides the generated one.
+  const [manualBlurb, setManualBlurb] = useState('');
   // Shot 1 = cover + kick-synced waveform. We analyze every snippet on pick,
   // auto-select the one with the strongest 4/4 (house store = four-to-the-floor),
   // and keep its kick timestamps for the waveform pulse (canvas comes in 4A-2).
@@ -5926,7 +5938,7 @@ function StoriesGenerator() {
   // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
   const pickRelease = async (r) => {
     setSelected(r);
-    setCtxOptions([]); setCtxChosen(''); setCtxErr('');
+    setCtxOptions([]); setCtxChosen(''); setCtxErr(''); setCtxPrompt(''); setManualBlurb('');
     setKickAnalysis(null); setChosenTrack(null);
     // Analyze all snippets for their 4/4 kick and auto-pick the strongest.
     const tracks = (r.tracks || []).filter(t => t && t.url);
@@ -5963,6 +5975,7 @@ function StoriesGenerator() {
           year: selected.year || '',
           description: selected.desc || '',
           tracks: (selected.tracks || []).map(t => t && t.name).filter(Boolean),
+          prompt: ctxPrompt.trim(),   // optional steer — augments the metadata above
         }),
       });
       const data = await res.json();
@@ -5970,7 +5983,14 @@ function StoriesGenerator() {
         setCtxOptions(data.options);
         setCtxChosen(data.options[0]);
       } else {
-        setCtxErr(data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
+        // The worker sends a friendly `hint` + `retryable` for transient
+        // overload/rate-limit (429/529). Prefer that over the raw error code.
+        const friendly = data?.hint
+          ? data.hint
+          : data?.retryable
+            ? 'Anthropic is busy — wait a moment and press Generate again.'
+            : (data?.error ? `Generation failed: ${data.error}` : 'No lines generated.');
+        setCtxErr(friendly);
       }
     } catch (e) {
       setCtxErr('Generation failed: ' + (e?.message || 'unknown'));
@@ -6055,12 +6075,25 @@ function StoriesGenerator() {
               Genuine musical context — artist lineage, label, or era. Not marketing copy. Pick one, edit if needed. You are the final fact-check.
             </div>
 
+            {/* Optional steer — augments the track metadata sent to Claude */}
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Your prompt (optional) — steers the 3 lines</div>
+              <textarea
+                value={ctxPrompt}
+                onChange={e => setCtxPrompt(e.target.value)}
+                rows={2}
+                placeholder="e.g. focus on the Detroit lineage / keep it to one punchy sentence / mention the label's history…"
+                style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+              />
+              <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>Sent together with artist, title, label & track names — leave blank to let Claude work from the metadata alone.</div>
+            </div>
+
             {ctxErr && <div style={{ fontSize:10, color:S.danger, marginBottom:10 }}>{ctxErr}</div>}
 
             {ctxOptions.length > 0 && (
               <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:12 }}>
                 {ctxOptions.map((opt, i) => (
-                  <div key={i} onClick={() => setCtxChosen(opt)} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
+                  <div key={i} onClick={() => { setCtxChosen(opt); setManualBlurb(''); }} style={{ display:'flex', gap:10, alignItems:'flex-start', background:ctxChosen===opt?S.bg:S.surf, border:`1px solid ${ctxChosen===opt?S.accent:S.border}`, borderRadius:2, padding:'10px 12px', cursor:'pointer' }}>
                     <span style={{ fontSize:9, color:ctxChosen===opt?S.accent:S.muted, fontWeight:800, marginTop:2 }}>{ctxChosen===opt?'●':'○'}</span>
                     <span style={{ fontSize:12, color:S.text, lineHeight:1.5 }}>{opt}</span>
                   </div>
@@ -6080,6 +6113,23 @@ function StoriesGenerator() {
                 <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>{ctxChosen.length} chars · {ctxChosen.trim().split(/\s+/).filter(Boolean).length} words</div>
               </div>
             )}
+
+            {/* Fully manual path — write your own blurb, skip Claude entirely. */}
+            <div style={{ marginTop:14, paddingTop:14, borderTop:`1px dashed ${S.border}` }}>
+              <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:6 }}>Or write your own blurb</div>
+              <textarea
+                value={manualBlurb}
+                onChange={e => { setManualBlurb(e.target.value); setCtxChosen(e.target.value); }}
+                rows={2}
+                placeholder="Type your own knowledge line here — it goes straight to Shot 2 (overrides any generated line)."
+                style={{ width:'100%', boxSizing:'border-box', background:S.bg, border:`1px solid ${manualBlurb.trim() ? S.accent : S.border}`, color:S.text, borderRadius:2, padding:'8px 10px', fontSize:12, fontFamily:'inherit', lineHeight:1.5, outline:'none', resize:'vertical' }}
+              />
+              <div style={{ fontSize:9, color:S.muted, marginTop:4 }}>
+                {manualBlurb.trim()
+                  ? <span style={{ color:S.accent }}>● Using your own blurb for Shot 2.</span>
+                  : 'Leave blank to use a generated line above.'}
+              </div>
+            </div>
           </div>
 
           {/* Shot 1 — audio + kick analysis */}
@@ -6124,14 +6174,25 @@ function StoriesGenerator() {
             )}
           </div>
 
-          {/* Shots 1 & 2 — canvas previews side by side */}
-          {kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack] && (
+          {/* Shots 1, 2 & 3 — canvas previews side by side. Renders whether or
+              not the release has audio: Shot 1's pulse is a synthetic 120bpm
+              grid, so it needs no track. With audio, the chosen snippet drives
+              the preview play button and is recorded into the export; without,
+              the story is silent (you can add Instagram's own audio later). */}
+          {selected && (() => {
+            const exTrack = (kickAnalysis && chosenTrack != null && kickAnalysis.tracks[chosenTrack]) || null;
+            return (
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
               <div style={lbl}>Shot previews</div>
+              {!exTrack && (
+                <div style={{ fontSize:9, color:S.muted, letterSpacing:0.5, marginBottom:10, lineHeight:1.6 }}>
+                  No audio snippet for this release — the story exports silently. Add audio in the Instagram app after uploading.
+                </div>
+              )}
               <div style={{ display:'flex', gap:24, flexWrap:'wrap' }}>
                 <div>
                   <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 1 — cover + pulse</div>
-                  <Shot1Canvas release={selected} track={kickAnalysis.tracks[chosenTrack]} />
+                  <Shot1Canvas release={selected} track={exTrack} />
                 </div>
                 <div>
                   <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 2 — knowledge line</div>
@@ -6142,9 +6203,10 @@ function StoriesGenerator() {
                   <Shot3Canvas release={selected} />
                 </div>
               </div>
-              <StoryExporter release={selected} track={kickAnalysis.tracks[chosenTrack]} line={ctxChosen} />
+              <StoryExporter release={selected} track={exTrack} line={ctxChosen} />
             </div>
-          )}
+            );
+          })()}
 
           {/* Description (reference) */}
           <div style={{ marginTop:16 }}>
