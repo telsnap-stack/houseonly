@@ -5687,13 +5687,12 @@ function shot2Layout(measureCtx, W, H, text) {
   const cadence = 1.0;              // one line per half-bar (constant — no compression)
   const lastLineStart = beat + (rows.length - 1) * cadence;
   const revealDone = lastLineStart + 0.35;            // last line finished fading in
-  // Read pause after the full text is on screen: a short, fixed ~1s beat, then
-  // cut to Shot 3. (Previously this scaled per line, which left long phrases
-  // sitting on screen far too long after the reveal finished.) Reading happens
-  // progressively as each line lands, so once the last line is up, one extra
-  // second is enough before moving on.
-  const readPause = 1.0;
-  const dur = Math.min(22, Math.max(5, revealDone + readPause));
+  // Read pause after the full text is on screen: hold for 4s so the viewer can
+  // actually read the whole knowledge line before cutting to Shot 3. (Reading
+  // also happens progressively as each line lands, but the last line needs real
+  // dwell time — 1s felt far too fast on first play.)
+  const readPause = 4.0;
+  const dur = Math.min(25, Math.max(5, revealDone + readPause));
   return { rows, fontSize, font, beat, cadence, dur, startY: topY, lineH };
 }
 
