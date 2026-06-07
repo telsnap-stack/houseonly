@@ -1579,6 +1579,10 @@ export default {
       // Anthropic returns 529 when momentarily saturated (not billed); a short
       // backoff almost always clears it. Up to 4 attempts.
       const callAnthropic = async (payload: any): Promise<{ res: Response | null; status: number }> => {
+        // Retry ONLY 529 (transient overload, not billed, clears with a short
+        // backoff). Do NOT retry 429: that's the input-tokens-per-minute rate
+        // limit, and resending the (large) payload within the same minute only
+        // pushes the window further over. On 429 we stop and surface the hint.
         const backoffs = [0, 600, 1500, 3000];
         let res: Response | null = null;
         let status = 0;
@@ -1594,7 +1598,7 @@ export default {
             body: JSON.stringify(payload),
           });
           status = res.status;
-          if (status !== 529 && status !== 429) break;
+          if (status !== 529) break;   // only 529 is worth retrying
         }
         return { res, status };
       };
@@ -1622,25 +1626,28 @@ export default {
 
           const { res: rRes } = await callAnthropic({
             model: 'claude-sonnet-4-6',
-            max_tokens: 1500,
+            max_tokens: 800,
             system: researchSys,
             messages: [{ role: 'user', content: researchUser }],
-            tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+            tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 2 }],
           });
-          // Web search can return stop_reason "pause_turn" for long turns; loop
-          // the conversation forward until it finishes (cap the loops).
+          // Web search can return stop_reason "pause_turn" for long turns; we
+          // continue ONCE if needed. We deliberately do NOT loop further: each
+          // continuation resends the full conversation (including fat web-search
+          // result blocks) as input, so multiple loops can blow the org's
+          // input-tokens-per-minute limit on a single generation.
           if (rRes && rRes.ok) {
             let data = await rRes.json() as any;
             const convo: any[] = [{ role: 'user', content: researchUser }];
             let guard = 0;
-            while (data?.stop_reason === 'pause_turn' && guard < 3) {
+            while (data?.stop_reason === 'pause_turn' && guard < 1) {
               convo.push({ role: 'assistant', content: data.content });
               const { res: cRes } = await callAnthropic({
                 model: 'claude-sonnet-4-6',
-                max_tokens: 1500,
+                max_tokens: 800,
                 system: researchSys,
                 messages: convo,
-                tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+                tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 2 }],
               });
               if (!cRes || !cRes.ok) break;
               data = await cRes.json() as any;
@@ -1648,7 +1655,8 @@ export default {
             }
             research = (data?.content || [])
               .filter((b: any) => b.type === 'text')
-              .map((b: any) => b.text).join('\n').trim();
+              .map((b: any) => b.text).join('\n').trim()
+              .slice(0, 1200);   // cap notes — keeps the stage-2 call small
           } else {
             // Capture WHY it failed (e.g. web search not enabled on the org).
             const code = rRes ? rRes.status : 0;
