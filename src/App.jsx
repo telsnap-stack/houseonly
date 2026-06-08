@@ -3053,49 +3053,18 @@ function ZipImporter() {
 // Join key across all three is the SPACE-NORMALIZED catno (invoice "FOKUZ 016.2" == CDN "FOKUZ016.2").
 // Reuses shared helpers: loadJSZip, uploadToR2, resizeImageIfNeeded, buildDescriptionHtml, Btn, S.
 
-// Invoice 202631612 — non-discounted list "Price P/item" (per pricing decision).
-const TV_COSTS = {
-  "BLAKE001RP2":8.89,"DOPEDMND001":9.25,"FOKUZ 016.2":5.00,"FOKUZ 017":5.00,"FOKUZ 022":5.50,
-  "FOKUZ049":4.99,"FOKUZ055.2":5.29,"FOKUZ058":5.29,"FOKUZ059_":4.15,"FOKUZ062":5.29,
-  "FOKUZ065.2":5.29,"FOKUZ066.1":5.29,"FOKUZ066.3":5.29,"FOKUZ067":5.49,"FOKUZ071_":4.15,
-  "FOKUZ072":5.49,"FOKUZ080.3_":4.15,"FOKUZ081_":4.15,"FOKUZ082":5.99,"FOKUZ085_":4.15,
-  "FOKUZ086":5.99,"FOKUZ087_":4.15,"FOKUZ091RP_":4.15,"FOKUZ093RP":6.65,"FOKUZ095":6.25,
-  "FOKUZ097":5.99,"FOKUZ098RP":7.79,"FOKUZ099RP":6.99,"FOKUZ100":6.25,"FOKUZ101RP_":4.15,
-  "FOKUZ104_":4.15,"FOKUZ106RP3":7.79,"FOKUZ106RP3_":4.15,"FOKUZ106RP5":6.99,"FOKUZ106RP6":6.99,
-  "FOKUZ107_":4.15,"FOKUZ109_":4.15,"FOKUZ110":8.89,"FOKUZ111":7.79,"FOKUZ113":7.79,
-  "FOKUZ114RP1":8.10,"FOKUZ114RP2_":4.15,"FOKUZ114RP3":8.10,"FOKUZ115RP1_":4.15,"FOKUZ116":8.89,
-  "FOKUZ117":9.25,"FOKUZ118":8.89,"FOKUZ119":9.25,"FOKUZ120":9.25,"FOKUZ121":10.10,
-  "FOKUZ122":8.89,"FOKUZ124":9.75,"FOKUZ125":10.10,"FOKUZ126":8.89,"FOKUZ127":8.89,
-  "FOKUZ128":8.89,"FOKUZ129":8.89,"FOKUZ130":10.10,"FOKUZ402V":11.50,"FOKUZLP 003":17.50,
-  "FOKUZLP 003AB":4.99,"FOKUZLP 006":9.90,"FOKUZLP007S1":4.99,"FOKUZLP008S1":4.99,"FOKUZLP009":6.25,
-  "FOKUZLP010S":5.29,"FOKUZLP013":11.90,"FOKUZLP013S":5.99,"FOKUZLP020S_":4.15,"FOKUZLP036":11.50,
-  "HEYNOW001RP":9.25,"HUMANATURE001":7.40,"KEYS001":9.25,"LOVE2020":9.25,"LOVELY001RP":8.10,
-  "MARYJ001":9.25,"SIG001-2024":8.89,"SIG002-2024":8.89,"SIG002RP2":8.50,"SIG003-2024":8.89,
-  "SIG004-2024":8.89,"SIG005R":10.10,"SIG015R":7.79,"SIG019RP":6.25,"SIG021RP":6.99,
-  "SIG026":10.10,"SIG028RP":9.75,"SIG029":9.75,"SIG030":10.10,"SIGLP001RP":27.90,
-  "SIGLP007R":26.95,"SIGLP008RE":19.99,"SIGLP010R":26.95,"SIGLP011RP":29.99,"SIGLP012LTDRP":7.79,
-  "SIGLP013RP2":24.95,"SIGLP015RP":29.99,"SIGLP017":29.99,"SIGLP018":24.95,"SIGLP019":24.95,
-  "SIGLP021":24.95,"SOULR014":7.79,"SOULR015":7.79,"SOULR018":7.79,"SOULR020RP":8.89,
-  "SOULR042RP":8.89,"SOULR043RP":8.89,"SOULR046RP":8.50,"SOULR048RP":8.50,"SOULR049RP":22.90,
-  "SOULR053RP":8.50,"SOULR055":8.89,"SOULR061":8.50,"SOULR062RP":8.89,"SOULR064":8.50,
-  "SOULR065":10.50,"SOULR067RP":10.90,"SOULR068RP":8.50,"SOULR075RP":9.75,"SOULR077RP":17.50,
-  "SOULR056":16.25,"SUMMER001RP":8.10,"TDINER001":10.50,"WETDREAMZ001":8.50,
-};
+// ── TRIPLE VISION IMPORTER (Drum & Bass) ──────────────────────
+// ── TRIPLE VISION helpers (invoice-PDF-driven; nothing hardcoded per-order) ──
 
-// Space-normalized join key. "FOKUZ 016.2" -> "FOKUZ016.2"; everything upper-cased.
+// Space-normalized join key. "FOKUZ 016.2" -> "FOKUZ016.2"; upper-cased.
 function tvKey(catno) {
   return String(catno || '').replace(/\s+/g, '').toUpperCase().trim();
 }
 
-// Build a lookup of normalized-catno -> list cost from the baked invoice.
-const TV_COST_BY_KEY = Object.fromEntries(
-  Object.entries(TV_COSTS).map(([c, p]) => [tvKey(c), p])
-);
-
 // Map a TV "label" string to the storefront label tag (real names in dropdown).
 function tvLabelTag(label, catno) {
   const l = (label || '').trim();
-  if (l) return l;                       // page gives the real label name
+  if (l) return l;
   const k = tvKey(catno);
   if (k.startsWith('SOULR'))  return 'Soul:R';
   if (k.startsWith('SIG'))    return 'Signature';
@@ -3103,15 +3072,23 @@ function tvLabelTag(label, catno) {
   return '';
 }
 
-// Map TV "Format" string to grams. 2x12"/2LP/double -> 900, else 500.
+// Disc count from TV "Format"/title, then grams = discs * 500.
+// Handles "2x12\"", "3x12\"", "4x12\"", "2LP", "double", single 12"/10"/LP.
+function tvDiscCount(format, title) {
+  const s = `${format || ''} ${title || ''}`.toLowerCase();
+  const m = s.match(/(\d+)\s*x?\s*(?:12"|10"|lp)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 6) return n;
+  }
+  if (/double|2\s*lp/.test(s)) return 2;
+  return 1;
+}
 function tvGrams(format, title) {
-  const f = `${format || ''} ${title || ''}`.toLowerCase();
-  if (/2\s*x?\s*12"|double|2\s*lp|3\s*lp/.test(f)) return '900';
-  return '500';
+  return String(tvDiscCount(format, title) * 500);
 }
 
-// Normalize a TV style string for the genre tag. Keeps the real style but
-// canonicalizes the common variants so filtering is consistent.
+// Normalize a TV style string for the genre tag.
 function tvGenre(style) {
   const s = (style || '').toLowerCase();
   if (/liquid/.test(s)) return 'Liquid Funk';
@@ -3119,29 +3096,80 @@ function tvGenre(style) {
   return (style || 'Drum n Bass').trim();
 }
 
+// Parse a Triple Vision invoice PDF (text layer) into { key: {catno, qty, cost} }.
+// Each item line looks like:
+//   "0000183841 BLAKE001RP2 - The F Word EP [black vinyl repress] 2 8,89 IL 8 16,36"
+//   10-digit productcode, then cat-no + description, then QTY, PRICE, "IL", pct, total.
+// We anchor on the trailing "<qty> <price> IL <pct> <total>" and the leading code.
+async function parseTvInvoicePdf(pdfBlob) {
+  const pdfjsLib = await loadPDFJS();
+  const arrayBuffer = await pdfBlob.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // Group items into lines by their y-position so the row stays intact.
+    const byLine = {};
+    for (const it of content.items) {
+      const y = Math.round(it.transform[5]);
+      (byLine[y] = byLine[y] || []).push(it.str);
+    }
+    const ys = Object.keys(byLine).map(Number).sort((a, b) => b - a);
+    for (const y of ys) text += byLine[y].join(' ').replace(/\s+/g, ' ').trim() + '\n';
+  }
+  const out = {};
+  const lineRe = /^\d{10}\s+(.+?)\s+(\d+)\s+([\d.,]+)\s+IL\s+\d+\s+[\d.,]+$/;
+  // cat-no is the first token of the description part, but TV cat-nos can contain
+  // a space ("FOKUZ 016.2","FOKUZLP 003"). The cat-no is everything up to the first
+  // run that looks like the title; we capture the leading token(s) that match a
+  // cat-no shape: letters+digits, optionally "LP", optional space+digits, dots,
+  // trailing underscore. Fall back to first token.
+  const catRe = /^([A-Z0-9]+(?:\.\d+)?(?:LP)?(?:[\s-][0-9][\w.]*)?[A-Z0-9]*_?)/i;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const m = lineRe.exec(line);
+    if (!m) continue;
+    const desc = m[1];
+    const qty  = parseInt(m[2], 10);
+    const cost = parseFloat(m[3].replace(/\./g, '').replace(',', '.')); // EU "8,89" / "1.234,56"
+    const cm = catRe.exec(desc);
+    const catno = (cm ? cm[1] : desc.split(/\s+/)[0]).trim();
+    const key = tvKey(catno);
+    if (key) out[key] = { catno, qty: qty || 1, cost: isNaN(cost) ? null : cost };
+  }
+  return out;
+}
+
 function TripleVisionImporter() {
-  const [metaFile, setMetaFile] = useState(null);     // tv_metadata.json
+  const [pdfFile, setPdfFile]     = useState(null);   // invoice PDF (cost + qty)
+  const [invoice, setInvoice]     = useState(null);   // parsed { key: {catno,qty,cost} }
+  const [metaFile, setMetaFile]   = useState(null);   // tv_metadata.json
   const [metaRecords, setMetaRecords] = useState(null);
   const [zipFiles, setZipFiles]   = useState([]);
   const [status, setStatus]       = useState('idle');
   const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
   const [results, setResults]     = useState([]);
-  const [skippedCount, setSkippedCount] = useState(0);
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
+  const pdfRef  = useRef(null);
   const metaRef = useRef(null);
   const zipRef  = useRef(null);
 
-  const assignFiles = (files) => {
+  const assignFiles = async (files) => {
+    const pdfs  = files.filter(f => /\.pdf$/i.test(f.name));
     const jsons = files.filter(f => /\.json$/i.test(f.name));
     const zips  = files.filter(f => /\.zip$/i.test(f.name));
+    if (pdfs[0]) {
+      setPdfFile(pdfs[0]);
+      try { setInvoice(await parseTvInvoicePdf(pdfs[0])); }
+      catch (e) { setError('Could not read invoice PDF: ' + e.message); }
+    }
     if (jsons[0]) {
       setMetaFile(jsons[0]);
       jsons[0].text().then(t => {
-        try {
-          const parsed = JSON.parse(t);
-          setMetaRecords(parsed.records || parsed);
-        } catch { setError('tv_metadata.json is not valid JSON'); }
+        try { const parsed = JSON.parse(t); setMetaRecords(parsed.records || parsed); }
+        catch { setError('tv_metadata.json is not valid JSON'); }
       });
     }
     if (zips.length) setZipFiles(prev => {
@@ -3151,84 +3179,83 @@ function TripleVisionImporter() {
   };
 
   const process = async () => {
-    if (!metaRecords || !zipFiles.length) return;
+    if (!invoice || !metaRecords) return;
     setError(''); setStatus('processing'); setResults([]);
     try {
       setProgress({ done:0, total:0, current:'Loading libraries…' });
       const JSZip = await loadJSZip();
 
-      // metadata lookup by normalized catno
       const metaByKey = {};
       metaRecords.forEach(r => { metaByKey[tvKey(r.catno)] = r; });
+      const zipByKey = {};
+      zipFiles.forEach(f => { zipByKey[tvKey(f.name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,''))] = f; });
 
-      // ZIP filename -> normalized catno (strip .zip, any " (1)" suffix, spaces)
-      const zipKey = (name) => tvKey(name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,''));
-
-      const total = zipFiles.length;
+      // SPINE = the invoice. Every invoiced record gets a row, ZIP or not.
+      const keys = Object.keys(invoice);
+      const total = keys.length;
       const processed = [];
 
-      for (let i = 0; i < zipFiles.length; i++) {
-        const zipFile = zipFiles[i];
-        const key     = zipKey(zipFile.name);
-        const meta    = metaByKey[key] || {};
-        const listCost = TV_COST_BY_KEY[key];
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const inv = invoice[key];
+        const meta = metaByKey[key] || {};
+        const zipFile = zipByKey[key];
         const safeKey = key.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
-        setProgress({ done:i, total, current:`${key} — extracting…` });
+        setProgress({ done:i, total, current:`${key} — processing…` });
 
         let coverUrl='', tracks=[], itemError='';
-        try {
-          const zip   = await JSZip.loadAsync(zipFile);
-          const files = Object.values(zip.files).filter(f => !f.dir);
-          const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
-          // Prefer the dedicated front cover, then the bare {catno}.jpg, then back, then any image.
-          const coverFile =
-              imgFiles.find(f => /_front\.(jpg|jpeg|png)$/i.test(f.name))
-           || imgFiles.find(f => /\/?[^\/]*\.(jpg|jpeg|png)$/i.test(f.name) && !/_back/i.test(f.name) && !/_front/i.test(f.name))
-           || imgFiles.find(f => /_back\.(jpg|jpeg|png)$/i.test(f.name))
-           || imgFiles[0];
-          const audioFiles = files
-            .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
-            .sort((a,b) => a.name.localeCompare(b.name));
+        if (zipFile) {
+          try {
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f => !f.dir);
+            const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile =
+                imgFiles.find(f => /_front\.(jpg|jpeg|png)$/i.test(f.name))
+             || imgFiles.find(f => /\/?[^\/]*\.(jpg|jpeg|png)$/i.test(f.name) && !/_back/i.test(f.name) && !/_front/i.test(f.name))
+             || imgFiles.find(f => /_back\.(jpg|jpeg|png)$/i.test(f.name))
+             || imgFiles[0];
+            const audioFiles = files
+              .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
+              .sort((a,b) => a.name.localeCompare(b.name));
 
-          if (coverFile) {
-            setProgress({ done:i, total, current:`${key} — uploading cover…` });
-            const rawBlob = await coverFile.async('blob');
-            const ext     = coverFile.name.split('.').pop().toLowerCase();
-            const resizedBlob = await resizeImageIfNeeded(rawBlob, 2000, 0.92);
-            const wasResized  = resizedBlob !== rawBlob;
-            const outExt      = wasResized ? 'jpg' : ext;
-            const outMime     = wasResized ? 'image/jpeg' : (ext==='png' ? 'image/png' : 'image/jpeg');
-            coverUrl = await uploadToR2(resizedBlob, `covers/${safeKey}.${outExt}`, outMime);
-          }
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${key} — uploading cover…` });
+              const rawBlob = await coverFile.async('blob');
+              const ext     = coverFile.name.split('.').pop().toLowerCase();
+              const resizedBlob = await resizeImageIfNeeded(rawBlob, 2000, 0.92);
+              const wasResized  = resizedBlob !== rawBlob;
+              const outExt      = wasResized ? 'jpg' : ext;
+              const outMime     = wasResized ? 'image/jpeg' : (ext==='png' ? 'image/png' : 'image/jpeg');
+              coverUrl = await uploadToR2(resizedBlob, `covers/${safeKey}.${outExt}`, outMime);
+            }
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g,'-');
+              setProgress({ done:i, total, current:`${key} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              let pos = '';
+              const m = filename.replace(/\.[^.]+$/,'').match(/_([A-D]\d?)$/i);
+              if (m) pos = m[1].toUpperCase();
+              const trackName = pos || filename.replace(/\.[^.]+$/,'');
+              tracks.push({ name: trackName, d:'', url });
+            }
+          } catch (e) { itemError = e.message; }
+        }
 
-          for (const af of audioFiles) {
-            const filename = af.name.split('/').pop();
-            const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g,'-');
-            setProgress({ done:i, total, current:`${key} — uploading ${filename}…` });
-            const blob = await af.async('blob');
-            const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
-            // TV filenames are "{CATNO}_A1.mp3" / "{CATNO}_B1.mp3" → derive side label "A1".
-            let pos = '';
-            const m = filename.replace(/\.[^.]+$/,'').match(/_([A-D]\d?)$/i);
-            if (m) pos = m[1].toUpperCase();
-            const trackName = pos || filename.replace(/\.[^.]+$/,'');
-            tracks.push({ name: trackName, d:'', url });
-          }
-        } catch (e) { itemError = e.message; }
-
-        const title  = String(meta.title  || key);
+        const title  = String(meta.title  || inv.catno || key);
         const artist = String(meta.artist || '');
         const label  = tvLabelTag(meta.label, key);
         const genre  = tvGenre(meta.style);
         const year   = (meta.released && (meta.released.match(/\b(19|20)\d{2}\b/)||[])[0]) || '';
         const desc   = String(meta.description || '');
         const grams  = tvGrams(meta.format, title);
+        const qty    = String(inv.qty || 1);
 
-        // Pricing: ceil(listCost * (1+margin)) - 0.01  → always ends .99.
-        // If a catno is missing from the invoice table, flag it rather than guess.
+        // Pricing from invoice cost: ceil(cost * (1+margin)) - 0.01 → ends .99.
         let price = '', priceFlag = '';
-        if (typeof listCost === 'number') {
-          price = String((Math.ceil(listCost * (1 + margin/100)) - 0.01).toFixed(2));
+        if (typeof inv.cost === 'number') {
+          price = String((Math.ceil(inv.cost * (1 + margin/100)) - 0.01).toFixed(2));
         } else {
           priceFlag = 'NO COST IN INVOICE';
         }
@@ -3236,15 +3263,12 @@ function TripleVisionImporter() {
         const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
-
-        // Tags: base vinyl, source:tv, label (real name → dropdown), genre style,
-        // explicit "dnb" for the /dnb route, year. Empty strings filtered out.
         const tags = ['vinyl','source:tv', label?`label:${label}`:'', genre, 'dnb', String(year)]
           .filter(Boolean).join(', ');
 
         processed.push({
           _catno: key, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
-          _error: itemError, _priceFlag: priceFlag, _noPromo: !meta.promopack,
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
           'Handle': handle, 'Title': title || key, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -3252,7 +3276,7 @@ function TripleVisionImporter() {
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
           'Variant SKU': key, 'Variant Grams': grams, 'Variant Inventory Tracker': 'shopify',
-          'Variant Inventory Qty': '1', 'Variant Inventory Policy': 'continue',
+          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'continue',
           'Variant Fulfillment Service': 'manual', 'Variant Price': price,
           'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'TRUE',
           'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
@@ -3260,14 +3284,12 @@ function TripleVisionImporter() {
           'Variant Barcode': '', 'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
           'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
           'Gift Card': 'FALSE', 'SEO Title': '', 'SEO Description': '',
-          'Variant Image': '', 'Variant Weight Unit': 'kg', 'Variant Tax Code': '', 'Cost per item': listCost!=null?String(listCost):'', 'Status': 'active',
+          'Variant Image': '', 'Variant Weight Unit': 'kg', 'Variant Tax Code': '', 'Cost per item': inv.cost!=null?String(inv.cost):'', 'Status': 'active',
         });
         setProgress({ done:i+1, total, current:'' });
       }
 
       setResults(processed);
-      // "skipped" = zips with no metadata match (shouldn't happen if harvest covered them)
-      setSkippedCount(processed.filter(r => !metaByKey[r._catno]).length);
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
@@ -3285,33 +3307,38 @@ function TripleVisionImporter() {
   const withAudio=results.filter(r=>r._tracks?.length>0).length;
   const errors=results.filter(r=>r._error).length;
   const noPrice=results.filter(r=>r._priceFlag).length;
+  const noZip=results.filter(r=>r._noZip).length;
+  const invCount = invoice ? Object.keys(invoice).length : 0;
+  const ready = invoice && metaRecords;
 
   return (
     <div>
       <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
-        Drum &amp; Bass import (Signature / Fokuz / Soul:R via Triple Vision). Upload <strong>tv_metadata.json</strong> (from the release-page harvester) + all promopack ZIPs. Covers &amp; audio upload to R2, then download the Shopify CSV. Prices come from invoice 202631612 (list price × margin).
+        Drum &amp; Bass import (Signature / Fokuz / Soul:R via Triple Vision). Drop the <strong>invoice PDF</strong> (cost + quantity per record), <strong>tv_metadata.json</strong> (from the release-page harvester), and all promopack ZIPs. The invoice is the spine: every invoiced record gets a row — those with a ZIP get cover + audio, the rest come through cover-less (add art in Shopify). Prices = invoice list price × margin.
       </p>
-      <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${(metaFile||zipFiles.length)?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
+      <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${ready?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
         <div style={{ fontSize:28, marginBottom:6 }}>🥁</div>
-        <div style={{ fontSize:11, color:(metaFile||zipFiles.length)?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag tv_metadata.json + ZIPs here, or use buttons below</div>
-        <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
+        <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag invoice PDF + tv_metadata.json + ZIPs here</div>
+        <div style={{ display:'flex', gap:8, justifyContent:'center', flexWrap:'wrap' }}>
+          <input ref={pdfRef}  type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
           <input ref={metaRef} type="file" accept=".json" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
           <input ref={zipRef}  type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
-          <button onClick={()=>metaRef.current.click()} style={{ background:metaFile?S.accent:S.border, border:'none', color:metaFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{metaFile?`✓ ${metaFile.name}`:'+ Metadata JSON'}</button>
+          <button onClick={()=>pdfRef.current.click()} style={{ background:pdfFile?S.accent:S.border, border:'none', color:pdfFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{pdfFile?`✓ Invoice (${invCount})`:'+ Invoice PDF'}</button>
+          <button onClick={()=>metaRef.current.click()} style={{ background:metaFile?S.accent:S.border, border:'none', color:metaFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{metaFile?`✓ Metadata`:'+ Metadata JSON'}</button>
           <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}</button>
-          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear</button>}
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear ZIPs</button>}
         </div>
       </div>
-      {metaRecords&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>Metadata: {metaRecords.length} releases loaded{metaRecords.filter(r=>!r.promopack).length?` · ${metaRecords.filter(r=>!r.promopack).length} without promopack`:''}</div>}
-      {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{f.name.replace(/\.zip$/i,'')}</span>)}</div>}
-      {status==='idle'&&metaRecords&&zipFiles.length>0&&(
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:4}}>Invoice: {invCount} records parsed (cost + qty)</div>}
+      {metaRecords&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>Metadata: {metaRecords.length} releases · ZIPs: {zipFiles.length} (cover-less: {Math.max(0, invCount - zipFiles.length)})</div>}
+      {status==='idle'&&ready&&(
         <div style={{marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
             <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
             <span style={{fontSize:9,color:S.muted}}>→ e.g. €8.89 × {(1+margin/100).toFixed(2)} → €{(Math.ceil(8.89*(1+margin/100))-0.01).toFixed(2)}</span>
           </div>
-          <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
+          <Btn ch={`🚀 Process ${invCount} Invoiced Records → Upload to R2`} onClick={process} full />
         </div>
       )}
       {status==='processing'&&(
@@ -3325,7 +3352,7 @@ function TripleVisionImporter() {
       {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
-            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}{skippedCount>0?` · ${skippedCount} no metadata`:''}</span></div>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
