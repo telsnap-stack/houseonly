@@ -78,7 +78,14 @@ function parseProduct({ node }) {
   const bodyHtml = node.descriptionHtml || '';
   const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
   const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
-  const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
+  // Vendor holds the artist. Blank-artist imports get Shopify's default (the
+  // shop name "House Only") — that exact value is the bug and must never show
+  // as an artist. Treat it as no-artist (blank) so it can be corrected in
+  // Shopify; never display the store name.
+  const vendorIsStoreDefault = (node.vendor || '').trim() === 'House Only';
+  const artist = vendorIsStoreDefault
+    ? (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '')
+    : (node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : ''));
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
@@ -3269,7 +3276,7 @@ function TripleVisionImporter() {
         }
 
         const title  = String(meta.title  || inv.catno || key);
-        const artist = String(meta.artist || '');
+        const artist = String(meta.artist || '').trim();
         const label  = tvLabelTag(meta.label, key);
         const genre  = tvGenre(meta.style);
         const year   = (meta.released && (meta.released.match(/\b(19|20)\d{2}\b/)||[])[0]) || '';
