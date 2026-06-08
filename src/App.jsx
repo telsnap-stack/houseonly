@@ -104,7 +104,13 @@ function parseProduct({ node }) {
   };
 }
 
-async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false } = {}) {
+// Tags that mark a release as Drum & Bass (incl. jungle / liquid). The TV
+// importer always writes 'dnb' on D&B records; the others catch any variant
+// spelling. This set both POPULATES the "Drum & Bass Only" section and is
+// EXCLUDED from the main house catalogue so the two never mix.
+const DNB_TAGS = ['dnb', 'jungle', 'Jungle', 'Drum n Bass', 'Drum and Bass', 'Liquid Funk'];
+
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false, dnb=false } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
   // Build a tag-AND query string for server-side filtering. Each filterTag is a
   // raw tag value like "label:Word and Sound" or "year:2025".
@@ -116,8 +122,19 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
   //     never leak into the main catalogue.
   // Negation ("-tag:...") is supported by Shopify's search query grammar
   // (verified against docs: a "-" modifier excludes documents with that value).
+  //
+  // Drum & Bass handling (separate "Drum & Bass Only" section):
+  //   - dnb=true  → REQUIRE any D&B tag  → only the D&B catalogue
+  //   - dnb=false → EXCLUDE all D&B tags so they never appear among the house
+  //     genres on the main page. (Forthcoming is exempt — pre-orders can be D&B.)
   const clauses = filterTags.map(t => `tag:'${t}'`);
   clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
+  if (dnb) {
+    clauses.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+  } else if (!forthcoming) {
+    // Main catalogue: hide every D&B record from the house genres.
+    for (const t of DNB_TAGS) clauses.push(`-tag:'${t}'`);
+  }
   const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
@@ -152,7 +169,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
 // Note: server-side search uses Shopify's relevance scoring which indexes
 // title, vendor, tags, product_type, and metafields exposed to search.
 // Description body is NOT searched by default.
-async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[] } = {}) {
+async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[], dnb=false } = {}) {
   if (!searchTerm.trim()) {
     // Caller should not invoke us with empty term; bail safely.
     return { products: [], hasNextPage: false, endCursor: null };
@@ -164,6 +181,13 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // section and should never surface in a normal catalogue search.
   const queryParts = [searchTerm.trim(), `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
+  // D&B scoping: in the D&B section, require a D&B tag; in the main catalogue,
+  // exclude all D&B tags so house searches never surface drum & bass.
+  if (dnb) {
+    queryParts.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+  } else {
+    for (const t of DNB_TAGS) queryParts.push(`-tag:'${t}'`);
+  }
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
     search(query: ${combinedQuery}, first: 24${after}, types: PRODUCT, prefix: LAST) {
@@ -7908,7 +7932,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false,dnb:false});
   const [search,setSearch]               = useState('');
   const navMobile = useIsMobile(720); // drives the two-row mobile header layout
   // Debounced version of `search`: updated 300ms after the user stops typing.
@@ -8191,8 +8215,8 @@ export default function App() {
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
-    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming };
-  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, debouncedSearch]);
+    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming, dnb: !!filters.dnb };
+  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, filters.dnb, debouncedSearch]);
 
   // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
   // Code paths:
@@ -8217,6 +8241,7 @@ export default function App() {
       return fetchShopifyProductSearch({
         searchTerm: fetchParams.searchTerm,
         filterTags: fetchParams.filterTags,
+        dnb: fetchParams.dnb,
         ...extraOpts,
       });
     }
@@ -8224,6 +8249,7 @@ export default function App() {
       sortKey: fetchParams.sortKey,
       reverse: fetchParams.reverse,
       filterTags: fetchParams.filterTags,
+      dnb: fetchParams.dnb,
       ...extraOpts,
     });
   }, [fetchParams]);
@@ -8346,7 +8372,7 @@ export default function App() {
   return (
     <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
+      <Nav onLogo={()=>{setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
@@ -8362,7 +8388,8 @@ export default function App() {
         </div>
         {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
-          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <button onClick={()=>setFilters(f=>({...f, forthcoming:!f.forthcoming, dnb:false, genre:null, label:null, year:null}))} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <button onClick={()=>setFilters(f=>({...f, dnb:!f.dnb, forthcoming:false, genre:null, label:null, year:null}))} title={filters.dnb?'Exit Drum & Bass — back to all records':'Drum & Bass Only'} style={{background:filters.dnb?S.accent:'transparent',color:filters.dnb?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.dnb?'✕ Drum & Bass':'Drum & Bass'}</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
@@ -8378,7 +8405,7 @@ export default function App() {
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
-        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
+        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={filters.dnb ? allGenres.filter(g=>DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase())) : allGenres.filter(g=>!DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase()))} allYears={allYears} />
         {filters.forthcoming && (
           <div style={{display:'flex',justifyContent:'flex-end',gap:6,marginBottom:14}}>
             {['list','grid'].map(v=>(
