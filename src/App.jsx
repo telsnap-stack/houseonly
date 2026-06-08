@@ -78,7 +78,14 @@ function parseProduct({ node }) {
   const bodyHtml = node.descriptionHtml || '';
   const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
   const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
-  const artist= node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '');
+  // Vendor holds the artist. Blank-artist imports get Shopify's default (the
+  // shop name "House Only") — that exact value is the bug and must never show
+  // as an artist. Treat it as no-artist (blank) so it can be corrected in
+  // Shopify; never display the store name.
+  const vendorIsStoreDefault = (node.vendor || '').trim() === 'House Only';
+  const artist = vendorIsStoreDefault
+    ? (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '')
+    : (node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : ''));
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
@@ -104,7 +111,13 @@ function parseProduct({ node }) {
   };
 }
 
-async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false } = {}) {
+// Tags that mark a release as Drum & Bass (incl. jungle / liquid). The TV
+// importer always writes 'dnb' on D&B records; the others catch any variant
+// spelling. This set both POPULATES the "Drum & Bass Only" section and is
+// EXCLUDED from the main house catalogue so the two never mix.
+const DNB_TAGS = ['dnb', 'jungle', 'Jungle', 'Drum n Bass', 'Drum and Bass', 'Liquid Funk'];
+
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false, dnb=false } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
   // Build a tag-AND query string for server-side filtering. Each filterTag is a
   // raw tag value like "label:Word and Sound" or "year:2025".
@@ -116,8 +129,19 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
   //     never leak into the main catalogue.
   // Negation ("-tag:...") is supported by Shopify's search query grammar
   // (verified against docs: a "-" modifier excludes documents with that value).
+  //
+  // Drum & Bass handling (separate "Drum & Bass Only" section):
+  //   - dnb=true  → REQUIRE any D&B tag  → only the D&B catalogue
+  //   - dnb=false → EXCLUDE all D&B tags so they never appear among the house
+  //     genres on the main page. (Forthcoming is exempt — pre-orders can be D&B.)
   const clauses = filterTags.map(t => `tag:'${t}'`);
   clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
+  if (dnb) {
+    clauses.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+  } else if (!forthcoming) {
+    // Main catalogue: hide every D&B record from the house genres.
+    for (const t of DNB_TAGS) clauses.push(`-tag:'${t}'`);
+  }
   const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
@@ -152,7 +176,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
 // Note: server-side search uses Shopify's relevance scoring which indexes
 // title, vendor, tags, product_type, and metafields exposed to search.
 // Description body is NOT searched by default.
-async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[] } = {}) {
+async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[], dnb=false } = {}) {
   if (!searchTerm.trim()) {
     // Caller should not invoke us with empty term; bail safely.
     return { products: [], hasNextPage: false, endCursor: null };
@@ -164,6 +188,13 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // section and should never surface in a normal catalogue search.
   const queryParts = [searchTerm.trim(), `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
+  // D&B scoping: in the D&B section, require a D&B tag; in the main catalogue,
+  // exclude all D&B tags so house searches never surface drum & bass.
+  if (dnb) {
+    queryParts.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+  } else {
+    for (const t of DNB_TAGS) queryParts.push(`-tag:'${t}'`);
+  }
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
     search(query: ${combinedQuery}, first: 24${after}, types: PRODUCT, prefix: LAST) {
@@ -3023,6 +3054,346 @@ function ZipImporter() {
                 <div style={{ position:'relative', paddingBottom:'100%', background:'#1a1a2e' }}>
                   {r._coverUrl?<img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />:<div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🎵</div>}
                   {r._error&&<div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
+                  {r._tracks?.length>0&&<div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
+                </div>
+                <div style={{ padding:'8px 8px 6px' }}>
+                  <div style={{ fontSize:9, color:S.muted, fontFamily:'monospace', marginBottom:2 }}>{r._catno}</div>
+                  <div style={{ fontSize:10, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._title||r._catno}</div>
+                  <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._artist}</div>
+                  {r._error&&<div style={{ fontSize:8, color:S.danger, marginTop:4, lineHeight:1.4 }}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── TRIPLE VISION IMPORTER (Drum & Bass) ──────────────────────
+// ── TRIPLE VISION IMPORTER ─────────────────────────────────────
+// Drum & Bass importer (Signature, Fokuz, Soul:R via Triple Vision).
+// Mirrors ZipImporter, but its inputs are:
+//   • the promopack ZIPs (downloaded from xcdn.triplevision.nl) — named {CATNO}.zip
+//     internal files: {CATNO}_{pos}.mp3, {CATNO}_front.jpg, {CATNO}_back.jpg, {CATNO}.jpg, {CATNO}.txt
+//   • tv_metadata.json — harvested from release pages (artist/title/format/style/released/desc/promopack)
+//   • TV_COSTS — the invoice list price per catno (baked in for invoice 202631612)
+// Join key across all three is the SPACE-NORMALIZED catno (invoice "FOKUZ 016.2" == CDN "FOKUZ016.2").
+// Reuses shared helpers: loadJSZip, uploadToR2, resizeImageIfNeeded, buildDescriptionHtml, Btn, S.
+
+// ── TRIPLE VISION IMPORTER (Drum & Bass) ──────────────────────
+// ── TRIPLE VISION helpers (invoice-PDF-driven; nothing hardcoded per-order) ──
+
+// Space-normalized join key. "FOKUZ 016.2" -> "FOKUZ016.2"; upper-cased.
+function tvKey(catno) {
+  return String(catno || '').replace(/\s+/g, '').toUpperCase().trim();
+}
+
+// Map a TV "label" string to the storefront label tag (real names in dropdown).
+function tvLabelTag(label, catno) {
+  const l = (label || '').trim();
+  if (l) return l;
+  const k = tvKey(catno);
+  if (k.startsWith('SOULR'))  return 'Soul:R';
+  if (k.startsWith('SIG'))    return 'Signature';
+  if (k.startsWith('FOKUZ'))  return 'Fokuz';
+  return '';
+}
+
+// Disc count from TV "Format"/title, then grams = discs * 500.
+// Handles "2x12\"", "3x12\"", "4x12\"", "2LP", "double", single 12"/10"/LP.
+function tvDiscCount(format, title) {
+  const s = `${format || ''} ${title || ''}`.toLowerCase();
+  const m = s.match(/(\d+)\s*x?\s*(?:12"|10"|lp)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 6) return n;
+  }
+  if (/double|2\s*lp/.test(s)) return 2;
+  return 1;
+}
+function tvGrams(format, title) {
+  return String(tvDiscCount(format, title) * 500);
+}
+
+// Normalize a TV style string for the genre tag.
+function tvGenre(style) {
+  const s = (style || '').toLowerCase();
+  if (/liquid/.test(s)) return 'Liquid Funk';
+  if (/drum\s*n?\s*bass|dnb|d&b/.test(s)) return 'Drum n Bass';
+  return (style || 'Drum n Bass').trim();
+}
+
+// Parse a Triple Vision invoice PDF (text layer) into { key: {catno, qty, cost} }.
+// Each item line looks like:
+//   "0000183841 BLAKE001RP2 - The F Word EP [black vinyl repress] 2 8,89 IL 8 16,36"
+//   10-digit productcode, then cat-no + description, then QTY, PRICE, "IL", pct, total.
+// We anchor on the trailing "<qty> <price> IL <pct> <total>" and the leading code.
+async function parseTvInvoicePdf(pdfBlob) {
+  const pdfjsLib = await loadPDFJS();
+  const arrayBuffer = await pdfBlob.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // Group items into lines by their y-position so the row stays intact.
+    const byLine = {};
+    for (const it of content.items) {
+      const y = Math.round(it.transform[5]);
+      (byLine[y] = byLine[y] || []).push(it.str);
+    }
+    const ys = Object.keys(byLine).map(Number).sort((a, b) => b - a);
+    for (const y of ys) text += byLine[y].join(' ').replace(/\s+/g, ' ').trim() + '\n';
+  }
+  const out = {};
+  // In-browser pdfjs lays each item row out as:
+  //   {10-digit code} {catno(+spaced)} {TOTAL} IL {QTY} {description} {pct} {PRICE}
+  // (Different from the server text layer — price is LAST, total comes early.)
+  const lineRe = /^\d{10}\s+(.+?)\s+([\d.,]+)\s+IL\s+(\d+)\s+(.+?)\s+\d+\s+([\d.,]+)$/;
+  // cat-no = leading token(s); TV cat-nos can contain a space ("FOKUZ 016.2",
+  // "FOKUZLP 003"), a dot (".1"/".2"), a hyphen suffix ("-2024"), or trailing "_".
+  const catRe = /^([A-Z0-9]+(?:\.\d+)?(?:LP)?(?:[\s-][0-9][\w.]*)?[A-Z0-9]*_?)/i;
+  const eu = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.')); // "8,89" / "1.234,56"
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const m = lineRe.exec(line);
+    if (!m) continue;
+    const head = m[1];                 // catno (+ maybe leading desc tokens)
+    const qty  = parseInt(m[3], 10);   // QTY
+    const cost = eu(m[5]);             // PRICE (per item) — last column
+    const cm = catRe.exec(head);
+    const catno = (cm ? cm[1] : head.split(/\s+/)[0]).trim();
+    const key = tvKey(catno);
+    if (key) out[key] = { catno, qty: qty || 1, cost: isNaN(cost) ? null : cost };
+  }
+  return out;
+}
+
+function TripleVisionImporter() {
+  const [pdfFile, setPdfFile]     = useState(null);   // invoice PDF (cost + qty)
+  const [invoice, setInvoice]     = useState(null);   // parsed { key: {catno,qty,cost} }
+  const [metaFile, setMetaFile]   = useState(null);   // tv_metadata.json
+  const [metaRecords, setMetaRecords] = useState(null);
+  const [zipFiles, setZipFiles]   = useState([]);
+  const [status, setStatus]       = useState('idle');
+  const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
+  const [results, setResults]     = useState([]);
+  const [error, setError]         = useState('');
+  const [margin, setMargin]       = useState(60);
+  const pdfRef  = useRef(null);
+  const metaRef = useRef(null);
+  const zipRef  = useRef(null);
+
+  const assignFiles = async (files) => {
+    const pdfs  = files.filter(f => /\.pdf$/i.test(f.name));
+    const jsons = files.filter(f => /\.json$/i.test(f.name));
+    const zips  = files.filter(f => /\.zip$/i.test(f.name));
+    if (pdfs[0]) {
+      setPdfFile(pdfs[0]);
+      try { setInvoice(await parseTvInvoicePdf(pdfs[0])); }
+      catch (e) { setError('Could not read invoice PDF: ' + e.message); }
+    }
+    if (jsons[0]) {
+      setMetaFile(jsons[0]);
+      jsons[0].text().then(t => {
+        try { const parsed = JSON.parse(t); setMetaRecords(parsed.records || parsed); }
+        catch { setError('tv_metadata.json is not valid JSON'); }
+      });
+    }
+    if (zips.length) setZipFiles(prev => {
+      const existing = new Set(prev.map(f => f.name));
+      return [...prev, ...zips.filter(f => !existing.has(f.name))];
+    });
+  };
+
+  const process = async () => {
+    if (!invoice || !metaRecords) return;
+    setError(''); setStatus('processing'); setResults([]);
+    try {
+      setProgress({ done:0, total:0, current:'Loading libraries…' });
+      const JSZip = await loadJSZip();
+
+      const metaByKey = {};
+      metaRecords.forEach(r => { metaByKey[tvKey(r.catno)] = r; });
+      const zipByKey = {};
+      zipFiles.forEach(f => { zipByKey[tvKey(f.name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,''))] = f; });
+
+      // SPINE = the invoice. Every invoiced record gets a row, ZIP or not.
+      const keys = Object.keys(invoice);
+      const total = keys.length;
+      const processed = [];
+
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const inv = invoice[key];
+        const meta = metaByKey[key] || {};
+        const zipFile = zipByKey[key];
+        const safeKey = key.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+        setProgress({ done:i, total, current:`${key} — processing…` });
+
+        let coverUrl='', tracks=[], itemError='';
+        if (zipFile) {
+          try {
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f => !f.dir);
+            const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile =
+                imgFiles.find(f => /_front\.(jpg|jpeg|png)$/i.test(f.name))
+             || imgFiles.find(f => /\/?[^\/]*\.(jpg|jpeg|png)$/i.test(f.name) && !/_back/i.test(f.name) && !/_front/i.test(f.name))
+             || imgFiles.find(f => /_back\.(jpg|jpeg|png)$/i.test(f.name))
+             || imgFiles[0];
+            const audioFiles = files
+              .filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name))
+              .sort((a,b) => a.name.localeCompare(b.name));
+
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${key} — uploading cover…` });
+              const rawBlob = await coverFile.async('blob');
+              const ext     = coverFile.name.split('.').pop().toLowerCase();
+              const resizedBlob = await resizeImageIfNeeded(rawBlob, 2000, 0.92);
+              const wasResized  = resizedBlob !== rawBlob;
+              const outExt      = wasResized ? 'jpg' : ext;
+              const outMime     = wasResized ? 'image/jpeg' : (ext==='png' ? 'image/png' : 'image/jpeg');
+              coverUrl = await uploadToR2(resizedBlob, `covers/${safeKey}.${outExt}`, outMime);
+            }
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g,'-');
+              setProgress({ done:i, total, current:`${key} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              let pos = '';
+              const m = filename.replace(/\.[^.]+$/,'').match(/_([A-D]\d?)$/i);
+              if (m) pos = m[1].toUpperCase();
+              const trackName = pos || filename.replace(/\.[^.]+$/,'');
+              tracks.push({ name: trackName, d:'', url });
+            }
+          } catch (e) { itemError = e.message; }
+        }
+
+        const title  = String(meta.title  || inv.catno || key);
+        const artist = String(meta.artist || '').trim();
+        const label  = tvLabelTag(meta.label, key);
+        const genre  = tvGenre(meta.style);
+        const year   = (meta.released && (meta.released.match(/\b(19|20)\d{2}\b/)||[])[0]) || '';
+        const desc   = String(meta.description || '');
+        const grams  = tvGrams(meta.format, title);
+        const qty    = String(inv.qty || 1);
+
+        // Pricing from invoice cost: ceil(cost * (1+margin)) - 0.01 → ends .99.
+        let price = '', priceFlag = '';
+        if (typeof inv.cost === 'number') {
+          price = String((Math.ceil(inv.cost * (1 + margin/100)) - 0.01).toFixed(2));
+        } else {
+          priceFlag = 'NO COST IN INVOICE';
+        }
+
+        const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
+        const tags = ['vinyl','source:tv', label?`label:${label}`:'', genre, 'dnb', String(year)]
+          .filter(Boolean).join(', ');
+
+        processed.push({
+          _catno: key, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
+          'Handle': handle, 'Title': title || key, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
+          'Tags': tags,
+          'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
+          'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
+          'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
+          'Variant SKU': key, 'Variant Grams': grams, 'Variant Inventory Tracker': 'shopify',
+          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'continue',
+          'Variant Fulfillment Service': 'manual', 'Variant Price': price,
+          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'TRUE',
+          'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
+          'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
+          'Variant Barcode': '', 'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE', 'SEO Title': '', 'SEO Description': '',
+          'Variant Image': '', 'Variant Weight Unit': 'kg', 'Variant Tax Code': '', 'Cost per item': inv.cost!=null?String(inv.cost):'', 'Status': 'active',
+        });
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch (e) { setError(e.message); setStatus('idle'); }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_tv.csv'; a.click();
+  };
+
+  const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
+  const covered=results.filter(r=>r._coverUrl).length;
+  const withAudio=results.filter(r=>r._tracks?.length>0).length;
+  const errors=results.filter(r=>r._error).length;
+  const noPrice=results.filter(r=>r._priceFlag).length;
+  const noZip=results.filter(r=>r._noZip).length;
+  const invCount = invoice ? Object.keys(invoice).length : 0;
+  const ready = invoice && metaRecords;
+
+  return (
+    <div>
+      <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
+        Drum &amp; Bass import (Signature / Fokuz / Soul:R via Triple Vision). Drop the <strong>invoice PDF</strong> (cost + quantity per record), <strong>tv_metadata.json</strong> (from the release-page harvester), and all promopack ZIPs. The invoice is the spine: every invoiced record gets a row — those with a ZIP get cover + audio, the rest come through cover-less (add art in Shopify). Prices = invoice list price × margin.
+      </p>
+      <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${ready?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
+        <div style={{ fontSize:28, marginBottom:6 }}>🥁</div>
+        <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag invoice PDF + tv_metadata.json + ZIPs here</div>
+        <div style={{ display:'flex', gap:8, justifyContent:'center', flexWrap:'wrap' }}>
+          <input ref={pdfRef}  type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
+          <input ref={metaRef} type="file" accept=".json" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
+          <input ref={zipRef}  type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
+          <button onClick={()=>pdfRef.current.click()} style={{ background:pdfFile?S.accent:S.border, border:'none', color:pdfFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{pdfFile?`✓ Invoice (${invCount})`:'+ Invoice PDF'}</button>
+          <button onClick={()=>metaRef.current.click()} style={{ background:metaFile?S.accent:S.border, border:'none', color:metaFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{metaFile?`✓ Metadata`:'+ Metadata JSON'}</button>
+          <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}</button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear ZIPs</button>}
+        </div>
+      </div>
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:4}}>Invoice: {invCount} records parsed (cost + qty)</div>}
+      {metaRecords&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>Metadata: {metaRecords.length} releases · ZIPs: {zipFiles.length} (cover-less: {Math.max(0, invCount - zipFiles.length)})</div>}
+      {status==='idle'&&ready&&(
+        <div style={{marginBottom:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
+            <span style={{fontSize:9,color:S.muted}}>→ e.g. €8.89 × {(1+margin/100).toFixed(2)} → €{(Math.ceil(8.89*(1+margin/100))-0.01).toFixed(2)}</span>
+          </div>
+          <Btn ch={`🚀 Process ${invCount} Invoiced Records → Upload to R2`} onClick={process} full />
+        </div>
+      )}
+      {status==='processing'&&(
+        <div style={{ padding:14, background:S.bg, borderRadius:2, border:`1px solid ${S.border}` }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}><span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span><span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span></div>
+          <div style={{ height:3, background:S.border, borderRadius:2, overflow:'hidden', marginBottom:8 }}><div style={{ height:'100%', background:S.accent, width:`${pct}%`, transition:'width 0.3s' }} /></div>
+          {progress.current&&<div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>→ {progress.current}</div>}
+        </div>
+      )}
+      {error&&<div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
+      {status==='review'&&results.length>0&&(
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
+            {results.map((r,i)=>(
+              <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
+                <div style={{ position:'relative', paddingBottom:'100%', background:'#1a1a2e' }}>
+                  {r._coverUrl?<img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />:<div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>🥁</div>}
+                  {r._error&&<div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
+                  {r._priceFlag&&<div style={{ position:'absolute', top:4, left:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>NO €</div>}
                   {r._tracks?.length>0&&<div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
                   {!r._coverUrl&&!r._error&&<div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
                 </div>
@@ -7385,6 +7756,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('dbh','🏠 DBH Import')}
           {tabBtn('mt','🇮🇹 MT Import')}
           {tabBtn('rh','💎 Rush Hour Import')}
+          {tabBtn('tv','🥁 Triple Vision')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
           {tabBtn('newsletter','✉️ Newsletter')}
@@ -7394,6 +7766,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='dbh'   && <DBHImporter />}
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
+        {tab==='tv'    && <TripleVisionImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
         {tab==='newsletter'&& <NewsletterPanel />}
@@ -7566,7 +7939,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false});
+  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false,dnb:false});
   const [search,setSearch]               = useState('');
   const navMobile = useIsMobile(720); // drives the two-row mobile header layout
   // Debounced version of `search`: updated 300ms after the user stops typing.
@@ -7849,8 +8222,8 @@ export default function App() {
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
-    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming };
-  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, debouncedSearch]);
+    return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming, dnb: !!filters.dnb };
+  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, filters.dnb, debouncedSearch]);
 
   // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
   // Code paths:
@@ -7875,6 +8248,7 @@ export default function App() {
       return fetchShopifyProductSearch({
         searchTerm: fetchParams.searchTerm,
         filterTags: fetchParams.filterTags,
+        dnb: fetchParams.dnb,
         ...extraOpts,
       });
     }
@@ -7882,6 +8256,7 @@ export default function App() {
       sortKey: fetchParams.sortKey,
       reverse: fetchParams.reverse,
       filterTags: fetchParams.filterTags,
+      dnb: fetchParams.dnb,
       ...extraOpts,
     });
   }, [fetchParams]);
@@ -8004,7 +8379,7 @@ export default function App() {
   return (
     <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>{setPage('shop');setFilter('forthcoming',false);}}>
+      <Nav onLogo={()=>{setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
           <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
@@ -8020,7 +8395,8 @@ export default function App() {
         </div>
         {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
-          <button onClick={()=>setFilter('forthcoming', !filters.forthcoming)} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <button onClick={()=>setFilters(f=>({...f, forthcoming:!f.forthcoming, dnb:false, genre:null, label:null, year:null}))} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <button onClick={()=>setFilters(f=>({...f, dnb:!f.dnb, forthcoming:false, genre:null, label:null, year:null}))} title={filters.dnb?'Exit Drum & Bass — back to all records':'Drum & Bass Only'} style={{background:filters.dnb?S.accent:'transparent',color:filters.dnb?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.dnb?'✕ Drum & Bass':'Drum & Bass'}</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
@@ -8036,7 +8412,7 @@ export default function App() {
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
-        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={allGenres} allYears={allYears} />
+        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={filters.dnb ? allGenres.filter(g=>DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase())) : allGenres.filter(g=>!DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase()))} allYears={allYears} />
         {filters.forthcoming && (
           <div style={{display:'flex',justifyContent:'flex-end',gap:6,marginBottom:14}}>
             {['list','grid'].map(v=>(
