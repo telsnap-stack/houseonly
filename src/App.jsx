@@ -3119,22 +3119,23 @@ async function parseTvInvoicePdf(pdfBlob) {
     for (const y of ys) text += byLine[y].join(' ').replace(/\s+/g, ' ').trim() + '\n';
   }
   const out = {};
-  const lineRe = /^\d{10}\s+(.+?)\s+(\d+)\s+([\d.,]+)\s+IL\s+\d+\s+[\d.,]+$/;
-  // cat-no is the first token of the description part, but TV cat-nos can contain
-  // a space ("FOKUZ 016.2","FOKUZLP 003"). The cat-no is everything up to the first
-  // run that looks like the title; we capture the leading token(s) that match a
-  // cat-no shape: letters+digits, optionally "LP", optional space+digits, dots,
-  // trailing underscore. Fall back to first token.
+  // In-browser pdfjs lays each item row out as:
+  //   {10-digit code} {catno(+spaced)} {TOTAL} IL {QTY} {description} {pct} {PRICE}
+  // (Different from the server text layer — price is LAST, total comes early.)
+  const lineRe = /^\d{10}\s+(.+?)\s+([\d.,]+)\s+IL\s+(\d+)\s+(.+?)\s+\d+\s+([\d.,]+)$/;
+  // cat-no = leading token(s); TV cat-nos can contain a space ("FOKUZ 016.2",
+  // "FOKUZLP 003"), a dot (".1"/".2"), a hyphen suffix ("-2024"), or trailing "_".
   const catRe = /^([A-Z0-9]+(?:\.\d+)?(?:LP)?(?:[\s-][0-9][\w.]*)?[A-Z0-9]*_?)/i;
+  const eu = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.')); // "8,89" / "1.234,56"
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     const m = lineRe.exec(line);
     if (!m) continue;
-    const desc = m[1];
-    const qty  = parseInt(m[2], 10);
-    const cost = parseFloat(m[3].replace(/\./g, '').replace(',', '.')); // EU "8,89" / "1.234,56"
-    const cm = catRe.exec(desc);
-    const catno = (cm ? cm[1] : desc.split(/\s+/)[0]).trim();
+    const head = m[1];                 // catno (+ maybe leading desc tokens)
+    const qty  = parseInt(m[3], 10);   // QTY
+    const cost = eu(m[5]);             // PRICE (per item) — last column
+    const cm = catRe.exec(head);
+    const catno = (cm ? cm[1] : head.split(/\s+/)[0]).trim();
     const key = tvKey(catno);
     if (key) out[key] = { catno, qty: qty || 1, cost: isNaN(cost) ? null : cost };
   }
