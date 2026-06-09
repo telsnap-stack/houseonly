@@ -50,8 +50,11 @@ const DISCOGS_DEFAULT_CONDITION = 'Near Mint (NM or M-)' as const;
 // Weights (grams) for shipping; 2LP heavier than single.
 const WEIGHT_SINGLE_LP = 500;
 const WEIGHT_DOUBLE_LP = 900;
-// Only auto-process products from this source (Fase 3.5B scope: DBH only).
-const AUTO_LIST_SOURCE_TAG = 'source:dbh';
+// Only auto-process products from a known distributor source. DBH was the
+// Fase 3.5B first slice; W&S/Kudos/MT added once the pipeline was validated.
+// The Discogs matcher uses catno/label/artist/title (not genre), so all four
+// sources are matchable even though W&S lacks genre at import time.
+const ACCEPTED_SOURCE_TAGS = ['source:ws', 'source:kudos', 'source:dbh', 'source:mt', 'source:tv'];
 
 // Status values from Discogs we consider "firm sale" — we reduce Shopify
 // inventory when an order reaches one of these. Earlier states ("New Order",
@@ -963,6 +966,14 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ error: 'invalid hmac' }, 401);
   }
 
+  // Backfill mode: when ?sync=1, run the match synchronously (awaited) and
+  // bypass the idempotency lock. Live Shopify webhooks never set this, so they
+  // keep the fast-response + background (waitUntil) behaviour. Synchronous
+  // processing avoids the 30s waitUntil cancellation that drops slow matches
+  // during bulk re-sends — fine here because the caller is our backfill script,
+  // not Shopify, so a slower response is acceptable.
+  const syncMode = new URL(request.url).searchParams.get('sync') === '1';
+
   // 2. Parse
   let body: ShopifyProductWebhookBody;
   try {
@@ -976,18 +987,22 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ ok: true, processed: 0, reason: 'no product id' });
   }
 
-  // 3. Idempotency lock (60s TTL — dedupes Shopify retries)
-  const lockKey = `lock:product-create:${productId}`;
-  if (await env.SYNC_STATE.get(lockKey)) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+  // 3. Idempotency lock (60s TTL — dedupes Shopify retries). Skipped in sync
+  // backfill mode, where re-processing is intentional and idempotent at the
+  // pending-review level.
+  if (!syncMode) {
+    const lockKey = `lock:product-create:${productId}`;
+    if (await env.SYNC_STATE.get(lockKey)) {
+      return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+    }
+    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
   }
-  await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
 
-  // 4. Filter: only source:dbh products
+  // 4. Filter: only products from a known distributor source
   const tags = body.tags || '';
   const tagList = tags.split(',').map(t => t.trim());
-  if (!tagList.includes(AUTO_LIST_SOURCE_TAG)) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'not source:dbh' });
+  if (!tagList.some(t => ACCEPTED_SOURCE_TAGS.includes(t))) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'no recognized source tag' });
   }
 
   // 4b. NEVER list pre-orders on Discogs. A `forthcoming` product has stock 0
@@ -1021,16 +1036,22 @@ export async function handleProductCreateWebhook(
   const label = extractLabelTag(tags);
   const weight = detectWeight(title, tags);
 
-  // 7. Do the slow work (Discogs match + maybe create listing) in background
-  ctx.waitUntil(processProductMatch(env, {
-    sku, barcode, artist, title, label, shopifyPrice, weight,
-  }));
+  // 7. Run the match (Discogs lookup + maybe create listing). In sync/backfill
+  // mode, await it so it completes before we respond (no waitUntil 30s cap). For
+  // live Shopify webhooks, background it so we respond fast as Shopify requires.
+  const matchArgs = { sku, barcode, artist, title, label, shopifyPrice, weight };
+  if (syncMode) {
+    await processProductMatch(env, matchArgs);
+  } else {
+    ctx.waitUntil(processProductMatch(env, matchArgs));
+  }
 
   return jsonResponse({
     ok: true,
     product_id: productId,
     sku,
     queued: true,
+    sync: syncMode,
     has_barcode: Boolean(barcode),
   });
 }
