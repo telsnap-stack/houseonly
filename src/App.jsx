@@ -6784,6 +6784,181 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── RADAR PAGE (daily Bandcamp house-discovery crate) ─────────
+// A standalone /radar page. The global pipeline (Worker cron, 08:00 UTC) scrapes
+// Bandcamp Daily, scores each release against the House Only taste profile with
+// Haiku, and writes an ever-growing crate to KV. This page reads that crate, lets
+// us audition every record via its Bandcamp embed, and vote Keep/Pass to sharpen
+// the profile. Admin-gated for now with the same BOOTSTRAP_AUTH_SECRET as the
+// other panels; Phase 2 swaps the secret gate for per-subscriber auth + per-user
+// re-ranking. All /radar/* endpoints are Bearer-gated and CORS-open (prod Worker).
+function radarScoreColor(s) {
+  if (s >= 70) return S.accent;   // strong match
+  if (s >= 60) return '#ffd24a';  // solid
+  return '#ff9a4a';               // borderline — kept by the genre-gate floor
+}
+function bandcampEmbedSrc(id) {
+  return `https://bandcamp.com/EmbeddedPlayer/album=${id}/size=large/bgcol=111111/linkcol=c8ff00/tracklist=true/transparent=true/`;
+}
+
+function RadarItemCard({ item, busy, onVote }) {
+  const [showAbout, setShowAbout] = useState(false);
+  const kept = item.vote === 1;
+  const passed = item.vote === -1;
+  const about = (item.about || '').trim();
+  const longAbout = about.length > 220;
+  return (
+    <div style={{background:S.bg,border:`1px solid ${kept?S.accent:S.border}`,borderRadius:3,padding:16,opacity:passed?0.5:1,transition:'opacity 0.15s'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:10}}>
+        <div style={{minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:800,color:S.text,lineHeight:1.25}}>{item.artist} — {item.title}</div>
+          <div style={{fontSize:10,color:S.muted,marginTop:4}}>
+            {item.label || 'self-released'}{item.year?` · ${item.year}`:''}{item.tracks?` · ${item.tracks} ${item.tracks===1?'track':'tracks'}`:''}
+            <span style={{marginLeft:8,fontSize:8.5,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:item.route==='stock'?'#080808':S.muted,background:item.route==='stock'?S.accent:'transparent',border:item.route==='stock'?'none':`1px solid ${S.border}`,padding:'2px 6px',borderRadius:2}}>{item.route==='stock'?'Vinyl':'Press watch'}</span>
+          </div>
+        </div>
+        <div style={{textAlign:'right',whiteSpace:'nowrap',flexShrink:0}}>
+          <span style={{fontSize:11,fontWeight:800,color:'#080808',background:radarScoreColor(item.score),padding:'3px 8px',borderRadius:2}}>{item.score}</span>
+          {item.axis && <div style={{fontSize:9,color:S.muted,marginTop:5,maxWidth:150,whiteSpace:'normal',lineHeight:1.4}}>{item.axis}</div>}
+        </div>
+      </div>
+
+      <div style={{borderRadius:3,overflow:'hidden',marginBottom:10,maxWidth:400}}>
+        <iframe title={`${item.artist} — ${item.title}`} src={bandcampEmbedSrc(item.id)} loading="lazy"
+          style={{border:0,width:'100%',height:472,display:'block',background:'#111'}}>
+          <a href={item.url}>{item.artist} — {item.title}</a>
+        </iframe>
+      </div>
+
+      {item.reason && <div style={{fontSize:11,color:S.text,lineHeight:1.5,marginBottom:8}}>{item.reason}</div>}
+
+      {Array.isArray(item.tags) && item.tags.length>0 && (
+        <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:about?10:12}}>
+          {item.tags.slice(0,10).map((t,i)=>(
+            <span key={i} style={{fontSize:8.5,color:S.muted,letterSpacing:0.5,textTransform:'uppercase',border:`1px solid ${S.border}`,padding:'2px 6px',borderRadius:2}}>{t}</span>
+          ))}
+        </div>
+      )}
+
+      {about && (
+        <div style={{fontSize:10.5,color:S.muted,lineHeight:1.6,marginBottom:12}}>
+          {longAbout && !showAbout ? about.slice(0,220).trimEnd()+'…' : about}
+          {longAbout && <button onClick={()=>setShowAbout(s=>!s)} style={{background:'none',border:'none',color:S.accent,cursor:'pointer',fontSize:10,fontFamily:'inherit',marginLeft:6,padding:0}}>{showAbout?'less':'more'}</button>}
+        </div>
+      )}
+
+      <div style={{display:'flex',gap:8,alignItems:'center'}}>
+        <button onClick={()=>onVote(item.id, kept?null:1)} disabled={busy} style={{flex:1,background:kept?S.accent:'transparent',color:kept?'#080808':S.text,border:`1px solid ${kept?S.accent:S.border}`,borderRadius:2,padding:'9px 14px',cursor:busy?'wait':'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',opacity:busy?0.5:1}}>{kept?'♥ Kept':'♥ Keep'}</button>
+        <button onClick={()=>onVote(item.id, passed?null:-1)} disabled={busy} style={{flex:1,background:passed?S.danger:'transparent',color:passed?'#fff':S.muted,border:`1px solid ${passed?S.danger:S.border}`,borderRadius:2,padding:'9px 14px',cursor:busy?'wait':'pointer',fontSize:10,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',opacity:busy?0.5:1}}>{passed?'✕ Passed':'✕ Pass'}</button>
+        <a href={item.url} target="_blank" rel="noreferrer" style={{fontSize:9,color:S.muted,letterSpacing:1,textTransform:'uppercase',textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'9px 12px',whiteSpace:'nowrap'}}>Bandcamp ↗</a>
+      </div>
+    </div>
+  );
+}
+
+function RadarPage({ onBack }) {
+  const [secret, setSecret]   = useState('');
+  const [authed, setAuthed]   = useState(false);
+  const [items, setItems]     = useState([]);
+  const [total, setTotal]     = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState('');
+  const [busy, setBusy]       = useState({});    // {id:true} while a vote is in flight
+  const [filter, setFilter]   = useState('all'); // all | stock | press | kept
+
+  const authHeaders = () => ({ 'Authorization': `Bearer ${secret}`, 'Content-Type':'application/json' });
+
+  async function loadFeed(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError('');
+    try {
+      const r = await fetch(`${WORKER_URL}/radar/feed?limit=80`, { headers:{ 'Authorization':`Bearer ${useSecret}` } });
+      if (r.status === 401) { setError('Unauthorized — check the admin secret.'); setAuthed(false); setLoading(false); return; }
+      if (!r.ok) { setError(`Feed failed (HTTP ${r.status})`); setLoading(false); return; }
+      const data = await r.json();
+      setItems(data.items || []);
+      setTotal(data.total || 0);
+      setAuthed(true);
+    } catch (e) { setError(`Network error: ${e.message}`); }
+    setLoading(false);
+  }
+
+  async function vote(id, v) {
+    const prev = items;
+    setBusy(b=>({...b,[id]:true}));
+    setItems(list=>list.map(it=>it.id===id?{...it,vote:v}:it)); // optimistic
+    try {
+      const r = await fetch(`${WORKER_URL}/radar/vote`, { method:'POST', headers:authHeaders(), body:JSON.stringify({ id, vote:v }) });
+      if (!r.ok) { setItems(prev); setError(`Vote failed (HTTP ${r.status})`); }
+    } catch (e) { setItems(prev); setError(`Network error: ${e.message}`); }
+    setBusy(b=>({...b,[id]:false}));
+  }
+
+  const backBtn = <button onClick={onBack} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,letterSpacing:1.5,textTransform:'uppercase',padding:'5px 12px',borderRadius:2,whiteSpace:'nowrap'}}>← Shop</button>;
+
+  // ── Secret gate ──
+  if (!authed) {
+    return (
+      <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
+        <Nav onLogo={onBack}>{backBtn}</Nav>
+        <div style={{maxWidth:340,margin:'0 auto',padding:'48px 20px'}}>
+          <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Radar · Admin Secret</div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>Paste the worker BOOTSTRAP_AUTH_SECRET. Held in memory only — never stored.</div>
+          <input type="password" value={secret} onChange={e=>setSecret(e.target.value)} onKeyDown={e=>e.key==='Enter'&&loadFeed()} placeholder="BOOTSTRAP_AUTH_SECRET"
+            style={{width:'100%',background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+          <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadFeed()} disabled={!secret||loading} full />
+          {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Feed ──
+  const keptCount = items.filter(i=>i.vote===1).length;
+  const passedCount = items.filter(i=>i.vote===-1).length;
+  const shown = items.filter(i =>
+    filter==='stock' ? i.route==='stock' :
+    filter==='press' ? i.route==='press' :
+    filter==='kept'  ? i.vote===1 : true
+  );
+  const fBtn = (key,label) => (
+    <button onClick={()=>setFilter(key)} style={{background:filter===key?S.accent:'transparent',color:filter===key?'#080808':S.muted,border:`1px solid ${filter===key?S.accent:S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',whiteSpace:'nowrap'}}>{label}</button>
+  );
+
+  return (
+    <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
+      <Nav onLogo={onBack}>{backBtn}</Nav>
+      <div style={{maxWidth:760,margin:'0 auto',padding:'40px 16px 60px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:12,marginBottom:6,flexWrap:'wrap'}}>
+          <div>
+            <h1 style={{margin:0,fontSize:20,fontWeight:800,letterSpacing:-0.5}}>Radar</h1>
+            <div style={{fontSize:11,color:S.muted,marginTop:4,letterSpacing:2,textTransform:'uppercase'}}>Daily house discovery</div>
+          </div>
+          <Btn ch={loading?'Refreshing…':'↻ Refresh'} variant="ghost" onClick={()=>loadFeed()} disabled={loading} />
+        </div>
+        <p style={{fontSize:11,color:S.muted,lineHeight:1.6,margin:'12px 0 0',maxWidth:560}}>Fresh house surfaced from Bandcamp every morning, scored against the House Only taste and growing daily. Audition each one, then Keep or Pass to sharpen what the radar brings back.</p>
+
+        <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',margin:'22px 0 18px'}}>
+          {fBtn('all',`All ${total}`)}
+          {fBtn('stock','Vinyl')}
+          {fBtn('press','Press watch')}
+          {fBtn('kept',`♥ Kept ${keptCount}`)}
+          {passedCount>0 && <span style={{fontSize:9,color:S.muted,marginLeft:'auto'}}>{passedCount} passed</span>}
+        </div>
+
+        {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
+        {loading && items.length===0 && <div style={{fontSize:11,color:S.muted,padding:'32px 0',textAlign:'center'}}>Loading the crate…</div>}
+        {!loading && total===0 && <div style={{fontSize:11,color:S.muted,padding:'32px 0',textAlign:'center'}}>The crate is empty — the radar runs daily at 08:00 UTC, or seed it now with a manual run.</div>}
+        {!loading && total>0 && shown.length===0 && <div style={{fontSize:11,color:S.muted,padding:'32px 0',textAlign:'center'}}>Nothing under this filter.</div>}
+
+        <div style={{display:'flex',flexDirection:'column',gap:16}}>
+          {shown.map(it => <RadarItemCard key={it.id} item={it} busy={!!busy[it.id]} onVote={vote} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── NEWSLETTER PANEL (build a broadcast draft in Resend) ───────
 // Flow: paste BOOTSTRAP_AUTH_SECRET → load preview (3 sections from the Worker)
 // → tick which records go in the email (✓) and which show large → set subject +
@@ -8361,6 +8536,11 @@ export default function App() {
   // of the site's routing.
   const isJoinPage = /^\/join\/?$/.test(path);
   if (isJoinPage) return <JoinPage onBack={()=>navigate('/')} />;
+
+  // /radar — daily Bandcamp house-discovery crate. Path-routed like /join; the
+  // page gates itself behind the admin secret for now (Phase 2: subscriber auth).
+  const isRadarPage = /^\/radar\/?$/.test(path);
+  if (isRadarPage) return <RadarPage onBack={()=>navigate('/')} />;
 
   if(page==='login') return (
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif"}}>
