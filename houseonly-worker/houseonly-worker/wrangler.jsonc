@@ -25,13 +25,19 @@
     {
       "binding": "SYNC_STATE",
       "id": "5c5c0ee16cc34f68bd2109b01894f09d"
+    },
+    {
+      // RADAR_KV: House Only Radar daily-discovery crate (see src/lib/radar.ts).
+      "binding": "RADAR_KV",
+      "id": "f6d45b8c2e9d4b88834cb3598697a5e4"
     }
   ],
   // Cron triggers. Production cron activated May 19 2026 when Fase 3 was migrated
   // to prod. Polls Discogs marketplace every 15 min to detect sales (Fase 3E).
+  // The daily "0 8 * * *" cron runs the House Only Radar discovery (src/lib/radar.ts).
   // Staging cron continues to run independently (see env.staging.triggers below).
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["*/15 * * * *", "0 8 * * *"]
   },
   "env": {
     "staging": {
@@ -53,12 +59,18 @@
         {
           "binding": "SYNC_STATE",
           "id": "5069be832df64efdb5e3d1a49f85b0ea"
+        },
+        {
+          // RADAR_KV (staging): House Only Radar daily-discovery crate.
+          "binding": "RADAR_KV",
+          "id": "728914e5974c4c10ae59af63c22ef224"
         }
       ],
       // Fase 3E cron: poll Discogs every 15 min. Worker reads meta:sync_3e_mode
       // from KV to decide between dry (default, log only) and live (adjust stock).
+      // The daily "0 8 * * *" cron runs the House Only Radar discovery on staging.
       "triggers": {
-        "crons": ["*/15 * * * *"]
+        "crons": ["*/15 * * * *", "0 8 * * *"]
       }
     }
   }
