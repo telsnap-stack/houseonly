@@ -6823,9 +6823,9 @@ function RadarItemCard({ item, busy, onVote }) {
         </div>
       </div>
 
-      <div style={{borderRadius:3,overflow:'hidden',marginBottom:10,maxWidth:400,position:'relative',paddingBottom:'calc(100% + 74px)'}}>
+      <div style={{borderRadius:3,overflow:'hidden',marginBottom:10,maxWidth:400}}>
         <iframe title={`${item.artist} — ${item.title}`} src={bandcampEmbedSrc(item.id)} loading="lazy"
-          style={{border:0,position:'absolute',top:0,left:0,width:'100%',height:'100%',display:'block',background:'#111'}}>
+          style={{border:0,width:'100%',aspectRatio:'400/490',display:'block',background:'#111'}}>
           <a href={item.url}>{item.artist} — {item.title}</a>
         </iframe>
       </div>
