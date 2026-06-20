@@ -6798,7 +6798,7 @@ function radarScoreColor(s) {
   return '#ff9a4a';               // borderline — kept by the genre-gate floor
 }
 function bandcampEmbedSrc(id) {
-  return `https://bandcamp.com/EmbeddedPlayer/album=${id}/size=large/bgcol=111111/linkcol=c8ff00/tracklist=true/transparent=true/`;
+  return `https://bandcamp.com/EmbeddedPlayer/album=${id}/size=large/bgcol=111111/linkcol=c8ff00/tracklist=false/transparent=true/`;
 }
 
 function RadarItemCard({ item, busy, onVote }) {
@@ -6823,9 +6823,9 @@ function RadarItemCard({ item, busy, onVote }) {
         </div>
       </div>
 
-      <div style={{borderRadius:3,overflow:'hidden',marginBottom:10,maxWidth:400}}>
+      <div style={{borderRadius:3,overflow:'hidden',marginBottom:10,maxWidth:400,position:'relative',paddingBottom:'calc(100% + 120px)'}}>
         <iframe title={`${item.artist} — ${item.title}`} src={bandcampEmbedSrc(item.id)} loading="lazy"
-          style={{border:0,width:'100%',height:472,display:'block',background:'#111'}}>
+          style={{border:0,position:'absolute',top:0,left:0,width:'100%',height:'100%',display:'block',background:'#111'}}>
           <a href={item.url}>{item.artist} — {item.title}</a>
         </iframe>
       </div>
