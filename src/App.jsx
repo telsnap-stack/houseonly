@@ -6801,12 +6801,27 @@ function bandcampEmbedSrc(id) {
   return `https://bandcamp.com/EmbeddedPlayer/album=${id}/size=large/bgcol=111111/linkcol=c8ff00/tracklist=false/transparent=true/`;
 }
 
-function RadarItemCard({ item, busy, onVote }) {
+function RadarItemCard({ item, busy, onVote, collapsed, onExpand }) {
   const [showAbout, setShowAbout] = useState(false);
   const kept = item.vote === 1;
   const passed = item.vote === -1;
   const about = (item.about || '').trim();
   const longAbout = about.length > 220;
+
+  // Once judged + kept, collapse to a slim re-expandable row so the page stays
+  // focused on records not yet auditioned. Click the row to reopen the full card.
+  if (kept && collapsed) {
+    return (
+      <div onClick={onExpand} title="Click to expand" style={{display:'flex',alignItems:'center',gap:10,background:S.bg,border:`1px solid ${S.accent}`,borderRadius:3,padding:'9px 12px',cursor:'pointer'}}>
+        <span style={{color:S.accent,fontSize:12,flexShrink:0}}>♥</span>
+        <span style={{fontSize:11,fontWeight:700,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',minWidth:0,flex:1}}>{item.artist} — {item.title}</span>
+        <span style={{fontSize:9,color:S.muted,whiteSpace:'nowrap',flexShrink:0}}>{item.label||'self-released'}</span>
+        <span style={{fontSize:10,fontWeight:800,color:'#080808',background:radarScoreColor(item.score),padding:'2px 7px',borderRadius:2,flexShrink:0}}>{item.score}</span>
+        <span style={{fontSize:8,color:S.muted,letterSpacing:1,flexShrink:0}}>▾</span>
+      </div>
+    );
+  }
+
   return (
     <div style={{background:S.bg,border:`1px solid ${kept?S.accent:S.border}`,borderRadius:3,padding:16,opacity:passed?0.5:1,transition:'opacity 0.15s'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,marginBottom:10}}>
@@ -6864,7 +6879,9 @@ function RadarPage({ onBack }) {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
   const [busy, setBusy]       = useState({});    // {id:true} while a vote is in flight
-  const [filter, setFilter]   = useState('all'); // all | stock | press | kept
+  const [filter, setFilter]   = useState('all'); // all | stock | press | kept | passed
+  const [expanded, setExpanded] = useState(()=>new Set()); // ids of kept cards manually re-opened
+  const toggleExpand = (id) => setExpanded(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; });
 
   const authHeaders = () => ({ 'Authorization': `Bearer ${secret}`, 'Content-Type':'application/json' });
 
@@ -6917,9 +6934,11 @@ function RadarPage({ onBack }) {
   const keptCount = items.filter(i=>i.vote===1).length;
   const passedCount = items.filter(i=>i.vote===-1).length;
   const shown = items.filter(i =>
-    filter==='stock' ? i.route==='stock' :
-    filter==='press' ? i.route==='press' :
-    filter==='kept'  ? i.vote===1 : true
+    filter==='stock'  ? (i.route==='stock' && i.vote!==-1) :
+    filter==='press'  ? (i.route==='press' && i.vote!==-1) :
+    filter==='kept'   ? i.vote===1 :
+    filter==='passed' ? i.vote===-1 :
+    i.vote!==-1   // 'all' default: hide the ones already passed
   );
   const fBtn = (key,label) => (
     <button onClick={()=>setFilter(key)} style={{background:filter===key?S.accent:'transparent',color:filter===key?'#080808':S.muted,border:`1px solid ${filter===key?S.accent:S.border}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',whiteSpace:'nowrap'}}>{label}</button>
@@ -6943,7 +6962,7 @@ function RadarPage({ onBack }) {
           {fBtn('stock','Vinyl')}
           {fBtn('press','Press watch')}
           {fBtn('kept',`♥ Kept ${keptCount}`)}
-          {passedCount>0 && <span style={{fontSize:9,color:S.muted,marginLeft:'auto'}}>{passedCount} passed</span>}
+          {passedCount>0 && fBtn('passed',`✕ Passed ${passedCount}`)}
         </div>
 
         {error && <div style={{fontSize:10,color:S.danger,marginBottom:12}}>{error}</div>}
@@ -6952,7 +6971,7 @@ function RadarPage({ onBack }) {
         {!loading && total>0 && shown.length===0 && <div style={{fontSize:11,color:S.muted,padding:'32px 0',textAlign:'center'}}>Nothing under this filter.</div>}
 
         <div style={{display:'flex',flexDirection:'column',gap:16}}>
-          {shown.map(it => <RadarItemCard key={it.id} item={it} busy={!!busy[it.id]} onVote={vote} />)}
+          {shown.map(it => <RadarItemCard key={it.id} item={it} busy={!!busy[it.id]} onVote={vote} collapsed={it.vote===1 && filter!=='kept' && !expanded.has(it.id)} onExpand={()=>toggleExpand(it.id)} />)}
         </div>
       </div>
     </div>
