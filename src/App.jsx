@@ -7341,6 +7341,20 @@ function PreorderImporter() {
   }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── processing (back half — mirrors DBHImporter) ────────────
+  // Los pre-orders D&B/Jungle de TV llevan los tags del storefront para aparecer
+  // en la sección "Drum & Bass" (y bajo Jungle) como el stock TV facturado:
+  // siempre `dnb`, más `jungle` cuando aplica. Solo para source:tv D&B/jungle.
+  // (La descarga de los ZIP de TV se hace con tv-download.sh sobre las URLs
+  // xcdn — el importer no descarga, solo reconcilia los ZIP que sueltas.)
+  const dnbTagsFor = (source, genre) => {
+    if ((source || '') !== 'tv') return [];
+    const g = (genre || '').toLowerCase();
+    if (!/drum\s*(&|n|and)?\s*bass|jungle|liquid funk/i.test(g)) return [];
+    const tags = ['dnb'];
+    if (/jungle/i.test(g)) tags.push('jungle');
+    return tags;
+  };
+
   const process = async () => {
     if (!recon.ready.length) return;
     setError(''); setStatus('processing'); setResults([]);
@@ -7441,6 +7455,7 @@ function PreorderImporter() {
           `source:${m.source || 'dbh'}`,
           label ? `label:${label}` : '',
           genre,
+          ...dnbTagsFor(m.source, genre),
           year ? String(year) : '',
           'forthcoming',
           release ? `release:${release}` : '',
@@ -7504,6 +7519,7 @@ function PreorderImporter() {
     `source:${r._source || 'dbh'}`,
     r._label ? `label:${r._label}` : '',
     r._genre || '',
+    ...dnbTagsFor(r._source, r._genre),
     r._year || '',
     'forthcoming',
     r._release ? `release:${r._release}` : '',
