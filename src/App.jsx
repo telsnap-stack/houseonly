@@ -7418,7 +7418,11 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
+        // Triple Vision promopacks are plain CORS-enabled DigitalOcean Spaces
+        // ZIPs — fetch() works directly (no proxy, no session cookies needed),
+        // so we can await the full blob like DBH and name it by cat-no.
+        const isTv = /triple-vision-assets[^]*\.zip$/i.test(url);
+        return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTv };
       });
     if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
     setDownloadDone(false);
@@ -7429,9 +7433,38 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { url, catno, dbhId, isDbh } = rows[i];
+      const { url, catno, dbhId, isDbh, isTv } = rows[i];
       try {
-        if (isDbh) {
+        if (isTv) {
+          // Triple Vision: direct CDN fetch, await the full blob, save by cat-no.
+          // The promopack URL carries a literal 0x17 control byte before the
+          // timestamp ("…promopack-UTIMESTAMP\x17NNNNN.zip"); manifests may store
+          // it raw or pre-encoded as %17. Normalize to %17 so fetch() sends a
+          // valid URL either way.
+          const tvUrl = url.replace(/\u0017/g, '%17');
+          const res = await fetch(tvUrl);
+          if (!res.ok) {
+            missing++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+          }
+          const blob = await res.blob();      // waits for the FULL file
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          const safeCatno = (catno || `tv_${i}`).replace(/[\/\\]/g, '_');
+          a.download = `${safeCatno}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
+          ok++;
+          setDownloadStats({ ok, missing, failed });
+          setDownloadProgress(i + 1);
+          await new Promise(r => setTimeout(r, 300));
+        } else if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
           // a real ZIP comes back as application/zip.
@@ -7535,6 +7568,22 @@ function PreorderImporter() {
   }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── processing (back half — mirrors DBHImporter) ────────────
+  // Triple Vision D&B/Jungle pre-orders must carry the storefront's D&B tags so
+  // they surface in the "Drum & Bass" section (and under the Jungle genre) just
+  // like invoiced TV stock. Mirrors the live-importer tag set: always `dnb`,
+  // plus `jungle` when the genre is jungle. Only fires for source:tv records
+  // whose genre is in the D&B/jungle family; house TV releases (rare) are left
+  // untouched so they stay in the main catalogue.
+  const dnbTagsFor = (source, genre) => {
+    if ((source || '') !== 'tv') return [];
+    const g = (genre || '').toLowerCase();
+    const isDnbFamily = /drum\s*(&|n|and)?\s*bass|jungle|liquid funk/i.test(g);
+    if (!isDnbFamily) return [];
+    const tags = ['dnb'];
+    if (/jungle/i.test(g)) tags.push('jungle');
+    return tags;
+  };
+
   const process = async () => {
     if (!recon.ready.length) return;
     setError(''); setStatus('processing'); setResults([]);
@@ -7635,6 +7684,7 @@ function PreorderImporter() {
           `source:${m.source || 'dbh'}`,
           label ? `label:${label}` : '',
           genre,
+          ...dnbTagsFor(m.source, genre),
           year ? String(year) : '',
           'forthcoming',
           release ? `release:${release}` : '',
@@ -7698,6 +7748,7 @@ function PreorderImporter() {
     `source:${r._source || 'dbh'}`,
     r._label ? `label:${r._label}` : '',
     r._genre || '',
+    ...dnbTagsFor(r._source, r._genre),
     r._year || '',
     'forthcoming',
     r._release ? `release:${r._release}` : '',
