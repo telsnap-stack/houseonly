@@ -7418,15 +7418,7 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        // El manifest de TV trae la URL de la PÁGINA de release (el link de
-        // promopack del email es el de DO-Spaces muerto; el ZIP real es solo con
-        // login). Para TV: fetch de la página con la sesión del usuario, leer la
-        // URL xcdn del promopack, fetch del ZIP como BLOB y descargar el blob.
-        // Usamos blob (no anchor-click directo) porque un blob URL nunca navega
-        // la pestaña — se descarga y ya, igual que DBH. xcdn permite fetch con
-        // CORS+sesión (verificado: 200 application/x-zip).
-        const isTvPage = /distribution\.triplevision\.nl\/release\//i.test(url);
-        return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTvPage };
+        return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
       });
     if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
     setDownloadDone(false);
@@ -7437,55 +7429,9 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { url, catno, dbhId, isDbh, isTvPage } = rows[i];
+      const { url, catno, dbhId, isDbh } = rows[i];
       try {
-        if (isTvPage) {
-          // Triple Vision: 1) fetch de la página de release con la cookie de
-          // sesión, 2) extraer la URL xcdn del promopack del HTML, 3) fetch del
-          // ZIP como BLOB y descargar el blob por cat-no. Todo con
-          // credentials:'include' para que la sesión TV autorice. NUNCA navega
-          // la pestaña (es blob), igual que DBH.
-          let zip = '';
-          try {
-            const pageRes = await fetch(url, { credentials: 'include' });
-            if (pageRes.ok) {
-              const html = await pageRes.text();
-              zip = (html.match(/https?:\/\/xcdn\.triplevision\.nl\/zip\/promopack\/[^\s"'<>]+?\.zip/i) || [])[0] || '';
-            }
-          } catch (e) { /* cae a missing */ }
-          if (!zip) {
-            // sin link xcdn → no logueado en TV, o catno equivocado
-            missing++;
-            setDownloadStats({ ok, missing, failed });
-            setDownloadProgress(i + 1);
-            await new Promise(r => setTimeout(r, 200));
-            continue;
-          }
-          const zres = await fetch(zip, { credentials: 'include' });
-          const zct = (zres.headers.get('content-type') || '').toLowerCase();
-          const isZip = zct.includes('zip') || zct.includes('octet-stream');
-          if (!zres.ok || !isZip) {
-            missing++;
-            setDownloadStats({ ok, missing, failed });
-            setDownloadProgress(i + 1);
-            await new Promise(r => setTimeout(r, 200));
-            continue;
-          }
-          const blob = await zres.blob();      // espera el archivo COMPLETO
-          const blobUrl = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = blobUrl;
-          const safeCatno = (catno || `tv_${i}`).replace(/[\/\\]/g, '_');
-          a.download = `${safeCatno}.zip`;     // blob URL → siempre descarga
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
-          ok++;
-          setDownloadStats({ ok, missing, failed });
-          setDownloadProgress(i + 1);
-          await new Promise(r => setTimeout(r, 300));
-        } else if (isDbh) {
+        if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
           // a real ZIP comes back as application/zip.
@@ -7592,6 +7538,8 @@ function PreorderImporter() {
   // Los pre-orders D&B/Jungle de TV llevan los tags del storefront para aparecer
   // en la sección "Drum & Bass" (y bajo Jungle) como el stock TV facturado:
   // siempre `dnb`, más `jungle` cuando aplica. Solo para source:tv D&B/jungle.
+  // (La descarga de los ZIP de TV se hace con tv-download.sh sobre las URLs
+  // xcdn — el importer no descarga, solo reconcilia los ZIP que sueltas.)
   const dnbTagsFor = (source, genre) => {
     if ((source || '') !== 'tv') return [];
     const g = (genre || '').toLowerCase();
