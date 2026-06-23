@@ -7418,15 +7418,14 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        // Triple Vision promopacks are gated behind the dealer login on
-        // distribution.triplevision.nl (the "Promopack: download" link is
-        // /login/?rql=1&rp=/release/{CATNO}/). Like W&S, only the operator's
-        // logged-in browser session can fetch them — a Worker has no TV session
-        // and a cross-origin fetch() carries no cookies. So we anchor-click the
-        // real URL (same gesture as opening it by hand): the browser downloads
-        // it with the user's cookies.
-        const isTv = /(?:distribution\.triplevision\.nl|triplevision\.nl\/release)/i.test(url);
-        return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTv };
+        // TV manifests carry the release PAGE URL (the email's promopack link is
+        // the dead DO-Spaces one; the real ZIP is login-only). For a TV page URL
+        // we fetch the page with the user's session, read the xcdn promopack
+        // link off it, then anchor-click that — reusing the W&S session-cookie
+        // mechanism. The {labelId}/{relId} in the xcdn path aren't in the email,
+        // so this page hop is the only way to resolve them.
+        const isTvPage = /distribution\.triplevision\.nl\/release\//i.test(url);
+        return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTvPage };
       });
     if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
     setDownloadDone(false);
@@ -7437,18 +7436,31 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { url, catno, dbhId, isDbh, isTv } = rows[i];
+      const { url, catno, dbhId, isDbh, isTvPage } = rows[i];
       try {
-        if (isTv) {
-          // Triple Vision: session-authenticated download (dealer login on
-          // distribution.triplevision.nl). Anchor-click the real URL so the
-          // browser navigates with the operator's TV cookies — same mechanism
-          // as W&S. We can't await completion or force a filename (cross-origin
-          // download ignores a.download); the server's content-disposition names
-          // the file. Pop-up blockers kill window.open, so we use anchor-click
-          // on a longer stagger.
+        if (isTvPage) {
+          // Triple Vision: the manifest gives the release PAGE. Fetch it with the
+          // dealer session cookie (credentials:'include'), read the real xcdn
+          // promopack URL out of the page HTML, then anchor-click that — the same
+          // session-auth download path W&S uses. If the user isn't logged in the
+          // page shows a /login/ link instead of an xcdn one → count as missing.
+          let zip = '';
+          try {
+            const pageRes = await fetch(url, { credentials: 'include' });
+            if (pageRes.ok) {
+              const html = await pageRes.text();
+              zip = (html.match(/https?:\/\/xcdn\.triplevision\.nl\/zip\/promopack\/[^\s"'<>]+?\.zip/i) || [])[0] || '';
+            }
+          } catch (e) { /* fall through to missing */ }
+          if (!zip) {
+            missing++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+          }
           const a = document.createElement('a');
-          a.href = url;
+          a.href = zip;
           a.rel = 'noreferrer';
           document.body.appendChild(a);
           a.click();
@@ -7456,7 +7468,7 @@ function PreorderImporter() {
           ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
-          await new Promise(r => setTimeout(r, 2500));
+          await new Promise(r => setTimeout(r, 2500)); // stagger, like W&S direct downloads
         } else if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
@@ -7561,17 +7573,13 @@ function PreorderImporter() {
   }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── processing (back half — mirrors DBHImporter) ────────────
-  // Triple Vision D&B/Jungle pre-orders must carry the storefront's D&B tags so
-  // they surface in the "Drum & Bass" section (and under the Jungle genre) just
-  // like invoiced TV stock. Mirrors the live-importer tag set: always `dnb`,
-  // plus `jungle` when the genre is jungle. Only fires for source:tv records
-  // whose genre is in the D&B/jungle family; house TV releases (rare) are left
-  // untouched so they stay in the main catalogue.
+  // TV D&B/Jungle pre-orders carry the storefront's D&B tags so they surface in
+  // the "Drum & Bass" section (and under Jungle) like invoiced TV stock: always
+  // `dnb`, plus `jungle` when applicable. Only for source:tv D&B-family records.
   const dnbTagsFor = (source, genre) => {
     if ((source || '') !== 'tv') return [];
     const g = (genre || '').toLowerCase();
-    const isDnbFamily = /drum\s*(&|n|and)?\s*bass|jungle|liquid funk/i.test(g);
-    if (!isDnbFamily) return [];
+    if (!/drum\s*(&|n|and)?\s*bass|jungle|liquid funk/i.test(g)) return [];
     const tags = ['dnb'];
     if (/jungle/i.test(g)) tags.push('jungle');
     return tags;
