@@ -7418,10 +7418,14 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        // Triple Vision promopacks are plain CORS-enabled DigitalOcean Spaces
-        // ZIPs — fetch() works directly (no proxy, no session cookies needed),
-        // so we can await the full blob like DBH and name it by cat-no.
-        const isTv = /triple-vision-assets[^]*\.zip$/i.test(url);
+        // Triple Vision promopacks are gated behind the dealer login on
+        // distribution.triplevision.nl (the "Promopack: download" link is
+        // /login/?rql=1&rp=/release/{CATNO}/). Like W&S, only the operator's
+        // logged-in browser session can fetch them — a Worker has no TV session
+        // and a cross-origin fetch() carries no cookies. So we anchor-click the
+        // real URL (same gesture as opening it by hand): the browser downloads
+        // it with the user's cookies.
+        const isTv = /(?:distribution\.triplevision\.nl|triplevision\.nl\/release)/i.test(url);
         return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTv };
       });
     if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
@@ -7436,34 +7440,23 @@ function PreorderImporter() {
       const { url, catno, dbhId, isDbh, isTv } = rows[i];
       try {
         if (isTv) {
-          // Triple Vision: direct CDN fetch, await the full blob, save by cat-no.
-          // The promopack URL carries a literal 0x17 control byte before the
-          // timestamp ("…promopack-UTIMESTAMP\x17NNNNN.zip"); manifests may store
-          // it raw or pre-encoded as %17. Normalize to %17 so fetch() sends a
-          // valid URL either way.
-          const tvUrl = url.replace(/\u0017/g, '%17');
-          const res = await fetch(tvUrl);
-          if (!res.ok) {
-            missing++;
-            setDownloadStats({ ok, missing, failed });
-            setDownloadProgress(i + 1);
-            await new Promise(r => setTimeout(r, 200));
-            continue;
-          }
-          const blob = await res.blob();      // waits for the FULL file
-          const blobUrl = URL.createObjectURL(blob);
+          // Triple Vision: session-authenticated download (dealer login on
+          // distribution.triplevision.nl). Anchor-click the real URL so the
+          // browser navigates with the operator's TV cookies — same mechanism
+          // as W&S. We can't await completion or force a filename (cross-origin
+          // download ignores a.download); the server's content-disposition names
+          // the file. Pop-up blockers kill window.open, so we use anchor-click
+          // on a longer stagger.
           const a = document.createElement('a');
-          a.href = blobUrl;
-          const safeCatno = (catno || `tv_${i}`).replace(/[\/\\]/g, '_');
-          a.download = `${safeCatno}.zip`;
+          a.href = url;
+          a.rel = 'noreferrer';
           document.body.appendChild(a);
           a.click();
           a.remove();
-          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
           ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 2500));
         } else if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
