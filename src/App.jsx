@@ -7418,12 +7418,13 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        // TV manifests carry the release PAGE URL (the email's promopack link is
-        // the dead DO-Spaces one; the real ZIP is login-only). For a TV page URL
-        // we fetch the page with the user's session, read the xcdn promopack
-        // link off it, then anchor-click that — reusing the W&S session-cookie
-        // mechanism. The {labelId}/{relId} in the xcdn path aren't in the email,
-        // so this page hop is the only way to resolve them.
+        // El manifest de TV trae la URL de la PÁGINA de release (el link de
+        // promopack del email es el de DO-Spaces muerto; el ZIP real es solo con
+        // login). Para TV: fetch de la página con la sesión del usuario, leer la
+        // URL xcdn del promopack, fetch del ZIP como BLOB y descargar el blob.
+        // Usamos blob (no anchor-click directo) porque un blob URL nunca navega
+        // la pestaña — se descarga y ya, igual que DBH. xcdn permite fetch con
+        // CORS+sesión (verificado: 200 application/x-zip).
         const isTvPage = /distribution\.triplevision\.nl\/release\//i.test(url);
         return { url, catno: m.catno, dbhId, isDbh: !!dbhId, isTvPage };
       });
@@ -7439,11 +7440,11 @@ function PreorderImporter() {
       const { url, catno, dbhId, isDbh, isTvPage } = rows[i];
       try {
         if (isTvPage) {
-          // Triple Vision: the manifest gives the release PAGE. Fetch it with the
-          // dealer session cookie (credentials:'include'), read the real xcdn
-          // promopack URL out of the page HTML, then anchor-click that — the same
-          // session-auth download path W&S uses. If the user isn't logged in the
-          // page shows a /login/ link instead of an xcdn one → count as missing.
+          // Triple Vision: 1) fetch de la página de release con la cookie de
+          // sesión, 2) extraer la URL xcdn del promopack del HTML, 3) fetch del
+          // ZIP como BLOB y descargar el blob por cat-no. Todo con
+          // credentials:'include' para que la sesión TV autorice. NUNCA navega
+          // la pestaña (es blob), igual que DBH.
           let zip = '';
           try {
             const pageRes = await fetch(url, { credentials: 'include' });
@@ -7451,24 +7452,39 @@ function PreorderImporter() {
               const html = await pageRes.text();
               zip = (html.match(/https?:\/\/xcdn\.triplevision\.nl\/zip\/promopack\/[^\s"'<>]+?\.zip/i) || [])[0] || '';
             }
-          } catch (e) { /* fall through to missing */ }
+          } catch (e) { /* cae a missing */ }
           if (!zip) {
+            // sin link xcdn → no logueado en TV, o catno equivocado
             missing++;
             setDownloadStats({ ok, missing, failed });
             setDownloadProgress(i + 1);
             await new Promise(r => setTimeout(r, 200));
             continue;
           }
+          const zres = await fetch(zip, { credentials: 'include' });
+          const zct = (zres.headers.get('content-type') || '').toLowerCase();
+          const isZip = zct.includes('zip') || zct.includes('octet-stream');
+          if (!zres.ok || !isZip) {
+            missing++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+          }
+          const blob = await zres.blob();      // espera el archivo COMPLETO
+          const blobUrl = URL.createObjectURL(blob);
           const a = document.createElement('a');
-          a.href = zip;
-          a.rel = 'noreferrer';
+          a.href = blobUrl;
+          const safeCatno = (catno || `tv_${i}`).replace(/[\/\\]/g, '_');
+          a.download = `${safeCatno}.zip`;     // blob URL → siempre descarga
           document.body.appendChild(a);
           a.click();
           a.remove();
+          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
           ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
-          await new Promise(r => setTimeout(r, 2500)); // stagger, like W&S direct downloads
+          await new Promise(r => setTimeout(r, 300));
         } else if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
@@ -7573,9 +7589,9 @@ function PreorderImporter() {
   }, [manifest, zipFiles, liveHandles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── processing (back half — mirrors DBHImporter) ────────────
-  // TV D&B/Jungle pre-orders carry the storefront's D&B tags so they surface in
-  // the "Drum & Bass" section (and under Jungle) like invoiced TV stock: always
-  // `dnb`, plus `jungle` when applicable. Only for source:tv D&B-family records.
+  // Los pre-orders D&B/Jungle de TV llevan los tags del storefront para aparecer
+  // en la sección "Drum & Bass" (y bajo Jungle) como el stock TV facturado:
+  // siempre `dnb`, más `jungle` cuando aplica. Solo para source:tv D&B/jungle.
   const dnbTagsFor = (source, genre) => {
     if ((source || '') !== 'tv') return [];
     const g = (genre || '').toLowerCase();
