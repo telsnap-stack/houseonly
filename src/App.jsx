@@ -2735,7 +2735,11 @@ async function loadXLSX() {
 }
 
 function catnoFromFilename(name) {
-  const base = name.replace(/\.zip$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  let base = name.replace(/\.zip$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  // W&S download names URL-encode punctuation in the catno (e.g. "DBS#1" comes
+  // through as "DBS%231"). Decode so the catno round-trips back to the invoice
+  // SKU; %23→# then collapses to the same rdKey. Tolerate malformed escapes.
+  try { base = decodeURIComponent(base); } catch { /* keep raw on bad % escape */ }
   const m = base.match(/^\d+-(.+)$/);
   return (m ? m[1] : base).toUpperCase().trim();
 }
@@ -3547,17 +3551,37 @@ function RubadubImporter() {
 
       // Index ZIPs by normalized catno (filename → catno, same as W&S).
       const zipByKey = {};
-      zipFiles.forEach(f => { zipByKey[rdKey(catnoFromFilename(f.name))] = f; });
+      zipFiles.forEach(f => { const k = rdKey(catnoFromFilename(f.name)); if (k) zipByKey[k] = f; });
 
       // SPINE = the invoice. Every invoiced disc gets a row, ZIP or not.
       const keys = Object.keys(invoice);
+
+      // Resolve a ZIP per invoice SKU. Exact catno match first; if none, fall
+      // back to a format-suffix match — W&S filenames sometimes carry a trailing
+      // format token the Rubadub SKU omits ("AOS-111" ↔ "aos111lp", "EB004" ↔
+      // "EB004S"). Only ZIPs not already claimed by an exact match are eligible,
+      // and only when the leftover is a known format token, so e.g. "AOS-432-J"
+      // (…432J) never steals the "AOS-432Z" (…432Z) ZIP.
+      const FORMAT_SUFFIXES = ['LP','EP','S','RE','X','R','12','7','CD'];
+      const zipForKey = {};
+      const claimed = new Set();
+      for (const k of keys) { if (zipByKey[k]) { zipForKey[k] = zipByKey[k]; claimed.add(k); } }
+      for (const k of keys) {
+        if (zipForKey[k]) continue;
+        const hit = Object.keys(zipByKey).find(zk => {
+          if (claimed.has(zk)) return false;
+          const [a, b] = zk.length > k.length ? [zk, k] : [k, zk];
+          return a.startsWith(b) && FORMAT_SUFFIXES.includes(a.slice(b.length));
+        });
+        if (hit) { zipForKey[k] = zipByKey[hit]; claimed.add(hit); }
+      }
       const total = keys.length;
       const processed = [];
 
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
         const inv = invoice[key];
-        const zipFile = zipByKey[key];
+        const zipFile = zipForKey[key];
         const safeKey = key.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
         setProgress({ done:i, total, current:`${inv.sku} — processing…` });
 
