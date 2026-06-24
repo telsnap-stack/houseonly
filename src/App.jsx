@@ -3413,6 +3413,347 @@ function TripleVisionImporter() {
   );
 }
 
+
+// ── RUBADUB IMPORTER (UK distributor; invoice-PDF-driven, GBP) ──
+// Rubadub ships no promopacks of their own — ZIPs are sourced from OTHER
+// distributors (W&S etc.) and matched to the Rubadub invoice by SKU/catno.
+// Inputs:
+//   • the Rubadub invoice PDF (the SPINE: SKU + dealer £ cost + qty per line)
+//   • the ZIP files (named {…-}{CATNO}.zip, same convention W&S uses)
+// Every invoiced disc gets a row. With a matching ZIP → cover + audio; without
+// → cover-less (add art in Shopify). Prices = dealer £ × FX → × margin.
+
+// Normalize a catno/SKU for cross-distributor matching: upper-case, strip
+// every non-alphanumeric (so "AOS-432-J" ↔ "AOS432J", "DBS#1" ↔ "DBS1",
+// "BLNDTROP5.5" ↔ "BLNDTROP55"). Punctuation differs between Rubadub's SKU
+// and a W&S filename, so we collapse it on BOTH sides before comparing.
+function rdKey(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '').trim();
+}
+
+// Parse a Rubadub invoice PDF (text layer) into { key: {sku, qty, cost} }.
+// Each item row (grouped by y-position) looks like:
+//   "{qty} {item name} {SKU} {HS code?} £{net} £{total}"
+// Anchor on the two trailing £-amounts; SKU = last body token before the
+// optional HS code / first £. Shipping & fee lines are dropped. Continuation
+// lines (a long SKU that wraps, e.g. "echospace012-" + "RE") are rejoined.
+async function parseRubadubInvoicePdf(pdfBlob) {
+  const pdfjsLib = await loadPDFJS();
+  const arrayBuffer = await pdfBlob.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const rawLines = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const byLine = {};
+    for (const it of content.items) {
+      const y = Math.round(it.transform[5]);
+      (byLine[y] = byLine[y] || []).push(it.str);
+    }
+    const ys = Object.keys(byLine).map(Number).sort((a, b) => b - a);
+    for (const y of ys) rawLines.push(byLine[y].join(' ').replace(/\s+/g, ' ').trim());
+  }
+
+  // qty + body + optional HS + £net + £total
+  const LINE = /^(\d+)\s+(.+?)\s+(?:(\d{4}\.\d{2}\.\d{2})\s+)?£([\d.,]+)\s+£([\d.,]+)$/;
+  const gbp  = (s) => parseFloat(s.replace(/,/g, ''));
+
+  // Pass 1: rejoin wrapped SKU tails. If a matched row's last body token ends
+  // with '-' and the next line is a bare short token, splice it in before the
+  // (HS?/£) suffix.
+  const merged = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    let ln = rawLines[i];
+    const m = LINE.exec(ln);
+    if (m) {
+      const body = m[2].trim();
+      const last = body.split(/\s+/).pop();
+      if (last.endsWith('-') && i + 1 < rawLines.length) {
+        const nxt = rawLines[i + 1].trim();
+        if (/^[A-Za-z0-9]{1,8}$/.test(nxt)) {
+          const cut = m[3] ? ln.indexOf(m[3]) : ln.indexOf('£');
+          const head = ln.slice(0, cut).trimEnd();
+          const suffix = ln.slice(cut);
+          ln = `${head}${nxt} ${suffix}`;
+          i++; // consume continuation line
+        }
+      }
+    }
+    merged.push(ln);
+  }
+
+  const out = {};
+  for (const ln of merged) {
+    const m = LINE.exec(ln);
+    if (!m) continue;
+    const qty  = parseInt(m[1], 10);
+    const body = m[2].trim();
+    const cost = gbp(m[4]);                 // dealer £ (Item net), per unit
+    const parts = body.split(/\s+/);
+    const sku  = parts.length > 1 ? parts[parts.length - 1] : body;
+    // Drop shipping / postage / fee lines (not records).
+    if (/Z-?EU|SHIPPING|POSTAGE|CARRIAGE/i.test(sku)) continue;
+    const key = rdKey(sku);
+    if (!key) continue;
+    // item name = body minus the trailing SKU token
+    const name = parts.length > 1 ? parts.slice(0, -1).join(' ') : body;
+    out[key] = { sku: sku.trim(), name: name.trim(), qty: qty || 1, cost: isNaN(cost) ? null : cost };
+  }
+  return out;
+}
+
+// Split a Rubadub "Artist - Title" item name into {artist, title}. Rubadub uses
+// both ASCII hyphen and en-dash. First " - "/" – " is the separator.
+function rdSplitName(name) {
+  const m = String(name || '').match(/^(.*?)\s+[-–]\s+(.+)$/);
+  if (m) return { artist: m[1].trim(), title: m[2].trim() };
+  return { artist: '', title: String(name || '').trim() };
+}
+
+function RubadubImporter() {
+  const [pdfFile, setPdfFile]   = useState(null);   // invoice PDF (SKU + cost + qty)
+  const [invoice, setInvoice]   = useState(null);   // parsed { key: {sku,name,qty,cost} }
+  const [zipFiles, setZipFiles] = useState([]);
+  const [status, setStatus]     = useState('idle');
+  const [progress, setProgress] = useState({ done:0, total:0, current:'' });
+  const [results, setResults]   = useState([]);
+  const [error, setError]       = useState('');
+  const [margin, setMargin]     = useState(60);
+  const [fx, setFx]             = useState(1.15);    // GBP→EUR
+  const [genre, setGenre]       = useState('Deep House');
+  const pdfRef = useRef(null);
+  const zipRef = useRef(null);
+
+  const assignFiles = async (files) => {
+    const pdfs = files.filter(f => /\.pdf$/i.test(f.name));
+    const zips = files.filter(f => /\.zip$/i.test(f.name));
+    if (pdfs[0]) {
+      setPdfFile(pdfs[0]);
+      try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
+      catch (e) { setError('Could not read invoice PDF: ' + e.message); }
+    }
+    if (zips.length) setZipFiles(prev => {
+      const existing = new Set(prev.map(f => f.name));
+      return [...prev, ...zips.filter(f => !existing.has(f.name))];
+    });
+  };
+
+  const process = async () => {
+    if (!invoice) return;
+    setError(''); setStatus('processing'); setResults([]);
+    try {
+      setProgress({ done:0, total:0, current:'Loading libraries…' });
+      const JSZip = await loadJSZip();
+
+      // Index ZIPs by normalized catno (filename → catno, same as W&S).
+      const zipByKey = {};
+      zipFiles.forEach(f => { zipByKey[rdKey(catnoFromFilename(f.name))] = f; });
+
+      // SPINE = the invoice. Every invoiced disc gets a row, ZIP or not.
+      const keys = Object.keys(invoice);
+      const total = keys.length;
+      const processed = [];
+
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const inv = invoice[key];
+        const zipFile = zipByKey[key];
+        const safeKey = key.replace(/[^A-Za-z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+        setProgress({ done:i, total, current:`${inv.sku} — processing…` });
+
+        let coverUrl='', tracks=[], desc='', pdfLabel='', pdfGenre='', itemError='';
+        if (zipFile) {
+          try {
+            const zip   = await JSZip.loadAsync(zipFile);
+            const files = Object.values(zip.files).filter(f => !f.dir);
+            const imgFiles  = files.filter(f => /\.(jpg|jpeg|png)$/i.test(f.name));
+            const coverFile = imgFiles.find(f => /front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+            const salesPdf  = files.find(f => /SALESPAPER\.pdf$/i.test(f.name));
+            const audioFiles = files.filter(f => /\.(mp3|wav|flac|aac|ogg)$/i.test(f.name)).sort((a,b)=>a.name.localeCompare(b.name));
+
+            if (coverFile) {
+              setProgress({ done:i, total, current:`${inv.sku} — uploading cover…` });
+              const rawBlob = await coverFile.async('blob');
+              const ext     = coverFile.name.split('.').pop().toLowerCase();
+              const resizedBlob = await resizeImageIfNeeded(rawBlob, 2000, 0.92);
+              const wasResized  = resizedBlob !== rawBlob;
+              const outExt      = wasResized ? 'jpg' : ext;
+              const outMime     = wasResized ? 'image/jpeg' : (ext==='png' ? 'image/png' : 'image/jpeg');
+              coverUrl = await uploadToR2(resizedBlob, `covers/${safeKey}.${outExt}`, outMime);
+            }
+            if (salesPdf) {
+              setProgress({ done:i, total, current:`${inv.sku} — reading press text…` });
+              const blob = await salesPdf.async('blob');
+              const extracted = await extractSalesPaperText(blob);
+              desc=extracted.desc; pdfLabel=extracted.label; pdfGenre=extracted.genre;
+            }
+            for (const af of audioFiles) {
+              const filename = af.name.split('/').pop();
+              const safeFilename = filename.replace(/[^A-Za-z0-9._-]+/g,'-');
+              setProgress({ done:i, total, current:`${inv.sku} — uploading ${filename}…` });
+              const blob = await af.async('blob');
+              const url  = await uploadToR2(blob, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              // Same W&S filename cleanup as ZipImporter (ZIPs come from W&S).
+              let trackName = filename.replace(/\.[^.]+$/, '');
+              const prefixMatch = trackName.match(/^(\d+)_(\d+)_(.+)$/);
+              let trackIdx = tracks.length + 1;
+              if (prefixMatch) { trackIdx = parseInt(prefixMatch[2],10) || trackIdx; trackName = prefixMatch[3]; }
+              const dashIdx = trackName.indexOf(' - ');
+              if (dashIdx > -1) trackName = trackName.slice(dashIdx + 3);
+              if (!/^[A-D]\d?[\s.:)-]/.test(trackName)) {
+                const tot = audioFiles.length, half = Math.ceil(tot/2);
+                const sideLetter = trackIdx <= half ? 'A' : 'B';
+                const sideNum = trackIdx <= half ? trackIdx : trackIdx - half;
+                trackName = `${sideLetter}${sideNum} ${trackName}`;
+              }
+              let duration = '';
+              const durMatch = trackName.match(/\s*\(?(\d{1,2}:\d{2})\)?\s*$/);
+              if (durMatch) { duration = durMatch[1]; trackName = trackName.slice(0, durMatch.index); }
+              tracks.push({ name: trackName.trim(), d: duration, url });
+            }
+          } catch (e) { itemError = e.message; }
+        }
+
+        const { artist, title } = rdSplitName(inv.name);
+        const finalGenre = pdfGenre || genre;
+        const label = pdfLabel || '';
+        const is2LP = /2[\s-]?lp|double\s*lp|3[\s-]?lp|2x12|3x12/i.test(inv.name) || /2lp|3lp|2x12|3x12/i.test(key);
+        const grams = is2LP ? '900' : '500';
+        const qty   = String(inv.qty || 1);
+
+        // Pricing: dealer £ × FX → × margin → ceil − 0.01 (ends .99).
+        let price = '', priceFlag = '';
+        if (typeof inv.cost === 'number') {
+          const eur = inv.cost * fx * (1 + margin/100);
+          price = String((Math.ceil(eur) - 0.01).toFixed(2));
+        } else {
+          priceFlag = 'NO COST IN INVOICE';
+        }
+        const costEur = typeof inv.cost === 'number' ? (inv.cost * fx).toFixed(2) : '';
+
+        const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
+        const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
+        const tags = ['vinyl','source:rd', label?`label:${label}`:'', finalGenre].filter(Boolean).join(', ');
+
+        processed.push({
+          _catno: inv.sku, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
+          'Handle': handle, 'Title': title || inv.sku, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
+          'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
+          'Tags': tags,
+          'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
+          'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
+          'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
+          'Variant SKU': inv.sku, 'Variant Grams': grams, 'Variant Inventory Tracker': 'shopify',
+          'Variant Inventory Qty': qty, 'Variant Inventory Policy': 'continue',
+          'Variant Fulfillment Service': 'manual', 'Variant Price': price,
+          'Variant Compare At Price': '', 'Variant Requires Shipping': 'TRUE', 'Variant Taxable': 'TRUE',
+          'Unit Price Total Measure': '', 'Unit Price Total Measure Unit': '',
+          'Unit Price Base Measure': '', 'Unit Price Base Measure Unit': '',
+          'Variant Barcode': '', 'Image Src': coverUrl, 'Image Position': coverUrl ? '1' : '',
+          'Image Alt Text': coverUrl ? `${title} - ${artist}` : '',
+          'Gift Card': 'FALSE', 'SEO Title': '', 'SEO Description': '',
+          'Variant Image': '', 'Variant Weight Unit': 'kg', 'Variant Tax Code': '', 'Cost per item': costEur, 'Status': 'active',
+        });
+        setProgress({ done:i+1, total, current:'' });
+      }
+
+      setResults(processed);
+      setStatus('review');
+    } catch (e) { setError(e.message); setStatus('idle'); }
+  };
+
+  const downloadCSV = () => {
+    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_rd.csv'; a.click();
+  };
+
+  const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
+  const covered=results.filter(r=>r._coverUrl).length;
+  const withAudio=results.filter(r=>r._tracks?.length>0).length;
+  const errors=results.filter(r=>r._error).length;
+  const noPrice=results.filter(r=>r._priceFlag).length;
+  const noZip=results.filter(r=>r._noZip).length;
+  const invCount = invoice ? Object.keys(invoice).length : 0;
+  const ready = !!invoice;
+  const sampleCost = invoice ? (Object.values(invoice).find(r=>typeof r.cost==='number')?.cost || 9.99) : 9.99;
+
+  return (
+    <div>
+      <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
+        Rubadub (UK) import. Rubadub supplies no promopacks — drop the <strong>Rubadub invoice PDF</strong> (SKU + dealer £ cost + qty) plus the <strong>ZIPs sourced from Word &amp; Sound</strong> (or other distributors). The invoice is the spine: every invoiced record gets a row — matched by SKU it gets cover + audio, the rest come through cover-less (add art in Shopify). Prices = dealer £ × FX × margin.
+      </p>
+      <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${ready?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
+        <div style={{ fontSize:28, marginBottom:6 }}>💿</div>
+        <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag Rubadub invoice PDF + W&amp;S ZIPs here</div>
+        <div style={{ display:'flex', gap:8, justifyContent:'center', flexWrap:'wrap' }}>
+          <input ref={pdfRef} type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
+          <input ref={zipRef} type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
+          <button onClick={()=>pdfRef.current.click()} style={{ background:pdfFile?S.accent:S.border, border:'none', color:pdfFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{pdfFile?`✓ Invoice (${invCount})`:'+ Invoice PDF'}</button>
+          <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}</button>
+          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear ZIPs</button>}
+        </div>
+      </div>
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:4}}>Invoice: {invCount} records parsed (SKU + £ cost + qty)</div>}
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>ZIPs: {zipFiles.length} · cover-less: {Math.max(0, invCount - zipFiles.length)}</div>}
+      {zipFiles.length>0&&<div style={{ maxHeight:80, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=>{const k=rdKey(catnoFromFilename(f.name));const hit=invoice&&invoice[k];return <span key={i} style={{ background:hit?S.border:'#3a1a00', padding:'2px 8px', borderRadius:10, color:hit?S.text:'#ff8800' }}>{catnoFromFilename(f.name)}{hit?'':' ?'}</span>;})}</div>}
+      {status==='idle'&&ready&&(
+        <div style={{marginBottom:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
+            <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:64,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
+            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>GBP→EUR</span>
+            <input type="number" step="0.01" value={fx} onChange={e=>setFx(Math.max(0.01,parseFloat(e.target.value)||1))} style={{width:64,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
+            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Genre</span>
+            <input type="text" value={genre} onChange={e=>setGenre(e.target.value)} style={{width:120,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none'}} />
+          </div>
+          <div style={{fontSize:9,color:S.muted,marginBottom:10}}>→ e.g. £{sampleCost} × {fx} × {(1+margin/100).toFixed(2)} → €{(Math.ceil(sampleCost*fx*(1+margin/100))-0.01).toFixed(2)}</div>
+          <Btn ch={`🚀 Process ${invCount} Invoiced Records → Upload to R2`} onClick={process} full />
+        </div>
+      )}
+      {status==='processing'&&(
+        <div style={{ padding:14, background:S.bg, borderRadius:2, border:`1px solid ${S.border}` }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}><span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1 }}>PROCESSING…</span><span style={{ fontSize:10, color:S.muted }}>{progress.done} / {progress.total} · {pct}%</span></div>
+          <div style={{ height:3, background:S.border, borderRadius:2, overflow:'hidden', marginBottom:8 }}><div style={{ height:'100%', background:S.accent, width:`${pct}%`, transition:'width 0.3s' }} /></div>
+          {progress.current&&<div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>→ {progress.current}</div>}
+        </div>
+      )}
+      {error&&<div style={{ marginTop:8, padding:10, background:'#1a0000', border:`1px solid ${S.danger}44`, borderRadius:2, fontSize:10, color:S.danger }}>{error}</div>}
+      {status==='review'&&results.length>0&&(
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
+            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
+            {results.map((r,i)=>(
+              <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
+                <div style={{ position:'relative', paddingBottom:'100%', background:'#1a1a2e' }}>
+                  {r._coverUrl?<img src={r._coverUrl} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover' }} onError={e=>e.target.style.display='none'} />:<div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:24 }}>💿</div>}
+                  {r._error&&<div style={{ position:'absolute', top:4, right:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>ERR</div>}
+                  {r._priceFlag&&<div style={{ position:'absolute', top:4, left:4, background:S.danger, borderRadius:2, fontSize:7, color:'#fff', padding:'2px 5px', fontWeight:700 }}>NO £</div>}
+                  {r._tracks?.length>0&&<div style={{ position:'absolute', bottom:4, left:4, background:'rgba(0,0,0,0.75)', borderRadius:2, fontSize:8, color:S.accent, padding:'2px 6px' }}>▶ {r._tracks.length} tracks</div>}
+                  {!r._coverUrl&&!r._error&&<div style={{ position:'absolute', top:4, right:4, background:'#ff8800', borderRadius:2, fontSize:7, color:'#080808', padding:'2px 5px', fontWeight:700 }}>NO IMG</div>}
+                </div>
+                <div style={{ padding:'8px 8px 6px' }}>
+                  <div style={{ fontSize:9, color:S.muted, fontFamily:'monospace', marginBottom:2 }}>{r._catno}</div>
+                  <div style={{ fontSize:10, fontWeight:700, color:S.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._title||r._catno}</div>
+                  <div style={{ fontSize:9, color:S.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r._artist}</div>
+                  {r._error&&<div style={{ fontSize:8, color:S.danger, marginTop:4, lineHeight:1.4 }}>{r._error}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+        </div>
+      )}
+    </div>
+  );
+}
 // ── EDIT MODAL ─────────────────────────────────────────────────
 const GENRE_OPTS=['Deep House','Tech House','Afro House','Chicago House','Soulful House','Acid House','Detroit House','Disco House'];
 function EditModal({ record, onSave, onClose }) {
@@ -7967,6 +8308,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('mt','🇮🇹 MT Import')}
           {tabBtn('rh','💎 Rush Hour Import')}
           {tabBtn('tv','🥁 Triple Vision')}
+          {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
           {tabBtn('newsletter','✉️ Newsletter')}
@@ -7977,6 +8319,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='mt'    && <MotherTongueImporter />}
         {tab==='rh'    && <RushHourImporter />}
         {tab==='tv'    && <TripleVisionImporter />}
+        {tab==='rd'    && <RubadubImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
         {tab==='newsletter'&& <NewsletterPanel />}
