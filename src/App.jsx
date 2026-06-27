@@ -8151,7 +8151,10 @@ function PreorderImporter() {
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
           {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
-            const total = manifest.filter(m=>m.zipUrl).length;
+            // Count only what will actually download: has zipUrl, not already
+            // live in Shopify, not manually excluded — matches downloadAllZips.
+            const isLiveC = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+            const total = manifest.filter(m=>m.zipUrl && !isLiveC(m.catno) && !excluded[m.catno]).length;
             const label = downloading
               ? `Downloading… ${downloadProgress}/${total}`
               : downloadDone
@@ -8181,12 +8184,16 @@ function PreorderImporter() {
             }
           </div>
 
-          {/* Need-ZIP list: tell the operator exactly what to download */}
-          {recon.needZip.length>0&&(
+          {/* Need-ZIP list: tell the operator exactly what to download.
+              Exclude rows already live in Shopify or manually dropped — those
+              don't need downloading. */}
+          {(()=>{
+            const toGet = recon.needZip.filter(m => !m._alreadyLive && !excluded[m._catno||m.catno]);
+            return toGet.length>0&&(
             <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
-              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({recon.needZip.length})</div>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({toGet.length})</div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                {recon.needZip.map((m,i)=>(
+                {toGet.map((m,i)=>(
                   <div key={i} style={{fontSize:10,color:S.text,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontFamily:'monospace',color:'#ff8800'}}>{m.catno}</span>
                     <span style={{color:S.muted}}>{m.artist} — {m.title}</span>
@@ -8195,7 +8202,8 @@ function PreorderImporter() {
                 ))}
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* Orphan-ZIP list: ZIPs with no manifest entry */}
           {recon.orphanZip.length>0&&(
