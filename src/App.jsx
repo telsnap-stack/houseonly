@@ -7778,14 +7778,31 @@ function PreorderImporter() {
     //     a plain anchor-click on the real URL (same as opening it by hand): the
     //     browser downloads it with the user's cookies. Pop-up blockers kill
     //     window.open, but a same-gesture anchor-click on a stagger works.
+    // Skip rows we already have (live in Shopify) or that were manually
+    // dropped (excluded), so the batch only fetches ZIPs we actually need.
+    // liveHandles is the Set of lowercased live handles+SKUs loaded with the
+    // manifest; null means the lookup hasn't returned yet (then we skip nothing).
+    const isLiveDl = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+    const skipped = { live: 0, dropped: 0 };
     const rows = manifest
-      .filter(m => m.zipUrl)
+      .filter(m => {
+        if (!m.zipUrl) return false;
+        if (isLiveDl(m.catno)) { skipped.live++; return false; }
+        if (excluded[m.catno])  { skipped.dropped++; return false; }
+        return true;
+      })
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
         return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
       });
-    if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
+    if (!rows.length) {
+      const had = manifest.some(m => m.zipUrl);
+      setError(had
+        ? `Nothing new to download — every ZIP is already live or excluded (${skipped.live} live, ${skipped.dropped} dropped).`
+        : 'No ZIP URLs in the manifest to download.');
+      return;
+    }
     setDownloadDone(false);
     setDownloadProgress(0);
     setDownloadStats({ ok: 0, missing: 0, failed: 0 });
