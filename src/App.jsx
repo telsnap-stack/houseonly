@@ -7584,14 +7584,27 @@ function PreorderImporter() {
     //     a plain anchor-click on the real URL (same as opening it by hand): the
     //     browser downloads it with the user's cookies. Pop-up blockers kill
     //     window.open, but a same-gesture anchor-click on a stagger works.
+    const isLiveDl = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+    const skipped = { live: 0, dropped: 0 };
     const rows = manifest
-      .filter(m => m.zipUrl)
+      .filter(m => {
+        if (!m.zipUrl) return false;
+        if (isLiveDl(m.catno)) { skipped.live++; return false; }
+        if (excluded[m.catno])  { skipped.dropped++; return false; }
+        return true;
+      })
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
         return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
       });
-    if (!rows.length) { setError('No ZIP URLs in the manifest to download.'); return; }
+    if (!rows.length) {
+      const had = manifest.some(m => m.zipUrl);
+      setError(had
+        ? `Nothing new to download — every ZIP is already live or excluded (${skipped.live} live, ${skipped.dropped} dropped).`
+        : 'No ZIP URLs in the manifest to download.');
+      return;
+    }
     setDownloadDone(false);
     setDownloadProgress(0);
     setDownloadStats({ ok: 0, missing: 0, failed: 0 });
@@ -7940,7 +7953,8 @@ function PreorderImporter() {
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
           {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
-            const total = manifest.filter(m=>m.zipUrl).length;
+            const isLiveC = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+            const total = manifest.filter(m=>m.zipUrl && !isLiveC(m.catno) && !excluded[m.catno]).length;
             const label = downloading
               ? `Downloading… ${downloadProgress}/${total}`
               : downloadDone
@@ -7971,11 +7985,11 @@ function PreorderImporter() {
           </div>
 
           {/* Need-ZIP list: tell the operator exactly what to download */}
-          {recon.needZip.length>0&&(
+          {(()=>{const toGet = recon.needZip.filter(m => !m._alreadyLive && !excluded[m._catno || m.catno]); return toGet.length>0&&(
             <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
-              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({recon.needZip.length})</div>
+              <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({toGet.length})</div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                {recon.needZip.map((m,i)=>(
+                {toGet.map((m,i)=>(
                   <div key={i} style={{fontSize:10,color:S.text,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                     <span style={{fontFamily:'monospace',color:'#ff8800'}}>{m.catno}</span>
                     <span style={{color:S.muted}}>{m.artist} — {m.title}</span>
@@ -7984,7 +7998,7 @@ function PreorderImporter() {
                 ))}
               </div>
             </div>
-          )}
+          );})()}
 
           {/* Orphan-ZIP list: ZIPs with no manifest entry */}
           {recon.orphanZip.length>0&&(
