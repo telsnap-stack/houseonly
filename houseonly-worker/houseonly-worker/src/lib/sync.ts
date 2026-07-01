@@ -791,8 +791,11 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
           delta: -1,  // one unit sold
         }],
         idempotencyKey,
-        'movement_created',
-        `discogs:order:${orderIdStr}`,
+        'correction',
+        // NOTE: no referenceDocumentUri — a ledger/reference document URI is
+        // forbidden when adjusting `available` (Shopify: INVALID_AVAILABLE_DOCUMENT).
+        // Passing one here caused every live decrement to be rejected at the
+        // GraphQL layer while adjustInventory still reported ok:true.
       );
 
       if (adjustResult.ok) {

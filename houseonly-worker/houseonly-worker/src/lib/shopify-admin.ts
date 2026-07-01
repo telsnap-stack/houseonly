@@ -281,6 +281,15 @@ export async function adjustInventory(
   };
 
   const result = await shopifyAdminGraphQL(env, mutation, variables);
+
+  // Top-level GraphQL errors leave `data` null. These must NOT be treated as
+  // success — this was the root cause of silent inventory drift: a rejected
+  // mutation (e.g. INVALID_AVAILABLE_DOCUMENT) surfaced here, `payload` was
+  // undefined, `userErrors` defaulted to [], and the function returned ok:true.
+  if (result?.errors?.length) {
+    return { ok: false, userErrors: result.errors };
+  }
+
   const payload = result?.data?.inventoryAdjustQuantities;
   const userErrors = payload?.userErrors || [];
 
@@ -288,9 +297,22 @@ export async function adjustInventory(
     return { ok: false, userErrors };
   }
 
+  // Require positive proof the adjustment actually applied. Without this a null
+  // payload silently returned ok:true. If no adjustment group came back, the
+  // change did not happen — report failure so the audit shows the truth.
+  if (!payload?.inventoryAdjustmentGroup?.id) {
+    return {
+      ok: false,
+      userErrors: [{
+        message: 'inventoryAdjustQuantities returned no inventoryAdjustmentGroup',
+        raw: result,
+      }],
+    };
+  }
+
   return {
     ok: true,
-    groupId: payload?.inventoryAdjustmentGroup?.id,
+    groupId: payload.inventoryAdjustmentGroup.id,
   };
 }
 
