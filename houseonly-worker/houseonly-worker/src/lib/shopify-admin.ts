@@ -491,3 +491,183 @@ export async function listShopifyWebhooks(
     uri: e.node.endpoint?.callbackUrl || '',
   }));
 }
+
+// ── DISCOGS ORDER → SHOPIFY ORDER (Fase 3G) ─────────────────────────
+//
+// Creates a real, PAID Shopify order for a Discogs marketplace sale so the
+// sale is captured in Shopify for Spanish fiscal invoicing (Shoptopus reads
+// completed Shopify orders to produce the factura).
+//
+// Design decisions (confirmed with Eduardo):
+//   - Line prices = each variant's CURRENT SHOPIFY PRICE (not the Discogs
+//     total). We pass variantId with no price override, so Shopify uses the
+//     product's own price. Rationale: the factura must reflect the record's
+//     actual selling price in the shop, independent of PayPal/Discogs fees
+//     and shipping that the buyer paid on Discogs.
+//   - taxExempt: true → NO VAT on these orders (per fiscal instruction).
+//     This overrides each product's own `taxable:true` flag at order level.
+//   - Real buyer: name/address/email parsed from the Discogs order and set
+//     as the Shopify shippingAddress + email so the factura names the buyer.
+//   - draftOrderComplete(paymentPending:false) → order is marked PAID and
+//     converts to a real order. Completing the draft performs the SINGLE
+//     inventory decrement — so the caller must NOT also call adjustInventory.
+//   - Tagged `source:discogs`; Discogs order id in note + custom attribute
+//     for traceability.
+
+export interface DiscogsBuyer {
+  name: string;
+  email?: string;
+  address1: string;
+  address2?: string;
+  city: string;
+  province?: string;
+  zip: string;
+  country: string;
+  phone?: string;
+}
+
+export interface DiscogsOrderLine {
+  variantId: string;   // gid://shopify/ProductVariant/...
+  quantity: number;
+}
+
+export interface CreateDiscogsOrderResult {
+  ok: boolean;
+  draftOrderId?: string;
+  orderId?: string;       // gid://shopify/Order/... after completion
+  orderName?: string;     // e.g. "#1007"
+  error?: string;
+  userErrors?: any[];
+}
+
+/**
+ * Create a paid Shopify order for a Discogs sale.
+ *
+ * @param env         Worker env
+ * @param discogsOrderId  e.g. "147628-8" (for tags/note/traceability)
+ * @param lines       Line items (variantId + quantity)
+ * @param buyer       Parsed buyer details from the Discogs order
+ */
+// Minimal country name → ISO 3166-1 alpha-2 map covering the markets a
+// Madrid vinyl shop actually ships to. Extend as needed. Unknown → undefined
+// (we then omit countryCode rather than reject the order).
+const COUNTRY_NAME_TO_CODE: Record<string, string> = {
+  'spain': 'ES', 'españa': 'ES', 'espana': 'ES',
+  'italy': 'IT', 'italia': 'IT',
+  'france': 'FR', 'germany': 'DE', 'deutschland': 'DE',
+  'united kingdom': 'GB', 'uk': 'GB', 'great britain': 'GB', 'england': 'GB',
+  'portugal': 'PT', 'netherlands': 'NL', 'holland': 'NL',
+  'belgium': 'BE', 'ireland': 'IE', 'austria': 'AT', 'switzerland': 'CH',
+  'sweden': 'SE', 'norway': 'NO', 'denmark': 'DK', 'finland': 'FI',
+  'poland': 'PL', 'czechia': 'CZ', 'czech republic': 'CZ', 'greece': 'GR',
+  'united states': 'US', 'usa': 'US', 'united states of america': 'US',
+  'canada': 'CA', 'japan': 'JP', 'australia': 'AU',
+};
+function countryNameToCode(name: string): string | undefined {
+  if (!name) return undefined;
+  return COUNTRY_NAME_TO_CODE[name.trim().toLowerCase()];
+}
+
+export async function createDiscogsOrder(
+  env: ShopifyAdminEnv,
+  discogsOrderId: string,
+  lines: DiscogsOrderLine[],
+  buyer: DiscogsBuyer,
+): Promise<CreateDiscogsOrderResult> {
+  if (lines.length === 0) {
+    return { ok: false, error: 'no line items' };
+  }
+
+  // ── 1. Create the draft order ─────────────────────────────────
+  const createMutation = `
+    mutation createDiscogsDraft($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder { id }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const shippingAddress: any = {
+    firstName: buyer.name,   // Discogs gives one combined name; put it all in firstName
+    address1: buyer.address1,
+    city: buyer.city,
+    zip: buyer.zip,
+  };
+  // Shopify wants a 2-letter ISO countryCode, but Discogs gives the country
+  // NAME ("Spain"). Map it; if unknown, omit countryCode rather than send an
+  // invalid value (Shopify would reject the whole order).
+  const cc = countryNameToCode(buyer.country);
+  if (cc) shippingAddress.countryCode = cc;
+  if (buyer.address2) shippingAddress.address2 = buyer.address2;
+  // NOTE: provinceCode requires a valid subdivision code we can't reliably
+  // derive from Discogs' free-text region, so we fold the region into
+  // address2 to preserve it without risking an invalid-code rejection.
+  if (buyer.province) {
+    shippingAddress.address2 = shippingAddress.address2
+      ? `${shippingAddress.address2}, ${buyer.province}`
+      : buyer.province;
+  }
+  if (buyer.phone) shippingAddress.phone = buyer.phone;
+
+  const draftInput: any = {
+    lineItems: lines.map(l => ({ variantId: l.variantId, quantity: l.quantity })),
+    taxExempt: true,                       // NO VAT
+    shippingAddress,
+    tags: ['source:discogs'],
+    sourceName: 'discogs',
+    note: `Discogs order ${discogsOrderId}`,
+    customAttributes: [{ key: 'discogs_order_id', value: discogsOrderId }],
+  };
+  if (buyer.email) draftInput.email = buyer.email;
+
+  const createRes = await shopifyAdminGraphQL(env, createMutation, { input: draftInput });
+  if (createRes?.errors?.length) {
+    return { ok: false, error: 'draftOrderCreate GraphQL error', userErrors: createRes.errors };
+  }
+  const createPayload = createRes?.data?.draftOrderCreate;
+  const createErrs = createPayload?.userErrors || [];
+  if (createErrs.length > 0) {
+    return { ok: false, error: 'draftOrderCreate userErrors', userErrors: createErrs };
+  }
+  const draftOrderId = createPayload?.draftOrder?.id;
+  if (!draftOrderId) {
+    return { ok: false, error: 'draftOrderCreate returned no draftOrder id', userErrors: [createRes] };
+  }
+
+  // ── 2. Complete the draft, marking it PAID ────────────────────
+  // paymentPending:false → mark as paid. Completing claims inventory (the
+  // single decrement — caller must not adjustInventory separately).
+  const completeMutation = `
+    mutation completeDiscogsDraft($id: ID!) {
+      draftOrderComplete(id: $id, paymentPending: false) {
+        draftOrder {
+          id
+          order { id name }
+        }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  const completeRes = await shopifyAdminGraphQL(env, completeMutation, { id: draftOrderId });
+  if (completeRes?.errors?.length) {
+    return { ok: false, draftOrderId, error: 'draftOrderComplete GraphQL error', userErrors: completeRes.errors };
+  }
+  const completePayload = completeRes?.data?.draftOrderComplete;
+  const completeErrs = completePayload?.userErrors || [];
+  if (completeErrs.length > 0) {
+    return { ok: false, draftOrderId, error: 'draftOrderComplete userErrors', userErrors: completeErrs };
+  }
+  const order = completePayload?.draftOrder?.order;
+  if (!order?.id) {
+    return { ok: false, draftOrderId, error: 'draftOrderComplete returned no order', userErrors: [completeRes] };
+  }
+
+  return {
+    ok: true,
+    draftOrderId,
+    orderId: order.id,
+    orderName: order.name,
+  };
+}

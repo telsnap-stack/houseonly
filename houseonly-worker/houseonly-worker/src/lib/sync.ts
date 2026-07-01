@@ -22,6 +22,8 @@ import {
   getOrders,
   createListing,
   searchRelease,
+  getOrder,
+  parseDiscogsShippingAddress,
   type DiscogsListing,
   type DiscogsOrder,
   type DiscogsListingInput,
@@ -34,6 +36,9 @@ import {
   findVariantBySku,
   getPrimaryLocationId,
   adjustInventory,
+  createDiscogsOrder,
+  type DiscogsOrderLine,
+  type DiscogsBuyer,
   type ShopifyAdminEnv,
 } from './shopify-admin';
 
@@ -706,7 +711,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     // TTL 24 h is enough cushion.
     await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 24 * 60 * 60 });
 
-    // Process each item in the order
+    // Build the audit record for this order.
     const audit: any = {
       order_id: orderIdStr,
       status: order.status,
@@ -714,7 +719,15 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       mode,
       processed_at: new Date().toISOString(),
       items: [],
+      order_creation: null as any,
     };
+
+    // ── Resolve every item to a Shopify variant (NO inventory calls here) ──
+    // Fase 3G: we create ONE paid Shopify order per Discogs order so the sale
+    // is captured for Spanish fiscal invoicing. Completing that order performs
+    // the SINGLE inventory decrement — so we must NOT call adjustInventory.
+    const resolvedLines: DiscogsOrderLine[] = [];
+    let hadUnmapped = false;
 
     for (const item of (order.items || [])) {
       const itemAudit: any = {
@@ -723,7 +736,6 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         quantity: 1,  // Discogs marketplace items are always quantity 1
         sku: null as string | null,
         shopify_variant_id: null as string | null,
-        shopify_location_id: null as string | null,
         outcome: 'pending',
         error: null as string | null,
       };
@@ -733,12 +745,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       if (!listingMapping?.sku) {
         itemAudit.outcome = 'unmapped_listing';
         result.unmapped_listings++;
+        hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
         audit.items.push(itemAudit);
         continue;
       }
       itemAudit.sku = listingMapping.sku;
 
-      // Resolve sku → Shopify variant + inventory item
+      // Resolve sku → Shopify variant
       let variant;
       try {
         variant = await findVariantBySku(env, listingMapping.sku);
@@ -749,64 +762,112 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         audit.items.push(itemAudit);
         continue;
       }
-      if (!variant?.inventoryItemId) {
+      if (!variant?.variantId) {
         itemAudit.outcome = 'variant_not_found';
         result.variant_not_found++;
         audit.items.push(itemAudit);
         continue;
       }
       itemAudit.shopify_variant_id = variant.variantId;
-
-      // Resolve location ID
-      let locationId;
-      try {
-        locationId = await getPrimaryLocationId(env);
-      } catch (e: any) {
-        itemAudit.outcome = 'location_lookup_failed';
-        itemAudit.error = e?.message || String(e);
-        result.shopify_adjustments_failed++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-      itemAudit.shopify_location_id = locationId;
-
-      // ── Branch: dry or live ────────────────────────────
-      if (mode === 'dry') {
-        itemAudit.outcome = 'would_adjust_dry_run';
-        result.shopify_adjustments_attempted++;
-        // count as "succeeded" semantically — we say "would have worked"
-        result.shopify_adjustments_succeeded++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-
-      // LIVE mode: actually call Shopify
-      result.shopify_adjustments_attempted++;
-      const idempotencyKey = `discogs-order-${orderIdStr}-item-${item.id}`;
-      const adjustResult = await adjustInventory(
-        env,
-        [{
-          inventoryItemId: variant.inventoryItemId,
-          locationId,
-          delta: -1,  // one unit sold
-        }],
-        idempotencyKey,
-        'correction',
-        // NOTE: no referenceDocumentUri — a ledger/reference document URI is
-        // forbidden when adjusting `available` (Shopify: INVALID_AVAILABLE_DOCUMENT).
-        // Passing one here caused every live decrement to be rejected at the
-        // GraphQL layer while adjustInventory still reported ok:true.
-      );
-
-      if (adjustResult.ok) {
-        itemAudit.outcome = 'adjusted_live';
-        result.shopify_adjustments_succeeded++;
-      } else {
-        itemAudit.outcome = 'shopify_adjust_failed';
-        itemAudit.error = JSON.stringify(adjustResult.userErrors);
-        result.shopify_adjustments_failed++;
-      }
+      itemAudit.outcome = 'resolved';
+      resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
       audit.items.push(itemAudit);
+    }
+
+    // Fiscal safety: if ANY item couldn't be mapped to a SKU, do NOT create a
+    // partial order (a factura missing a record is worse than none). Skip the
+    // whole order and flag it for manual handling.
+    if (hadUnmapped) {
+      audit.order_creation = {
+        ok: false,
+        needs_manual: true,
+        error: 'order has unmapped item(s); skipped to avoid partial factura',
+      };
+      result.shopify_adjustments_failed++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // If nothing resolved, record and move on (lock stays set so we don't spin).
+    if (resolvedLines.length === 0) {
+      audit.order_creation = { ok: false, error: 'no resolvable line items' };
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // ── Fetch full order for buyer details, parse the shipping address ──
+    let buyer: DiscogsBuyer;
+    try {
+      const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+      const parsed = parseDiscogsShippingAddress(full.shipping_address);
+      buyer = {
+        name: parsed.name,
+        email: full.buyer?.email,
+        address1: parsed.address1,
+        address2: parsed.address2,
+        city: parsed.city,
+        province: parsed.province,
+        zip: parsed.zip,
+        country: parsed.country,
+        phone: parsed.phone,
+      };
+    } catch (e: any) {
+      audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
+      result.shopify_adjustments_failed++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    result.shopify_adjustments_attempted++;
+
+    if (mode === 'dry') {
+      audit.order_creation = {
+        ok: true,
+        dry_run: true,
+        would_create_lines: resolvedLines.length,
+        buyer_name: buyer.name,
+        buyer_country: buyer.country,
+      };
+      result.shopify_adjustments_succeeded++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
+    const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+    if (orderResult.ok) {
+      audit.order_creation = {
+        ok: true,
+        shopify_order_id: orderResult.orderId,
+        shopify_order_name: orderResult.orderName,
+        draft_order_id: orderResult.draftOrderId,
+        lines: resolvedLines.length,
+      };
+      result.shopify_adjustments_succeeded++;
+    } else {
+      audit.order_creation = {
+        ok: false,
+        error: orderResult.error,
+        userErrors: orderResult.userErrors,
+        draft_order_id: orderResult.draftOrderId,
+      };
+      result.shopify_adjustments_failed++;
     }
 
     // Save audit trail (30 day TTL)

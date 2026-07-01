@@ -79,6 +79,86 @@ export interface DiscogsOrder {
   status: string;  // "New Order", "Buyer contacted", "Payment Received", etc.
   created: string;  // ISO 8601
   items: DiscogsOrderItem[];
+  // Present on the single-order endpoint (getOrder). Discogs returns the
+  // shipping address as ONE free-text block (name/street/city-region-zip/
+  // country + trailing "Phone:"/"Paypal address:" lines), NOT structured
+  // fields — so we parse it (see parseDiscogsShippingAddress).
+  shipping_address?: string;
+  buyer?: {
+    id?: number;
+    username?: string;
+    email?: string;
+    resource_url?: string;
+  };
+}
+
+/**
+ * Structured buyer details parsed out of a Discogs order's free-text
+ * shipping_address block. Fields map onto Shopify's MailingAddressInput.
+ */
+export interface ParsedShippingAddress {
+  name: string;
+  address1: string;
+  address2: string;
+  city: string;
+  province: string;   // free-text region (Shopify has no matching free-text field; caller folds into address2)
+  zip: string;
+  country: string;    // full country NAME (caller maps to ISO countryCode)
+  phone: string;
+}
+
+/**
+ * Parse Discogs' concatenated shipping_address string into structured fields.
+ *
+ * Discogs only ever returns a single newline-delimited block, e.g.:
+ *   "LUIS MANUEL FERNANDEZ ROCA\nrua finca Permuy, 1,3ºB\nNarón, a coruña, 15570\nSpain\n\nPhone: 629016695"
+ * Layout (observed across ES/IT/US orders):
+ *   line 0            = full name
+ *   line 1..k-2       = street (address1, extra lines → address2)
+ *   line k-1          = "City, Region, ZIP" (comma-separated; zip = the part with digits)
+ *   line k            = Country
+ *   trailing          = "Phone: ..." / "Paypal address: ..." (stripped)
+ *
+ * Best-effort: correct for the common EU "name/street/city,region,zip/country"
+ * format. Unusual layouts may misfile a field; country + name + zip are the
+ * most robust. Never throws — returns empty strings on missing pieces.
+ */
+export function parseDiscogsShippingAddress(raw?: string): ParsedShippingAddress {
+  const out: ParsedShippingAddress = {
+    name: '', address1: '', address2: '', city: '', province: '', zip: '', country: '', phone: '',
+  };
+  if (!raw) return out;
+
+  const phoneMatch = raw.match(/Phone:\s*(.+)/i);
+  if (phoneMatch) out.phone = phoneMatch[1].trim();
+
+  const lines = raw.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/^Phone:/i.test(l) && !/^Paypal address:/i.test(l));
+
+  if (lines.length === 0) return out;
+
+  out.name = lines[0];
+  out.country = lines.length > 1 ? lines[lines.length - 1] : '';
+
+  const cityLineIdx = lines.length - 2;
+  const cityLine = cityLineIdx >= 1 ? lines[cityLineIdx] : '';
+
+  const streetLines = lines.slice(1, Math.max(1, cityLineIdx));
+  out.address1 = streetLines[0] || '';
+  out.address2 = streetLines.slice(1).join(', ');
+
+  if (cityLine) {
+    const parts = cityLine.split(',').map(p => p.trim()).filter(Boolean);
+    let zipIdx = -1;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (/\d/.test(parts[i])) { zipIdx = i; break; }
+    }
+    if (zipIdx >= 0) { out.zip = parts[zipIdx]; parts.splice(zipIdx, 1); }
+    out.city = parts[0] || '';
+    out.province = parts.slice(1).join(', ');
+  }
+  return out;
 }
 
 export interface DiscogsApiError {
