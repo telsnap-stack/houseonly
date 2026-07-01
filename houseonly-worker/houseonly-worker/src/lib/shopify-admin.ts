@@ -275,6 +275,10 @@ export async function adjustInventory(
         delta: a.delta,
         inventoryItemId: a.inventoryItemId,
         locationId: a.locationId,
+        // Must be present per the 2026-04 validator. `null` skips the
+        // compare-and-swap check — correct here because the Discogs sync is
+        // the source of truth for this decrement (no concurrent-update guard needed).
+        changeFromQuantity: null,
       })),
     },
     idempotencyKey,
