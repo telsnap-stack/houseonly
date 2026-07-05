@@ -37,6 +37,7 @@ import {
   getPrimaryLocationId,
   adjustInventory,
   createDiscogsOrder,
+  publishProductToAllChannels,
   type DiscogsOrderLine,
   type DiscogsBuyer,
   type ShopifyAdminEnv,
@@ -1063,7 +1064,26 @@ export async function handleProductCreateWebhook(
     await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
   }
 
-  // 4. Filter: only products from a known distributor source
+  // 4. Publish the new product to ALL sales channels (incl. the headless
+  //    Storefront channel). A Shopify CSV import only publishes to the Online
+  //    Store channel, so imported products are invisible to the headless store
+  //    until published here. Runs for EVERY new product regardless of source
+  //    (dbh / tv / mt / manual) and in the background so it never blocks or
+  //    fails the webhook — a publish error is logged, not surfaced to Shopify.
+  const productGid = `gid://shopify/Product/${productId}`;
+  ctx.waitUntil(
+    publishProductToAllChannels(env, productGid)
+      .then(r => {
+        if (r.errors.length) {
+          console.error(`[publish-channels] product ${productId}:`, r.errors.join('; '));
+        } else {
+          console.log(`[publish-channels] product ${productId} → ${r.published} channel(s): ${r.channels.join(', ')}`);
+        }
+      })
+      .catch(e => console.error(`[publish-channels] product ${productId} failed:`, e?.message || e)),
+  );
+
+  // 5. Filter: only products from a known distributor source
   const tags = body.tags || '';
   const tagList = tags.split(',').map(t => t.trim());
   if (!tagList.some(t => ACCEPTED_SOURCE_TAGS.includes(t))) {
@@ -1081,14 +1101,14 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ ok: true, processed: 0, reason: 'forthcoming pre-order — not listed on Discogs', sku: (((body.variants || [])[0] || {}).sku || '').trim() });
   }
 
-  // 5. Extract identifiers from the first variant
+  // 6. Extract identifiers from the first variant
   const variant = (body.variants || [])[0] || {};
   const sku = (variant.sku || '').trim();
   if (!sku) {
     return jsonResponse({ ok: true, processed: 0, reason: 'no sku' });
   }
 
-  // 6. Duplicate check — already mapped means already on Discogs
+  // 7. Duplicate check — already mapped means already on Discogs
   const existing = await getSkuMapping(env, sku);
   if (existing) {
     return jsonResponse({ ok: true, processed: 0, reason: 'sku already mapped', sku });
@@ -1101,7 +1121,7 @@ export async function handleProductCreateWebhook(
   const label = extractLabelTag(tags);
   const weight = detectWeight(title, tags);
 
-  // 7. Run the match (Discogs lookup + maybe create listing). In sync/backfill
+  // 8. Run the match (Discogs lookup + maybe create listing). In sync/backfill
   // mode, await it so it completes before we respond (no waitUntil 30s cap). For
   // live Shopify webhooks, background it so we respond fast as Shopify requires.
   const matchArgs = { sku, barcode, artist, title, label, shopifyPrice, weight };
