@@ -2747,11 +2747,11 @@ function catnoFromFilename(name) {
 // Expand any .zip files into the same flat File[] the folder picker produces,
 // so the Mother Tongue importer reads promopack zips like the DBH/W&S/TV flows
 // instead of ignoring them. Each image/audio entry becomes a real File whose
-// synthetic relative path is prefixed with the zip's basename — that way the
-// existing catno-by-path-segment matcher in buildFolderIndex resolves a zip
-// named after its catno (e.g. "CAT-016.zip") without any extra plumbing, and
-// zips whose inner folders are catno-named still match too. macOS AppleDouble
-// junk (__MACOSX, ._*) is dropped up front. Non-zip files pass through as-is.
+// synthetic relative path is prefixed with the zip's basename, and every entry
+// is tagged with _zipBase so buildFolderIndex can resolve ONE catno per zip
+// from the pooled names of all its entries — no renaming required, whatever the
+// distributor called the zip. macOS AppleDouble junk (__MACOSX, ._*) is dropped
+// up front. Non-zip files pass through as-is.
 async function expandZips(files) {
   const zips  = files.filter(f => /\.zip$/i.test(f.name));
   const loose = files.filter(f => !/\.zip$/i.test(f.name));
@@ -2789,6 +2789,7 @@ async function expandZips(files) {
         Object.defineProperty(file, 'webkitRelativePath', { value: relpath, configurable: true });
       } catch { /* engine won't let us shadow the getter — fall back below */ }
       file._relpath = relpath; // read by buildFolderIndex as a safety net
+      file._zipBase = zipBase; // groups a zip's entries so one catno resolves all
       extracted.push(file);
     }
   }
@@ -4699,35 +4700,85 @@ function MotherTongueImporter() {
   }
 
   // ── FOLDER INDEXER ────────────────────────────────────────────
+  // Matches a distributor folder's files to invoice catnos by catno *substring*
+  // (longest catno wins) so real-world names resolve WITHOUT renaming:
+  // "TLM041_promopack.zip", "01 - CAT-016 - The Soul Pops.mp3" and
+  // "GT01-A1-Useless-Technology.mp3" all map to TLM041 / CAT-016 / GT01.
+  // Zip-extracted files (tagged with _zipBase by expandZips) are resolved
+  // per-zip using ALL of the zip's entry names as pooled evidence — so a single
+  // catno-bearing file (usually the cover, e.g. "CAT-016-front.jpg") pins every
+  // track in that zip even when the zip name is an opaque hash and the audio
+  // filenames carry no catno.
   function buildFolderIndex(files, knownCatnos) {
     const index = {};
-    const knownSet = new Set(knownCatnos.map(normCatno));
+    const knownNorm = [...new Set(knownCatnos.map(normCatno).filter(Boolean))]
+      .sort((a, b) => b.length - a.length);            // longest catno first
     const SKIP_FILE = (n) =>
       n.startsWith('._') || n === '.DS_Store' || n === 'Thumbs.db';
     const SKIP_DIR  = (seg) => seg === '__MACOSX';
+    const classify = (fname) => {
+      const ext = (fname.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
+      if (['jpg','jpeg','png','webp'].includes(ext)) return 'covers';
+      if (['mp3','wav','flac','aac','ogg','m4a'].includes(ext)) return 'audio';
+      return null;
+    };
 
-    for (const f of files) {
-      const path = f.webkitRelativePath || f._relpath || f.name;
-      const segs = path.split('/');
-      const fname = segs[segs.length - 1];
-      if (SKIP_FILE(fname)) continue;
-      if (segs.some(SKIP_DIR)) continue;
-
-      let matchedKey = null;
-      for (const seg of segs) {
-        const k = normCatno(seg);
-        if (k && knownSet.has(k)) matchedKey = k;
+    // Longest known catno appearing as a substring of any candidate string;
+    // ties broken by how many candidates contain it.
+    const resolve = (cands) => {
+      const norm = cands.map(normCatno).filter(Boolean);
+      let best = null;
+      for (const k of knownNorm) {
+        let count = 0;
+        for (const c of norm) if (c.includes(k)) count++;
+        if (count > 0 && (!best || k.length > best.k.length ||
+            (k.length === best.k.length && count > best.count))) {
+          best = { k, count };
+        }
       }
-      if (!matchedKey) continue;
+      return best ? best.k : null;
+    };
 
-      const ext = (fname.match(/\.([a-z0-9]+)$/i) || [,''])[1].toLowerCase();
-      const isImg   = ['jpg','jpeg','png','webp'].includes(ext);
-      const isAudio = ['mp3','wav','flac','aac','ogg','m4a'].includes(ext);
-      if (!isImg && !isAudio) continue;
+    const add = (key, kind, f) => {
+      if (!key || !kind) return;
+      if (!index[key]) index[key] = { covers: [], audio: [] };
+      index[key][kind].push(f);
+    };
 
-      if (!index[matchedKey]) index[matchedKey] = { covers: [], audio: [] };
-      if (isImg)   index[matchedKey].covers.push(f);
-      if (isAudio) index[matchedKey].audio.push(f);
+    // Split into loose files vs zip-extracted groups.
+    const zipGroups = {};
+    const loose = [];
+    for (const f of files) {
+      const path  = f.webkitRelativePath || f._relpath || f.name;
+      const segs  = path.split('/');
+      const fname = segs[segs.length - 1];
+      if (SKIP_FILE(fname) || segs.some(SKIP_DIR)) continue;
+      if (!classify(fname)) continue;
+      if (f._zipBase) {
+        if (!zipGroups[f._zipBase]) zipGroups[f._zipBase] = [];
+        zipGroups[f._zipBase].push(f);
+      } else {
+        loose.push(f);
+      }
+    }
+
+    // Loose files: resolve each from its own path segments.
+    for (const f of loose) {
+      const path = f.webkitRelativePath || f._relpath || f.name;
+      add(resolve(path.split('/')), classify(f.name), f);
+    }
+
+    // Zip groups: one catno per zip, pooled evidence across all entries + name.
+    for (const [zipBase, group] of Object.entries(zipGroups)) {
+      const evidence = [zipBase];
+      for (const f of group) {
+        for (const seg of (f._relpath || f.name).split('/')) evidence.push(seg);
+      }
+      const key = resolve(evidence);
+      if (!key && typeof console !== 'undefined') {
+        console.warn(`[MT] Could not map zip "${zipBase}" to any invoice catno — its ${group.length} file(s) were skipped.`);
+      }
+      for (const f of group) add(key, classify(f.name), f);
     }
     return index;
   }
