@@ -2744,6 +2744,57 @@ function catnoFromFilename(name) {
   return (m ? m[1] : base).toUpperCase().trim();
 }
 
+// Expand any .zip files into the same flat File[] the folder picker produces,
+// so the Mother Tongue importer reads promopack zips like the DBH/W&S/TV flows
+// instead of ignoring them. Each image/audio entry becomes a real File whose
+// synthetic relative path is prefixed with the zip's basename — that way the
+// existing catno-by-path-segment matcher in buildFolderIndex resolves a zip
+// named after its catno (e.g. "CAT-016.zip") without any extra plumbing, and
+// zips whose inner folders are catno-named still match too. macOS AppleDouble
+// junk (__MACOSX, ._*) is dropped up front. Non-zip files pass through as-is.
+async function expandZips(files) {
+  const zips  = files.filter(f => /\.zip$/i.test(f.name));
+  const loose = files.filter(f => !/\.zip$/i.test(f.name));
+  if (!zips.length) return files;
+
+  const JSZip = await loadJSZip();
+  const AUDIO = ['mp3','wav','flac','aac','ogg','m4a'];
+  const IMG   = ['jpg','jpeg','png','webp'];
+  const extracted = [];
+
+  for (const zf of zips) {
+    const zipBase = zf.name.replace(/\.zip$/i, '');
+    let zip;
+    try { zip = await JSZip.loadAsync(zf); }
+    catch (e) { throw new Error(`Could not read "${zf.name}": ${e.message}`); }
+
+    for (const entry of Object.values(zip.files)) {
+      if (entry.dir) continue;
+      const parts = entry.name.split('/');
+      if (parts.some(p => p === '__MACOSX')) continue;
+      const fname = parts[parts.length - 1];
+      if (!fname || fname.startsWith('._') || fname === '.DS_Store') continue;
+
+      const extMatch = fname.match(/\.([a-z0-9]+)$/i);
+      const ext = (extMatch ? extMatch[1] : '').toLowerCase();
+      const isImg = IMG.includes(ext), isAudio = AUDIO.includes(ext);
+      if (!isImg && !isAudio) continue;
+
+      const blob = await entry.async('blob');
+      const type = blob.type || (isAudio ? 'audio/mpeg' : `image/${ext === 'jpg' ? 'jpeg' : ext}`);
+      const file = new File([blob], fname, { type });
+      // Prefix with the zip basename so a catno-named zip matches by path segment.
+      const relpath = `${zipBase}/${entry.name}`;
+      try {
+        Object.defineProperty(file, 'webkitRelativePath', { value: relpath, configurable: true });
+      } catch { /* engine won't let us shadow the getter — fall back below */ }
+      file._relpath = relpath; // read by buildFolderIndex as a safety net
+      extracted.push(file);
+    }
+  }
+  return [...loose, ...extracted];
+}
+
 async function loadPDFJS() {
   if (window.pdfjsLib) return window.pdfjsLib;
   return new Promise((res, rej) => {
@@ -4656,7 +4707,7 @@ function MotherTongueImporter() {
     const SKIP_DIR  = (seg) => seg === '__MACOSX';
 
     for (const f of files) {
-      const path = f.webkitRelativePath || f.name;
+      const path = f.webkitRelativePath || f._relpath || f.name;
       const segs = path.split('/');
       const fname = segs[segs.length - 1];
       if (SKIP_FILE(fname)) continue;
@@ -4890,9 +4941,25 @@ function MotherTongueImporter() {
     }
   };
 
-  const onFolder = (filesList) => {
+  const onFolder = async (filesList) => {
     const arr = Array.from(filesList || []);
-    setFolderFiles(arr);
+    const hasZip = arr.some(f => /\.zip$/i.test(f.name));
+    if (!hasZip) { setFolderFiles(arr); return; }
+    // Promopack zips present — expand them (JSZip) so their audio/covers are
+    // indexed just like loose files. Show a transient status while unzipping.
+    setError('');
+    setProgress({ done: 0, total: 0, current: 'Unzipping promopacks…' });
+    setStatus('processing');
+    try {
+      const expanded = await expandZips(arr);
+      setFolderFiles(expanded);
+    } catch (e) {
+      setError('ZIP read error: ' + e.message);
+      setFolderFiles(arr.filter(f => !/\.zip$/i.test(f.name)));
+    } finally {
+      setStatus('idle');
+      setProgress({ done: 0, total: 0, current: '' });
+    }
   };
 
   useEffect(() => {
@@ -5130,8 +5197,9 @@ function MotherTongueImporter() {
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
         Drop the invoice PDF, the listener HTML (descriptions/artist/title/genres), and the
-        full distributor folder. The importer matches catnos across all three
-        sources and builds the Shopify CSV.
+        full distributor folder (loose files or per-release promopack .zip files — zips are
+        unpacked automatically). The importer matches catnos across all three sources and
+        builds the Shopify CSV.
       </p>
 
       <div
@@ -5143,6 +5211,9 @@ function MotherTongueImporter() {
           const html = fl.find(f => /\.html?$/i.test(f.name));
           if (pdf)  onPdf(pdf);
           if (html) onHtml(html);
+          // Also accept dropped promopack zips / loose covers + audio.
+          const assets = fl.filter(f => /\.(zip|jpe?g|png|webp|mp3|wav|flac|aac|ogg|m4a)$/i.test(f.name));
+          if (assets.length) onFolder(assets);
         }}
         style={{
           border:`2px dashed ${(pdfFile||htmlFile||folderFiles.length)?S.accent:S.border}`,
