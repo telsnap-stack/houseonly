@@ -72,6 +72,24 @@ const FIRM_SALE_STATUSES = new Set([
   'Shipped',
 ]);
 
+// ── FASE 3H: POLL WINDOW + IDEMPOTENCY ──────────────────────────────
+// Re-scan orders created in the last N days on every run instead of trusting
+// a created-timestamp high-water cursor. The old cursor advanced past an order
+// the first time it was polled — while it was still pre-firm ("New Order",
+// "Payment Pending") — and `created_after` (exclusive) then excluded it
+// forever, so once payment landed the order never became a Shopify order (see
+// pollDiscogsForSales header). 10 days comfortably covers a buyer paying days
+// after ordering.
+const POLL_LOOKBACK_DAYS = 10;
+// Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
+// real volume; prevents a runaway loop if pagination ever misbehaves.
+const MAX_POLL_PAGES = 20;
+// lock:order:{id} TTL. MUST exceed the lookback window: a firm order we already
+// turned into a paid Shopify order stays inside the fetch window for
+// POLL_LOOKBACK_DAYS, and the lock is the ONLY thing stopping us from creating
+// a second one (a duplicate factura). 60d >> 10d leaves a wide safety margin.
+const ORDER_LOCK_TTL_SECONDS = 60 * 24 * 60 * 60;
+
 // ── ENV ─────────────────────────────────────────────────────────────
 
 /** Subset of Env that sync handlers need. */
@@ -574,14 +592,24 @@ export async function getListingMapping(
 //
 // Switch modes via the sync-mode endpoint (no redeploy needed).
 //
-// Cursor:
-//   meta:last_polled_ts (ISO 8601) — orders with created_at after this
-//   timestamp are considered new. Updated to the newest processed order's
-//   created_at on success.
+// Window (Fase 3H fix):
+//   We fetch every order created within the last POLL_LOOKBACK_DAYS on each
+//   run, rather than trusting a created-timestamp high-water cursor. Reason:
+//   the actionable event is a STATUS transition (→ "Payment Received"), which
+//   happens AFTER the order's created_at. A high-water cursor advanced past an
+//   order the first time it was seen (while still "New Order" / "Payment
+//   Pending"); `created_after` (exclusive) then excluded it forever, so it
+//   never became a Shopify order once it turned firm. Re-scanning a rolling
+//   window fixes that; idempotency (below) prevents duplicate processing.
+//   meta:last_polled_ts is still written (newest created seen) but is now
+//   observability only — it does NOT gate fetching.
 //
-// Idempotency:
-//   lock:order:{order_id} TTL 24h — set BEFORE adjustment is attempted.
-//   If a second cron run sees the same order, it's skipped.
+// Idempotency (fiscal safety — a duplicate order is a duplicate factura):
+//   lock:order:{order_id}, TTL ORDER_LOCK_TTL_SECONDS — set BEFORE order
+//   creation is attempted and kept on every outcome. Its TTL MUST exceed the
+//   lookback window: a firm order we already turned into a Shopify order stays
+//   inside the window for POLL_LOOKBACK_DAYS, and the lock is the only thing
+//   stopping a second creation. 60d >> 10d.
 //
 // Audit:
 //   sales-detected:{order_id} JSON entry kept 30 days — for forensics.
@@ -646,35 +674,32 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     new_cursor: null,
   };
 
-  // ── 1. Determine cursor (createdAfter) ──────────────────────────
-  let cursor = await env.SYNC_STATE.get('meta:last_polled_ts');
-  if (!cursor) {
-    // First run: use bootstrap timestamp as starting point, so we don't
-    // re-process orders that existed before our system started watching.
-    cursor = await env.SYNC_STATE.get('meta:bootstrap_last_run');
-  }
-  if (!cursor) {
-    // Truly first time, neither bootstrap nor a previous poll has run.
-    // Start from 24 h ago as a safety fallback.
-    cursor = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  }
+  // ── 1. Fetch every order created within the lookback window ─────
+  // NOT a high-water cursor: an order first seen while still pre-firm must be
+  // re-examined on later runs so it gets processed once it becomes a firm sale
+  // (see the header note). Idempotency (lock:order) stops us re-creating orders
+  // we've already handled.
+  const windowStart = new Date(
+    Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
-  // ── 2. Fetch orders from Discogs ────────────────────────────────
   // We don't filter by status in the API call — Discogs only accepts one
   // status per call, and we want 3 (Payment Received, In Progress, Shipped).
-  // Filtering in code is simpler than 3 API calls.
+  // Filtering in code is simpler than 3 API calls. Sorted newest-first and
+  // paginated so a busy window (>50 orders) can't hide recent orders on a page
+  // we never fetch.
   let orders: DiscogsOrder[] = [];
   try {
-    // First page only for now — at 15 min poll cadence and ≤50 per page,
-    // we'd need 50+ firm sales in 15 min to overflow. Highly unlikely for
-    // a vinyl shop. If it ever happens, we'll log and add pagination.
-    const page = await getOrders(env.DISCOGS_TOKEN, {
-      createdAfter: cursor,
-      sort: 'created',
-      sortOrder: 'asc',
-      page: 1,
-    });
-    orders = page.orders;
+    for (let page = 1; page <= MAX_POLL_PAGES; page++) {
+      const pageResult = await getOrders(env.DISCOGS_TOKEN, {
+        createdAfter: windowStart,
+        sort: 'created',
+        sortOrder: 'desc',
+        page,
+      });
+      orders.push(...pageResult.orders);
+      if (page >= (pageResult.pagination?.pages ?? 1)) break;
+    }
     result.orders_examined = orders.length;
   } catch (e: any) {
     errors.push(`getOrders failed: ${e?.message || e}`);
@@ -684,13 +709,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
   }
 
   // ── 3. Process each order ───────────────────────────────────────
-  let newestProcessed = cursor;
+  // newestSeen is written to meta:last_polled_ts purely for observability
+  // (sync-status). It does NOT gate fetching — the window above does.
+  let newestSeen = '';
 
   for (const order of orders) {
-    // Track the newest seen — we use this as the next cursor even if
-    // the order is skipped (e.g. status not firm sale).
-    if (order.created && order.created > newestProcessed) {
-      newestProcessed = order.created;
+    if (order.created && order.created > newestSeen) {
+      newestSeen = order.created;
     }
 
     // Filter to firm-sale statuses
@@ -706,10 +731,11 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
-    // Set lock IMMEDIATELY — even if we fail mid-way, we don't want
-    // to retry blindly on next cron run (would double-decrement stock).
-    // TTL 24 h is enough cushion.
-    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 24 * 60 * 60 });
+    // Set lock IMMEDIATELY and keep it on every outcome. This is the single
+    // guard against creating a duplicate paid Shopify order (a duplicate
+    // factura): its TTL must outlive the fetch window so an order we've already
+    // handled is never re-created while it's still inside the window.
+    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
 
     // Build the audit record for this order.
     const audit: any = {
@@ -878,10 +904,10 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     );
   }
 
-  // ── 4. Update cursor ────────────────────────────────────────────
-  if (newestProcessed !== cursor) {
-    await env.SYNC_STATE.put('meta:last_polled_ts', newestProcessed);
-    result.new_cursor = newestProcessed;
+  // ── 4. Record newest order seen (observability only; see header) ─
+  if (newestSeen) {
+    await env.SYNC_STATE.put('meta:last_polled_ts', newestSeen);
+    result.new_cursor = newestSeen;
   }
 
   if (errors.length > 0) result.errors = errors;
