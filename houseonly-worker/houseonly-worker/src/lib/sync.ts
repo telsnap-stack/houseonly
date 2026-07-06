@@ -81,6 +81,15 @@ const FIRM_SALE_STATUSES = new Set([
 // pollDiscogsForSales header). 10 days comfortably covers a buyer paying days
 // after ordering.
 const POLL_LOOKBACK_DAYS = 10;
+// Go-live floor: NEVER process orders created before this instant. The lookback
+// window on its own back-processes ALL historical orders in range the first
+// time it runs — which created duplicate paid orders (duplicate facturas) for
+// Discogs sales already handled manually before Fase 3H. This floor caps how
+// far back the window may reach. Anchored just before order 147628-C-2 (the
+// first sale we want auto-synced). Override at runtime via KV key
+// `meta:sync_go_live_ts` (ISO 8601) — no redeploy needed — e.g. to move it
+// forward after go-live.
+const DEFAULT_GO_LIVE_CUTOFF = '2026-07-06T12:40:00Z';
 // Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
 // real volume; prevents a runaway loop if pagination ever misbehaves.
 const MAX_POLL_PAGES = 20;
@@ -603,6 +612,10 @@ export async function getListingMapping(
 //   window fixes that; idempotency (below) prevents duplicate processing.
 //   meta:last_polled_ts is still written (newest created seen) but is now
 //   observability only — it does NOT gate fetching.
+//   The window is floored at a go-live cutoff (DEFAULT_GO_LIVE_CUTOFF, override
+//   via meta:sync_go_live_ts) so it never back-processes orders that predate
+//   this system — that floor is what stops the first run from creating
+//   duplicate facturas for sales already handled manually.
 //
 // Idempotency (fiscal safety — a duplicate order is a duplicate factura):
 //   lock:order:{order_id}, TTL ORDER_LOCK_TTL_SECONDS — set BEFORE order
@@ -679,8 +692,17 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
   // re-examined on later runs so it gets processed once it becomes a firm sale
   // (see the header note). Idempotency (lock:order) stops us re-creating orders
   // we've already handled.
+  //
+  // The window is floored at the go-live cutoff so it can never reach back into
+  // orders that predate this system (which would create duplicate facturas for
+  // sales already handled manually). createdAfter = the LATER of (now − N days)
+  // and the cutoff; once now−N days passes the cutoff it's a pure rolling
+  // window.
+  const cutoff = (await env.SYNC_STATE.get('meta:sync_go_live_ts'))
+    || DEFAULT_GO_LIVE_CUTOFF;
+  const lookbackMs = Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
   const windowStart = new Date(
-    Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    Math.max(lookbackMs, Date.parse(cutoff)),
   ).toISOString();
 
   // We don't filter by status in the API call — Discogs only accepts one

@@ -54,6 +54,26 @@ un poll posterior; idempotencia evita duplicados. (Los 4 tests scaffold
 - Migración segura: los locks del código viejo eran de 24h y ya expiraron, pero
   como **no existe ningún pedido `source:discogs` en Shopify**, re-escanear la
   ventana no puede duplicar nada al desplegar.
+## Incidente en el primer run live (y corrección)
+
+Al desplegar la ventana en prod, el primer poll live (18:45 UTC) reprocesó el
+histórico dentro de la ventana de 10 días y **creó 3 pedidos de Shopify
+duplicados** de ventas ya gestionadas manualmente (facturas repetidas), mientras
+que **147628-C-2 NO se creó** porque tenía un `lock:order` previo
+(`skipped_duplicate: 1`). Los 3 duplicados se cancelaron a mano (con restock).
+
+Corrección: **corte de arranque** `DEFAULT_GO_LIVE_CUTOFF`
+(`2026-07-06T12:40:00Z`, justo antes de 147628-C-2), overridable por KV
+`meta:sync_go_live_ts`. `createdAfter = max(now − POLL_LOOKBACK_DAYS, cutoff)`,
+así la ventana nunca alcanza pedidos anteriores al go-live. Tests añadidos: el
+`createdAfter` nunca es anterior al corte; el override por KV se respeta.
+
+Recuperación de 147628-C-2: desplegar el corte, borrar `lock:order:147628-C-2`
+y poner `live`; el siguiente cron lo crea una sola vez (los 3 duplicados
+conservan su lock → no se recrean).
+
+---
+
 - Tras `wrangler deploy`, el próximo cron recuperará **147628-C-2**
   automáticamente **si** se saltó estando pendiente (sin `lock:order`). Si
   existe `lock:order:147628-C-2` / `sales-detected:147628-C-2` (se intentó y

@@ -74,7 +74,7 @@ describe("Hello World user worker", () => {
 // processed once it becomes a firm sale on a later poll. The old
 // created-timestamp high-water cursor advanced past the order on sight and
 // `created_after` (exclusive) then excluded it forever.
-describe("pollDiscogsForSales — pending→firm order recovery", () => {
+describe("pollDiscogsForSales - pending to firm order recovery", () => {
 	// An order id WITH a letter segment, to also confirm ids like "147628-C-2"
 	// flow through KV keys / order fetch unparsed.
 	const ORDER_ID = "147628-C-2";
@@ -100,6 +100,7 @@ describe("pollDiscogsForSales — pending→firm order recovery", () => {
 		for (const k of [
 			"meta:last_polled_ts",
 			"meta:sync_3e_mode",
+			"meta:sync_go_live_ts",
 			`lock:order:${ORDER_ID}`,
 			`sales-detected:${ORDER_ID}`,
 			`listing:${LISTING_ID}`,
@@ -131,6 +132,25 @@ describe("pollDiscogsForSales — pending→firm order recovery", () => {
 		expect(new Date(call!.createdAfter!).getTime()).toBeGreaterThan(
 			Date.now() - 40 * 24 * 60 * 60 * 1000,
 		);
+	});
+
+	it("never fetches orders created before the go-live cutoff", async () => {
+		vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
+		await pollDiscogsForSales(env as any);
+		const call = vi.mocked(discogs.getOrders).mock.calls[0][1];
+		// The window is floored at the cutoff, so it can never back-process
+		// history and create duplicate facturas — regardless of the lookback.
+		expect(Date.parse(call!.createdAfter!)).toBeGreaterThanOrEqual(
+			Date.parse("2026-07-06T12:40:00Z"),
+		);
+	});
+
+	it("honors a runtime go-live override (meta:sync_go_live_ts)", async () => {
+		await env.SYNC_STATE.put("meta:sync_go_live_ts", "2030-01-01T00:00:00Z");
+		vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
+		await pollDiscogsForSales(env as any);
+		const call = vi.mocked(discogs.getOrders).mock.calls[0][1];
+		expect(call!.createdAfter).toBe("2030-01-01T00:00:00.000Z");
 	});
 
 	it("skips the order while pre-firm (no lock, no audit)", async () => {
