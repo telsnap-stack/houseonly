@@ -150,7 +150,22 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
 		await pollDiscogsForSales(env as any);
 		const call = vi.mocked(discogs.getOrders).mock.calls[0][1];
-		expect(call!.createdAfter).toBe("2030-01-01T00:00:00.000Z");
+		// Same instant as the override, but rendered in the account offset (NOT
+		// UTC "Z") because Discogs reads created_after as account-local time.
+		expect(Date.parse(call!.createdAfter!)).toBe(Date.parse("2030-01-01T00:00:00Z"));
+		expect(call!.createdAfter).toMatch(/[+-]\d{2}:\d{2}$/);
+	});
+
+	it("derives the timezone offset from meta:last_polled_ts", async () => {
+		// A Discogs-native cursor with a -05:00 offset must be echoed back, so the
+		// boundary self-corrects across the account's DST instead of hardcoding.
+		await env.SYNC_STATE.put("meta:last_polled_ts", "2030-01-01T00:00:00-05:00");
+		await env.SYNC_STATE.put("meta:sync_go_live_ts", "2030-06-01T00:00:00Z");
+		vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
+		await pollDiscogsForSales(env as any);
+		const call = vi.mocked(discogs.getOrders).mock.calls[0][1];
+		expect(call!.createdAfter!.endsWith("-05:00")).toBe(true);
+		expect(Date.parse(call!.createdAfter!)).toBe(Date.parse("2030-06-01T00:00:00Z"));
 	});
 
 	it("skips the order while pre-firm (no lock, no audit)", async () => {

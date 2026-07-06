@@ -90,6 +90,28 @@ const POLL_LOOKBACK_DAYS = 10;
 // `meta:sync_go_live_ts` (ISO 8601) — no redeploy needed — e.g. to move it
 // forward after go-live.
 const DEFAULT_GO_LIVE_CUTOFF = '2026-07-06T12:40:00Z';
+// Discogs interprets `created_after` in the SELLER ACCOUNT's local timezone and
+// ignores the UTC offset we send — so a "...Z" value is read as local wall-clock,
+// silently shifting the boundary by the offset (this excluded order 147628-C-2:
+// a 12:40Z cutoff was read as 12:40 Pacific = 19:40Z, dropping a 12:41Z order).
+// We therefore render the boundary in the account's own offset. The offset is
+// taken from the last Discogs-native timestamp we stored (meta:last_polled_ts,
+// which Discogs emits like "...-07:00"), so it self-corrects across DST; this
+// fallback only applies before the first poll has stored one.
+const ACCOUNT_TZ_OFFSET_FALLBACK = '-07:00';
+
+/**
+ * Format an instant (epoch ms) as an ISO 8601 string in a fixed UTC offset,
+ * e.g. formatInOffset(<12:40Z>, '-07:00') → '2026-07-06T05:40:00-07:00'.
+ * Discogs compares `created_after` against order.created using this wall clock.
+ */
+function formatInOffset(epochMs: number, offset: string): string {
+  const m = offset.match(/^([+-])(\d{2}):(\d{2})$/);
+  const sign = m && m[1] === '-' ? -1 : 1;
+  const offMs = m ? sign * (Number(m[2]) * 60 + Number(m[3])) * 60000 : 0;
+  const wall = new Date(epochMs + offMs).toISOString().slice(0, 19);
+  return `${wall}${m ? offset : 'Z'}`;
+}
 // Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
 // real volume; prevents a runaway loop if pagination ever misbehaves.
 const MAX_POLL_PAGES = 20;
@@ -701,9 +723,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
   const cutoff = (await env.SYNC_STATE.get('meta:sync_go_live_ts'))
     || DEFAULT_GO_LIVE_CUTOFF;
   const lookbackMs = Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-  const windowStart = new Date(
-    Math.max(lookbackMs, Date.parse(cutoff)),
-  ).toISOString();
+  const windowStartMs = Math.max(lookbackMs, Date.parse(cutoff));
+  // Format in the account's timezone offset, NOT UTC "Z" — Discogs reads
+  // created_after as account-local wall-clock (see formatInOffset).
+  const lastPolled = await env.SYNC_STATE.get('meta:last_polled_ts');
+  const tzMatch = (lastPolled || '').match(/([+-]\d{2}:\d{2})$/);
+  const accountOffset = tzMatch ? tzMatch[1] : ACCOUNT_TZ_OFFSET_FALLBACK;
+  const windowStart = formatInOffset(windowStartMs, accountOffset);
 
   // We don't filter by status in the API call — Discogs only accepts one
   // status per call, and we want 3 (Payment Received, In Progress, Shipped).
