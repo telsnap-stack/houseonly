@@ -23,6 +23,7 @@ import {
   createListing,
   searchRelease,
   getOrder,
+  getListing,
   parseDiscogsShippingAddress,
   type DiscogsListing,
   type DiscogsOrder,
@@ -814,21 +815,40 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         error: null as string | null,
       };
 
-      // Resolve listing_id → sku via KV (populated by Fase 3C bootstrap)
-      const listingMapping = await getListingMapping(env, item.id);
-      if (!listingMapping?.sku) {
+      // Resolve listing_id → sku. First the KV mapping (bootstrap / auto-list);
+      // if absent, self-heal by asking Discogs for the listing's external_id
+      // (the SKU we set at listing time) and cache it. Without this, EVERY sale
+      // of a record listed after the last bootstrap fails as unmapped and needs
+      // a manual KV write — the recurring "Shopify didn't catch the order" bug.
+      let sku = (await getListingMapping(env, item.id))?.sku || null;
+      if (!sku) {
+        try {
+          const listing = await getListing(env.DISCOGS_TOKEN, item.id);
+          const ext = (listing.external_id || '').trim();
+          if (ext) {
+            sku = ext;
+            await env.SYNC_STATE.put(`listing:${item.id}`,
+              JSON.stringify({ sku, status: listing.status }));
+            await env.SYNC_STATE.put(`sku:${sku}`,
+              JSON.stringify({ listing_id: item.id, status: listing.status, synced_at: new Date().toISOString() }));
+          }
+        } catch (e: any) {
+          itemAudit.error = `getListing failed: ${e?.message || e}`;
+        }
+      }
+      if (!sku) {
         itemAudit.outcome = 'unmapped_listing';
         result.unmapped_listings++;
         hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
         audit.items.push(itemAudit);
         continue;
       }
-      itemAudit.sku = listingMapping.sku;
+      itemAudit.sku = sku;
 
       // Resolve sku → Shopify variant
       let variant;
       try {
-        variant = await findVariantBySku(env, listingMapping.sku);
+        variant = await findVariantBySku(env, sku);
       } catch (e: any) {
         itemAudit.outcome = 'shopify_lookup_failed';
         itemAudit.error = e?.message || String(e);
