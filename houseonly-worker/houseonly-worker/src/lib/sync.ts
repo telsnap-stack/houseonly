@@ -824,9 +824,15 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       if (!sku) {
         try {
           const listing = await getListing(env.DISCOGS_TOKEN, item.id);
-          const ext = (listing.external_id || '').trim();
-          if (ext) {
-            sku = ext;
+          // SKU link, most reliable first: the external_id we set at listing
+          // time, else the release catalog number — this shop's Shopify SKUs
+          // ARE the Discogs catno (e.g. DMND010), so a listing created outside
+          // our auto-list flow (no external_id) still resolves. Cache whichever
+          // we find so future polls skip the lookup.
+          sku = (listing.external_id || '').trim()
+            || (listing.release?.catalog_number || '').trim()
+            || null;
+          if (sku) {
             await env.SYNC_STATE.put(`listing:${item.id}`,
               JSON.stringify({ sku, status: listing.status }));
             await env.SYNC_STATE.put(`sku:${sku}`,

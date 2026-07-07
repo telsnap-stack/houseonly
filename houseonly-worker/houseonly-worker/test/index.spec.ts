@@ -221,12 +221,32 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		expect(JSON.parse(cached!).sku).toBe("SKU1");
 	});
 
-	it("flags unmapped only when Discogs has no external_id either", async () => {
+	it("self-heals via the release catalog number when external_id is missing", async () => {
+		// Listing created outside our auto-list flow: no external_id, but the
+		// release catno IS the Shopify SKU (this shop's convention).
 		await env.SYNC_STATE.delete(`listing:${LISTING_ID}`);
 		vi.mocked(discogs.getListing).mockResolvedValue({
 			id: LISTING_ID,
 			status: "For Sale",
 			external_id: "",
+			release: { id: 1, catalog_number: "SKU1", description: "x" },
+		} as any);
+		vi.mocked(discogs.getOrders).mockResolvedValue(
+			ordersPage([firmOrder]) as any,
+		);
+		const res = await pollDiscogsForSales(env as any);
+		expect(res.unmapped_listings).toBe(0);
+		expect(res.shopify_adjustments_succeeded).toBe(1);
+		expect(JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku).toBe("SKU1");
+	});
+
+	it("flags unmapped only when neither external_id nor catno is present", async () => {
+		await env.SYNC_STATE.delete(`listing:${LISTING_ID}`);
+		vi.mocked(discogs.getListing).mockResolvedValue({
+			id: LISTING_ID,
+			status: "For Sale",
+			external_id: "",
+			release: { id: 1, catalog_number: "", description: "x" },
 		} as any);
 		vi.mocked(discogs.getOrders).mockResolvedValue(
 			ordersPage([firmOrder]) as any,
