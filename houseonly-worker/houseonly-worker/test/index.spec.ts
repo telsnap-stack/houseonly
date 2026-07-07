@@ -14,7 +14,7 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 // parseDiscogsShippingAddress) real so the poll exercises its real logic.
 vi.mock("../src/lib/discogs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/discogs")>();
-	return { ...actual, getOrders: vi.fn(), getOrder: vi.fn() };
+	return { ...actual, getOrders: vi.fn(), getOrder: vi.fn(), getListing: vi.fn() };
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
@@ -199,6 +199,41 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const audit = JSON.parse(auditRaw!);
 		expect(audit.status).toBe("Payment Received");
 		expect(audit.order_creation?.ok).toBe(true);
+	});
+
+	it("self-heals an unmapped listing via the Discogs external_id (SKU)", async () => {
+		// No KV mapping for this listing (record listed after the last bootstrap).
+		await env.SYNC_STATE.delete(`listing:${LISTING_ID}`);
+		vi.mocked(discogs.getListing).mockResolvedValue({
+			id: LISTING_ID,
+			status: "For Sale",
+			external_id: "SKU1",
+		} as any);
+		vi.mocked(discogs.getOrders).mockResolvedValue(
+			ordersPage([firmOrder]) as any,
+		);
+		const res = await pollDiscogsForSales(env as any);
+
+		expect(res.unmapped_listings).toBe(0);
+		expect(res.shopify_adjustments_succeeded).toBe(1);
+		// The resolved mapping is cached back so future polls skip the lookup.
+		const cached = await env.SYNC_STATE.get(`listing:${LISTING_ID}`);
+		expect(JSON.parse(cached!).sku).toBe("SKU1");
+	});
+
+	it("flags unmapped only when Discogs has no external_id either", async () => {
+		await env.SYNC_STATE.delete(`listing:${LISTING_ID}`);
+		vi.mocked(discogs.getListing).mockResolvedValue({
+			id: LISTING_ID,
+			status: "For Sale",
+			external_id: "",
+		} as any);
+		vi.mocked(discogs.getOrders).mockResolvedValue(
+			ordersPage([firmOrder]) as any,
+		);
+		const res = await pollDiscogsForSales(env as any);
+		expect(res.unmapped_listings).toBe(1);
+		expect(res.shopify_adjustments_succeeded).toBe(0);
 	});
 
 	it("does not re-process (no duplicate) once locked", async () => {
