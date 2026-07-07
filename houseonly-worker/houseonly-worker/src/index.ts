@@ -37,9 +37,6 @@ interface Env {
   // / newsletter-confirm) and Broadcasts. Sending-access key scoped to the account.
   // Set via `wrangler secret put RESEND_API_KEY` (separately for staging).
   RESEND_API_KEY: string;
-  // RADAR_KV: KV namespace for the House Only Radar daily-discovery crate
-  // (taste profile, scored candidates, votes). See src/lib/radar.ts.
-  RADAR_KV: KVNamespace;
 }
 
 const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -837,7 +834,6 @@ import {
 import { searchRelease } from './lib/discogs';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
-import { handleRadar, runDailyRadar } from './lib/radar';
 
 import {
   buildAuthorizeUrl,
@@ -1112,11 +1108,6 @@ export default {
 
     const url = new URL(request.url);
     const action = url.searchParams.get('action');
-
-    // House Only Radar — hidden daily-discovery crate (endpoints under /radar/*).
-    // Returns null for any non-/radar/ path, so normal routing continues untouched.
-    const radarRes = await handleRadar(request, env);
-    if (radarRes) return radarRes;
 
     // ── CUSTOMER ACCOUNT API AUTH (NCA, confidential) ──────────────
     //
@@ -2390,20 +2381,6 @@ export default {
   // returns before pollDiscogsForSales is done. Errors are caught so a
   // bad poll doesn't crash the Worker — we want next run to try again.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Daily house-discovery radar (separate cron "0 8 * * *"). Returns early so the
-    // daily invocation runs radar only; the */15 invocations below stay untouched.
-    if (event.cron === '0 8 * * *') {
-      ctx.waitUntil(
-        runDailyRadar(env).catch((err) =>
-          env.RADAR_KV.put('run:last', JSON.stringify({
-            scheduled_at: new Date(event.scheduledTime).toISOString(),
-            ok: false, error: err?.message || String(err),
-          })),
-        ),
-      );
-      return;
-    }
-
     ctx.waitUntil(
       pollDiscogsForSales(env).then(
         (result) => {
