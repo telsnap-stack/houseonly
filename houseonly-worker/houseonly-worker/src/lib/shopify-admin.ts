@@ -143,6 +143,60 @@ export async function shopifyAdminGraphQL(
   return await r.json();
 }
 
+// ── CHANNEL PUBLICATION ─────────────────────────────────────────────
+// Publish a product to EVERY sales channel (publication), including the
+// headless / custom-app Storefront channel. A Shopify CSV import only publishes
+// to the Online Store channel, so freshly imported products stay invisible to
+// the headless storefront (which reads the Storefront API and only returns
+// products published to its channel) until they are published here.
+//
+// Idempotent: re-publishing an already-published product is a no-op, so this is
+// safe to call on every products/create webhook (including Shopify retries).
+// Requires the `write_publications` access scope on the admin token — without it
+// Shopify returns an access-denied error, surfaced in the returned `errors`.
+export async function publishProductToAllChannels(
+  env: ShopifyAdminEnv,
+  productGid: string,
+): Promise<{ published: number; channels: string[]; errors: string[] }> {
+  // 1. List all sales channels (publications).
+  const pubResp = await shopifyAdminGraphQL(
+    env,
+    `query { publications(first: 50) { nodes { id name } } }`,
+  );
+  const gqlErrors: string[] = (pubResp?.errors || []).map((e: any) => e.message);
+  const nodes: Array<{ id: string; name: string }> =
+    pubResp?.data?.publications?.nodes || [];
+  if (!nodes.length) {
+    return {
+      published: 0,
+      channels: [],
+      errors: gqlErrors.length ? gqlErrors : ['no publications returned'],
+    };
+  }
+
+  // 2. Publish to all of them in one mutation. publishablePublish is additive
+  //    and idempotent, so already-published channels are left untouched.
+  const resp = await shopifyAdminGraphQL(
+    env,
+    `mutation PublishAll($id: ID!, $input: [PublishablePublishInput!]!) {
+      publishablePublish(id: $id, input: $input) {
+        userErrors { field message }
+      }
+    }`,
+    { id: productGid, input: nodes.map(n => ({ publicationId: n.id })) },
+  );
+
+  const errors: string[] = [
+    ...(resp?.errors || []).map((e: any) => e.message),
+    ...(resp?.data?.publishablePublish?.userErrors || []).map((e: any) => e.message),
+  ];
+  return {
+    published: errors.length ? 0 : nodes.length,
+    channels: nodes.map(n => n.name),
+    errors,
+  };
+}
+
 // ── INVENTORY LOOKUP ────────────────────────────────────────────────
 
 export interface VariantInventoryInfo {
