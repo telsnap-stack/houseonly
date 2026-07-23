@@ -43,6 +43,7 @@ ejecutar **dry-run por defecto**, flag explícito para aplicar.
 | Script | Qué hace | Aplicar con |
 |---|---|---|
 | `backfill-tv-auto.mjs` | Reenvía productos `source:tv` al webhook para meterlos en la cola de revisión Discogs. Reintenta en varias pasadas hasta que todos los SKU estén en cola. | `--send` |
+| `backfill-dj-auto.mjs` | Ídem para `source:dj` (pedido Deep Jungle 2026-07). Ejecutar tras desplegar el worker con `source:dj` en `ACCEPTED_SOURCE_TAGS`. | `--send` |
 | `backfill-dbh-tag.mjs` | Renombra el tag legacy `dbh` → `source:dbh`. | `--commit` |
 | `migrate-*.mjs`, `register-products-create-webhook.mjs`, `diagnose-webhooks.mjs`, `test-product-webhook-signed.mjs` | Migración/registro/diagnóstico de webhooks. | ver cabecera |
 
@@ -61,4 +62,4 @@ ejecutar **dry-run por defecto**, flag explícito para aplicar.
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-06-09-tv-backfill.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-07-23-deep-jungle-import.md`.
