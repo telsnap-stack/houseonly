@@ -69,6 +69,21 @@ calculados con la regla `dealer_gbp × discos × 1.15 × 2 → ceil − 0.01`).
   (Black €60.99 / Coloured €75.99, cambio de precio y carrito OK; snippets
   reproducibles desde el origen del site).
 
+## Resultado
+
+- **96/96 productos creados** en Shopify (ACTIVE, verificado con
+  `productsCount(query: "tag:'source:dj'")` = 96). Todos con snippet player,
+  portada, inventario en la location `115150881152`, taxable, peso, policy
+  CONTINUE.
+- **96/96 releases con assets completos** en R2 (0 fallos): portadas
+  `covers/<KEY>.jpg` + snippets 2:00 `audio/<KEY>/1_<n>_<Artista>---<Tema>.mp3`.
+- Estructura: 4 productos con 2 variantes (Black/Coloured: DAT001LP, DAT102,
+  DAT101, DAT082), 5 solo-Coloured (DAT073, DAT062, DAT105, JIG001, APORN100;
+  sku sin sufijo), resto Default Title. Coloured con ambas = sku `<catno>-COL`.
+- Nota menor: en 4 releases antiguas (DAT029/031/032/008) los nombres de
+  archivo en R2 arrastran el prefijo `DATxxx - Artista -` del título Bandcamp;
+  los nombres mostrados en la tracklist se limpiaron al crear el producto.
+
 ## Estado / pendientes
 
 - [ ] `npx wrangler deploy --env=""` del worker desde main (sin credenciales CF
