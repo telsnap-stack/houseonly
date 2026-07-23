@@ -1546,6 +1546,10 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const hasTracks = (r.tracks || []).length > 0;
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
+  // Multi-variant records (e.g. Deep Jungle Black/Coloured) must not quick-add
+  // the default variant from the card — that silently buys Black. Instead the
+  // card action opens the modal so the buyer picks the colour there.
+  const hasVariantChoice = (r.variants?.length || 0) > 1;
   return (
     <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} style={{ background:S.surf, border:`1px solid ${hov?'#2e2e2e':S.border}`, borderRadius:3, overflow:'hidden', transition:'border 0.15s, transform 0.15s', transform:hov?'translateY(-2px)':'none' }}>
       <div style={{ position:'relative', paddingBottom:'100%', cursor:'pointer' }} onClick={()=>onOpen(r)}>
@@ -1595,6 +1599,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               // in-stock record. The full-width REQUEST button below is for
               // backorders only and is suppressed for forthcoming (see below).
               if (isForthcoming(r)) {
+                if (hasVariantChoice) return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Choose a version, then pre-order" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>Options</button>;
                 return <button onClick={e=>{e.stopPropagation();onAdd(r);}} title="Pre-order — pay now, ships when it arrives" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Pre-order</button>;
               }
               const eligible = isBackorderEligible(r);
@@ -1602,6 +1607,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               // (full-width REQUEST button), so this slot stays empty.
               if (r.stock === 0 && eligible) return null;
               if (r.stock > 0) {
+                if (hasVariantChoice) return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Choose a version before adding to cart" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>Options</button>;
                 return <button onClick={e=>{e.stopPropagation();onAdd(r);}} style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Cart</button>;
               }
               return <button disabled style={{ background:S.border, color:S.muted, border:'none', borderRadius:2, cursor:'not-allowed', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', opacity:0.4, whiteSpace:'nowrap' }}>Sold Out</button>;
@@ -8653,6 +8659,9 @@ export default function App() {
       } catch { /* ignore */ }
     }
     if (!r) return;
+    // Multi-variant (e.g. Black/Coloured): don't silently add the default —
+    // open the product so the buyer picks the version, and keep it wishlisted.
+    if ((r.variants?.length || 0) > 1) { openWishlistItem(item); return; }
     addToCart(r);
     wishlistRemove(item.handle);
   };
@@ -8668,7 +8677,9 @@ export default function App() {
       if (!r) {
         try { r = await fetchShopifyProductByHandle(item.handle); } catch { /* skip */ }
       }
-      if (r && r.stock > 0) toAdd.push({ item, r });
+      // Skip multi-variant records: they need a colour choice, so leave them
+      // wishlisted (like OOS items) rather than bulk-adding the default.
+      if (r && r.stock > 0 && (r.variants?.length || 0) <= 1) toAdd.push({ item, r });
     }
     for (const { r } of toAdd) addToCart(r);
     for (const { item } of toAdd) wishlistRemove(item.handle);
