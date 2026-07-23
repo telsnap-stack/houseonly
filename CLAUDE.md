@@ -54,6 +54,20 @@ ejecutar **dry-run por defecto**, flag explícito para aplicar.
   de los webhooks.
 - `PROD_BS` — `BOOTSTRAP_AUTH_SECRET` de prod (Bearer para endpoints admin).
 
+## Scraping Bandcamp (entorno Claude Code remoto)
+
+Bandcamp sirve un "Client Challenge" JS de Fastly (curl no pasa; afecta a
+páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
+
+- Navegador real: Chromium de Playwright con `--no-sandbox` y
+  `--ssl-version-max=tls1.2` (el proxy de egreso resetea el ClientHello
+  TLS 1.3 de Chrome) + CA del proxy importada al NSS store
+  (`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -i /root/.ccr/agent-proxy-ca.crt`).
+- Con las cookies exportadas del navegador + UA de Chrome, `yt-dlp` extrae
+  metadatos y streams mp3-128 de las páginas de álbum.
+- El CDN `*.bcbits.com` (streams `mp3-128` y artwork `…_0.jpg` = resolución
+  original) acepta curl directo con UA de navegador, sin challenge.
+
 ## Convenciones
 
 - Rama de trabajo por tarea (p. ej. `claude/...`); PR a `main`.
