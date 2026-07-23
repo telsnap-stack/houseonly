@@ -98,8 +98,19 @@ function parseProduct({ node }) {
   // the pre-order UI can use them without re-fetching.
   const releaseTag = tags.find(t => /^release:/i.test(t));
   const releaseDate = releaseTag ? releaseTag.slice(releaseTag.indexOf(':') + 1).trim() : '';
+  // Multi-variant support (Deep Jungle colour editions: Black / Coloured).
+  // Most of the catalogue is single-variant ("Default Title") — for those the
+  // variants array has one entry and everything renders as before. The record
+  // keeps first-variant price/stock/shopifyVariantId so cards, quick-add and
+  // legacy code paths are untouched; only the Modal offers the variant choice.
+  const variants = (node.variants.edges || []).map(e => ({
+    id: e.node.id, sku: e.node.sku || '',
+    option: e.node.title || 'Default Title',
+    price: parseFloat(e.node.price?.amount || 0),
+    stock: e.node.quantityAvailable ?? 0,
+  }));
   return {
-    id: node.id, shopifyVariantId: v?.id,
+    id: node.id, shopifyVariantId: v?.id, variants,
     title, artist, label,
     catalog, genre, year,
     slug: makeSlug(artist, title, catalog),
@@ -150,7 +161,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
       edges {
         node {
           id title vendor descriptionHtml tags
-          variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
+          variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
       }
@@ -203,7 +214,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
         node {
           ... on Product {
             id title vendor descriptionHtml tags
-            variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
+            variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
             images(first:1) { edges { node { url } } }
           }
         }
@@ -288,7 +299,7 @@ async function fetchShopifyProductByHandle(handle) {
     query($h: String!) {
       product(handle: $h) {
         id title vendor descriptionHtml tags
-        variants(first:1) { edges { node { id sku price { amount currencyCode } quantityAvailable } } }
+        variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
         images(first:1) { edges { node { url } } }
       }
     }`, { h: handle });
@@ -1888,7 +1899,25 @@ function TrackPlayer({ tracks, release }) {
 }
 
 function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
+  // Variant choice (Deep Jungle colour editions: Black / Coloured). Hook must
+  // run unconditionally, so it sits before the null guard. When the selected
+  // id belongs to a previously-opened product we fall back to the first
+  // variant, so no reset-on-open effect is needed.
+  const [variantId, setVariantId] = useState(null);
   if (!r) return null;
+  const variants = r.variants || [];
+  const hasChoice = variants.length > 1;
+  const selVariant = variants.find(v => v.id === variantId) || variants[0] || null;
+  const shownPrice = hasChoice && selVariant ? selVariant.price : r.price;
+  const shownStock = hasChoice && selVariant ? selVariant.stock : r.stock;
+  // Cart lines are keyed by record id; give each variant its own line and
+  // point checkout at the chosen variant. Single-variant records pass through
+  // untouched (same object as before).
+  const addSelected = rec => onAdd(hasChoice && selVariant ? {
+    ...rec, id: `${rec.id}::${selVariant.id}`, shopifyVariantId: selVariant.id,
+    price: selVariant.price, stock: selVariant.stock,
+    title: `${rec.title} (${selVariant.option})`, catalog: selVariant.sku || rec.catalog,
+  } : rec);
   const tracks = r.tracks || [];
   const wished = isWished ? isWished(r) : false;
   return (
@@ -1961,8 +1990,21 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
                     </div>
                   )
                 }
+                {hasChoice && (
+                  <div style={{ marginTop:18, display:'flex', gap:8, flexWrap:'wrap' }}>
+                    {variants.map(v => {
+                      const sel = selVariant && v.id === selVariant.id;
+                      return (
+                        <button key={v.id} onClick={()=>setVariantId(v.id)}
+                          style={{ background:sel?'rgba(198,255,0,0.08)':'transparent', border:`1px solid ${sel?S.accent:S.border}`, color:sel?S.accent:S.muted, borderRadius:2, padding:'7px 12px', cursor:'pointer', fontSize:10, fontFamily:'inherit', letterSpacing:1.5, textTransform:'uppercase', fontWeight:700, transition:'all 0.15s' }}>
+                          {v.option} · €{v.price.toFixed(2)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:10 }}>
-                  <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
+                  <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{shownPrice.toFixed(2)}</span>
                   {onWishlistToggle && (
                     <button
                       onClick={()=>onWishlistToggle(r)}
@@ -1976,13 +2018,13 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
                   {isForthcoming(r)
                     ? (
                       <div style={{ display:'flex', flexDirection:'column', gap:6, flex:1 }}>
-                        <Btn ch="Pre-order" onClick={()=>{onAdd(r);onClose();}} full />
+                        <Btn ch="Pre-order" onClick={()=>{addSelected(r);onClose();}} full />
                         <span style={{ fontSize:10, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</span>
                         <span style={{ fontSize:9, color:S.muted, lineHeight:1.5 }}>Pay now to reserve your copy. Ships when it arrives — estimated date above.</span>
                       </div>
                     )
-                    : r.stock > 0
-                    ? <Btn ch="Add to Cart" onClick={()=>{onAdd(r);onClose();}} full />
+                    : shownStock > 0
+                    ? <Btn ch="Add to Cart" onClick={()=>{addSelected(r);onClose();}} full />
                     : <Btn ch="Out of Stock" disabled full />
                   }
                 </div>
@@ -7706,10 +7748,6 @@ function PreorderImporter() {
     //     a plain anchor-click on the real URL (same as opening it by hand): the
     //     browser downloads it with the user's cookies. Pop-up blockers kill
     //     window.open, but a same-gesture anchor-click on a stagger works.
-    // Skip rows we already have (live in Shopify) or that were manually
-    // dropped (excluded), so the batch only fetches ZIPs we actually need.
-    // liveHandles is the Set of lowercased live handles+SKUs loaded with the
-    // manifest; null means the lookup hasn't returned yet (then we skip nothing).
     const isLiveDl = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
     const skipped = { live: 0, dropped: 0 };
     const rows = manifest
@@ -8079,8 +8117,6 @@ function PreorderImporter() {
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
           {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
-            // Count only what will actually download: has zipUrl, not already
-            // live in Shopify, not manually excluded — matches downloadAllZips.
             const isLiveC = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
             const total = manifest.filter(m=>m.zipUrl && !isLiveC(m.catno) && !excluded[m.catno]).length;
             const label = downloading
@@ -8112,12 +8148,8 @@ function PreorderImporter() {
             }
           </div>
 
-          {/* Need-ZIP list: tell the operator exactly what to download.
-              Exclude rows already live in Shopify or manually dropped — those
-              don't need downloading. */}
-          {(()=>{
-            const toGet = recon.needZip.filter(m => !m._alreadyLive && !excluded[m._catno||m.catno]);
-            return toGet.length>0&&(
+          {/* Need-ZIP list: tell the operator exactly what to download */}
+          {(()=>{const toGet = recon.needZip.filter(m => !m._alreadyLive && !excluded[m._catno || m.catno]); return toGet.length>0&&(
             <div style={{padding:'8px 14px',background:'#1a1200',border:`1px solid #ff880044`,borderRadius:4,marginBottom:10}}>
               <div style={{fontSize:9,color:'#ff8800',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:6}}>Download these ZIPs ({toGet.length})</div>
               <div style={{display:'flex',flexDirection:'column',gap:4}}>
@@ -8130,8 +8162,7 @@ function PreorderImporter() {
                 ))}
               </div>
             </div>
-            );
-          })()}
+          );})()}
 
           {/* Orphan-ZIP list: ZIPs with no manifest entry */}
           {recon.orphanZip.length>0&&(

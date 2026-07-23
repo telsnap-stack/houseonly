@@ -22,6 +22,9 @@ import {
   getOrders,
   createListing,
   searchRelease,
+  getOrder,
+  getListing,
+  parseDiscogsShippingAddress,
   type DiscogsListing,
   type DiscogsOrder,
   type DiscogsListingInput,
@@ -34,7 +37,9 @@ import {
   findVariantBySku,
   getPrimaryLocationId,
   adjustInventory,
-  publishProductToAllChannels,
+  createDiscogsOrder,
+  type DiscogsOrderLine,
+  type DiscogsBuyer,
   type ShopifyAdminEnv,
 } from './shopify-admin';
 
@@ -51,8 +56,13 @@ const DISCOGS_DEFAULT_CONDITION = 'Near Mint (NM or M-)' as const;
 // Weights (grams) for shipping; 2LP heavier than single.
 const WEIGHT_SINGLE_LP = 500;
 const WEIGHT_DOUBLE_LP = 900;
-// Only auto-process products from this source (Fase 3.5B scope: DBH only).
-const AUTO_LIST_SOURCE_TAG = 'source:dbh';
+// Only auto-process products from a known distributor source. DBH was the
+// Fase 3.5B first slice; W&S/Kudos/MT added once the pipeline was validated.
+// Rubadub (rd) imports off a W&S-style ZIP + invoice, so it matches the same
+// way. Deep Jungle (dj) is a direct-from-label order (2026-07 proforma).
+// The Discogs matcher uses catno/label/artist/title (not genre), so all
+// sources are matchable even though W&S lacks genre at import time.
+const ACCEPTED_SOURCE_TAGS = ['source:ws', 'source:kudos', 'source:dbh', 'source:mt', 'source:tv', 'source:rd', 'source:dj'];
 
 // Status values from Discogs we consider "firm sale" — we reduce Shopify
 // inventory when an order reaches one of these. Earlier states ("New Order",
@@ -63,6 +73,55 @@ const FIRM_SALE_STATUSES = new Set([
   'In Progress',
   'Shipped',
 ]);
+
+// ── FASE 3H: POLL WINDOW + IDEMPOTENCY ──────────────────────────────
+// Re-scan orders created in the last N days on every run instead of trusting
+// a created-timestamp high-water cursor. The old cursor advanced past an order
+// the first time it was polled — while it was still pre-firm ("New Order",
+// "Payment Pending") — and `created_after` (exclusive) then excluded it
+// forever, so once payment landed the order never became a Shopify order (see
+// pollDiscogsForSales header). 10 days comfortably covers a buyer paying days
+// after ordering.
+const POLL_LOOKBACK_DAYS = 10;
+// Go-live floor: NEVER process orders created before this instant. The lookback
+// window on its own back-processes ALL historical orders in range the first
+// time it runs — which created duplicate paid orders (duplicate facturas) for
+// Discogs sales already handled manually before Fase 3H. This floor caps how
+// far back the window may reach. Anchored just before order 147628-C-2 (the
+// first sale we want auto-synced). Override at runtime via KV key
+// `meta:sync_go_live_ts` (ISO 8601) — no redeploy needed — e.g. to move it
+// forward after go-live.
+const DEFAULT_GO_LIVE_CUTOFF = '2026-07-06T12:40:00Z';
+// Discogs interprets `created_after` in the SELLER ACCOUNT's local timezone and
+// ignores the UTC offset we send — so a "...Z" value is read as local wall-clock,
+// silently shifting the boundary by the offset (this excluded order 147628-C-2:
+// a 12:40Z cutoff was read as 12:40 Pacific = 19:40Z, dropping a 12:41Z order).
+// We therefore render the boundary in the account's own offset. The offset is
+// taken from the last Discogs-native timestamp we stored (meta:last_polled_ts,
+// which Discogs emits like "...-07:00"), so it self-corrects across DST; this
+// fallback only applies before the first poll has stored one.
+const ACCOUNT_TZ_OFFSET_FALLBACK = '-07:00';
+
+/**
+ * Format an instant (epoch ms) as an ISO 8601 string in a fixed UTC offset,
+ * e.g. formatInOffset(<12:40Z>, '-07:00') → '2026-07-06T05:40:00-07:00'.
+ * Discogs compares `created_after` against order.created using this wall clock.
+ */
+function formatInOffset(epochMs: number, offset: string): string {
+  const m = offset.match(/^([+-])(\d{2}):(\d{2})$/);
+  const sign = m && m[1] === '-' ? -1 : 1;
+  const offMs = m ? sign * (Number(m[2]) * 60 + Number(m[3])) * 60000 : 0;
+  const wall = new Date(epochMs + offMs).toISOString().slice(0, 19);
+  return `${wall}${m ? offset : 'Z'}`;
+}
+// Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
+// real volume; prevents a runaway loop if pagination ever misbehaves.
+const MAX_POLL_PAGES = 20;
+// lock:order:{id} TTL. MUST exceed the lookback window: a firm order we already
+// turned into a paid Shopify order stays inside the fetch window for
+// POLL_LOOKBACK_DAYS, and the lock is the ONLY thing stopping us from creating
+// a second one (a duplicate factura). 60d >> 10d leaves a wide safety margin.
+const ORDER_LOCK_TTL_SECONDS = 60 * 24 * 60 * 60;
 
 // ── ENV ─────────────────────────────────────────────────────────────
 
@@ -566,14 +625,28 @@ export async function getListingMapping(
 //
 // Switch modes via the sync-mode endpoint (no redeploy needed).
 //
-// Cursor:
-//   meta:last_polled_ts (ISO 8601) — orders with created_at after this
-//   timestamp are considered new. Updated to the newest processed order's
-//   created_at on success.
+// Window (Fase 3H fix):
+//   We fetch every order created within the last POLL_LOOKBACK_DAYS on each
+//   run, rather than trusting a created-timestamp high-water cursor. Reason:
+//   the actionable event is a STATUS transition (→ "Payment Received"), which
+//   happens AFTER the order's created_at. A high-water cursor advanced past an
+//   order the first time it was seen (while still "New Order" / "Payment
+//   Pending"); `created_after` (exclusive) then excluded it forever, so it
+//   never became a Shopify order once it turned firm. Re-scanning a rolling
+//   window fixes that; idempotency (below) prevents duplicate processing.
+//   meta:last_polled_ts is still written (newest created seen) but is now
+//   observability only — it does NOT gate fetching.
+//   The window is floored at a go-live cutoff (DEFAULT_GO_LIVE_CUTOFF, override
+//   via meta:sync_go_live_ts) so it never back-processes orders that predate
+//   this system — that floor is what stops the first run from creating
+//   duplicate facturas for sales already handled manually.
 //
-// Idempotency:
-//   lock:order:{order_id} TTL 24h — set BEFORE adjustment is attempted.
-//   If a second cron run sees the same order, it's skipped.
+// Idempotency (fiscal safety — a duplicate order is a duplicate factura):
+//   lock:order:{order_id}, TTL ORDER_LOCK_TTL_SECONDS — set BEFORE order
+//   creation is attempted and kept on every outcome. Its TTL MUST exceed the
+//   lookback window: a firm order we already turned into a Shopify order stays
+//   inside the window for POLL_LOOKBACK_DAYS, and the lock is the only thing
+//   stopping a second creation. 60d >> 10d.
 //
 // Audit:
 //   sales-detected:{order_id} JSON entry kept 30 days — for forensics.
@@ -638,35 +711,45 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     new_cursor: null,
   };
 
-  // ── 1. Determine cursor (createdAfter) ──────────────────────────
-  let cursor = await env.SYNC_STATE.get('meta:last_polled_ts');
-  if (!cursor) {
-    // First run: use bootstrap timestamp as starting point, so we don't
-    // re-process orders that existed before our system started watching.
-    cursor = await env.SYNC_STATE.get('meta:bootstrap_last_run');
-  }
-  if (!cursor) {
-    // Truly first time, neither bootstrap nor a previous poll has run.
-    // Start from 24 h ago as a safety fallback.
-    cursor = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  }
+  // ── 1. Fetch every order created within the lookback window ─────
+  // NOT a high-water cursor: an order first seen while still pre-firm must be
+  // re-examined on later runs so it gets processed once it becomes a firm sale
+  // (see the header note). Idempotency (lock:order) stops us re-creating orders
+  // we've already handled.
+  //
+  // The window is floored at the go-live cutoff so it can never reach back into
+  // orders that predate this system (which would create duplicate facturas for
+  // sales already handled manually). createdAfter = the LATER of (now − N days)
+  // and the cutoff; once now−N days passes the cutoff it's a pure rolling
+  // window.
+  const cutoff = (await env.SYNC_STATE.get('meta:sync_go_live_ts'))
+    || DEFAULT_GO_LIVE_CUTOFF;
+  const lookbackMs = Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const windowStartMs = Math.max(lookbackMs, Date.parse(cutoff));
+  // Format in the account's timezone offset, NOT UTC "Z" — Discogs reads
+  // created_after as account-local wall-clock (see formatInOffset).
+  const lastPolled = await env.SYNC_STATE.get('meta:last_polled_ts');
+  const tzMatch = (lastPolled || '').match(/([+-]\d{2}:\d{2})$/);
+  const accountOffset = tzMatch ? tzMatch[1] : ACCOUNT_TZ_OFFSET_FALLBACK;
+  const windowStart = formatInOffset(windowStartMs, accountOffset);
 
-  // ── 2. Fetch orders from Discogs ────────────────────────────────
   // We don't filter by status in the API call — Discogs only accepts one
   // status per call, and we want 3 (Payment Received, In Progress, Shipped).
-  // Filtering in code is simpler than 3 API calls.
+  // Filtering in code is simpler than 3 API calls. Sorted newest-first and
+  // paginated so a busy window (>50 orders) can't hide recent orders on a page
+  // we never fetch.
   let orders: DiscogsOrder[] = [];
   try {
-    // First page only for now — at 15 min poll cadence and ≤50 per page,
-    // we'd need 50+ firm sales in 15 min to overflow. Highly unlikely for
-    // a vinyl shop. If it ever happens, we'll log and add pagination.
-    const page = await getOrders(env.DISCOGS_TOKEN, {
-      createdAfter: cursor,
-      sort: 'created',
-      sortOrder: 'asc',
-      page: 1,
-    });
-    orders = page.orders;
+    for (let page = 1; page <= MAX_POLL_PAGES; page++) {
+      const pageResult = await getOrders(env.DISCOGS_TOKEN, {
+        createdAfter: windowStart,
+        sort: 'created',
+        sortOrder: 'desc',
+        page,
+      });
+      orders.push(...pageResult.orders);
+      if (page >= (pageResult.pagination?.pages ?? 1)) break;
+    }
     result.orders_examined = orders.length;
   } catch (e: any) {
     errors.push(`getOrders failed: ${e?.message || e}`);
@@ -676,13 +759,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
   }
 
   // ── 3. Process each order ───────────────────────────────────────
-  let newestProcessed = cursor;
+  // newestSeen is written to meta:last_polled_ts purely for observability
+  // (sync-status). It does NOT gate fetching — the window above does.
+  let newestSeen = '';
 
   for (const order of orders) {
-    // Track the newest seen — we use this as the next cursor even if
-    // the order is skipped (e.g. status not firm sale).
-    if (order.created && order.created > newestProcessed) {
-      newestProcessed = order.created;
+    if (order.created && order.created > newestSeen) {
+      newestSeen = order.created;
     }
 
     // Filter to firm-sale statuses
@@ -698,12 +781,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
-    // Set lock IMMEDIATELY — even if we fail mid-way, we don't want
-    // to retry blindly on next cron run (would double-decrement stock).
-    // TTL 24 h is enough cushion.
-    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 24 * 60 * 60 });
+    // Set lock IMMEDIATELY and keep it on every outcome. This is the single
+    // guard against creating a duplicate paid Shopify order (a duplicate
+    // factura): its TTL must outlive the fetch window so an order we've already
+    // handled is never re-created while it's still inside the window.
+    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
 
-    // Process each item in the order
+    // Build the audit record for this order.
     const audit: any = {
       order_id: orderIdStr,
       status: order.status,
@@ -711,7 +795,15 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       mode,
       processed_at: new Date().toISOString(),
       items: [],
+      order_creation: null as any,
     };
+
+    // ── Resolve every item to a Shopify variant (NO inventory calls here) ──
+    // Fase 3G: we create ONE paid Shopify order per Discogs order so the sale
+    // is captured for Spanish fiscal invoicing. Completing that order performs
+    // the SINGLE inventory decrement — so we must NOT call adjustInventory.
+    const resolvedLines: DiscogsOrderLine[] = [];
+    let hadUnmapped = false;
 
     for (const item of (order.items || [])) {
       const itemAudit: any = {
@@ -720,25 +812,50 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         quantity: 1,  // Discogs marketplace items are always quantity 1
         sku: null as string | null,
         shopify_variant_id: null as string | null,
-        shopify_location_id: null as string | null,
         outcome: 'pending',
         error: null as string | null,
       };
 
-      // Resolve listing_id → sku via KV (populated by Fase 3C bootstrap)
-      const listingMapping = await getListingMapping(env, item.id);
-      if (!listingMapping?.sku) {
+      // Resolve listing_id → sku. First the KV mapping (bootstrap / auto-list);
+      // if absent, self-heal by asking Discogs for the listing's external_id
+      // (the SKU we set at listing time) and cache it. Without this, EVERY sale
+      // of a record listed after the last bootstrap fails as unmapped and needs
+      // a manual KV write — the recurring "Shopify didn't catch the order" bug.
+      let sku = (await getListingMapping(env, item.id))?.sku || null;
+      if (!sku) {
+        try {
+          const listing = await getListing(env.DISCOGS_TOKEN, item.id);
+          // SKU link, most reliable first: the external_id we set at listing
+          // time, else the release catalog number — this shop's Shopify SKUs
+          // ARE the Discogs catno (e.g. DMND010), so a listing created outside
+          // our auto-list flow (no external_id) still resolves. Cache whichever
+          // we find so future polls skip the lookup.
+          sku = (listing.external_id || '').trim()
+            || (listing.release?.catalog_number || '').trim()
+            || null;
+          if (sku) {
+            await env.SYNC_STATE.put(`listing:${item.id}`,
+              JSON.stringify({ sku, status: listing.status }));
+            await env.SYNC_STATE.put(`sku:${sku}`,
+              JSON.stringify({ listing_id: item.id, status: listing.status, synced_at: new Date().toISOString() }));
+          }
+        } catch (e: any) {
+          itemAudit.error = `getListing failed: ${e?.message || e}`;
+        }
+      }
+      if (!sku) {
         itemAudit.outcome = 'unmapped_listing';
         result.unmapped_listings++;
+        hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
         audit.items.push(itemAudit);
         continue;
       }
-      itemAudit.sku = listingMapping.sku;
+      itemAudit.sku = sku;
 
-      // Resolve sku → Shopify variant + inventory item
+      // Resolve sku → Shopify variant
       let variant;
       try {
-        variant = await findVariantBySku(env, listingMapping.sku);
+        variant = await findVariantBySku(env, sku);
       } catch (e: any) {
         itemAudit.outcome = 'shopify_lookup_failed';
         itemAudit.error = e?.message || String(e);
@@ -746,61 +863,112 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         audit.items.push(itemAudit);
         continue;
       }
-      if (!variant?.inventoryItemId) {
+      if (!variant?.variantId) {
         itemAudit.outcome = 'variant_not_found';
         result.variant_not_found++;
         audit.items.push(itemAudit);
         continue;
       }
       itemAudit.shopify_variant_id = variant.variantId;
-
-      // Resolve location ID
-      let locationId;
-      try {
-        locationId = await getPrimaryLocationId(env);
-      } catch (e: any) {
-        itemAudit.outcome = 'location_lookup_failed';
-        itemAudit.error = e?.message || String(e);
-        result.shopify_adjustments_failed++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-      itemAudit.shopify_location_id = locationId;
-
-      // ── Branch: dry or live ────────────────────────────
-      if (mode === 'dry') {
-        itemAudit.outcome = 'would_adjust_dry_run';
-        result.shopify_adjustments_attempted++;
-        // count as "succeeded" semantically — we say "would have worked"
-        result.shopify_adjustments_succeeded++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-
-      // LIVE mode: actually call Shopify
-      result.shopify_adjustments_attempted++;
-      const idempotencyKey = `discogs-order-${orderIdStr}-item-${item.id}`;
-      const adjustResult = await adjustInventory(
-        env,
-        [{
-          inventoryItemId: variant.inventoryItemId,
-          locationId,
-          delta: -1,  // one unit sold
-        }],
-        idempotencyKey,
-        'movement_created',
-        `discogs:order:${orderIdStr}`,
-      );
-
-      if (adjustResult.ok) {
-        itemAudit.outcome = 'adjusted_live';
-        result.shopify_adjustments_succeeded++;
-      } else {
-        itemAudit.outcome = 'shopify_adjust_failed';
-        itemAudit.error = JSON.stringify(adjustResult.userErrors);
-        result.shopify_adjustments_failed++;
-      }
+      itemAudit.outcome = 'resolved';
+      resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
       audit.items.push(itemAudit);
+    }
+
+    // Fiscal safety: if ANY item couldn't be mapped to a SKU, do NOT create a
+    // partial order (a factura missing a record is worse than none). Skip the
+    // whole order and flag it for manual handling.
+    if (hadUnmapped) {
+      audit.order_creation = {
+        ok: false,
+        needs_manual: true,
+        error: 'order has unmapped item(s); skipped to avoid partial factura',
+      };
+      result.shopify_adjustments_failed++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // If nothing resolved, record and move on (lock stays set so we don't spin).
+    if (resolvedLines.length === 0) {
+      audit.order_creation = { ok: false, error: 'no resolvable line items' };
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // ── Fetch full order for buyer details, parse the shipping address ──
+    let buyer: DiscogsBuyer;
+    try {
+      const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+      const parsed = parseDiscogsShippingAddress(full.shipping_address);
+      buyer = {
+        name: parsed.name,
+        email: full.buyer?.email,
+        address1: parsed.address1,
+        address2: parsed.address2,
+        city: parsed.city,
+        province: parsed.province,
+        zip: parsed.zip,
+        country: parsed.country,
+        phone: parsed.phone,
+      };
+    } catch (e: any) {
+      audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
+      result.shopify_adjustments_failed++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    result.shopify_adjustments_attempted++;
+
+    if (mode === 'dry') {
+      audit.order_creation = {
+        ok: true,
+        dry_run: true,
+        would_create_lines: resolvedLines.length,
+        buyer_name: buyer.name,
+        buyer_country: buyer.country,
+      };
+      result.shopify_adjustments_succeeded++;
+      await env.SYNC_STATE.put(
+        `sales-detected:${orderIdStr}`,
+        JSON.stringify(audit),
+        { expirationTtl: 30 * 24 * 60 * 60 },
+      );
+      continue;
+    }
+
+    // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
+    const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+    if (orderResult.ok) {
+      audit.order_creation = {
+        ok: true,
+        shopify_order_id: orderResult.orderId,
+        shopify_order_name: orderResult.orderName,
+        draft_order_id: orderResult.draftOrderId,
+        lines: resolvedLines.length,
+      };
+      result.shopify_adjustments_succeeded++;
+    } else {
+      audit.order_creation = {
+        ok: false,
+        error: orderResult.error,
+        userErrors: orderResult.userErrors,
+        draft_order_id: orderResult.draftOrderId,
+      };
+      result.shopify_adjustments_failed++;
     }
 
     // Save audit trail (30 day TTL)
@@ -811,10 +979,10 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     );
   }
 
-  // ── 4. Update cursor ────────────────────────────────────────────
-  if (newestProcessed !== cursor) {
-    await env.SYNC_STATE.put('meta:last_polled_ts', newestProcessed);
-    result.new_cursor = newestProcessed;
+  // ── 4. Record newest order seen (observability only; see header) ─
+  if (newestSeen) {
+    await env.SYNC_STATE.put('meta:last_polled_ts', newestSeen);
+    result.new_cursor = newestSeen;
   }
 
   if (errors.length > 0) result.errors = errors;
@@ -964,6 +1132,14 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ error: 'invalid hmac' }, 401);
   }
 
+  // Backfill mode: when ?sync=1, run the match synchronously (awaited) and
+  // bypass the idempotency lock. Live Shopify webhooks never set this, so they
+  // keep the fast-response + background (waitUntil) behaviour. Synchronous
+  // processing avoids the 30s waitUntil cancellation that drops slow matches
+  // during bulk re-sends — fine here because the caller is our backfill script,
+  // not Shopify, so a slower response is acceptable.
+  const syncMode = new URL(request.url).searchParams.get('sync') === '1';
+
   // 2. Parse
   let body: ShopifyProductWebhookBody;
   try {
@@ -977,37 +1153,22 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ ok: true, processed: 0, reason: 'no product id' });
   }
 
-  // 3. Idempotency lock (60s TTL — dedupes Shopify retries)
-  const lockKey = `lock:product-create:${productId}`;
-  if (await env.SYNC_STATE.get(lockKey)) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+  // 3. Idempotency lock (60s TTL — dedupes Shopify retries). Skipped in sync
+  // backfill mode, where re-processing is intentional and idempotent at the
+  // pending-review level.
+  if (!syncMode) {
+    const lockKey = `lock:product-create:${productId}`;
+    if (await env.SYNC_STATE.get(lockKey)) {
+      return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+    }
+    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
   }
-  await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
 
-  // 4. Publish the new product to ALL sales channels (incl. the headless
-  //    Storefront channel). A Shopify CSV import only publishes to the Online
-  //    Store channel, so imported products are invisible to the headless store
-  //    until published here. Runs for EVERY new product regardless of source
-  //    (dbh / tv / mt / manual) and in the background so it never blocks or
-  //    fails the webhook — a publish error is logged, not surfaced to Shopify.
-  const productGid = `gid://shopify/Product/${productId}`;
-  ctx.waitUntil(
-    publishProductToAllChannels(env, productGid)
-      .then(r => {
-        if (r.errors.length) {
-          console.error(`[publish-channels] product ${productId}:`, r.errors.join('; '));
-        } else {
-          console.log(`[publish-channels] product ${productId} → ${r.published} channel(s): ${r.channels.join(', ')}`);
-        }
-      })
-      .catch(e => console.error(`[publish-channels] product ${productId} failed:`, e?.message || e)),
-  );
-
-  // 5. Filter: only source:dbh products (Discogs auto-listing below)
+  // 4. Filter: only products from a known distributor source
   const tags = body.tags || '';
   const tagList = tags.split(',').map(t => t.trim());
-  if (!tagList.includes(AUTO_LIST_SOURCE_TAG)) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'not source:dbh' });
+  if (!tagList.some(t => ACCEPTED_SOURCE_TAGS.includes(t))) {
+    return jsonResponse({ ok: true, processed: 0, reason: 'no recognized source tag' });
   }
 
   // 4b. NEVER list pre-orders on Discogs. A `forthcoming` product has stock 0
@@ -1021,14 +1182,14 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ ok: true, processed: 0, reason: 'forthcoming pre-order — not listed on Discogs', sku: (((body.variants || [])[0] || {}).sku || '').trim() });
   }
 
-  // 6. Extract identifiers from the first variant
+  // 5. Extract identifiers from the first variant
   const variant = (body.variants || [])[0] || {};
   const sku = (variant.sku || '').trim();
   if (!sku) {
     return jsonResponse({ ok: true, processed: 0, reason: 'no sku' });
   }
 
-  // 7. Duplicate check — already mapped means already on Discogs
+  // 6. Duplicate check — already mapped means already on Discogs
   const existing = await getSkuMapping(env, sku);
   if (existing) {
     return jsonResponse({ ok: true, processed: 0, reason: 'sku already mapped', sku });
@@ -1041,16 +1202,22 @@ export async function handleProductCreateWebhook(
   const label = extractLabelTag(tags);
   const weight = detectWeight(title, tags);
 
-  // 8. Do the slow work (Discogs match + maybe create listing) in background
-  ctx.waitUntil(processProductMatch(env, {
-    sku, barcode, artist, title, label, shopifyPrice, weight,
-  }));
+  // 7. Run the match (Discogs lookup + maybe create listing). In sync/backfill
+  // mode, await it so it completes before we respond (no waitUntil 30s cap). For
+  // live Shopify webhooks, background it so we respond fast as Shopify requires.
+  const matchArgs = { sku, barcode, artist, title, label, shopifyPrice, weight };
+  if (syncMode) {
+    await processProductMatch(env, matchArgs);
+  } else {
+    ctx.waitUntil(processProductMatch(env, matchArgs));
+  }
 
   return jsonResponse({
     ok: true,
     product_id: productId,
     sku,
     queued: true,
+    sync: syncMode,
     has_barcode: Boolean(barcode),
   });
 }
