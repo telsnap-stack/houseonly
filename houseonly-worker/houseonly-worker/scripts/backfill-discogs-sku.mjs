@@ -32,6 +32,11 @@ const SEND  = process.argv.includes('--send');
 const FORCE = process.argv.includes('--force');
 const limitIx = process.argv.indexOf('--limit');
 const LIMIT = limitIx > -1 ? parseInt(process.argv[limitIx + 1], 10) : Infinity;
+// --map FILE: JSON { "<listing_id>": "<sku>" } of pre-approved writes. When
+// given, --send writes exactly those rows with those SKUs (the file is the
+// verification — built by cross-checking the dry-run against Shopify).
+const mapIx = process.argv.indexOf('--map');
+const MAP_FILE = mapIx > -1 ? process.argv[mapIx + 1] : null;
 
 const TOKEN = process.env.DISCOGS_TOKEN;
 if (!TOKEN) { console.error('ERROR: DISCOGS_TOKEN must be set.'); process.exit(1); }
@@ -181,11 +186,20 @@ const main = async () => {
     return;
   }
 
-  const writable = rows.filter(r => r.sku && (r.verified === true || (FORCE && r.verified !== true) || (!VERIFY && FORCE)));
-  const skipped = rows.filter(r => !writable.includes(r));
-  if (!VERIFY && !FORCE) {
-    console.log('\nRefusing to --send without Shopify verification. Set SHOPIFY_ADMIN_CLIENT_ID/SECRET, or add --force after reviewing the dry-run.');
-    process.exit(1);
+  let writable, skipped;
+  if (MAP_FILE) {
+    const { readFileSync } = await import('node:fs');
+    const approved = JSON.parse(readFileSync(MAP_FILE, 'utf8'));
+    writable = rows.filter(r => approved[String(r.listing_id)])
+      .map(r => ({ ...r, sku: approved[String(r.listing_id)] }));
+    skipped = rows.filter(r => !approved[String(r.listing_id)]);
+  } else {
+    writable = rows.filter(r => r.sku && (r.verified === true || (FORCE && r.verified !== true) || (!VERIFY && FORCE)));
+    skipped = rows.filter(r => !writable.includes(r));
+    if (!VERIFY && !FORCE) {
+      console.log('\nRefusing to --send without Shopify verification. Set SHOPIFY_ADMIN_CLIENT_ID/SECRET, use --map, or add --force after reviewing the dry-run.');
+      process.exit(1);
+    }
   }
   console.log(`\nWriting ${Math.min(writable.length, LIMIT)} of ${writable.length} listings (${skipped.length} skipped)…`);
   let done = 0, failed = 0;
