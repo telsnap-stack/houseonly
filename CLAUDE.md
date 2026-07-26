@@ -43,7 +43,8 @@ ejecutar **dry-run por defecto**, flag explícito para aplicar.
 | Script | Qué hace | Aplicar con |
 |---|---|---|
 | `backfill-tv-auto.mjs` | Reenvía productos `source:tv` al webhook para meterlos en la cola de revisión Discogs. Reintenta en varias pasadas hasta que todos los SKU estén en cola. | `--send` |
-| `backfill-dj-auto.mjs` | Ídem para `source:dj` (pedido Deep Jungle 2026-07). Ejecutar tras desplegar el worker con `source:dj` en `ACCEPTED_SOURCE_TAGS`. | `--send` |
+| `backfill-dj-auto.mjs` | Ídem para `source:dj` (pedido Deep Jungle 2026-07). **OJO: el lote DJ ya tiene listings Discogs + mapeos KV (2026-07-26); correrlo duplicaría listings.** | `--send` |
+| `backfill-discogs-sku.mjs` | Escribe el SKU en `external_id`+`location` de listings Discogs live que los tengan vacíos (patrón del worker). Verifica contra Shopify o acepta un mapa aprobado. | `--send --map f.json` |
 | `backfill-dbh-tag.mjs` | Renombra el tag legacy `dbh` → `source:dbh`. | `--commit` |
 | `migrate-*.mjs`, `register-products-create-webhook.mjs`, `diagnose-webhooks.mjs`, `test-product-webhook-signed.mjs` | Migración/registro/diagnóstico de webhooks. | ver cabecera |
 
@@ -76,4 +77,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-07-23-deep-jungle-import.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-07-26-discogs-sku-backfill.md`.
