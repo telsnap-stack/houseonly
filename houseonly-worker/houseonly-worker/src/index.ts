@@ -1594,6 +1594,58 @@ export default {
       return jsonRes({ ok: true, name, html });
     }
 
+    // ── FASE 3B: PROXY DE ZIP ──────────────────────────────
+    //
+    //   GET ?action=zip-proxy&url=<url del promopack>   Bearer
+    //
+    // Sin esto, bajar un promopack desde el tab se hace con un anchor-click a
+    // la URL del distribuidor. Eso NAVEGA la pagina: Dropbox responde con un
+    // redirect y una pagina intermedia, asi que el navegador abandona el admin
+    // y se lleva por delante el proceso de descarga que estaba corriendo.
+    //
+    // Pasando por aqui, el navegador hace fetch() normal, espera el blob
+    // completo y lo guarda con su nombre. Nunca navega. Es lo mismo que ya
+    // hacia ?action=dbh-zip, generalizado a los demas distribuidores.
+    //
+    // Lista blanca cerrada: esto no es un proxy abierto. W&S queda FUERA a
+    // proposito — su /assets esta tras Cloudflare y responde 403 a cualquier
+    // servidor, asi que enrutarlo por aqui devolveria una pagina de desafio
+    // disfrazada de ZIP. Esos se bajan desde el navegador con la sesion.
+    if (action === 'zip-proxy' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      const target = url.searchParams.get('url') || '';
+      let parsed: URL;
+      try { parsed = new URL(target); } catch { return jsonRes({ error: 'invalid url' }, 400); }
+      const PERMITIDO = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$|^dbh-music\.com$/i;
+      if (parsed.protocol !== 'https:' || !PERMITIDO.test(parsed.hostname)) {
+        return jsonRes({ error: `host no permitido: ${parsed.hostname}` }, 400);
+      }
+      try {
+        const upstream = await fetch(target, {
+          redirect: 'follow',
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        });
+        if (!upstream.ok) {
+          return jsonRes({ error: `upstream ${upstream.status}` }, 502);
+        }
+        // El cuerpo se pasa TAL CUAL, sin bufferizarlo: hay promopacks de mas de
+        // 100 MB y cargarlos en memoria reventaria el limite del worker.
+        return new Response(upstream.body, {
+          headers: {
+            ...CORS,
+            'Content-Type': 'application/zip',
+            'Content-Length': upstream.headers.get('content-length') || '',
+          },
+        });
+      } catch (e: any) {
+        return jsonRes({ error: e.message }, 502);
+      }
+    }
+
     // ── FASE 3B: RESOLVER ENLACES DETRAS DE TRACKER ────────
     //
     // En el email archivado el enlace del promopack casi nunca esta a la vista:
