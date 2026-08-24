@@ -9322,6 +9322,33 @@ function PreorderImporter() {
                     ))}
                   </div>
                 ))}
+                {/* Bajar los ZIP de lo que ya esta en el manifest. Llama a la
+                    MISMA downloadAllZips del tab — no hay una segunda descarga —
+                    y de paso resuelve las portadas que faltan: las 50 de W&S no
+                    estan en su confirmacion de pedido pero si dentro del ZIP. */}
+                {(()=>{const conZip = mailRows.filter(r=>r._added && r.zipUrl).length;
+                       const sinZip = mailRows.filter(r=>r._added && !r.zipUrl).length;
+                       return (conZip>0||sinZip>0)&&(
+                  <div style={{margin:'8px 0',padding:'8px 12px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:3}}>
+                    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                      <button onClick={downloadAllZips} disabled={downloading||!conZip}
+                        style={{background:conZip?'none':S.border,border:`1px solid ${conZip?S.accent:S.border}`,color:conZip?S.accent:S.muted,
+                                cursor:conZip&&!downloading?'pointer':'default',fontSize:9,padding:'6px 14px',borderRadius:2,
+                                letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+                        {downloading?`Bajando… ${downloadProgress}/${conZip}`:`↓ Bajar los ZIP (${conZip})`}
+                      </button>
+                      <span style={{fontSize:9,color:S.muted,lineHeight:1.5}}>
+                        La portada de muchos discos solo está dentro del ZIP — sobre todo los de Word &amp; Sound,
+                        cuya confirmación de pedido no lleva imagen.
+                        {sinZip>0&&<> {sinZip} sin enlace de ZIP: ésos se bajan a mano.</>}
+                      </span>
+                    </div>
+                    {downloadDone&&<div style={{fontSize:9,color:S.accent,marginTop:6}}>
+                      ✓ {downloadStats.ok} bajados{downloadStats.missing?`, ${downloadStats.missing} sin ZIP todavía`:''}{downloadStats.failed?`, ${downloadStats.failed} fallaron`:''} — suéltalos en la zona de arriba
+                    </div>}
+                  </div>
+                );})()}
+
                 {/* Says what will actually enter, not what was parsed */}
                 {nChecked>0
                   ? <Btn ch={`+ Añadir ${nChecked} al manifest`} onClick={rdAddToManifest} full />
