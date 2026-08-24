@@ -7765,11 +7765,13 @@ function descFromProse(before, after, fields) {
   return trozos.sort((a, b) => b.length - a.length).slice(0, 4).join('\n\n').slice(0, 2400);
 }
 
-// Parse one or more pasted Rubadub emails into Pre-order manifest rows.
+// Parse one or more pasted distributor emails into Pre-order manifest rows.
+// Entiende Rubadub y Triple Vision: se distinguen por el nombre del campo del
+// catalogo ("Cat:" vs "Catalog:"), asi que un pegado mixto tambien sale bien.
 // fx converts the email's GBP to EUR HERE, so the row handed to the Pre-order
 // tab carries dealerPrice in EUR like every other distributor's — the tab's
 // pricing (margin → ceil − 0.01) is untouched and W&S/DBH are unaffected.
-function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
+function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) {
   const text = rdHtmlToText(String(raw || ''));
   const rows = [];
   // Document-level, not per-release. A shipping digest says so ONCE, in the
@@ -7869,7 +7871,14 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
     // Cada distribuidor sirve la portada desde su sitio: Rubadub por Mailchimp
     // bajo _compresseds/ (gallery.mailchimp.com es el logo de cabecera, nunca la
     // funda), y Triple Vision desde su bucket, con el sufijo _front.
+    // Rubadub sirve la portada desde mcusercontent, unas veces bajo
+    // _compresseds/ (14 de 51 emails) y otras bajo images/ (37). Ceñirse a la
+    // primera dejaba sin portada a tres cuartas partes del catalogo. El logo de
+    // cabecera NO se cuela: vive en gallery.mailchimp.com, otro host.
+    // Comprobado que las de images/ son portadas y no plantilla: ninguna se
+    // repite en mas de dos emails, y esos dos son el anuncio y su correccion.
     const coverUrl = imgs.find(u => /mcusercontent\.com\/.*_compresseds\//i.test(u))
+                  || imgs.find(u => /mcusercontent\.com\/.*\/images\//i.test(u))
                   || imgs.find(u => /digitaloceanspaces\.com\/.*_front[-.]/i.test(u))
                   || '';
 
@@ -8041,7 +8050,7 @@ function parseTvShelfList(rawHtml) {
 // El Apps Script archiva cada email del distribuidor como
 // {PREFIJO}__{asunto}__{fecha}.html y lo empuja al worker. Aqui se clasifica
 // por NOMBRE, sin abrir el cuerpo: abrir 207 emails para pintar una tabla seria
-// absurdo, y el parseo de campos vive en parseRubadubEmails y en ningun otro
+// absurdo, y el parseo de campos vive en parseDistributorEmail y en ningun otro
 // sitio. Reglas descubiertas contra el archivo real (207 emails, abril-agosto).
 const MAIL_SOURCES = {
   WS:    { label: 'Word & Sound',  kind: 'material' },
@@ -8552,7 +8561,7 @@ function PreorderImporter() {
       }));
       for (const b of tanda) {
         let rows = [];
-        try { rows = parseRubadubEmails(b.html, { fx: rdFx, emailDate: parseLocalDate(b.e.date) || new Date() }); }
+        try { rows = parseDistributorEmail(b.html, { fx: rdFx, emailDate: parseLocalDate(b.e.date) || new Date() }); }
         catch { /* un email raro no puede tumbar la vista entera */ }
         for (const row of rows) {
           if (!row.catno) continue;
@@ -8636,7 +8645,7 @@ function PreorderImporter() {
   };
 
   const mailAddPicked = () => {
-    const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live);
+    const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live && !r._added);
     if (!picked.length) return;
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
                                 _live, _qty, _ready, _ordSrcs, _trackers, _desc, ...row }) => row);
@@ -8645,7 +8654,12 @@ function PreorderImporter() {
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
       return [...byCatno.values()];
     });
-    setManifestName(name => name || 'Rubadub (archivo de emails)');
+    setManifestName(name => name || 'Archivo de emails');
+    // Antes solo se limpiaba la seleccion, asi que las filas se quedaban
+    // exactamente igual pero desmarcadas: desde fuera parecia que no habia
+    // pasado nada. Ahora quedan marcadas como que ya estan en el manifest.
+    const metidos = new Set(picked.map(r => rdKey(r.catno)));
+    setMailRows(rows => (rows || []).map(r => metidos.has(rdKey(r.catno)) ? { ...r, _added: true } : r));
     setMailPick({});
     setDownloadDone(false);
     setDownloadProgress(0);
@@ -8685,7 +8699,7 @@ function PreorderImporter() {
     setRdError('');
     if (!rdText.trim()) { setRdPreview(null); return; }
     try {
-      const rows = parseRubadubEmails(rdText, {
+      const rows = parseDistributorEmail(rdText, {
         fx: rdFx,
         emailDate: parseLocalDate(rdDate) || new Date(),
       });
@@ -9063,7 +9077,7 @@ function PreorderImporter() {
       {status==='idle'&&(
         <details style={{marginBottom:14,border:`1px solid ${S.border}`,borderRadius:4,background:S.bg}} open={!!mailRows}>
           <summary style={{cursor:'pointer',padding:'8px 14px',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>
-            📥 Archivo de emails · Rubadub {mailRows?`· ${mailRows.length} releases`:''}
+            📥 Archivo de emails {mailRows?`· ${mailRows.length} releases`:''}
           </summary>
           <div style={{padding:'0 14px 14px'}}>
             {mailError&&<div style={{marginBottom:10,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger,lineHeight:1.5}}>{mailError}</div>}
@@ -9089,8 +9103,9 @@ function PreorderImporter() {
             ):!mailRows?(
               <div>
                 <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
-                  {mailIdx.filter(e=>e.kind==='material'&&e.prefix==='RD').length} emails de Rubadub en el archivo,
-                  {' '}{mailIdx.filter(e=>e.kind==='pedido'&&e.prefix==='RD').length} reenvíos tuyos al distribuidor.
+                  {mailIdx.filter(e=>e.kind==='material'&&['RD','TV'].includes(e.prefix)).length} emails de anuncio (Rubadub y Triple Vision)
+                  {' '}y {mailIdx.filter(e=>e.kind==='pedido').length} señales de pedido — tus reenvíos a Rubadub,
+                  {' '}las confirmaciones de Word &amp; Sound y el shelf list de Triple Vision.
                   Se parsean todos y sale una sola lista.
                 </p>
                 <Btn ch={mailBusy==='todos'?`Parseando… ${mailProgress.done}/${mailProgress.total}`:'📖 Parsear todo el archivo'} onClick={mailParseAll} full />
@@ -9105,13 +9120,23 @@ function PreorderImporter() {
                 const on = !!mailPick[k];
                 // El mismo disco pedido a dos distribuidores llega dos veces.
                 const dup = (r._ordSrcs||[]).length > 1;
+                const bloqueada = r._live || r._added;
                 const col = r._live?S.muted:r._ordered?S.accent:S.danger;
                 return (
-                <div key={k} onClick={()=>{ if(!r._live) setMailPick(p=>({...p,[k]:!p[k]})); }}
-                  style={{display:'flex',gap:8,alignItems:'center',padding:'4px 8px',borderLeft:`3px solid ${col}`,
-                          borderBottom:`1px solid ${S.border}44`,background:on?`${S.accent}11`:'transparent',
-                          opacity:r._live?0.45:on?1:0.72,cursor:r._live?'default':'pointer'}}>
-                  <input type="checkbox" checked={on} disabled={r._live} readOnly style={{accentColor:S.accent,flexShrink:0}} />
+                <div key={k} onClick={()=>{ if(!bloqueada) setMailPick(p=>({...p,[k]:!p[k]})); }}
+                  style={{display:'flex',gap:8,alignItems:'center',padding:'4px 8px',borderLeft:`3px solid ${r._added?S.accent:col}`,
+                          borderBottom:`1px solid ${S.border}44`,background:r._added?`${S.accent}18`:on?`${S.accent}11`:'transparent',minHeight:38,
+                          opacity:bloqueada?0.5:on?1:0.72,cursor:bloqueada?'default':'pointer'}}>
+                  <input type="checkbox" checked={on||!!r._added} disabled={bloqueada} readOnly style={{accentColor:S.accent,flexShrink:0}} />
+                  {/* loading="lazy": son 187 filas y cargarlas todas de golpe
+                      seria traerse decenas de MB para ver las diez primeras.
+                      Las que no tienen portada son casi siempre las que entran
+                      solo por confirmacion de pedido (W&S), que no trae imagen. */}
+                  {r.coverUrl
+                    ? <img src={r.coverUrl} alt="" loading="lazy"
+                        onError={e=>{e.target.style.visibility='hidden';}}
+                        style={{width:30,height:30,objectFit:'cover',borderRadius:2,flexShrink:0,background:S.bg}} />
+                    : <span style={{width:30,height:30,flexShrink:0,borderRadius:2,background:S.bg,border:`1px solid ${S.border}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:S.border}}>♪</span>}
                   <span style={{fontSize:10,color:col,fontFamily:'monospace',width:104,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.catno}</span>
                   <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.artist} — {r.title}</span>
                   <span style={{fontSize:9,color:S.muted,width:78,flexShrink:0}}>{r.release||'sin fecha'}</span>
@@ -9122,6 +9147,7 @@ function PreorderImporter() {
                   <span style={{fontSize:8,color:S.muted,width:96,flexShrink:0}}>
                     {(r._ordSrcs||[]).join('+').toUpperCase()}{r.zipUrl?' · zip':''}{r.forthcoming?'':' · envío'}
                   </span>
+                  {r._added&&<span style={{fontSize:8,color:S.accent,fontWeight:700,flexShrink:0}}>✓ EN EL MANIFEST</span>}
                   {dup&&<span title="Pedido a dos distribuidores — llegará por duplicado" style={{fontSize:8,color:S.danger,fontWeight:700,flexShrink:0}}>⚠ DOBLE</span>}
                 </div>);
               };
@@ -9132,7 +9158,8 @@ function PreorderImporter() {
                   <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
                   <span><b style={{color:S.danger}}>{rest.length}</b> sin pedir</span>
                   <span>· <b style={{color:S.text}}>{n}</b> seleccionados</span>
-                  <button onClick={()=>setMailPick(Object.fromEntries(mailRows.filter(r=>!r._live).map(r=>[rdKey(r.catno),true])))} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
+                  {mailRows.some(r=>r._added)&&<span>· <b style={{color:S.accent}}>{mailRows.filter(r=>r._added).length}</b> en el manifest</span>}
+                  <button onClick={()=>setMailPick(Object.fromEntries(mailRows.filter(r=>!r._live&&!r._added).map(r=>[rdKey(r.catno),true])))} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
                   <button onClick={()=>setMailPick({})} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                   <button onClick={()=>{setMailRows(null);setMailPick({});}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Volver a parsear</button>
                 </div>
@@ -9144,7 +9171,7 @@ function PreorderImporter() {
                     </div>
                   </div>
                 );})()}
-                <div style={{maxHeight:400,overflowY:'auto',border:`1px solid ${S.border}`,borderRadius:3}}>
+                <div style={{maxHeight:520,overflowY:'auto',border:`1px solid ${S.border}`,borderRadius:3}}>
                   {ord.length>0&&<div style={{fontSize:8,color:S.accent,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Pedidos — marcados solos</div>}
                   {ord.map(fila)}
                   {rest.length>0&&<div style={{fontSize:8,color:S.danger,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Sin pedir — márcalos si los quieres</div>}
@@ -9167,11 +9194,11 @@ function PreorderImporter() {
       {status==='idle'&&(
         <details style={{marginBottom:14,border:`1px solid ${S.border}`,borderRadius:4,background:S.bg}}>
           <summary style={{cursor:'pointer',padding:'8px 14px',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>
-            📧 Pegar email de Rubadub (source:rd)
+            📧 Pegar un email a mano (Rubadub o Triple Vision)
           </summary>
           <div style={{padding:'0 14px 14px'}}>
             <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
-              Rubadub no manda manifest ni factura de las pre-sales: el email es el feed. Pega el <b style={{color:S.text}}>HTML</b> del <code style={{fontSize:9}}>RD__*.html</code> de Drive (trae portada y enlace de Dropbox limpio) o el texto plano. Puedes pegar varios emails de golpe. El precio se convierte a € aquí con el FX de abajo; el margen lo sigue aplicando el tab.
+              Para un email suelto que no esté en el archivo. Pega el <b style={{color:S.text}}>HTML</b> (trae portada y enlace) o el texto plano; puedes pegar varios de golpe. El FX solo se aplica a Rubadub, que factura en libras — Triple Vision ya viene en euros. El margen lo sigue aplicando el tab.
             </p>
             <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,flexWrap:'wrap'}}>
               <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>GBP→EUR</span>
