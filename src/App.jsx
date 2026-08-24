@@ -8464,7 +8464,10 @@ function PreorderImporter() {
       .map(m => {
         const url = String(m.zipUrl).trim();
         const dbhId = url.match(/\/release_zip\/(\d+)/)?.[1];
-        return { url, catno: m.catno, dbhId, isDbh: !!dbhId };
+        // Los hosts que el worker puede servir de proxy. Los demas —W&S— siguen
+        // por anchor-click porque necesitan la sesion del navegador.
+        const proxiable = /^https:\/\/((www\.)?dropbox\.com|dl\.dropboxusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com|xcdn\.triplevision\.nl)\//i.test(url);
+        return { url, catno: m.catno, dbhId, isDbh: !!dbhId, proxiable };
       });
     if (!rows.length) {
       const had = manifest.some(m => m.zipUrl);
@@ -8481,9 +8484,44 @@ function PreorderImporter() {
     let ok = 0, missing = 0, failed = 0;
 
     for (let i = 0; i < rows.length; i++) {
-      const { url, catno, dbhId, isDbh } = rows[i];
+      const { url, catno, dbhId, isDbh, proxiable } = rows[i];
       try {
-        if (isDbh) {
+        if (proxiable) {
+          // Por el proxy del worker y guardando el blob. NUNCA con anchor-click
+          // a la URL del distribuidor: Dropbox responde con un redirect y una
+          // pagina intermedia, asi que el navegador ABANDONA el admin y se
+          // lleva por delante la propia descarga que estaba corriendo.
+          if (!mailSecret) {
+            failed++;
+            setError('Para bajar de Dropbox o Triple Vision hace falta el secreto: cárgalo en "Archivo de emails".');
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            continue;
+          }
+          const res = await fetch(`${WORKER_URL}?action=zip-proxy&url=${encodeURIComponent(url)}`,
+                                  { headers: { 'Authorization': `Bearer ${mailSecret}` } });
+          if (!res.ok) {
+            // 502 aqui suele ser un enlace caducado: el token st= de Dropbox es
+            // efimero y hay que recoger el enlace fresco del email.
+            failed++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            continue;
+          }
+          const blob = await res.blob();      // espera al fichero COMPLETO
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = `${(catno || 'promopack').replace(/[\/\\]/g, '_')}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 4000);
+          ok++;
+          setDownloadStats({ ok, missing, failed });
+          setDownloadProgress(i + 1);
+          await new Promise(r => setTimeout(r, 300));
+        } else if (isDbh) {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
           // a real ZIP comes back as application/zip.
