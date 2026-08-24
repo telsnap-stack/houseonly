@@ -8282,9 +8282,16 @@ function PreorderImporter() {
       if (r.status === 401) throw new Error('Secreto incorrecto.');
       if (!r.ok) throw new Error(`El worker devolvió ${r.status}.`);
       const d = await r.json();
-      setMailIdx((d.emails || []).map(triageEmail));
+      const emails = d.emails || [];
+      if (!emails.length) setMailError('El worker respondió bien pero no tiene ningún email guardado todavía.');
+      setMailIdx(emails.map(triageEmail));
       setMailSecret(s);
-    } catch (e) { setMailError(e.message); setMailIdx(null); }
+    } catch (e) {
+      // Un fallo de red en fetch() llega como un escueto "Failed to fetch" sin
+      // decir contra que. Añadir la URL ahorra la mitad del diagnostico.
+      setMailError(`${e.message} — al llamar a ${WORKER_URL}?action=emails-list`);
+      setMailIdx(null);
+    }
     finally { setMailBusy(''); }
   };
 
@@ -8730,6 +8737,10 @@ function PreorderImporter() {
             📥 Archivo de emails {mailIdx?`· ${mailIdx.filter(e=>e.kind==='material'&&!mailState[e.name]).length} sin procesar`:''}
           </summary>
           <div style={{padding:'0 14px 14px'}}>
+            {/* Fuera de las dos ramas a proposito: si la carga falla, mailIdx se
+                queda en null y un error pintado solo dentro de la otra rama no
+                se ve nunca — el sintoma es "no pasa nada al pulsar Cargar". */}
+            {mailError&&<div style={{marginBottom:10,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger,lineHeight:1.5}}>{mailError}</div>}
             {mailIdx===null?(
               <>
                 <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
@@ -8765,7 +8776,6 @@ function PreorderImporter() {
                   </button>
                   <button onClick={()=>mailLoad()} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Recargar</button>
                 </div>
-                {mailError&&<div style={{marginBottom:8,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{mailError}</div>}
                 <div style={{maxHeight:340,overflowY:'auto'}}>
                   {Object.keys(g).sort().map(label=>(
                     <div key={label} style={{marginBottom:10}}>
