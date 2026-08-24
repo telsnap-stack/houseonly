@@ -1029,6 +1029,14 @@ const MIRROR_ALLOWED_HOSTS = new Set([
   'www.mothertonguerecords.com',
   'mothertonguerecords.com',
   'objectstore.true.nl',  // Rush Hour cover images (CDN behind their distribution site)
+  // Portadas que solo existen en el email, no en el promopack. Se espejan para
+  // no dejar la imagen del producto colgando de un servidor ajeno: si Shopify
+  // falla al descargarla durante el import el producto entra sin foto y nadie
+  // se entera, y aunque entre, la ficha depende para siempre de ese host.
+  'mcusercontent.com',   // Rubadub — Mailchimp sirve la funda bajo images/ o _compresseds/
+  'triple-vision-assets.ams3.cdn.digitaloceanspaces.com',  // Triple Vision — su bucket
+  // gallery.mailchimp.com queda FUERA a proposito: ahi vive el logo de
+  // cabecera de Rubadub, nunca una portada.
   // Add other distributor hosts here when needed:
   // 'kompakt.fm', 'www.kompakt.fm', etc.
 ]);
