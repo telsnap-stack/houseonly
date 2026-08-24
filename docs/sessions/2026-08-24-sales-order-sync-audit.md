@@ -34,6 +34,61 @@ hay que **escanear por fecha** (`created_at:>=…`) y comparar en local contra
 `note` / `customAttributes.discogs_order_id`. Es lo que hace
 `findOrderByDiscogsOrderId()`.
 
+## Causa raíz (confirmada contra la API de Discogs)
+
+El PDF del pedido (19 ítems, €390,81) y `GET /marketplace/listings/{id}` dan el
+diagnóstico:
+
+- Los 5 listings más nuevos (`43303…`) tienen **`external_id` vacío**, así que
+  el self-heal cae al `catalog_number` de Discogs, que viene **con espacio**:
+  `"DAT 114"`, `"DAT 125"`, `"DAT 126"`… Los SKU de Shopify **no** llevan
+  espacio (`DAT114`). Resultado: `findVariantBySku("DAT 114")` → nada, y el
+  mapeo erróneo queda **cacheado en KV**, así que el fallo es permanente.
+- De esos 5, tres **sí** existen en Shopify (`DAT114`, `DAT124`, `DAT120`) y
+  fallaron solo por el espacio. Los otros dos (`DAT125`, `DAT126`) **no están
+  en Shopify a propósito**: se excluyeron del import de Deep Jungle por no
+  tener artwork (ver `2026-07-23-deep-jungle-import.md`).
+- Los 14 listings antiguos sí traen `external_id` (`DAT110`, `FR013`, …) y
+  resolvían bien.
+
+**Sigue abierto**: con el código anterior, 14 líneas resueltas deberían haber
+generado un pedido parcial de 14 ítems, y no se creó **ninguno** (tampoco un
+draft huérfano: el último draft previo es `#D31`, del 17 ago). Falta leer
+`sales-detected:147628-33` y los logs del Worker para saber si la invocación
+murió entera (¿límite de subrequests/CPU en un pedido de 19 ítems?) o si falló
+`getOrder`. Requiere `CLOUDFLARE_API_TOKEN`.
+
+## Recuperación aplicada (24 ago 2026)
+
+Pedido Shopify **#1034** creado a mano con el **mismo formato que
+`createDiscogsOrder`**: `draftOrderCreate` → `draftOrderComplete(paymentPending:
+false)`, `taxExempt: true`, tag `source:discogs`, nota `Discogs order
+147628-33`, atributo `discogs_order_id`, envío a Almeirim (PT). Stock
+decrementado una sola vez (DAT124/DAT120/DAT114/DAT046… a 0) y factura
+disponible para Shoptopus.
+
+- 17 líneas por `variantId` (precio de catálogo Shopify, como hace el worker).
+- 2 líneas **custom** (`DAT125`, `DAT126`) con título + precio de Discogs
+  (€22,99): no existen como producto en Shopify y no se inventan; así la
+  factura cubre los 19 ítems vendidos.
+- Total Shopify **€402,81** vs **€390,81** cobrados: el worker siempre factura
+  al precio de catálogo de Shopify (aquí €20,99 vs €19,99 en Discogs). Es el
+  comportamiento de los ~20 pedidos anteriores, no una decisión de esta
+  sesión — pero conviene decidir si la factura debe reflejar lo cobrado.
+
+## Arreglo de código para las próximas ventas
+
+1. **`skuCandidates()`**: cada origen de SKU aporta su forma tal cual **y** sin
+   espacios, y se prueban en orden contra Shopify. Se cachea en KV **el
+   candidato que Shopify reconoce**, nunca el primero que se nos ocurrió — así
+   los mapeos ya envenenados (`listing:4330318059` → `"DAT 114"`) se corrigen
+   solos en la siguiente resolución, sin tocar KV a mano.
+2. **El veto de factura parcial ahora cubre `variant_not_found`**, no solo
+   `unmapped_listing`: si *cualquier* línea no resuelve, no se crea el pedido y
+   la venta queda parada con `needs_manual` y la lista de líneas irresolubles
+   en la auditoría. Facturar 14 de 19 no es un arreglo parcial, es un documento
+   equivocado.
+
 ## Lo que quedó sin verificar
 
 `sales-detected:147628-33` (qué falló exactamente: `unmapped_listing`,
@@ -90,6 +145,12 @@ curl -s -H "Authorization: Bearer $PROD_BS" "$W/?action=sales-audit&parked=1" | 
 
 ## Pendiente
 
-- Desplegar el worker y ejecutar el runbook: **la venta sigue parada** hasta
-  entonces (lock puesto → el cron no la recupera solo).
+- **Desplegar** el worker (arreglo del espacio + veto + endpoints). Hasta
+  entonces las próximas ventas de listings sin `external_id` seguirán fallando.
+- Leer `sales-detected:147628-33` y los logs para cerrar el "por qué no se creó
+  ni un pedido parcial" (necesita `CLOUDFLARE_API_TOKEN`).
+- `DAT125` / `DAT126`: decidir si entran en Shopify o se dejan fuera del
+  catálogo a sabiendas (hoy se venden en Discogs pero no existen en la tienda).
 - Revisar con `parked=1` si la parada de vacaciones dejó más ventas atascadas.
+- El pedido **#1034** no necesita nada más: el `lock:order:147628-33` sigue
+  puesto, así que el cron no puede duplicarlo.

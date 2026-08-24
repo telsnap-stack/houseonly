@@ -693,6 +693,47 @@ async function getAutoListMode(env: SyncEnv): Promise<SyncMode> {
 }
 
 /**
+ * Build the ordered, de-duplicated list of SKUs worth trying for a listing.
+ *
+ * Discogs' `catalog_number` is printed with a space ("DAT 125") while this
+ * shop's Shopify SKUs have none ("DAT125"), so the raw catno alone silently
+ * fails to match — that single space is what parked a 19-item order on
+ * 2026-08-24. Each input therefore contributes both its trimmed form and, when
+ * different, a whitespace-stripped one.
+ */
+export function skuCandidates(...parts: (string | undefined | null)[]): string[] {
+  const out: string[] = [];
+  for (const part of parts) {
+    const trimmed = (part || '').trim();
+    if (!trimmed) continue;
+    for (const candidate of [trimmed, trimmed.replace(/\s+/g, '')]) {
+      if (candidate && !out.includes(candidate)) out.push(candidate);
+    }
+  }
+  return out;
+}
+
+/**
+ * Try each SKU candidate against Shopify, in order, and return the first that
+ * resolves to a variant. Returns `{ error }` if Shopify itself failed (which
+ * is NOT the same as "no such SKU"), or null if no candidate matched.
+ */
+async function findVariantForSkuCandidates(
+  env: SyncAdminEnv,
+  candidates: string[],
+): Promise<{ sku?: string; variantId?: string; error?: string } | null> {
+  for (const sku of candidates) {
+    try {
+      const variant = await findVariantBySku(env, sku);
+      if (variant?.variantId) return { sku, variantId: variant.variantId };
+    } catch (e: any) {
+      return { error: e?.message || String(e) };
+    }
+  }
+  return null;
+}
+
+/**
  * Process ONE Discogs order end to end: idempotency lock → item resolution
  * (listing → SKU → Shopify variant, self-healing the KV mapping when it can)
  * → paid Shopify order creation in live mode. Writes the sales-detected:{id}
@@ -745,7 +786,7 @@ async function processDiscogsOrder(
   // is captured for Spanish fiscal invoicing. Completing that order performs
   // the SINGLE inventory decrement — so we must NOT call adjustInventory.
   const resolvedLines: DiscogsOrderLine[] = [];
-  let hadUnmapped = false;
+  let hadUnresolved = false;
 
   for (const item of (order.items || [])) {
     const itemAudit: any = {
@@ -753,78 +794,91 @@ async function processDiscogsOrder(
       release_title: item.release?.description,
       quantity: 1,  // Discogs marketplace items are always quantity 1
       sku: null as string | null,
+      sku_candidates: [] as string[],
       shopify_variant_id: null as string | null,
       outcome: 'pending',
       error: null as string | null,
     };
 
-    // Resolve listing_id → sku. First the KV mapping (bootstrap / auto-list);
-    // if absent, self-heal by asking Discogs for the listing's external_id
-    // (the SKU we set at listing time) and cache it. Without this, EVERY sale
-    // of a record listed after the last bootstrap fails as unmapped and needs
-    // a manual KV write — the recurring "Shopify didn't catch the order" bug.
-    let sku = (await getListingMapping(env, item.id))?.sku || null;
-    if (!sku) {
+    // Start from the KV mapping (bootstrap / auto-list / an earlier self-heal).
+    const candidates = skuCandidates((await getListingMapping(env, item.id))?.sku);
+    let listingStatus: string | undefined;
+    let lookup = candidates.length ? await findVariantForSkuCandidates(env, candidates) : null;
+
+    // Nothing mapped, or the mapping doesn't resolve in Shopify: ask Discogs
+    // for the listing itself. external_id is the SKU we set at listing time;
+    // the release catalog number is the fallback, since this shop's Shopify
+    // SKUs ARE the Discogs catno. Without this, every sale of a record listed
+    // after the last bootstrap parks and needs a manual KV write.
+    if (!lookup?.variantId) {
       try {
         const listing = await getListing(env.DISCOGS_TOKEN, item.id);
-        // SKU link, most reliable first: the external_id we set at listing
-        // time, else the release catalog number — this shop's Shopify SKUs
-        // ARE the Discogs catno (e.g. DMND010), so a listing created outside
-        // our auto-list flow (no external_id) still resolves. Cache whichever
-        // we find so future polls skip the lookup.
-        sku = (listing.external_id || '').trim()
-          || (listing.release?.catalog_number || '').trim()
-          || null;
-        if (sku) {
-          await env.SYNC_STATE.put(`listing:${item.id}`,
-            JSON.stringify({ sku, status: listing.status }));
-          await env.SYNC_STATE.put(`sku:${sku}`,
-            JSON.stringify({ listing_id: item.id, status: listing.status, synced_at: new Date().toISOString() }));
+        listingStatus = listing.status;
+        const extra = skuCandidates(listing.external_id, listing.release?.catalog_number)
+          .filter(c => !candidates.includes(c));
+        if (extra.length > 0) {
+          candidates.push(...extra);
+          const second = await findVariantForSkuCandidates(env, extra);
+          if (second?.variantId || !lookup) lookup = second;
         }
       } catch (e: any) {
         itemAudit.error = `getListing failed: ${e?.message || e}`;
       }
     }
-    if (!sku) {
+
+    itemAudit.sku_candidates = candidates;
+
+    if (lookup?.variantId && lookup.sku) {
+      itemAudit.sku = lookup.sku;
+      itemAudit.shopify_variant_id = lookup.variantId;
+      itemAudit.outcome = 'resolved';
+      // Cache the candidate Shopify actually recognises — NOT the first one we
+      // thought of. Caching an unrecognised SKU (e.g. the spaced catno) is what
+      // turns one bad listing into a permanently parked sale.
+      const status = listingStatus || 'For Sale';
+      await env.SYNC_STATE.put(`listing:${item.id}`, JSON.stringify({ sku: lookup.sku, status }));
+      await env.SYNC_STATE.put(`sku:${lookup.sku}`, JSON.stringify({
+        listing_id: item.id, status, synced_at: new Date().toISOString(),
+      }));
+      resolvedLines.push({ variantId: lookup.variantId, quantity: 1 });
+      audit.items.push(itemAudit);
+      continue;
+    }
+
+    // Everything below is a line we could NOT put on the invoice.
+    hadUnresolved = true;
+    if (lookup?.error) {
+      itemAudit.outcome = 'shopify_lookup_failed';
+      itemAudit.error = lookup.error;
+      result.shopify_adjustments_failed++;
+    } else if (candidates.length === 0) {
       itemAudit.outcome = 'unmapped_listing';
       result.unmapped_listings++;
-      hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
-      audit.items.push(itemAudit);
-      continue;
-    }
-    itemAudit.sku = sku;
-
-    // Resolve sku → Shopify variant
-    let variant;
-    try {
-      variant = await findVariantBySku(env, sku);
-    } catch (e: any) {
-      itemAudit.outcome = 'shopify_lookup_failed';
-      itemAudit.error = e?.message || String(e);
-      result.shopify_adjustments_failed++;
-      audit.items.push(itemAudit);
-      continue;
-    }
-    if (!variant?.variantId) {
+    } else {
       itemAudit.outcome = 'variant_not_found';
       result.variant_not_found++;
-      audit.items.push(itemAudit);
-      continue;
     }
-    itemAudit.shopify_variant_id = variant.variantId;
-    itemAudit.outcome = 'resolved';
-    resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
     audit.items.push(itemAudit);
   }
 
-  // Fiscal safety: if ANY item couldn't be mapped to a SKU, do NOT create a
-  // partial order (a factura missing a record is worse than none). Skip the
-  // whole order and flag it for manual handling.
-  if (hadUnmapped) {
+  // Fiscal safety: if ANY item couldn't be resolved to a Shopify variant, do
+  // NOT create a partial order — a factura missing a record is worse than
+  // none. Skip the whole order and flag it for manual handling. This covers
+  // variant_not_found too, not just unmapped listings: on 2026-08-24 a 19-item
+  // order had 5 lines Shopify didn't recognise, and invoicing the other 14
+  // would have been the wrong document, not a partial fix.
+  if (hadUnresolved) {
     audit.order_creation = {
       ok: false,
       needs_manual: true,
-      error: 'order has unmapped item(s); skipped to avoid partial factura',
+      error: 'order has unresolved item(s); skipped to avoid partial factura',
+      unresolved: audit.items
+        .filter((i: any) => i.outcome !== 'resolved')
+        .map((i: any) => ({
+          listing_id: i.listing_id,
+          outcome: i.outcome,
+          sku_candidates: i.sku_candidates,
+        })),
     };
     result.shopify_adjustments_failed++;
     return await saveAudit();

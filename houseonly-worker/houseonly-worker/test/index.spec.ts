@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import worker from "../src";
 import {
 	pollDiscogsForSales,
+	skuCandidates,
 	handleSalesAudit,
 	handleSalesMap,
 	handleSalesRetry,
@@ -576,5 +577,148 @@ describe("sales audit / repair endpoints", () => {
 		);
 		expect(second.status).toBe(409);
 		expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── SKU resolution: the space that parked a 19-item order ───────────
+//
+// Discogs prints catalog numbers with a space ("DAT 125"); this shop's Shopify
+// SKUs don't ("DAT125"). Resolving only the raw catno silently failed, and
+// caching it in KV made the failure permanent.
+describe("SKU candidate resolution", () => {
+	const ORDER_ID = "147628-90";
+	const LISTING_ID = 771;
+
+	const firmOrder = {
+		id: ORDER_ID,
+		status: "Payment Received",
+		created: "2026-08-24T01:50:00-07:00",
+		items: [{ id: LISTING_ID, release: { description: "Some Record" } }],
+	};
+	const ordersPage = (orders: any[]) => ({
+		pagination: { page: 1, pages: 1, per_page: 50, items: orders.length },
+		orders,
+	});
+
+	/** Shopify only knows the un-spaced SKU. */
+	const shopifyKnows = (known: string[]) =>
+		vi.mocked(shopifyAdmin.findVariantBySku).mockImplementation(
+			async (_env: any, sku: string) =>
+				known.includes(sku)
+					? ({ variantId: `gid://shopify/ProductVariant/${sku}` } as any)
+					: null,
+		);
+
+	beforeEach(async () => {
+		vi.clearAllMocks();
+		for (const k of [
+			`lock:order:${ORDER_ID}`,
+			`sales-detected:${ORDER_ID}`,
+			`listing:${LISTING_ID}`,
+			"sku:DAT125",
+			"sku:DAT 125",
+			"meta:sync_3e_mode",
+			"meta:last_polled_ts",
+			"meta:sync_go_live_ts",
+		]) {
+			await env.SYNC_STATE.delete(k);
+		}
+		vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+		vi.mocked(discogs.getOrder).mockResolvedValue({
+			...firmOrder,
+			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
+			buyer: { email: "jane@example.com" },
+		} as any);
+		vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+			ok: true,
+			orderId: "gid://shopify/Order/1",
+			orderName: "#1034",
+		} as any);
+	});
+
+	it("offers the spaced and un-spaced form of every input", () => {
+		expect(skuCandidates("DAT 125")).toEqual(["DAT 125", "DAT125"]);
+		expect(skuCandidates("", "  DAT 114 ")).toEqual(["DAT 114", "DAT114"]);
+		expect(skuCandidates("FR013")).toEqual(["FR013"]);
+		expect(skuCandidates(null, undefined, "")).toEqual([]);
+	});
+
+	it("resolves a spaced catalog number against the un-spaced Shopify SKU", async () => {
+		shopifyKnows(["DAT125"]);
+		vi.mocked(discogs.getListing).mockResolvedValue({
+			id: LISTING_ID,
+			status: "Sold",
+			external_id: "",
+			release: { id: 1, catalog_number: "DAT 125", description: "x" },
+		} as any);
+
+		const res = await pollDiscogsForSales(env as any);
+		expect(res.shopify_adjustments_succeeded).toBe(1);
+		expect(res.variant_not_found).toBe(0);
+
+		// The mapping cached is the one Shopify recognises, not the spaced catno.
+		expect(
+			JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku,
+		).toBe("DAT125");
+		expect(await env.SYNC_STATE.get("sku:DAT125")).not.toBeNull();
+		expect(await env.SYNC_STATE.get("sku:DAT 125")).toBeNull();
+	});
+
+	it("self-corrects a KV mapping that was poisoned with the spaced form", async () => {
+		shopifyKnows(["DAT125"]);
+		await env.SYNC_STATE.put(
+			`listing:${LISTING_ID}`,
+			JSON.stringify({ sku: "DAT 125", status: "For Sale" }),
+		);
+
+		const res = await pollDiscogsForSales(env as any);
+		expect(res.shopify_adjustments_succeeded).toBe(1);
+		// Fixed in place — no Discogs round-trip needed for a space.
+		expect(discogs.getListing).not.toHaveBeenCalled();
+		expect(
+			JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku,
+		).toBe("DAT125");
+	});
+
+	it("vetoes the WHOLE order when one line has no Shopify variant", async () => {
+		// Two items: one Shopify knows, one it doesn't.
+		vi.mocked(discogs.getOrders).mockResolvedValue(
+			ordersPage([
+				{
+					...firmOrder,
+					items: [
+						{ id: LISTING_ID, release: { description: "Known" } },
+						{ id: 772, release: { description: "Missing from Shopify" } },
+					],
+				},
+			]) as any,
+		);
+		shopifyKnows(["DAT125"]);
+		vi.mocked(discogs.getListing).mockImplementation(async (_t: any, id: number) => ({
+			id,
+			status: "Sold",
+			external_id: "",
+			release: {
+				id: 1,
+				catalog_number: id === LISTING_ID ? "DAT 125" : "DAT 126",
+				description: "x",
+			},
+		}) as any);
+
+		const res = await pollDiscogsForSales(env as any);
+
+		// No partial factura: 14-of-19 is the wrong document, not a fix.
+		expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		expect(res.variant_not_found).toBe(1);
+		const audit = JSON.parse(
+			(await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!,
+		);
+		expect(audit.order_creation.needs_manual).toBe(true);
+		expect(audit.order_creation.unresolved).toHaveLength(1);
+		expect(audit.order_creation.unresolved[0].sku_candidates).toContain("DAT126");
+		// The lock stays, so the cron won't spin on it — sales-retry is the way back.
+		expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+
+		await env.SYNC_STATE.delete("listing:772");
 	});
 });
