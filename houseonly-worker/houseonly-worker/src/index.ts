@@ -4,6 +4,15 @@ interface Env {
   // SYNC_STATE: KV namespace for Discogs↔Shopify sync metadata.
   // Used by Fase 3 sync handlers (bootstrap, status, webhook, polling).
   SYNC_STATE: KVNamespace;
+  // EMAILS: emails de distribuidor archivados por el Apps Script de Drive.
+  // Claves:
+  //   idx                → JSON con la lista completa {name, prefix, subject,
+  //                        date, bytes}. Una sola lectura sirve la tabla del
+  //                        Pre-order tab sin traerse los cuerpos.
+  //   msg:<filename>     → el htmlBody crudo del email, tal cual llego.
+  // El worker NO parsea nada de esto: el parseo vive en App.jsx y punto. Aqui
+  // solo se guarda y se sirve.
+  EMAILS: KVNamespace;
   SHOPIFY_ADMIN_CLIENT_ID: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
   // DISCOGS_TOKEN: Personal Access Token for Discogs API.
@@ -817,6 +826,10 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 // See src/lib/shopify-admin.ts for full docs.
 
 import { shopifyAdminGraphQL, getShopifyAdminToken } from './lib/shopify-admin';
+// Ajuste de inventario para llegadas de stock (?action=inventory-adjust). Las
+// tres ya existen y estan en produccion: sync.ts las usa para descontar stock
+// cuando entra una venta de Discogs.
+import { findVariantBySku, getPrimaryLocationId, adjustInventory } from './lib/shopify-admin';
 import {
   handleSyncBootstrap,
   handleSyncStatus,
@@ -1492,6 +1505,154 @@ export default {
     // the pending-review queue. Gated by meta:sync_35_mode (default dry).
     if (action === 'webhook-shopify-product' && request.method === 'POST') {
       return await handleProductCreateWebhook(request, env, ctx);
+    }
+
+    // ── FASE 3B: EMAILS DE DISTRIBUIDOR ─────────────────────
+    //
+    // El Apps Script de Drive ya archiva los emails de W&S / DBH / TV / Rubadub
+    // como {PREFIJO}__{asunto}__{fecha}.html. Aqui los guarda ADEMAS en KV para
+    // que el Pre-order tab pueda listarlos y leerlos sin depender de que
+    // Eduardo tenga la carpeta de Drive montada en esa maquina.
+    //
+    //   POST ?action=emails-ingest   {name, html}   Bearer. Idempotente.
+    //   GET  ?action=emails-list                    Bearer. Solo el indice.
+    //   GET  ?action=emails-get&name=<filename>     Bearer. El html crudo.
+    //
+    // El worker NO parsea: guarda y sirve. El parseo de campos vive en App.jsx,
+    // en un solo sitio, que es la regla del proyecto.
+    if (action === 'emails-ingest' && request.method === 'POST') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      let body: any;
+      try { body = await request.json(); } catch { return jsonRes({ error: 'bad json' }, 400); }
+      const name = String(body?.name || '').trim();
+      const html = String(body?.html || '');
+      if (!name || !html) return jsonRes({ error: 'name and html required' }, 400);
+      // La clave de KV admite 512 bytes; los nombres del Apps Script rondan los
+      // 100, pero un asunto raro podria pasarse y el put fallaria sin mas.
+      if (new TextEncoder().encode(`msg:${name}`).length > 500) {
+        return jsonRes({ error: 'name too long for a KV key' }, 400);
+      }
+
+      const idxRaw = await env.EMAILS.get('idx');
+      const idx: any[] = idxRaw ? JSON.parse(idxRaw) : [];
+      const already = idx.find((e) => e.name === name);
+      if (already) {
+        // Idempotente: el Apps Script reenvia lo mismo en cada pasada y no
+        // queremos reescribir 210 claves a diario (ni pagar por ello).
+        return jsonRes({ ok: true, stored: false, reason: 'already indexed' });
+      }
+
+      // {PREFIJO}__{asunto}__{fecha}.html — el mismo formato que en Drive, para
+      // que el triage del tab sea el mismo con carpeta o con KV.
+      const parts = name.match(/^([A-Z]+)__(.+?)__(\d{4}-\d{2}-\d{2})(?:__.*)?\.(html|pdf)$/);
+      await env.EMAILS.put(`msg:${name}`, html);
+      idx.push({
+        name,
+        prefix:  parts ? parts[1] : '',
+        subject: parts ? parts[2] : name,
+        date:    parts ? parts[3] : '',
+        bytes:   html.length,
+      });
+      idx.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      await env.EMAILS.put('idx', JSON.stringify(idx));
+      return jsonRes({ ok: true, stored: true, total: idx.length });
+    }
+
+    if (action === 'emails-list' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      const idxRaw = await env.EMAILS.get('idx');
+      const idx = idxRaw ? JSON.parse(idxRaw) : [];
+      return jsonRes({ ok: true, count: idx.length, emails: idx });
+    }
+
+    if (action === 'emails-get' && request.method === 'GET') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      const name = url.searchParams.get('name') || '';
+      if (!name) return jsonRes({ error: 'name required' }, 400);
+      const html = await env.EMAILS.get(`msg:${name}`);
+      if (html == null) return jsonRes({ error: 'not found' }, 404);
+      return jsonRes({ ok: true, name, html });
+    }
+
+    // ── FASE 3B: AJUSTE DE INVENTARIO (llegada de stock) ────
+    //
+    // Para los restocks: un disco que ya es producto vivo (se creo al pedirlo)
+    // y del que ahora llega la caja. Por CSV no se puede hacer bien — Shopify
+    // FIJA el qty en vez de sumarlo, lo que borraria el saldo negativo de
+    // oversell que ES el registro de demanda del pre-order, y las columnas
+    // vacias del CSV sobrescriben como vacias, cargandose portada y body. Por
+    // eso el importer deja esas filas fuera del CSV y se resuelven aqui.
+    //
+    //   POST ?action=inventory-adjust  Bearer
+    //     {items:[{sku, delta}], dry?:true, reason?}
+    //
+    // delta, NO absoluto: -1 + 2 = 1 disponible y la copia pre-vendida sigue
+    // debiendose. Con clave de idempotencia, asi que reintentar no duplica.
+    if (action === 'inventory-adjust' && request.method === 'POST') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      let body: any;
+      try { body = await request.json(); } catch { return jsonRes({ error: 'bad json' }, 400); }
+      const items = Array.isArray(body?.items) ? body.items : [];
+      if (!items.length) return jsonRes({ error: 'items required' }, 400);
+      // Dry por defecto DELIBERADAMENTE: este endpoint si muta Shopify, y el
+      // coste de un dry de mas es cero frente al de un live por accidente.
+      const dry = body?.dry !== false;
+      const reason = String(body?.reason || 'received');
+
+      const results: any[] = [];
+      const adjustments: any[] = [];
+      let locationId = '';
+      try { locationId = await getPrimaryLocationId(env); }
+      catch (e: any) { return jsonRes({ error: `no location: ${e.message}` }, 500); }
+
+      for (const it of items) {
+        const sku = String(it?.sku || '').trim();
+        const delta = Number(it?.delta);
+        if (!sku || !Number.isFinite(delta) || delta === 0) {
+          results.push({ sku, ok: false, error: 'sku y delta distinto de 0 requeridos' });
+          continue;
+        }
+        const variant = await findVariantBySku(env, sku);
+        if (!variant?.inventoryItemId) {
+          results.push({ sku, ok: false, error: 'sin variante con ese SKU en Shopify' });
+          continue;
+        }
+        results.push({ sku, ok: true, delta, inventoryItemId: variant.inventoryItemId });
+        adjustments.push({ inventoryItemId: variant.inventoryItemId, locationId, delta });
+      }
+
+      if (dry) {
+        return jsonRes({ ok: true, dry: true, locationId, results,
+                         note: 'nada aplicado — manda dry:false para aplicarlo' });
+      }
+      if (!adjustments.length) {
+        return jsonRes({ ok: false, dry: false, results, error: 'ningun SKU resoluble' }, 400);
+      }
+      // La clave de idempotencia se deriva del contenido del ajuste, asi que
+      // reenviar exactamente lo mismo no vuelve a sumar.
+      const fingerprint = adjustments.map((a) => `${a.inventoryItemId}:${a.delta}`).sort().join('|');
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(fingerprint));
+      const idempotencyKey = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 40);
+
+      const applied = await adjustInventory(env, adjustments, idempotencyKey, reason);
+      return jsonRes({ ok: applied.ok, dry: false, results, applied, idempotencyKey },
+                     applied.ok ? 200 : 500);
     }
 
     // ── FASE 3.5B: AUTO-LIST MODE (dry/live) ────────────────
