@@ -7662,14 +7662,13 @@ const RD_MONTHS = ['january','february','march','april','may','june',
 // catalogue — and that short digest is the dangerous one, because nobody
 // double-checks four rows.
 //
-// There are TWO kinds of digest and they are not interchangeable:
-//   • shipping digest — "these are all shipping to you today / next Monday":
-//     stock already on its way, NOT pre-orders.
-//   • weekly pre-sales round-up — "All Rubadub Pre-sales (Week …)": these ARE
-//     pre-orders.
-// Both are catalogues, so both default to nothing selected, but only the first
-// implies the records are already shipping. Keep the distinction: collapsing
-// them would mislabel a whole round-up as arriving stock.
+// There are TWO kinds of digest and they behave differently here:
+//   • shipping digest — "these are all shipping to you today / next Monday".
+//     Carries full field blocks (a real one runs to 132 of them) and the
+//     records are already on their way, so they are NOT pre-orders.
+//   • weekly pre-sales round-up — "All Rubadub Pre-sales (Week …)". Carries NO
+//     field blocks at all, just one link per release, so it parses to zero
+//     rows. It is detected only to explain that in the error message.
 const RD_DIGEST_SHIPPING = /these\s+are\s+all\s+shipping\s+to\s+you|shipping\s+to\s+you\s+(today|next\s+\w+)|New\s+Releases\s+Shipping\s+(This|Next)\s+Week|Imports\s+Shipping\s+Today|Today'?s?\s+New\s+Arrivals/i;
 const RD_DIGEST_PRESALES = /All\s+Rubadub\s+Pre-?sales|WEEKLY\s+ROUND\s*UP/i;
 
@@ -7744,11 +7743,12 @@ function rdShipDate(text, emailDate) {
 function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
   const text = rdHtmlToText(String(raw || ''));
   const rows = [];
-  // Document-level, not per-release: a digest states its nature once, in the
-  // opening prose, and that fact belongs to every row it carries.
-  const digestShipping = RD_DIGEST_SHIPPING.test(text);
-  const digestPresales = RD_DIGEST_PRESALES.test(text);
-  const digest = digestShipping ? 'shipping' : digestPresales ? 'presales' : '';
+  // Document-level, not per-release. A shipping digest says so ONCE, in the
+  // opening line, and that fact belongs to every release it carries: in the
+  // real 132-release digest "Hi, these are all shipping to you today" appears
+  // exactly once, so a per-release test only ever sees it in row 1 and leaves
+  // the other 131 looking like an ambiguous partial paste.
+  const digest = RD_DIGEST_SHIPPING.test(text) ? 'shipping' : '';
 
   // Locate every field block. "Cat:" is the anchor — a block without a cat-no
   // is not a release. Each block spans from its Artist:/first field line to the
@@ -7795,16 +7795,25 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
     // way, so it must NOT be tagged forthcoming or the graduation cron strips
     // the tag ~15 min later and it reads as a sync bug.
     const isPreorder = /Please\s+Pre-?Order/i.test(before);
-    const shipped    = /shipping\s+to\s+you\s+(today|next\s+\w+)/i.test(before) ||
+    // The digest's opening line covers every release it carries; the
+    // per-release windows only get consulted when this is not a digest.
+    const shipped    = digest === 'shipping' ||
+                       /shipping\s+to\s+you\s+(today|next\s+\w+)/i.test(before) ||
                        /shipping\s+(today|this\s+week)/i.test(before);
     // Absence of BOTH markers is ambiguous, not evidence: it is what a partial
     // copy looks like, since both live in the prose above the field block. Say
     // so — silently dropping `forthcoming` from a real pre-order is the same
-    // bug as tagging a shipped record, just from the other side.
+    // bug as tagging a shipped record, just from the other side. Inside a
+    // digest that ambiguity does not exist, so do not raise it there: it would
+    // fire on all but the first row and send the operator hunting for text
+    // they never failed to copy.
     if (!isPreorder) {
-      warnings.push(shipped
-        ? 'NO es pre-order (el email dice que ya se envía) → sin tag forthcoming'
-        : 'no aparece "Please Pre-Order" NI "shipping to you" → queda SIN tag forthcoming. Si es un pre-order, te faltó copiar el texto de encima del bloque de campos: selecciona el email entero.');
+      warnings.push(
+        digest === 'shipping'
+          ? 'ya enviándose (viene en un digest de envíos) → no es pre-order, sin tag forthcoming'
+          : shipped
+            ? 'NO es pre-order (el email dice que ya se envía) → sin tag forthcoming'
+            : 'no aparece "Please Pre-Order" NI "shipping to you" → queda SIN tag forthcoming. Si es un pre-order, te faltó copiar el texto de encima del bloque de campos: selecciona el email entero.');
     }
 
     const ship = rdShipDate(before, emailDate);
@@ -8214,7 +8223,12 @@ function PreorderImporter() {
       });
       if (!rows.length) {
         setRdPreview(null);
-        setRdError('No encontré ningún bloque de campos con "Cat:". Pega el email completo (el HTML del .html de Drive, o el texto plano).');
+        // The weekly round-up is the common way to land here: it lists one link
+        // per release and carries no field blocks at all, so there is nothing
+        // to parse and no amount of re-pasting will change that.
+        setRdError(RD_DIGEST_PRESALES.test(rdText)
+          ? 'Esto es el round-up semanal de pre-sales: no trae bloques de campos, solo un enlace por release, así que no hay nada que parsear. Abre el enlace del release que quieras y pega ESE email.'
+          : 'No encontré ningún bloque de campos con "Cat:". Pega el email completo (el HTML del .html de Drive, o el texto plano).');
         return;
       }
       setRdPreview(rows);
@@ -8614,11 +8628,9 @@ function PreorderImporter() {
                   <button onClick={()=>rdSetAll(true)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
                   <button onClick={()=>rdSetAll(false)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                 </div>
-                {kind&&(
+                {kind==='shipping'&&(
                   <div style={{fontSize:9,color:'#ff8800',lineHeight:1.6,marginBottom:8,padding:'6px 10px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:3}}>
-                    {kind==='shipping'
-                      ? <>Es un <b>digest de envíos</b>: es un catálogo de lo que ya sale hacia ti, no un pedido. Nada viene marcado — marca solo lo que pediste.</>
-                      : <>Es el <b>round-up semanal de pre-sales</b>: es un catálogo, no un pedido. Nada viene marcado — marca solo lo que pediste.</>}
+                    Es un <b>digest de envíos</b>: catálogo de lo que ya sale hacia ti, no un pedido. Ninguno lleva <code style={{fontFamily:'monospace'}}>forthcoming</code> y nada viene marcado — marca solo lo que pediste.
                   </div>
                 )}
                 {rdPreview.map((r,i)=>(
