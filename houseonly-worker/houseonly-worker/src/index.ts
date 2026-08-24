@@ -828,6 +828,9 @@ import {
   handlePendingReviewList,
   handlePendingReviewApprove,
   handlePendingReviewReject,
+  handleSalesAudit,
+  handleSalesMap,
+  handleSalesRetry,
   pollDiscogsForSales,
 } from './lib/sync';
 
@@ -1514,6 +1517,25 @@ export default {
     }
     if (action === 'pending-review-reject') {
       return await handlePendingReviewReject(request, env);
+    }
+
+    // ── FASE 3I: SALES AUDIT / REPAIR ──────────────────────
+    // GET  ?action=sales-audit&order_id=147628-33  → audit + lock + mappings
+    // GET  ?action=sales-audit[&parked=1]          → every audited sale
+    // POST ?action=sales-map    {listing_id, sku}  → write a missing mapping
+    // POST ?action=sales-retry  {order_id}         → clear the lock and re-run
+    //
+    // A Discogs sale that fails keeps its lock:order, so the cron reports it
+    // as a duplicate forever. These expose why it failed and let us fix it,
+    // using the BOOTSTRAP_AUTH_SECRET instead of a Cloudflare API token.
+    if (action === 'sales-audit') {
+      return await handleSalesAudit(request, env);
+    }
+    if (action === 'sales-map') {
+      return await handleSalesMap(request, env);
+    }
+    if (action === 'sales-retry') {
+      return await handleSalesRetry(request, env);
     }
 
     // ── MIRROR (server-side fetch + R2 store) ─────────────

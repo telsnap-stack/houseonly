@@ -671,3 +671,61 @@ export async function createDiscogsOrder(
     orderName: order.name,
   };
 }
+
+// ── LOOK UP AN EXISTING ORDER FOR A DISCOGS SALE ────────────────────
+//
+// Fiscal safety net for the manual retry path (Fase 3I): before we re-run a
+// Discogs order through createDiscogsOrder we must be sure Shopify doesn't
+// already have it — a second paid order is a second factura.
+//
+// Shopify's order search does NOT index `note` (a plain search for the Discogs
+// id returns nothing even when a note contains it), so we can't query for it:
+// we scan the orders created since the Discogs order and match locally on the
+// draft's customAttributes (`discogs_order_id`, exact) or its note.
+//
+// @param createdAtMin  YYYY-MM-DD, the earliest day the Shopify order could
+//                      exist — normally the Discogs order's creation day.
+export async function findOrderByDiscogsOrderId(
+  env: ShopifyAdminEnv,
+  discogsOrderId: string,
+  createdAtMin: string,
+): Promise<{ id: string; name: string; note: string | null } | null> {
+  // Escape for the note regex, then require a non-digit/non-dash boundary so
+  // looking for "147628-3" never matches a note about "147628-33".
+  const esc = discogsOrderId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const noteRe = new RegExp(`Discogs order #?${esc}(?![0-9-])`, 'i');
+
+  const query = `
+    query discogsOrderLookup($q: String!, $after: String) {
+      orders(first: 50, query: $q, sortKey: CREATED_AT, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { id name note customAttributes { key value } } }
+      }
+    }
+  `;
+
+  let after: string | null = null;
+  // 5 pages × 50 = 250 orders back from the Discogs order date. Far beyond a
+  // realistic gap between a Discogs sale and its Shopify order.
+  for (let page = 0; page < 5; page++) {
+    const res: any = await shopifyAdminGraphQL(env, query, {
+      q: `created_at:>=${createdAtMin}`,
+      after,
+    });
+    const conn = res?.data?.orders;
+    if (!conn) return null;
+    for (const edge of conn.edges || []) {
+      const node = edge?.node;
+      if (!node) continue;
+      const attrMatch = (node.customAttributes || []).some(
+        (a: any) => a?.key === 'discogs_order_id' && a?.value === discogsOrderId,
+      );
+      if (attrMatch || (node.note && noteRe.test(node.note))) {
+        return { id: node.id, name: node.name, note: node.note ?? null };
+      }
+    }
+    if (!conn.pageInfo?.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
+  }
+  return null;
+}

@@ -6,7 +6,12 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import worker from "../src";
-import { pollDiscogsForSales } from "../src/lib/sync";
+import {
+	pollDiscogsForSales,
+	handleSalesAudit,
+	handleSalesMap,
+	handleSalesRetry,
+} from "../src/lib/sync";
 import * as discogs from "../src/lib/discogs";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 
@@ -18,7 +23,12 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, findVariantBySku: vi.fn(), createDiscogsOrder: vi.fn() };
+	return {
+		...actual,
+		findVariantBySku: vi.fn(),
+		createDiscogsOrder: vi.fn(),
+		findOrderByDiscogsOrderId: vi.fn(),
+	};
 });
 
 describe("Hello World user worker", () => {
@@ -266,5 +276,305 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const second = await pollDiscogsForSales(env as any);
 		expect(second.skipped_duplicate).toBe(1);
 		expect(second.shopify_adjustments_attempted).toBe(0);
+	});
+});
+
+// ── FASE 3I: sales audit / repair endpoints ─────────────────────────
+//
+// The recurring incident these serve: a paid Discogs sale never becomes a
+// Shopify order, the audit in KV already says why, but the lock:order that
+// stops duplicate facturas also stops the cron from ever trying again.
+describe("sales audit / repair endpoints", () => {
+	const SECRET = "test-secret";
+	const ORDER_ID = "147628-33";
+	const LISTING_ID = 991;
+
+	// Real KV binding + the admin secrets the handlers check.
+	const adminEnv = () =>
+		({ ...env, BOOTSTRAP_AUTH_SECRET: SECRET, DISCOGS_TOKEN: "tok" }) as any;
+
+	const authed = (url: string, init: RequestInit = {}) =>
+		new Request(url, {
+			...init,
+			headers: { authorization: `Bearer ${SECRET}`, ...(init.headers || {}) },
+		});
+
+	const firmOrder = {
+		id: ORDER_ID,
+		status: "Payment Received",
+		created: "2026-08-24T01:50:00-07:00",
+		items: [{ id: LISTING_ID, release: { description: "Some Record" } }],
+	};
+
+	/** The audit a failed (unmapped item) run leaves behind. */
+	const parkedAudit = {
+		order_id: ORDER_ID,
+		status: "Payment Received",
+		created: firmOrder.created,
+		mode: "live",
+		processed_at: "2026-08-24T09:15:00.000Z",
+		items: [
+			{
+				listing_id: LISTING_ID,
+				release_title: "Some Record",
+				sku: null,
+				outcome: "unmapped_listing",
+				error: null,
+			},
+		],
+		order_creation: {
+			ok: false,
+			needs_manual: true,
+			error: "order has unmapped item(s); skipped to avoid partial factura",
+		},
+	};
+
+	beforeEach(async () => {
+		vi.clearAllMocks();
+		for (const k of [
+			`lock:order:${ORDER_ID}`,
+			`sales-detected:${ORDER_ID}`,
+			`listing:${LISTING_ID}`,
+			"sku:SKU9",
+			"meta:sync_3e_mode",
+		]) {
+			await env.SYNC_STATE.delete(k);
+		}
+		vi.mocked(discogs.getOrder).mockResolvedValue({
+			...firmOrder,
+			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
+			buyer: { email: "jane@example.com" },
+		} as any);
+		vi.mocked(shopifyAdmin.findVariantBySku).mockResolvedValue({
+			variantId: "gid://shopify/ProductVariant/9",
+		} as any);
+		vi.mocked(shopifyAdmin.findOrderByDiscogsOrderId).mockResolvedValue(null);
+		vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+			ok: true,
+			orderId: "gid://shopify/Order/1",
+			orderName: "#1034",
+			draftOrderId: "gid://shopify/DraftOrder/1",
+		} as any);
+	});
+
+	it("requires the bearer secret", async () => {
+		const res = await handleSalesAudit(
+			new Request(`http://w/?action=sales-audit&order_id=${ORDER_ID}`),
+			adminEnv(),
+		);
+		expect(res.status).toBe(401);
+	});
+
+	it("reports the audit, the lock, and that the lock blocks the cron", async () => {
+		await env.SYNC_STATE.put(
+			`sales-detected:${ORDER_ID}`,
+			JSON.stringify(parkedAudit),
+		);
+		await env.SYNC_STATE.put(`lock:order:${ORDER_ID}`, "1");
+
+		const res = await handleSalesAudit(
+			authed(`http://w/?action=sales-audit&order_id=${ORDER_ID}`),
+			adminEnv(),
+		);
+		const body: any = await res.json();
+
+		expect(res.status).toBe(200);
+		expect(body.found).toBe(true);
+		expect(body.order_created).toBe(false);
+		expect(body.lock.present).toBe(true);
+		expect(body.lock.blocks_cron_retry).toBe(true);
+		expect(body.audit.items[0].outcome).toBe("unmapped_listing");
+		// The mapping the operator has to write is spelled out, with its
+		// current (missing) value.
+		expect(body.mappings[0].listing_kv_key).toBe(`listing:${LISTING_ID}`);
+		expect(body.mappings[0].listing_kv).toBeNull();
+	});
+
+	it("lists only parked sales with parked=1", async () => {
+		await env.SYNC_STATE.put(
+			`sales-detected:${ORDER_ID}`,
+			JSON.stringify(parkedAudit),
+		);
+		await env.SYNC_STATE.put(
+			"sales-detected:147628-C-20",
+			JSON.stringify({
+				order_id: "147628-C-20",
+				processed_at: "2026-08-17T07:15:00.000Z",
+				items: [],
+				order_creation: { ok: true, shopify_order_name: "#1033" },
+			}),
+		);
+
+		const res = await handleSalesAudit(
+			authed("http://w/?action=sales-audit&parked=1"),
+			adminEnv(),
+		);
+		const body: any = await res.json();
+		expect(body.audits.map((a: any) => a.order_id)).toContain(ORDER_ID);
+		expect(body.audits.map((a: any) => a.order_id)).not.toContain("147628-C-20");
+
+		await env.SYNC_STATE.delete("sales-detected:147628-C-20");
+	});
+
+	it("writes both directions of a listing↔SKU mapping", async () => {
+		const res = await handleSalesMap(
+			authed("http://w/?action=sales-map", {
+				method: "POST",
+				body: JSON.stringify({ listing_id: LISTING_ID, sku: "SKU9" }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(200);
+		expect(
+			JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku,
+		).toBe("SKU9");
+		expect(
+			JSON.parse((await env.SYNC_STATE.get("sku:SKU9"))!).listing_id,
+		).toBe(LISTING_ID);
+	});
+
+	it("rejects a mapping write with a missing sku", async () => {
+		const res = await handleSalesMap(
+			authed("http://w/?action=sales-map", {
+				method: "POST",
+				body: JSON.stringify({ listing_id: LISTING_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(400);
+	});
+
+	it("refuses to retry a sale our audit says already became an order", async () => {
+		await env.SYNC_STATE.put(
+			`sales-detected:${ORDER_ID}`,
+			JSON.stringify({
+				...parkedAudit,
+				order_creation: { ok: true, shopify_order_name: "#1034" },
+			}),
+		);
+		const res = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(409);
+		expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+	});
+
+	it("refuses to retry when Shopify already has the order", async () => {
+		await env.SYNC_STATE.put(`lock:order:${ORDER_ID}`, "1");
+		vi.mocked(shopifyAdmin.findOrderByDiscogsOrderId).mockResolvedValue({
+			id: "gid://shopify/Order/2",
+			name: "#1034",
+			note: `Discogs order ${ORDER_ID}`,
+		} as any);
+
+		const res = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(409);
+		expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		// The lock must survive a refused retry — clearing it would let the
+		// next cron run create the duplicate this refusal just prevented.
+		expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+	});
+
+	it("fails closed when Shopify can't be checked", async () => {
+		vi.mocked(shopifyAdmin.findOrderByDiscogsOrderId).mockRejectedValue(
+			new Error("Shopify Admin API 500"),
+		);
+		const res = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(502);
+		expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+	});
+
+	it("refuses to retry an order that isn't a firm sale", async () => {
+		vi.mocked(discogs.getOrder).mockResolvedValue({
+			...firmOrder,
+			status: "Payment Pending",
+		} as any);
+		const res = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(res.status).toBe(409);
+		expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+	});
+
+	it("clears the lock and re-runs the order once the mapping is fixed", async () => {
+		await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+		await env.SYNC_STATE.put(
+			`sales-detected:${ORDER_ID}`,
+			JSON.stringify(parkedAudit),
+		);
+		await env.SYNC_STATE.put(`lock:order:${ORDER_ID}`, "1");
+		// The repair: the mapping the audit said was missing.
+		await env.SYNC_STATE.put(
+			`listing:${LISTING_ID}`,
+			JSON.stringify({ sku: "SKU9", status: "For Sale" }),
+		);
+
+		const res = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		const body: any = await res.json();
+
+		expect(res.status).toBe(200);
+		expect(body.ok).toBe(true);
+		expect(body.audit.order_creation.shopify_order_name).toBe("#1034");
+		expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+		// The lock is back, so the next cron run still can't duplicate it.
+		expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+		// And the audit now records the created order.
+		const stored = JSON.parse(
+			(await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!,
+		);
+		expect(stored.order_creation.ok).toBe(true);
+	});
+
+	it("re-refuses a second retry of a sale it just created", async () => {
+		await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+		await env.SYNC_STATE.put(
+			`listing:${LISTING_ID}`,
+			JSON.stringify({ sku: "SKU9", status: "For Sale" }),
+		);
+
+		const first = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(first.status).toBe(200);
+
+		const second = await handleSalesRetry(
+			authed("http://w/?action=sales-retry", {
+				method: "POST",
+				body: JSON.stringify({ order_id: ORDER_ID }),
+			}),
+			adminEnv(),
+		);
+		expect(second.status).toBe(409);
+		expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
 	});
 });

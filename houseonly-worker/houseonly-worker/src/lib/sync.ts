@@ -38,6 +38,7 @@ import {
   getPrimaryLocationId,
   adjustInventory,
   createDiscogsOrder,
+  findOrderByDiscogsOrderId,
   type DiscogsOrderLine,
   type DiscogsBuyer,
   type ShopifyAdminEnv,
@@ -122,6 +123,9 @@ const MAX_POLL_PAGES = 20;
 // POLL_LOOKBACK_DAYS, and the lock is the ONLY thing stopping us from creating
 // a second one (a duplicate factura). 60d >> 10d leaves a wide safety margin.
 const ORDER_LOCK_TTL_SECONDS = 60 * 24 * 60 * 60;
+// sales-detected:{id} audit TTL. Long enough to diagnose a sale weeks later
+// ("why did this order never reach Shopify?") without growing KV forever.
+const SALES_AUDIT_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 // ── ENV ─────────────────────────────────────────────────────────────
 
@@ -689,6 +693,210 @@ async function getAutoListMode(env: SyncEnv): Promise<SyncMode> {
 }
 
 /**
+ * Process ONE Discogs order end to end: idempotency lock → item resolution
+ * (listing → SKU → Shopify variant, self-healing the KV mapping when it can)
+ * → paid Shopify order creation in live mode. Writes the sales-detected:{id}
+ * audit on EVERY outcome, and returns it.
+ *
+ * The caller decides whether the order deserves processing (firm status, no
+ * existing lock). Extracted from the poll loop so the cron and the manual
+ * retry endpoint take exactly the same fiscal-safety path — one lock, one
+ * factura — instead of a hand-built draft order that skips these guards.
+ */
+async function processDiscogsOrder(
+  env: SyncAdminEnv,
+  order: DiscogsOrder,
+  mode: SyncMode,
+  result: PollResult,
+): Promise<any> {
+  const orderIdStr = String(order.id);
+
+  // Set lock IMMEDIATELY and keep it on every outcome. This is the single
+  // guard against creating a duplicate paid Shopify order (a duplicate
+  // factura): its TTL must outlive the fetch window so an order we've already
+  // handled is never re-created while it's still inside the window.
+  await env.SYNC_STATE.put(`lock:order:${orderIdStr}`, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
+
+  // Build the audit record for this order.
+  const audit: any = {
+    order_id: orderIdStr,
+    status: order.status,
+    created: order.created,
+    mode,
+    processed_at: new Date().toISOString(),
+    items: [],
+    order_creation: null as any,
+  };
+
+  // Persist the audit (30 day TTL) and hand it back to the caller. Every exit
+  // path below goes through here — an order that leaves no audit entry is an
+  // order nobody can diagnose later.
+  const saveAudit = async () => {
+    await env.SYNC_STATE.put(
+      `sales-detected:${orderIdStr}`,
+      JSON.stringify(audit),
+      { expirationTtl: SALES_AUDIT_TTL_SECONDS },
+    );
+    return audit;
+  };
+
+  // ── Resolve every item to a Shopify variant (NO inventory calls here) ──
+  // Fase 3G: we create ONE paid Shopify order per Discogs order so the sale
+  // is captured for Spanish fiscal invoicing. Completing that order performs
+  // the SINGLE inventory decrement — so we must NOT call adjustInventory.
+  const resolvedLines: DiscogsOrderLine[] = [];
+  let hadUnmapped = false;
+
+  for (const item of (order.items || [])) {
+    const itemAudit: any = {
+      listing_id: item.id,
+      release_title: item.release?.description,
+      quantity: 1,  // Discogs marketplace items are always quantity 1
+      sku: null as string | null,
+      shopify_variant_id: null as string | null,
+      outcome: 'pending',
+      error: null as string | null,
+    };
+
+    // Resolve listing_id → sku. First the KV mapping (bootstrap / auto-list);
+    // if absent, self-heal by asking Discogs for the listing's external_id
+    // (the SKU we set at listing time) and cache it. Without this, EVERY sale
+    // of a record listed after the last bootstrap fails as unmapped and needs
+    // a manual KV write — the recurring "Shopify didn't catch the order" bug.
+    let sku = (await getListingMapping(env, item.id))?.sku || null;
+    if (!sku) {
+      try {
+        const listing = await getListing(env.DISCOGS_TOKEN, item.id);
+        // SKU link, most reliable first: the external_id we set at listing
+        // time, else the release catalog number — this shop's Shopify SKUs
+        // ARE the Discogs catno (e.g. DMND010), so a listing created outside
+        // our auto-list flow (no external_id) still resolves. Cache whichever
+        // we find so future polls skip the lookup.
+        sku = (listing.external_id || '').trim()
+          || (listing.release?.catalog_number || '').trim()
+          || null;
+        if (sku) {
+          await env.SYNC_STATE.put(`listing:${item.id}`,
+            JSON.stringify({ sku, status: listing.status }));
+          await env.SYNC_STATE.put(`sku:${sku}`,
+            JSON.stringify({ listing_id: item.id, status: listing.status, synced_at: new Date().toISOString() }));
+        }
+      } catch (e: any) {
+        itemAudit.error = `getListing failed: ${e?.message || e}`;
+      }
+    }
+    if (!sku) {
+      itemAudit.outcome = 'unmapped_listing';
+      result.unmapped_listings++;
+      hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
+      audit.items.push(itemAudit);
+      continue;
+    }
+    itemAudit.sku = sku;
+
+    // Resolve sku → Shopify variant
+    let variant;
+    try {
+      variant = await findVariantBySku(env, sku);
+    } catch (e: any) {
+      itemAudit.outcome = 'shopify_lookup_failed';
+      itemAudit.error = e?.message || String(e);
+      result.shopify_adjustments_failed++;
+      audit.items.push(itemAudit);
+      continue;
+    }
+    if (!variant?.variantId) {
+      itemAudit.outcome = 'variant_not_found';
+      result.variant_not_found++;
+      audit.items.push(itemAudit);
+      continue;
+    }
+    itemAudit.shopify_variant_id = variant.variantId;
+    itemAudit.outcome = 'resolved';
+    resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
+    audit.items.push(itemAudit);
+  }
+
+  // Fiscal safety: if ANY item couldn't be mapped to a SKU, do NOT create a
+  // partial order (a factura missing a record is worse than none). Skip the
+  // whole order and flag it for manual handling.
+  if (hadUnmapped) {
+    audit.order_creation = {
+      ok: false,
+      needs_manual: true,
+      error: 'order has unmapped item(s); skipped to avoid partial factura',
+    };
+    result.shopify_adjustments_failed++;
+    return await saveAudit();
+  }
+
+  // If nothing resolved, record and move on (lock stays set so we don't spin).
+  if (resolvedLines.length === 0) {
+    audit.order_creation = { ok: false, error: 'no resolvable line items' };
+    return await saveAudit();
+  }
+
+  // ── Fetch full order for buyer details, parse the shipping address ──
+  let buyer: DiscogsBuyer;
+  try {
+    const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+    const parsed = parseDiscogsShippingAddress(full.shipping_address);
+    buyer = {
+      name: parsed.name,
+      email: full.buyer?.email,
+      address1: parsed.address1,
+      address2: parsed.address2,
+      city: parsed.city,
+      province: parsed.province,
+      zip: parsed.zip,
+      country: parsed.country,
+      phone: parsed.phone,
+    };
+  } catch (e: any) {
+    audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
+    result.shopify_adjustments_failed++;
+    return await saveAudit();
+  }
+
+  result.shopify_adjustments_attempted++;
+
+  if (mode === 'dry') {
+    audit.order_creation = {
+      ok: true,
+      dry_run: true,
+      would_create_lines: resolvedLines.length,
+      buyer_name: buyer.name,
+      buyer_country: buyer.country,
+    };
+    result.shopify_adjustments_succeeded++;
+    return await saveAudit();
+  }
+
+  // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
+  const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+  if (orderResult.ok) {
+    audit.order_creation = {
+      ok: true,
+      shopify_order_id: orderResult.orderId,
+      shopify_order_name: orderResult.orderName,
+      draft_order_id: orderResult.draftOrderId,
+      lines: resolvedLines.length,
+    };
+    result.shopify_adjustments_succeeded++;
+  } else {
+    audit.order_creation = {
+      ok: false,
+      error: orderResult.error,
+      userErrors: orderResult.userErrors,
+      draft_order_id: orderResult.draftOrderId,
+    };
+    result.shopify_adjustments_failed++;
+  }
+
+  return await saveAudit();
+}
+
+/**
  * Main entry point for the cron handler. Called every 15 min.
  *
  * @param env Worker env (needs SYNC_STATE, DISCOGS_TOKEN, Shopify admin secrets)
@@ -772,211 +980,19 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     if (!FIRM_SALE_STATUSES.has(order.status)) continue;
     result.firm_sales_found++;
 
-    // Idempotency check: have we already processed this order?
-    const orderIdStr = String(order.id);
-    const lockKey = `lock:order:${orderIdStr}`;
+    // Idempotency check: have we already processed this order? The lock is set
+    // inside processDiscogsOrder and kept on every outcome, so a firm order we
+    // already handled (or already FAILED on) is never touched twice. Clearing
+    // it deliberately — after fixing whatever failed — is what the sales-retry
+    // endpoint is for.
+    const lockKey = `lock:order:${String(order.id)}`;
     const alreadyProcessed = await env.SYNC_STATE.get(lockKey);
     if (alreadyProcessed) {
       result.skipped_duplicate++;
       continue;
     }
 
-    // Set lock IMMEDIATELY and keep it on every outcome. This is the single
-    // guard against creating a duplicate paid Shopify order (a duplicate
-    // factura): its TTL must outlive the fetch window so an order we've already
-    // handled is never re-created while it's still inside the window.
-    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
-
-    // Build the audit record for this order.
-    const audit: any = {
-      order_id: orderIdStr,
-      status: order.status,
-      created: order.created,
-      mode,
-      processed_at: new Date().toISOString(),
-      items: [],
-      order_creation: null as any,
-    };
-
-    // ── Resolve every item to a Shopify variant (NO inventory calls here) ──
-    // Fase 3G: we create ONE paid Shopify order per Discogs order so the sale
-    // is captured for Spanish fiscal invoicing. Completing that order performs
-    // the SINGLE inventory decrement — so we must NOT call adjustInventory.
-    const resolvedLines: DiscogsOrderLine[] = [];
-    let hadUnmapped = false;
-
-    for (const item of (order.items || [])) {
-      const itemAudit: any = {
-        listing_id: item.id,
-        release_title: item.release?.description,
-        quantity: 1,  // Discogs marketplace items are always quantity 1
-        sku: null as string | null,
-        shopify_variant_id: null as string | null,
-        outcome: 'pending',
-        error: null as string | null,
-      };
-
-      // Resolve listing_id → sku. First the KV mapping (bootstrap / auto-list);
-      // if absent, self-heal by asking Discogs for the listing's external_id
-      // (the SKU we set at listing time) and cache it. Without this, EVERY sale
-      // of a record listed after the last bootstrap fails as unmapped and needs
-      // a manual KV write — the recurring "Shopify didn't catch the order" bug.
-      let sku = (await getListingMapping(env, item.id))?.sku || null;
-      if (!sku) {
-        try {
-          const listing = await getListing(env.DISCOGS_TOKEN, item.id);
-          // SKU link, most reliable first: the external_id we set at listing
-          // time, else the release catalog number — this shop's Shopify SKUs
-          // ARE the Discogs catno (e.g. DMND010), so a listing created outside
-          // our auto-list flow (no external_id) still resolves. Cache whichever
-          // we find so future polls skip the lookup.
-          sku = (listing.external_id || '').trim()
-            || (listing.release?.catalog_number || '').trim()
-            || null;
-          if (sku) {
-            await env.SYNC_STATE.put(`listing:${item.id}`,
-              JSON.stringify({ sku, status: listing.status }));
-            await env.SYNC_STATE.put(`sku:${sku}`,
-              JSON.stringify({ listing_id: item.id, status: listing.status, synced_at: new Date().toISOString() }));
-          }
-        } catch (e: any) {
-          itemAudit.error = `getListing failed: ${e?.message || e}`;
-        }
-      }
-      if (!sku) {
-        itemAudit.outcome = 'unmapped_listing';
-        result.unmapped_listings++;
-        hadUnmapped = true;  // fiscal safety: one unmapped item voids the whole order
-        audit.items.push(itemAudit);
-        continue;
-      }
-      itemAudit.sku = sku;
-
-      // Resolve sku → Shopify variant
-      let variant;
-      try {
-        variant = await findVariantBySku(env, sku);
-      } catch (e: any) {
-        itemAudit.outcome = 'shopify_lookup_failed';
-        itemAudit.error = e?.message || String(e);
-        result.shopify_adjustments_failed++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-      if (!variant?.variantId) {
-        itemAudit.outcome = 'variant_not_found';
-        result.variant_not_found++;
-        audit.items.push(itemAudit);
-        continue;
-      }
-      itemAudit.shopify_variant_id = variant.variantId;
-      itemAudit.outcome = 'resolved';
-      resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
-      audit.items.push(itemAudit);
-    }
-
-    // Fiscal safety: if ANY item couldn't be mapped to a SKU, do NOT create a
-    // partial order (a factura missing a record is worse than none). Skip the
-    // whole order and flag it for manual handling.
-    if (hadUnmapped) {
-      audit.order_creation = {
-        ok: false,
-        needs_manual: true,
-        error: 'order has unmapped item(s); skipped to avoid partial factura',
-      };
-      result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
-      continue;
-    }
-
-    // If nothing resolved, record and move on (lock stays set so we don't spin).
-    if (resolvedLines.length === 0) {
-      audit.order_creation = { ok: false, error: 'no resolvable line items' };
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
-      continue;
-    }
-
-    // ── Fetch full order for buyer details, parse the shipping address ──
-    let buyer: DiscogsBuyer;
-    try {
-      const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
-      const parsed = parseDiscogsShippingAddress(full.shipping_address);
-      buyer = {
-        name: parsed.name,
-        email: full.buyer?.email,
-        address1: parsed.address1,
-        address2: parsed.address2,
-        city: parsed.city,
-        province: parsed.province,
-        zip: parsed.zip,
-        country: parsed.country,
-        phone: parsed.phone,
-      };
-    } catch (e: any) {
-      audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
-      result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
-      continue;
-    }
-
-    result.shopify_adjustments_attempted++;
-
-    if (mode === 'dry') {
-      audit.order_creation = {
-        ok: true,
-        dry_run: true,
-        would_create_lines: resolvedLines.length,
-        buyer_name: buyer.name,
-        buyer_country: buyer.country,
-      };
-      result.shopify_adjustments_succeeded++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
-      continue;
-    }
-
-    // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
-    const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
-    if (orderResult.ok) {
-      audit.order_creation = {
-        ok: true,
-        shopify_order_id: orderResult.orderId,
-        shopify_order_name: orderResult.orderName,
-        draft_order_id: orderResult.draftOrderId,
-        lines: resolvedLines.length,
-      };
-      result.shopify_adjustments_succeeded++;
-    } else {
-      audit.order_creation = {
-        ok: false,
-        error: orderResult.error,
-        userErrors: orderResult.userErrors,
-        draft_order_id: orderResult.draftOrderId,
-      };
-      result.shopify_adjustments_failed++;
-    }
-
-    // Save audit trail (30 day TTL)
-    await env.SYNC_STATE.put(
-      `sales-detected:${orderIdStr}`,
-      JSON.stringify(audit),
-      { expirationTtl: 30 * 24 * 60 * 60 },
-    );
+    await processDiscogsOrder(env, order, mode, result);
   }
 
   // ── 4. Record newest order seen (observability only; see header) ─
@@ -1541,5 +1557,305 @@ function jsonResponse(data: any, status = 200): Response {
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': '*',
     },
+  });
+}
+
+// ── FASE 3I: SALES AUDIT / REPAIR ENDPOINTS ─────────────────────────
+//
+// Why these exist: when a Discogs sale doesn't become a Shopify order, the
+// answer is already in KV (`sales-detected:{order_id}` says exactly which item
+// failed and how), but reading it needed a CLOUDFLARE_API_TOKEN nobody has to
+// hand — so every incident started with a blind guess. These three endpoints
+// expose the audit trail and the two repairs it points to, behind the
+// BOOTSTRAP_AUTH_SECRET the operator already uses:
+//
+//   GET  ?action=sales-audit&order_id=147628-33  → the audit + lock + mappings
+//   GET  ?action=sales-audit[&parked=1]          → every audited sale, newest
+//                                                  first (parked=1: only the
+//                                                  ones with no Shopify order)
+//   POST ?action=sales-map    {listing_id, sku}  → write the missing mapping
+//   POST ?action=sales-retry  {order_id}         → clear the lock and re-run
+//                                                  the order through the cron's
+//                                                  own path
+//
+// The retry deliberately re-uses processDiscogsOrder rather than building a
+// draft order by hand: same unmapped-item veto, same single lock, same audit.
+
+/** Compact one-line view of a sales-detected audit, for the list view. */
+function summarizeAudit(audit: any) {
+  const creation = audit?.order_creation;
+  return {
+    order_id: audit?.order_id,
+    status: audit?.status,
+    created: audit?.created,
+    processed_at: audit?.processed_at,
+    mode: audit?.mode,
+    shopify_order_name: creation?.shopify_order_name ?? null,
+    order_created: creation?.ok === true && !creation?.dry_run,
+    needs_manual: creation?.needs_manual === true,
+    error: creation?.error ?? null,
+    items: (audit?.items || []).map((i: any) => ({
+      listing_id: i?.listing_id,
+      sku: i?.sku ?? null,
+      outcome: i?.outcome,
+      error: i?.error ?? null,
+    })),
+  };
+}
+
+/**
+ * GET ?action=sales-audit — read the Fase 3E audit trail.
+ * Auth: Bearer BOOTSTRAP_AUTH_SECRET (it exposes buyer-adjacent sale data).
+ *
+ * With `order_id`: the full audit for that Discogs order, plus the state of
+ * the things that decide whether it can still be recovered — the idempotency
+ * lock, and the listing:/sku: mappings behind each line item.
+ * Without it: every audit we still hold (30d TTL), newest first.
+ */
+export async function handleSalesAudit(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method !== 'GET') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  const url = new URL(request.url);
+  const orderId = (url.searchParams.get('order_id') || '').trim();
+
+  // ── List view ─────────────────────────────────────────────────────
+  if (!orderId) {
+    const parkedOnly = url.searchParams.get('parked') === '1';
+    const audits: any[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      pages++;
+      const list = await env.SYNC_STATE.list({ prefix: 'sales-detected:', cursor });
+      for (const key of list.keys) {
+        const raw = await env.SYNC_STATE.get(key.name);
+        if (!raw) continue;
+        try {
+          const summary = summarizeAudit(JSON.parse(raw));
+          if (!parkedOnly || !summary.order_created) audits.push(summary);
+        } catch { /* skip malformed */ }
+      }
+      cursor = list.list_complete ? undefined : list.cursor;
+      if (pages > 20) break;  // safety cap, same as pending-review-list
+    } while (cursor);
+
+    audits.sort((a, b) => (b.processed_at || '').localeCompare(a.processed_at || ''));
+    return jsonResponse({ count: audits.length, parked_only: parkedOnly, audits });
+  }
+
+  // ── Single-order view ─────────────────────────────────────────────
+  const raw = await env.SYNC_STATE.get(`sales-detected:${orderId}`);
+  let audit: any = null;
+  if (raw) {
+    try { audit = JSON.parse(raw); } catch { audit = { parse_error: true, raw }; }
+  }
+
+  const lockPresent = (await env.SYNC_STATE.get(`lock:order:${orderId}`)) !== null;
+
+  // Resolve the KV mappings behind each line item, so a `unmapped_listing`
+  // outcome comes with the exact keys to write (and a `variant_not_found` one
+  // shows the SKU that Shopify didn't recognise).
+  const mappings: any[] = [];
+  for (const item of (audit?.items || [])) {
+    const listingRaw = item?.listing_id != null
+      ? await env.SYNC_STATE.get(`listing:${item.listing_id}`)
+      : null;
+    const skuRaw = item?.sku ? await env.SYNC_STATE.get(`sku:${item.sku}`) : null;
+    mappings.push({
+      listing_id: item?.listing_id ?? null,
+      release_title: item?.release_title ?? null,
+      outcome: item?.outcome ?? null,
+      sku: item?.sku ?? null,
+      listing_kv_key: item?.listing_id != null ? `listing:${item.listing_id}` : null,
+      listing_kv: listingRaw ? JSON.parse(listingRaw) : null,
+      sku_kv_key: item?.sku ? `sku:${item.sku}` : null,
+      sku_kv: skuRaw ? JSON.parse(skuRaw) : null,
+    });
+  }
+
+  const orderCreated = audit?.order_creation?.ok === true && !audit?.order_creation?.dry_run;
+
+  return jsonResponse({
+    order_id: orderId,
+    found: audit !== null,
+    lock: {
+      key: `lock:order:${orderId}`,
+      present: lockPresent,
+      // The lock is set before processing and kept on failure, so a failed
+      // order stays locked: the cron will keep reporting it as a duplicate and
+      // will NEVER retry it on its own. sales-retry is the way back in.
+      blocks_cron_retry: lockPresent && !orderCreated,
+    },
+    order_created: orderCreated,
+    audit,
+    mappings,
+  });
+}
+
+/**
+ * POST ?action=sales-map — write a listing_id ↔ SKU mapping by hand.
+ * Body: { listing_id: number, sku: string }
+ *
+ * The repair for an `unmapped_listing` outcome that self-healing couldn't fix
+ * (a Discogs listing with neither external_id nor a catalog number matching a
+ * Shopify SKU). Writes BOTH directions, exactly like the bootstrap does.
+ */
+export async function handleSalesMap(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  let body: { listing_id?: number | string; sku?: string; status?: string } = {};
+  try { body = await request.json(); } catch { /* validated below */ }
+
+  const listingId = Number(body.listing_id);
+  const sku = (body.sku || '').trim();
+  if (!Number.isFinite(listingId) || listingId <= 0 || !sku) {
+    return jsonResponse({
+      error: 'body must be {"listing_id": <number>, "sku": "<SKU>"}',
+      received: { listing_id: body.listing_id, sku: body.sku },
+    }, 400);
+  }
+
+  const listingKey = `listing:${listingId}`;
+  const skuKey = `sku:${sku}`;
+  const before = {
+    [listingKey]: await env.SYNC_STATE.get(listingKey),
+    [skuKey]: await env.SYNC_STATE.get(skuKey),
+  };
+
+  const status = body.status || 'For Sale';
+  await env.SYNC_STATE.put(listingKey, JSON.stringify({ sku, status }));
+  await env.SYNC_STATE.put(skuKey, JSON.stringify({
+    listing_id: listingId,
+    status,
+    synced_at: new Date().toISOString(),
+  }));
+
+  return jsonResponse({ ok: true, listing_id: listingId, sku, before });
+}
+
+/**
+ * POST ?action=sales-retry — re-run ONE Discogs order through the cron's path.
+ * Body: { order_id: string, force?: boolean }
+ *
+ * A sale that failed keeps its lock:order, so the cron reports it as a
+ * duplicate forever — by design (the lock is the only thing standing between a
+ * re-scanned window and a duplicate factura). This is the deliberate way back
+ * in: after fixing whatever the audit blamed, clear the lock and process the
+ * order once.
+ *
+ * Fiscal guards, all of which `force: true` overrides (use it only when you
+ * have checked Shopify yourself):
+ *   - refuse if our own audit says a Shopify order was already created;
+ *   - refuse if Shopify already has an order carrying this Discogs id;
+ *   - refuse if the Discogs order isn't in a firm-sale status.
+ */
+export async function handleSalesRetry(
+  request: Request,
+  env: SyncAdminEnv,
+): Promise<Response> {
+  if (request.method !== 'POST') return jsonResponse({ error: 'method not allowed' }, 405);
+  if (!checkBearer(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+
+  let body: { order_id?: string; force?: boolean } = {};
+  try { body = await request.json(); } catch { /* validated below */ }
+
+  const orderId = (body.order_id || '').trim();
+  const force = body.force === true;
+  if (!orderId) {
+    return jsonResponse({ error: 'body must be {"order_id": "147628-33"}' }, 400);
+  }
+
+  // Guard 1 — our own audit already recorded a created Shopify order.
+  const priorRaw = await env.SYNC_STATE.get(`sales-detected:${orderId}`);
+  let prior: any = null;
+  try { prior = priorRaw ? JSON.parse(priorRaw) : null; } catch { /* treat as absent */ }
+  const priorCreation = prior?.order_creation;
+  if (!force && priorCreation?.ok === true && !priorCreation?.dry_run) {
+    return jsonResponse({
+      error: 'already created — retrying would duplicate the factura',
+      shopify_order_id: priorCreation.shopify_order_id,
+      shopify_order_name: priorCreation.shopify_order_name,
+      hint: 'pass {"force": true} only if you have confirmed in Shopify that this order does NOT exist',
+    }, 409);
+  }
+
+  // Fetch the order from Discogs: we need its current status and its items.
+  let order: DiscogsOrder;
+  try {
+    order = await getOrder(env.DISCOGS_TOKEN, orderId);
+  } catch (e: any) {
+    return jsonResponse({ error: `getOrder failed: ${e?.message || e}` }, 502);
+  }
+
+  // Guard 2 — the sale must actually be firm.
+  if (!force && !FIRM_SALE_STATUSES.has(order.status)) {
+    return jsonResponse({
+      error: 'order is not a firm sale',
+      status: order.status,
+      firm_statuses: [...FIRM_SALE_STATUSES],
+    }, 409);
+  }
+
+  // Guard 3 — Shopify itself. Covers the case where the order was created but
+  // the worker died before writing the audit (and manual creations, which
+  // carry the Discogs id in the note).
+  if (!force) {
+    const createdAtMin = (order.created || '').slice(0, 10) || undefined;
+    try {
+      const existing = await findOrderByDiscogsOrderId(
+        env, orderId, createdAtMin || '2026-07-06',
+      );
+      if (existing) {
+        return jsonResponse({
+          error: 'Shopify already has an order for this Discogs sale',
+          shopify_order_id: existing.id,
+          shopify_order_name: existing.name,
+          note: existing.note,
+        }, 409);
+      }
+    } catch (e: any) {
+      // A lookup we can't complete is not permission to create a second
+      // factura — fail closed.
+      return jsonResponse({
+        error: `could not verify Shopify for an existing order: ${e?.message || e}`,
+        hint: 'retry later, or pass {"force": true} after checking Shopify by hand',
+      }, 502);
+    }
+  }
+
+  // Clear the lock, then take the normal path (which re-sets it immediately).
+  await env.SYNC_STATE.delete(`lock:order:${orderId}`);
+
+  const mode = await getSyncMode(env);
+  const result: PollResult = {
+    ok: true,
+    mode,
+    orders_examined: 1,
+    firm_sales_found: 1,
+    skipped_duplicate: 0,
+    shopify_adjustments_attempted: 0,
+    shopify_adjustments_succeeded: 0,
+    shopify_adjustments_failed: 0,
+    unmapped_listings: 0,
+    variant_not_found: 0,
+    new_cursor: null,
+  };
+
+  const audit = await processDiscogsOrder(env, order, mode, result);
+
+  return jsonResponse({
+    ok: audit?.order_creation?.ok === true,
+    mode,
+    forced: force,
+    result,
+    audit,
   });
 }

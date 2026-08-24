@@ -24,6 +24,10 @@ Tienda **HOUSE ONLY** (vinilos / música). Dos partes en el repo:
   barcode se listan como Draft (en modo live); el resto va a la **cola de
   revisión** (pending-review).
 - **Modos** (Bearer `BOOTSTRAP_AUTH_SECRET`): `sync35-mode` controla dry/live.
+- **Venta que no llega a Shopify**: `lock:order:{id}` se pone *antes* de crear el
+  pedido y se conserva aunque falle, así que el cron la marcará como duplicada
+  para siempre. `sales-audit` dice por qué falló; `sales-map` arregla el mapeo;
+  `sales-retry` es la única forma de que se reprocese.
 
 ### Endpoints relevantes (`?action=...`)
 
@@ -34,6 +38,9 @@ Tienda **HOUSE ONLY** (vinilos / música). Dos partes en el repo:
 | `pending-review-approve` | POST | `{sku, release_id}` → crea listing. |
 | `pending-review-reject` | POST | `{sku}` → descarta. |
 | `sync35-mode` | GET/POST | dry/live del auto-list. |
+| `sales-audit` | GET | Auditoría de una venta Discogs (`&order_id=`) o de todas (`&parked=1` = solo las que no generaron pedido). Bearer. |
+| `sales-map` | POST | `{listing_id, sku}` → escribe el mapeo `listing:`/`sku:` que falta. Bearer. |
+| `sales-retry` | POST | `{order_id}` → borra `lock:order` y reprocesa la venta una vez (rechaza si ya existe pedido en Shopify). Bearer. |
 
 ## Scripts de operación (`houseonly-worker/houseonly-worker/scripts/`)
 
@@ -76,4 +83,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-07-23-deep-jungle-import.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-08-24-sales-order-sync-audit.md`.
