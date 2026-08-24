@@ -7552,6 +7552,200 @@ function NewsletterPanel() {
   );
 }
 
+// ── RUBADUB EMAIL PARSER (source:rd) ───────────────────────────
+// Rubadub sends no manifest and no invoice for pre-sales — the release data
+// only exists in the per-release announcement email. This turns a pasted email
+// (HTML or plain text) into manifest rows the Pre-order tab already consumes.
+// Validated against the real HT001 / AD010 / YORE-011LTD / AD009 emails.
+//
+// Real structure (verified, NOT the order the fields suggest):
+//     <prose>
+//     Rubadub World Exclusive
+//     Please Pre-Order            ← BEFORE the field block
+//     Shipping 24th August        ← BEFORE the field block
+//
+//     Artist: Hot Towel
+//     Title: Warm in Your Office EP
+//     Label: Hot Towel Records
+//     Cat: HT001
+//     Format: 12" w / Full sleeve
+//     Price: £8.99
+//
+//     A1. … Download Zip (https://www.dropbox.com/scl/fo/…)   ← AFTER the block
+// So each release owns two windows: the prose BEFORE its field block (ship date
+// + pre-order marker) and the text AFTER it up to the next release (Dropbox).
+
+const RD_MONTHS = ['january','february','march','april','may','june',
+                   'july','august','september','october','november','december'];
+
+// Normalize pasted HTML into the same shape as Rubadub's plaintext part, so a
+// single parser handles both. Anchors become "label (url)" — exactly how the
+// plaintext renders them — and images become inline [[IMG:url]] markers, which
+// keeps every link and image positioned in the text for window attribution.
+function rdHtmlToText(input) {
+  if (!/<[a-z!/][^>]*>/i.test(input)) return input;   // already plain text
+  let s = input.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, '');
+  s = s.replace(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi, ' [[IMG:$1]] ');
+  s = s.replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+                (_m, href, label) => `${label.replace(/<[^>]+>/g, '')} (${href}) `);
+  s = s.replace(/<br\b[^>]*>/gi, '\n');
+  s = s.replace(/<\/(p|div|tr|td|th|li|h[1-6]|table|blockquote)\s*>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, ' ');
+  s = decodeHtmlEntities(s);
+  s = s.replace(/\r/g, '').replace(/[ \t ]+/g, ' ');
+  s = s.replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n');
+  return s;
+}
+
+// Dropbox FOLDER link (not a direct .zip). Mailchimp appends tracking junk that
+// in the plaintext part arrives mangled (`&mc_cid` loses its `=`), so cut at the
+// marker rather than trying to parse it. dl=1 makes Dropbox zip the folder.
+function rdCleanDropbox(url) {
+  if (!url) return '';
+  let u = url.split(/&(?:amp;)?mc_cid|&(?:amp;)?mc_eid/)[0];
+  u = u.replace(/&(?:amp;)?dl=0/g, '').replace(/&amp;/g, '&').replace(/[).,\s]+$/, '');
+  if (!/[?&]dl=1/.test(u)) u += (u.includes('?') ? '&' : '?') + 'dl=1';
+  return u;
+}
+
+// "Shipping 24th August" → 2026-08-24, rolled to next year when the date would
+// otherwise sit far in the past relative to the email. Also tolerates the vague
+// forms Rubadub really uses ("late August", "mid September", "NEXT WEEK"),
+// which resolve to a nominal day and are flagged approximate — an approximate
+// release: tag still beats no date, but the operator must see it.
+function rdShipDate(text, emailDate) {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const roll = (month, day) => {
+    let d = new Date(emailDate.getFullYear(), month, day);
+    if ((d - emailDate) / 86400000 < -30) d = new Date(emailDate.getFullYear()+1, month, day);
+    return d;
+  };
+  const exact = text.match(/Shipping\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)/i);
+  if (exact) {
+    const month = RD_MONTHS.indexOf(exact[2].toLowerCase());
+    if (month >= 0) return { date: iso(roll(month, parseInt(exact[1], 10))), approx: false };
+  }
+  const vague = text.match(/Shipping\s+(early|mid|late)\s+([A-Za-z]+)/i);
+  if (vague) {
+    const month = RD_MONTHS.indexOf(vague[2].toLowerCase());
+    if (month >= 0) {
+      const day = { early: 5, mid: 15, late: 25 }[vague[1].toLowerCase()];
+      return { date: iso(roll(month, day)), approx: true, raw: vague[0] };
+    }
+  }
+  const nextWeek = text.match(/Shipping\s+(NEXT\s+WEEK|TODAY|THIS\s+WEEK)/i);
+  if (nextWeek) {
+    const d = new Date(emailDate);
+    d.setDate(d.getDate() + (/NEXT/i.test(nextWeek[1]) ? 7 : 0));
+    return { date: iso(d), approx: true, raw: nextWeek[0] };
+  }
+  return { date: '', approx: false };
+}
+
+// Parse one or more pasted Rubadub emails into Pre-order manifest rows.
+// fx converts the email's GBP to EUR HERE, so the row handed to the Pre-order
+// tab carries dealerPrice in EUR like every other distributor's — the tab's
+// pricing (margin → ceil − 0.01) is untouched and W&S/DBH are unaffected.
+function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
+  const text = rdHtmlToText(String(raw || ''));
+  const rows = [];
+
+  // Locate every field block. "Cat:" is the anchor — a block without a cat-no
+  // is not a release. Each block spans from its Artist:/first field line to the
+  // last consecutive "Key: value" line.
+  const FIELD_LINE = /^[ \t]*(Artist|Title|Label|Cat|Format|Price|Barcode|Genre)[ \t]*:[ \t]*(.*)$/i;
+  const lines = text.split('\n');
+  const offsets = [];
+  let pos = 0;
+  for (const ln of lines) { offsets.push(pos); pos += ln.length + 1; }
+
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!FIELD_LINE.test(lines[i])) continue;
+    let j = i;
+    const fields = {};
+    while (j < lines.length) {
+      const m = lines[j].match(FIELD_LINE);
+      if (m) { fields[m[1].toLowerCase()] = m[2].trim(); j++; continue; }
+      if (!lines[j].trim() && j + 1 < lines.length && FIELD_LINE.test(lines[j+1])) { j++; continue; }
+      break;
+    }
+    if (fields.cat) blocks.push({ fields, start: offsets[i], end: offsets[j-1] + lines[j-1].length });
+    i = j - 1;
+  }
+
+  blocks.forEach((b, idx) => {
+    const before = text.slice(idx === 0 ? 0 : blocks[idx-1].end, b.start);
+    const after  = text.slice(b.end, idx === blocks.length-1 ? text.length : blocks[idx+1].start);
+    const warnings = [];
+
+    // "Artist:" sometimes carries the whole subject line rather than the artist
+    // ("Gradient - Random Layers (Alt Dub) AD010"). Keep the part before " - ".
+    let artist = b.fields.artist || '';
+    if (artist.includes(' - ')) {
+      warnings.push(`Artist traía la línea del asunto ("${artist}") → recortado a "${artist.split(' - ')[0].trim()}"`);
+      artist = artist.split(' - ')[0].trim();
+    }
+
+    const gbp = parseFloat((b.fields.price || '').replace(/[^\d.]/g, ''));
+    if (!gbp) warnings.push('sin Price en el email — quedará al suelo de €9.99');
+
+    // The pre-order marker sits in the prose BEFORE the block. A digest instead
+    // says "shipping to you today/next Monday": that stock is already on its
+    // way, so it must NOT be tagged forthcoming or the graduation cron strips
+    // the tag ~15 min later and it reads as a sync bug.
+    const isPreorder = /Please\s+Pre-?Order/i.test(before);
+    const shipped    = /shipping\s+to\s+you\s+(today|next\s+\w+)/i.test(before) ||
+                       /shipping\s+(today|this\s+week)/i.test(before);
+    if (!isPreorder) {
+      warnings.push(shipped
+        ? 'NO es pre-order (el email dice que ya se envía) → sin tag forthcoming'
+        : 'sin "Please Pre-Order" en el email → sin tag forthcoming');
+    }
+
+    const ship = rdShipDate(before, emailDate);
+    if (!ship.date) warnings.push('sin fecha de envío reconocible — el tag release: irá vacío');
+    else if (ship.approx) warnings.push(`fecha aproximada ("${ship.raw}") → ${ship.date}, revísala`);
+
+    // Dropbox link belongs to the window AFTER the block. Digests carry a
+    // Mailchimp click-tracker with the params corrupted in plaintext instead —
+    // not recoverable by regex, the operator must use the mailchi.mp archive.
+    const dropbox = after.match(/https:\/\/www\.dropbox\.com\/scl\/fo\/[^\s)"'<]+/);
+    const zipUrl = dropbox ? rdCleanDropbox(dropbox[0]) : '';
+    if (!zipUrl) {
+      warnings.push(/list-manage\.com\/track\/click/i.test(after)
+        ? 'el enlace del ZIP es un redirect de Mailchimp (digest): ábrelo en el archivo mailchi.mp y pega ese HTML'
+        : 'sin enlace de Dropbox — descarga el promopack a mano');
+    }
+
+    // Cover only exists in the HTML part. Mailchimp puts content images under
+    // _compresseds/; gallery.mailchimp.com is the header logo, never the sleeve.
+    const imgs = [...`${before}${after}`.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].map(m => m[1]);
+    const coverUrl = imgs.find(u => /mcusercontent\.com\/.*_compresseds\//i.test(u)) || '';
+
+    // Genre is never a field — it lives in the prose. Left blank on purpose:
+    // the ZIP's press text fills it later, and a wrong guess is worse than none.
+    rows.push({
+      catno: b.fields.cat,
+      artist,
+      title: b.fields.title || '',
+      label: b.fields.label || '',
+      genre: '',
+      release: ship.date,
+      dealerPrice: gbp ? Number((gbp * fx).toFixed(2)) : null,   // EUR, like every other source
+      format: b.fields.format || '',
+      coverUrl,
+      zipUrl,
+      source: 'rd',
+      forthcoming: isPreorder,
+      _gbp: gbp || null,
+      _warnings: warnings,
+    });
+  });
+
+  return rows;
+}
+
 // ── PRE-ORDER / FORTHCOMING IMPORTER ───────────────────────────
 // Lists distributor-announced records that have NOT yet arrived as paid
 // pre-orders. Differs from the invoice-driven DBHImporter in its FRONT half:
@@ -7581,6 +7775,12 @@ function PreorderImporter() {
   const [liveHandles, setLiveHandles] = useState(null); // Set of lowercased live handles+SKUs (null = not yet fetched)
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
+  const [ignoredKeys, setIgnoredKeys] = useState([]);  // manifest fields normalizeRow dropped
+  const [rdText, setRdText]         = useState('');    // pasted Rubadub email(s)
+  const [rdFx, setRdFx]             = useState(1.17);  // GBP→EUR, applied in the parser
+  const [rdDate, setRdDate]         = useState(() => new Date().toISOString().slice(0,10));
+  const [rdPreview, setRdPreview]   = useState(null);  // parsed rows awaiting confirmation
+  const [rdError, setRdError]       = useState('');
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -7688,6 +7888,14 @@ function PreorderImporter() {
     }).filter(r => r.catno);
   }
 
+  // The canonical manifest shape. Anything outside this list is DROPPED — a
+  // manifest written to a different field naming ends up silently priced at the
+  // €9.99 floor with no date and no ZIP, which is indistinguishable from a bad
+  // feed. loadManifest reports whatever it had to ignore.
+  const MANIFEST_KEYS = ['catno','artist','title','label','genre','release',
+                         'dealerPrice','tracks','format','coverUrl','zipUrl',
+                         'source','forthcoming'];
+
   // Normalize a parsed row (from CSV or JSON) into the canonical manifest shape.
   function normalizeRow(r) {
     const dp = r.dealerPrice;
@@ -7704,7 +7912,22 @@ function PreorderImporter() {
       coverUrl: String(r.coverUrl || '').trim(),
       zipUrl: String(r.zipUrl || '').trim(),
       source: String(r.source || 'dbh').trim(),
+      // Optional. Absent → true, so every existing manifest keeps behaving
+      // exactly as before; only a row that says forthcoming:false loses the tag.
+      forthcoming: r.forthcoming === false || r.forthcoming === 'false' ? false : true,
     };
+  }
+
+  // Keys present in the file that normalizeRow would throw away, for the UI.
+  function unknownManifestKeys(rows) {
+    const seen = new Set();
+    for (const r of rows.slice(0, 50)) {
+      if (!r || typeof r !== 'object') continue;
+      for (const k of Object.keys(r)) {
+        if (!MANIFEST_KEYS.includes(k) && !k.startsWith('_')) seen.add(k);
+      }
+    }
+    return [...seen];
   }
 
   const loadManifest = (file) => {
@@ -7723,6 +7946,7 @@ function PreorderImporter() {
         const norm = rows.map(normalizeRow).filter(r => r.catno);
         setManifest(norm);
         setManifestName(file.name);
+        setIgnoredKeys(unknownManifestKeys(rows));
         setError('');
         setDownloadDone(false);     // new manifest → clear any prior "done" signal
         setDownloadProgress(0);
@@ -7842,6 +8066,46 @@ function PreorderImporter() {
     }
     setDownloading(false);
     setDownloadDone(true);
+  };
+
+  // ── Rubadub paste → manifest rows ───────────────────────────
+  // Rubadub publishes no manifest and no invoice for pre-sales, so the email IS
+  // the feed. Parse to a preview first: the operator sees the warnings (approx
+  // dates, missing ZIP, not-a-pre-order) BEFORE the rows join the manifest.
+  const rdParse = () => {
+    setRdError('');
+    if (!rdText.trim()) { setRdPreview(null); return; }
+    try {
+      const rows = parseRubadubEmails(rdText, {
+        fx: rdFx,
+        emailDate: parseLocalDate(rdDate) || new Date(),
+      });
+      if (!rows.length) {
+        setRdPreview(null);
+        setRdError('No encontré ningún bloque de campos con "Cat:". Pega el email completo (el HTML del .html de Drive, o el texto plano).');
+        return;
+      }
+      setRdPreview(rows);
+    } catch (e) { setRdPreview(null); setRdError(e.message); }
+  };
+
+  const rdAddToManifest = () => {
+    if (!rdPreview?.length) return;
+    const clean = rdPreview.map(({ _gbp, _warnings, ...row }) => row);
+    setManifest(prev => {
+      const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
+      for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);  // re-paste overwrites
+      return [...byCatno.values()];
+    });
+    setManifestName(name => name || 'Rubadub (pegado)');
+    setRdPreview(null);
+    setRdText('');
+    setDownloadDone(false);
+    setDownloadProgress(0);
+    setDownloadStats({ ok: 0, missing: 0, failed: 0 });
+    if (liveHandles === null) {
+      fetchLiveHandles().then(setLiveHandles).catch(() => setLiveHandles(new Set()));
+    }
   };
 
   const assignZips = (files) => {
@@ -8005,7 +8269,10 @@ function PreorderImporter() {
           genre,
           ...dnbTagsFor(m.source, genre),
           year ? String(year) : '',
-          'forthcoming',
+          // Only a release that is genuinely still forthcoming gets the tag.
+          // Stock already shipping (a Rubadub digest, say) would be un-tagged by
+          // the graduation cron ~15 min later and look like a sync bug.
+          m.forthcoming === false ? '' : 'forthcoming',
           release ? `release:${release}` : '',
         ].filter(Boolean);
         const shopifyTags = tagList.join(', ');
@@ -8017,6 +8284,7 @@ function PreorderImporter() {
           _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
           _genre: genre,                              // editable in review; rebuilds Tags
           _label: label, _source: (m.source || 'dbh'), _year: year ? String(year) : '',
+          _forthcoming: m.forthcoming !== false,      // keeps tagsForRow in step with process()
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -8069,7 +8337,7 @@ function PreorderImporter() {
     r._genre || '',
     ...dnbTagsFor(r._source, r._genre),
     r._year || '',
-    'forthcoming',
+    r._forthcoming === false ? '' : 'forthcoming',
     r._release ? `release:${r._release}` : '',
   ].filter(Boolean).join(', ');
 
@@ -8139,6 +8407,77 @@ function PreorderImporter() {
           })()}
         </div>
       </div>
+
+      {/* Rubadub: the email IS the feed — no manifest file, no invoice */}
+      {status==='idle'&&(
+        <details style={{marginBottom:14,border:`1px solid ${S.border}`,borderRadius:4,background:S.bg}}>
+          <summary style={{cursor:'pointer',padding:'8px 14px',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>
+            📧 Pegar email de Rubadub (source:rd)
+          </summary>
+          <div style={{padding:'0 14px 14px'}}>
+            <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
+              Rubadub no manda manifest ni factura de las pre-sales: el email es el feed. Pega el <b style={{color:S.text}}>HTML</b> del <code style={{fontSize:9}}>RD__*.html</code> de Drive (trae portada y enlace de Dropbox limpio) o el texto plano. Puedes pegar varios emails de golpe. El precio se convierte a € aquí con el FX de abajo; el margen lo sigue aplicando el tab.
+            </p>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,flexWrap:'wrap'}}>
+              <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>GBP→EUR</span>
+              <input type="number" step="0.01" min="0.01" value={rdFx} onChange={e=>setRdFx(Math.max(0.01,parseFloat(e.target.value)||1))} style={{width:64,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
+              <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase'}}>Fecha del email</span>
+              <input type="date" value={rdDate} onChange={e=>setRdDate(e.target.value)} style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+              <span style={{fontSize:9,color:S.muted}}>(decide el año de "Shipping 24th August")</span>
+            </div>
+            <textarea
+              value={rdText}
+              onChange={e=>setRdText(e.target.value)}
+              placeholder={'Pega aquí el email completo…\n\nPlease Pre-Order\nShipping 24th August\n\nArtist: Hot Towel\nTitle: Warm in Your Office EP\nLabel: Hot Towel Records\nCat: HT001\nFormat: 12" w / Full sleeve\nPrice: £8.99'}
+              style={{width:'100%',minHeight:130,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'monospace',outline:'none',resize:'vertical',boxSizing:'border-box'}}
+            />
+            <div style={{display:'flex',gap:8,marginTop:8,flexWrap:'wrap'}}>
+              <button onClick={rdParse} disabled={!rdText.trim()} style={{background:rdText.trim()?S.accent:S.border,border:'none',color:rdText.trim()?'#080808':S.muted,cursor:rdText.trim()?'pointer':'default',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+                Parsear
+              </button>
+              {(rdText||rdPreview)&&<button onClick={()=>{setRdText('');setRdPreview(null);setRdError('');}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 12px',borderRadius:2,fontFamily:'inherit'}}>Limpiar</button>}
+            </div>
+
+            {rdError&&<div style={{marginTop:8,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{rdError}</div>}
+
+            {rdPreview&&(
+              <div style={{marginTop:10}}>
+                <div style={{fontSize:10,color:S.accent,fontWeight:700,marginBottom:6}}>
+                  {rdPreview.length} release{rdPreview.length===1?'':'s'} · revisa antes de añadir
+                </div>
+                {rdPreview.map((r,i)=>(
+                  <div key={i} style={{border:`1px solid ${r._warnings.length?'#ff8800':S.border}`,borderRadius:3,padding:'8px 10px',marginBottom:6,background:S.surf}}>
+                    <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'baseline'}}>
+                      <span style={{fontFamily:'monospace',fontSize:11,color:S.accent,fontWeight:700}}>{r.catno}</span>
+                      <span style={{fontSize:11,color:S.text}}>{r.artist} — {r.title}</span>
+                      <span style={{fontSize:9,color:S.muted}}>{r.label}</span>
+                    </div>
+                    <div style={{fontSize:9,color:S.muted,marginTop:4,display:'flex',gap:12,flexWrap:'wrap'}}>
+                      <span>£{r._gbp ?? '—'} × {rdFx} = <b style={{color:S.text}}>€{r.dealerPrice ?? '—'}</b> dealer → <b style={{color:S.accent}}>€{r.dealerPrice!=null?(Math.max(9.99,Math.ceil(r.dealerPrice*(1+margin/100))-0.01)).toFixed(2):'—'}</b> con {margin}%</span>
+                      <span>envío: {r.release||'—'}</span>
+                      <span style={{color:r.forthcoming?S.accent:'#ff8800'}}>{r.forthcoming?'pre-order → forthcoming':'ya enviándose → SIN forthcoming'}</span>
+                      <span>{r.zipUrl?'✓ Dropbox':'✗ sin ZIP'}</span>
+                      <span>{r.coverUrl?'✓ portada':'✗ sin portada'}</span>
+                    </div>
+                    {r._warnings.map((w,j)=>(
+                      <div key={j} style={{fontSize:9,color:'#ff8800',marginTop:3,lineHeight:1.5}}>⚠ {w}</div>
+                    ))}
+                  </div>
+                ))}
+                <Btn ch={`+ Añadir ${rdPreview.length} al manifest`} onClick={rdAddToManifest} full />
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+
+      {/* A manifest written to different field names loses price/date/ZIP in silence */}
+      {ignoredKeys.length>0&&status==='idle'&&(
+        <div style={{marginBottom:12,padding:'8px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4,fontSize:10,color:'#ff8800',lineHeight:1.6}}>
+          ⚠ Campos ignorados del manifest: <code style={{fontFamily:'monospace'}}>{ignoredKeys.join(', ')}</code>
+          <div style={{color:S.muted,marginTop:3}}>No están en el esquema y se han descartado. Si ahí venían el precio, la fecha o el ZIP, las filas entrarán incompletas.</div>
+        </div>
+      )}
 
       {/* Reconciliation view */}
       {manifest.length>0&&status==='idle'&&(
