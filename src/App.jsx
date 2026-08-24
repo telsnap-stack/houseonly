@@ -7697,10 +7697,14 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
     const isPreorder = /Please\s+Pre-?Order/i.test(before);
     const shipped    = /shipping\s+to\s+you\s+(today|next\s+\w+)/i.test(before) ||
                        /shipping\s+(today|this\s+week)/i.test(before);
+    // Absence of BOTH markers is ambiguous, not evidence: it is what a partial
+    // copy looks like, since both live in the prose above the field block. Say
+    // so — silently dropping `forthcoming` from a real pre-order is the same
+    // bug as tagging a shipped record, just from the other side.
     if (!isPreorder) {
       warnings.push(shipped
         ? 'NO es pre-order (el email dice que ya se envía) → sin tag forthcoming'
-        : 'sin "Please Pre-Order" en el email → sin tag forthcoming');
+        : 'no aparece "Please Pre-Order" NI "shipping to you" → queda SIN tag forthcoming. Si es un pre-order, te faltó copiar el texto de encima del bloque de campos: selecciona el email entero.');
     }
 
     const ship = rdShipDate(before, emailDate);
@@ -7781,6 +7785,7 @@ function PreorderImporter() {
   const [rdDate, setRdDate]         = useState(() => new Date().toISOString().slice(0,10));
   const [rdPreview, setRdPreview]   = useState(null);  // parsed rows awaiting confirmation
   const [rdError, setRdError]       = useState('');
+  const [rdPasteNote, setRdPasteNote] = useState('');  // set when a paste carried no text/html
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -8069,6 +8074,31 @@ function PreorderImporter() {
   };
 
   // ── Rubadub paste → manifest rows ───────────────────────────
+  // Copying from the rendered mailchi.mp page puts BOTH flavours on the
+  // clipboard, but a textarea only ever takes text/plain — so the cover <img>
+  // and the Dropbox <a href> are thrown away before the parser ever sees them,
+  // and every paste comes out "sin Dropbox / sin portada". Take the HTML
+  // flavour ourselves when the clipboard offers it.
+  const rdPaste = (e) => {
+    const cb = e.clipboardData;
+    if (!cb) return;                       // no clipboard API: let the browser paste
+    const html  = (cb.getData('text/html')  || '').trim();
+    const plain = (cb.getData('text/plain') || '').trim();
+    const chosen = html || plain;
+    if (!chosen) return;                   // nothing useful: let the browser paste
+    e.preventDefault();
+    const el = e.target;
+    const start = el.selectionStart ?? rdText.length;
+    const end   = el.selectionEnd   ?? rdText.length;
+    setRdText(rdText.slice(0, start) + chosen + rdText.slice(end));
+    setRdPasteNote(html ? '' : 'El portapapeles no traía versión HTML — copia desde la página del email en el navegador, no desde un cliente en texto plano.');
+    setRdPreview(null);
+  };
+
+  // What the parser will actually branch on — derived from the content, not
+  // from the paste event, so it stays honest after edits and repeated pastes.
+  const rdIsHtml = /<[a-z!/][^>]*>/i.test(rdText);
+
   // Rubadub publishes no manifest and no invoice for pre-sales, so the email IS
   // the feed. Parse to a preview first: the operator sees the warnings (approx
   // dates, missing ZIP, not-a-pre-order) BEFORE the rows join the manifest.
@@ -8100,6 +8130,7 @@ function PreorderImporter() {
     setManifestName(name => name || 'Rubadub (pegado)');
     setRdPreview(null);
     setRdText('');
+    setRdPasteNote('');
     setDownloadDone(false);
     setDownloadProgress(0);
     setDownloadStats({ ok: 0, missing: 0, failed: 0 });
@@ -8428,14 +8459,24 @@ function PreorderImporter() {
             <textarea
               value={rdText}
               onChange={e=>setRdText(e.target.value)}
+              onPaste={rdPaste}
               placeholder={'Pega aquí el email completo…\n\nPlease Pre-Order\nShipping 24th August\n\nArtist: Hot Towel\nTitle: Warm in Your Office EP\nLabel: Hot Towel Records\nCat: HT001\nFormat: 12" w / Full sleeve\nPrice: £8.99'}
               style={{width:'100%',minHeight:130,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'monospace',outline:'none',resize:'vertical',boxSizing:'border-box'}}
             />
+            {rdText.trim()&&(
+              <div style={{marginTop:6,fontSize:9,letterSpacing:0.5,color:rdIsHtml?S.accent:'#ff8800',display:'flex',alignItems:'center',gap:6}}>
+                {rdIsHtml
+                  ? <><b>HTML ✓</b> portada + Dropbox limpio</>
+                  : <><b>Solo texto</b> — sin portada, y en los digests el enlace del ZIP llega corrupto</>}
+                <span style={{color:S.muted}}>· {rdText.length.toLocaleString()} caracteres</span>
+              </div>
+            )}
+            {rdPasteNote&&<div style={{marginTop:4,fontSize:9,color:'#ff8800',lineHeight:1.5}}>⚠ {rdPasteNote}</div>}
             <div style={{display:'flex',gap:8,marginTop:8,flexWrap:'wrap'}}>
               <button onClick={rdParse} disabled={!rdText.trim()} style={{background:rdText.trim()?S.accent:S.border,border:'none',color:rdText.trim()?'#080808':S.muted,cursor:rdText.trim()?'pointer':'default',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
                 Parsear
               </button>
-              {(rdText||rdPreview)&&<button onClick={()=>{setRdText('');setRdPreview(null);setRdError('');}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 12px',borderRadius:2,fontFamily:'inherit'}}>Limpiar</button>}
+              {(rdText||rdPreview)&&<button onClick={()=>{setRdText('');setRdPreview(null);setRdError('');setRdPasteNote('');}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 12px',borderRadius:2,fontFamily:'inherit'}}>Limpiar</button>}
             </div>
 
             {rdError&&<div style={{marginTop:8,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{rdError}</div>}
