@@ -1586,6 +1586,53 @@ export default {
       return jsonRes({ ok: true, name, html });
     }
 
+    // ── FASE 3B: RESOLVER ENLACES DETRAS DE TRACKER ────────
+    //
+    // En el email archivado el enlace del promopack casi nunca esta a la vista:
+    // Mailchimp lo envuelve en un tracker que responde 302 al destino real.
+    // Rubadub -> Dropbox, Triple Vision -> su bucket. El navegador no puede
+    // seguir ese redirect (CORS), el worker si. Sin esto, 0 de 60 releases de
+    // Rubadub tienen ZIP descargable.
+    //
+    //   POST ?action=resolve-links {urls:[...]}  Bearer
+    //   -> {results:[{url, dest, kind}]}   kind: dropbox | tvassets | otro | error
+    //
+    // Solo sigue UN salto y solo desde dominios de tracking conocidos: es un
+    // seguidor de redirects, no un proxy abierto para cualquier URL.
+    if (action === 'resolve-links' && request.method === 'POST') {
+      const auth = request.headers.get('authorization') || '';
+      const m = auth.match(/^Bearer\s+(.+)$/i);
+      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
+        return jsonRes({ error: 'unauthorized' }, 401);
+      }
+      let body: any;
+      try { body = await request.json(); } catch { return jsonRes({ error: 'bad json' }, 400); }
+      const urls: string[] = Array.isArray(body?.urls) ? body.urls.slice(0, 60) : [];
+      if (!urls.length) return jsonRes({ error: 'urls required' }, 400);
+
+      const PERMITIDO = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
+      const clasifica = (u: string) =>
+        /dropbox\.com\/scl\/fo/i.test(u) ? 'dropbox'
+        : /digitaloceanspaces\.com\/.*promopack/i.test(u) ? 'tvassets'
+        : u ? 'otro' : 'error';
+
+      const results = await Promise.all(urls.map(async (raw) => {
+        const url = String(raw || '').replace(/&amp;/g, '&');
+        if (!PERMITIDO.test(url)) return { url, dest: '', kind: 'error', error: 'dominio no permitido' };
+        try {
+          // redirect:'manual' para leer el Location sin descargar el fichero:
+          // algunos promopacks pasan de 100 MB y aqui solo interesa la URL.
+          const r = await fetch(url, { method: 'GET', redirect: 'manual',
+                                       headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const dest = r.headers.get('location') || '';
+          return { url, dest, kind: clasifica(dest), status: r.status };
+        } catch (e: any) {
+          return { url, dest: '', kind: 'error', error: e.message };
+        }
+      }));
+      return jsonRes({ ok: true, results });
+    }
+
     // ── FASE 3B: AJUSTE DE INVENTARIO (llegada de stock) ────
     //
     // Para los restocks: un disco que ya es producto vivo (se creo al pedirlo)
