@@ -8046,6 +8046,86 @@ function parseTvShelfList(rawHtml) {
   return { total: total ? parseInt(total[1], 10) : null, items };
 }
 
+// ── CARPETA LOCAL DE PROMOPACKS ────────────────────────────────
+// Los ZIP ya estan bajados en Google Drive (Assets/{distribuidor}/). Leerlos de
+// ahi evita volver a descargarlos y, sobre todo, evita arrastrar decenas de
+// ficheros al navegador, que era el cuello de botella real del importador.
+//
+// No hay alternativa en servidor: el worker no ve el disco de Eduardo. La File
+// System Access API de Chrome es la unica via, y el permiso se guarda en
+// IndexedDB para que elegir la carpeta sea cosa de UNA vez, no de cada sesion.
+const ZIPDIR_DB  = 'houseonly_zipdir';
+const ZIPDIR_KEY = 'assets_handle';
+
+function idbGet(key) {
+  return new Promise((res) => {
+    try {
+      const req = indexedDB.open(ZIPDIR_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('h');
+      req.onsuccess = () => {
+        const tx = req.result.transaction('h', 'readonly').objectStore('h').get(key);
+        tx.onsuccess = () => res(tx.result || null);
+        tx.onerror = () => res(null);
+      };
+      req.onerror = () => res(null);
+    } catch { res(null); }
+  });
+}
+function idbSet(key, val) {
+  return new Promise((res) => {
+    try {
+      const req = indexedDB.open(ZIPDIR_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('h');
+      req.onsuccess = () => {
+        const tx = req.result.transaction('h', 'readwrite').objectStore('h').put(val, key);
+        tx.onsuccess = () => res(true);
+        tx.onerror = () => res(false);
+      };
+      req.onerror = () => res(false);
+    } catch { res(false); }
+  });
+}
+
+// Catno a partir del nombre del ZIP. Cada distribuidor nombra a su manera y esto
+// las cubre todas, verificado contra los 1.000 ficheros que hay en Assets/:
+//   W&S           100136-des133.zip      prefijo numerico + catno, URL-encoded
+//   DBH/Rubadub   ATJ021.zip             limpio
+//   Triple Vision CRVT010_promopack.zip  o CRVT010.zip
+//   Rush Hour     artwork_KSSV009.zip
+// Se normaliza con rdKey, la misma clave que usa el cotejo contra la tienda, asi
+// que "YORE-011LTD.zip" y un catno "yore 011 ltd" casan igual.
+function zipNameToKey(name) {
+  let b = name.replace(/\.zip$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  try { b = decodeURIComponent(b); } catch { /* escape malformado: se deja */ }
+  b = b.replace(/^artwork[_-]/i, '').replace(/[_-]?promopack$/i, '');
+  const m = b.match(/^\d+-(.+)$/);          // prefijo numerico de W&S
+  return rdKey(m ? m[1] : b);
+}
+
+// Recorre Assets/ y sus subcarpetas y devuelve rdKey(catno) -> handle del fichero.
+// Solo lee NOMBRES: abrir mil ZIP para hacer un indice seria absurdo, los bytes
+// se piden solo del que se vaya a procesar.
+async function scanZipDir(dirHandle, onProgress) {
+  const idx = new Map();
+  let vistos = 0;
+  const recorrer = async (dir, prof) => {
+    for await (const [nombre, h] of dir.entries()) {
+      if (h.kind === 'directory') {
+        if (prof < 2) await recorrer(h, prof + 1);
+        continue;
+      }
+      if (!/\.zip$/i.test(nombre)) continue;
+      vistos++;
+      if (onProgress && vistos % 100 === 0) onProgress(vistos);
+      const k = zipNameToKey(nombre);
+      // Si el mismo catno aparece dos veces (copias "(1)"), gana la primera.
+      if (k && !idx.has(k)) idx.set(k, h);
+    }
+  };
+  await recorrer(dirHandle, 0);
+  return { idx, vistos };
+}
+
 // ── TRIAGE DEL ARCHIVO DE EMAILS ───────────────────────────────
 // El Apps Script archiva cada email del distribuidor como
 // {PREFIJO}__{asunto}__{fecha}.html y lo empuja al worker. Aqui se clasifica
@@ -8171,6 +8251,10 @@ function PreorderImporter() {
   const [mailRows, setMailRows]     = useState(null);  // vista unica de releases
   const [mailPick, setMailPick]     = useState({});    // rdKey(catno) -> elegido
   const [mailProgress, setMailProgress] = useState({ done:0, total:0 });
+  // Carpeta local de promopacks (Assets/). El handle sobrevive a la recarga.
+  const [zipDir, setZipDir]         = useState(null);   // {idx:Map, vistos:number}
+  const [zipDirName, setZipDirName] = useState('');
+  const [zipDirBusy, setZipDirBusy] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -8457,6 +8541,47 @@ function PreorderImporter() {
     setDownloading(false);
     setDownloadDone(true);
   };
+
+  // ── Carpeta local de promopacks ─────────────────────────────
+  const zipDirConnect = async (handleGuardado) => {
+    if (!window.showDirectoryPicker && !handleGuardado) {
+      setMailError('Tu navegador no permite leer carpetas. Hace falta Chrome o Edge; en otro caso arrastra los ZIP como siempre.');
+      return;
+    }
+    setZipDirBusy(true); setMailError('');
+    try {
+      let h = handleGuardado;
+      if (!h) {
+        h = await window.showDirectoryPicker({ id: 'houseonly-assets', mode: 'read' });
+        await idbSet(ZIPDIR_KEY, h);
+      }
+      // El permiso hay que reclamarlo en cada sesion aunque el handle persista:
+      // Chrome no deja que una web lea tu disco en silencio, y me parece bien.
+      const q = await h.queryPermission?.({ mode: 'read' });
+      if (q !== 'granted') {
+        const r = await h.requestPermission?.({ mode: 'read' });
+        if (r !== 'granted') { setMailError('Sin permiso para leer la carpeta.'); setZipDirBusy(false); return; }
+      }
+      const res = await scanZipDir(h, () => {});
+      setZipDir(res); setZipDirName(h.name);
+    } catch (e) {
+      if (e.name !== 'AbortError') setMailError('No pude leer la carpeta: ' + e.message);
+    } finally { setZipDirBusy(false); }
+  };
+
+  // Reconectar sola al abrir, si ya se eligio carpeta alguna vez.
+  useEffect(() => {
+    let vivo = true;
+    idbGet(ZIPDIR_KEY).then(async (h) => {
+      if (!h || !vivo) return;
+      const q = await h.queryPermission?.({ mode: 'read' });
+      // Solo si el permiso SIGUE concedido: pedirlo sin que nadie haya pulsado
+      // nada saldria como un dialogo surgido de la nada.
+      if (q === 'granted') zipDirConnect(h);
+      else setZipDirName(h.name + ' (pulsa para reconectar)');
+    });
+    return () => { vivo = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Archivo de emails (worker) ──────────────────────────────
   const mailLoad = async (sec) => {
@@ -8862,7 +8987,19 @@ function PreorderImporter() {
         let itemError = '';
         let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
 
-        const zipFile = zipForCatno(catno);
+        // Primero lo arrastrado; si no, la carpeta de Drive. Asi quien prefiera
+        // seguir arrastrando no nota el cambio, y quien conecte la carpeta se
+        // ahorra el paso entero.
+        let zipFile = zipForCatno(catno);
+        if (!zipFile && zipDir) {
+          const h = zipDir.idx.get(rdKey(catno));
+          if (h) {
+            try {
+              setProgress({ done:i, total, current:`${catno} — leyendo ZIP de la carpeta…` });
+              zipFile = await h.getFile();
+            } catch (e) { itemError = 'no pude leer el ZIP de la carpeta: ' + e.message; }
+          }
+        }
         if (zipFile) {
           try {
             setProgress({ done:i, total, current:`${catno} — extracting ZIP…` });
@@ -9322,6 +9459,53 @@ function PreorderImporter() {
                     ))}
                   </div>
                 ))}
+                {/* Carpeta local: que ZIP hay ya en Drive y cuales faltan. Es la
+                    pregunta que Eduardo hace de verdad — "¿qué me falta por
+                    bajar?" — y antes solo se sabia procesando y viendo el hueco. */}
+                <div style={{margin:'8px 0',padding:'8px 12px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:3}}>
+                  {!zipDir ? (
+                    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                      <button onClick={()=>zipDirConnect()} disabled={zipDirBusy}
+                        style={{background:'none',border:`1px solid ${S.accent}`,color:S.accent,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+                        {zipDirBusy?'Leyendo…':'📁 Conectar carpeta de ZIPs'}
+                      </button>
+                      <span style={{fontSize:9,color:S.muted,lineHeight:1.5}}>
+                        Elige <code style={{fontFamily:'monospace'}}>Houseonly.store/Assets</code> una vez. Se lee de ahí en vez de arrastrar.
+                        {zipDirName&&<> · <span style={{color:'#ff8800'}}>{zipDirName}</span></>}
+                      </span>
+                    </div>
+                  ) : (()=>{
+                    const sel = mailRows.filter(r=>mailPick[rdKey(r.catno)]||r._added);
+                    const hay = sel.filter(r=>zipDir.idx.has(rdKey(r.catno)));
+                    const falta = sel.filter(r=>!zipDir.idx.has(rdKey(r.catno)));
+                    return (
+                    <>
+                      <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',alignItems:'center'}}>
+                        <span>📁 <b style={{color:S.text}}>{zipDirName}</b> · {zipDir.vistos} ZIP</span>
+                        <span>✅ Ya tienes: <b style={{color:S.accent}}>{hay.length}</b></span>
+                        <span>⚠ Faltan: <b style={{color:falta.length?'#ff8800':S.muted}}>{falta.length}</b></span>
+                        <button onClick={()=>zipDirConnect()} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Re-escanear</button>
+                      </div>
+                      {falta.length>0&&(
+                        <div style={{marginTop:6,fontSize:9,color:'#ff8800',lineHeight:1.6}}>
+                          Sin promopack en la carpeta — bájalos y vuelve a escanear:
+                          <div style={{marginTop:3,display:'flex',flexWrap:'wrap',gap:4}}>
+                            {falta.map(r=>(
+                              <span key={rdKey(r.catno)} title={r.zipUrl?'tiene enlace: entra en "Bajar los ZIP"':'sin enlace conocido'}
+                                style={{background:S.surf,border:`1px solid ${r.zipUrl?S.accent:S.border}`,borderRadius:10,padding:'1px 8px',fontFamily:'monospace',color:r.zipUrl?S.accent:S.muted}}>
+                                {r.catno}{r.zipUrl?' ↓':''}
+                              </span>
+                            ))}
+                          </div>
+                          <div style={{color:S.muted,marginTop:4}}>
+                            Los que llevan ↓ tienen enlace y se bajan con el botón de abajo; el resto hay que buscarlos a mano.
+                          </div>
+                        </div>
+                      )}
+                    </>);
+                  })()}
+                </div>
+
                 {/* Bajar los ZIP de lo que ya esta en el manifest. Llama a la
                     MISMA downloadAllZips del tab — no hay una segunda descarga —
                     y de paso resuelve las portadas que faltan: las 50 de W&S no
