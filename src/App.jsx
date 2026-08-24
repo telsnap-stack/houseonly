@@ -8919,7 +8919,33 @@ function PreorderImporter() {
         // (733019542_988549377418142_….jpg) y el selector se quedaba con la
         // primera que pillara — una cualquiera, no la portada. Si el ZIP no
         // nombra ninguna imagen como funda, manda la del email.
-        if (m.coverUrl && (!coverUrl || coverNamedInZip === false)) coverUrl = m.coverUrl;
+        if (m.coverUrl && (!coverUrl || coverNamedInZip === false)) {
+          // Y no se enlaza: se ESPEJA a R2. Poner la URL de Mailchimp en el CSV
+          // deja la portada del producto colgando de un servidor ajeno — si
+          // Shopify falla al descargarla en el momento del import, el producto
+          // entra sin imagen y no te enteras; y aunque entre, la ficha depende
+          // para siempre de que Mailchimp siga sirviendo ese fichero.
+          // El navegador no puede leer esos bytes (mcusercontent no manda
+          // cabeceras CORS), asi que lo hace el worker, que es justo para lo que
+          // existe ?action=mirror desde el importer de Mother Tongue.
+          setProgress({ done:i, total, current:`${catno} — espejando portada del email…` });
+          const ext = (m.coverUrl.split('?')[0].match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg').toLowerCase();
+          try {
+            const r = await fetch(`${WORKER_URL}?action=mirror`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: m.coverUrl, key: `covers/${safeKey}.${ext}` }),
+            });
+            const data = r.ok ? await r.json().catch(() => ({})) : {};
+            // Si el espejo falla se cae al enlace directo: una portada prestada
+            // es mejor que ninguna, pero se avisa para poder arreglarlo.
+            coverUrl = data.url || m.coverUrl;
+            if (!data.url) itemError = itemError || 'portada sin espejar: queda enlazada al servidor del distribuidor';
+          } catch (e) {
+            coverUrl = m.coverUrl;
+            itemError = itemError || 'portada sin espejar: ' + e.message;
+          }
+        }
 
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
