@@ -7929,6 +7929,114 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
   return rows;
 }
 
+// ── SEÑAL DE PEDIDO ────────────────────────────────────────────
+// Un Fwd/Re de Eduardo al distribuidor es su pedido. Marcar el EMAIL entero como
+// pedido no vale: un email puede anunciar varios discos y solo se pidio uno. El
+// caso real es el de Logistic, que anuncia LOG88 (Tobias) y LOG86 (Narcotic
+// Syntax) y el mensaje dice "2 of the narcotic syntax please" — marcar los dos
+// mete en el pedido un disco que nadie pidio.
+//
+// Las tres formas que aparecen en el archivo real:
+//   "2 of this please"              -> todo el email (suele traer un solo disco)
+//   "2 of the narcotic syntax please" -> nombra cual
+//   (sin texto)                     -> reenvio a secas: cuenta como pedido, sin
+//                                      cantidad y sin poder distinguir cual
+function parseOrderSignal(rawHtml) {
+  const text = rdHtmlToText(String(rawHtml || ''));
+  // Solo la parte de ARRIBA: lo de abajo es el email reenviado del distribuidor,
+  // y ahi cualquier "2 of..." seria suyo, no un pedido.
+  const head = text.split(/-{3,}\s*Forwarded message|^From:|^Desde:|On .{0,60}wrote:/im)[0] || text;
+  const m = head.match(/(\d+)\s+of\s+(?:the\s+|these\s+|those\s+)?([^.\n]{0,50}?)\s*(?:please|thanks|cheers|$)/i);
+  if (!m) return { qty: null, target: '', explicit: false };
+  const t = (m[2] || '').trim();
+  const generico = !t || /^(this|these|those|each|them|it|of them)$/i.test(t);
+  return { qty: parseInt(m[1], 10) || null, target: generico ? '' : t, explicit: !generico };
+}
+
+// ¿Se refiere esta señal a este release? Sin objetivo nombrado, si (el email
+// entero). Con objetivo, se compara contra artista, titulo y catno.
+function orderMatchesRelease(target, row) {
+  if (!target) return true;
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const t = norm(target);
+  if (!t) return true;
+  return [row.artist, row.title, row.catno].some((f) => {
+    const v = norm(f);
+    return v && (v.includes(t) || t.includes(v));
+  });
+}
+
+// ── SEÑAL DE PEDIDO: WORD & SOUND ──────────────────────────────
+// La confirmacion de pedido de W&S (WSORD__) es la mas completa de las tres: no
+// hace falta ni el email de anuncio, porque la propia linea trae la ficha.
+//   "1 x | Beste Hira - MP10 (Incl. Loidis Remix) | MP10 | | 12.99 € | 12.99 €"
+// El precio es el dealer ya negociado, en euros.
+function parseWsOrder(rawHtml) {
+  const text = rdHtmlToText(String(rawHtml || ''));
+  const L = text.split('\n').map((x) => x.trim()).filter(Boolean);
+  const num = text.match(/Order No:\s*(\d+)/i);
+  const items = [];
+  // Cinco celdas por linea, cada una en su propia fila tras convertir el HTML:
+  //   "1 x" / "Artista - Titulo" / "CATNO (url del release)" / "12.99 €" / "12.99 €"
+  // La celda de Reference va vacia y desaparece al filtrar lineas en blanco.
+  for (let i = 0; i < L.length - 4; i++) {
+    const m = L[i].match(/^(\d+)\s*x$/i);
+    if (!m) continue;
+    const desc = L[i+1];
+    const catCell = L[i+2];
+    const unit = (L[i+3].match(/([\d.,]+)\s*€/) || [])[1];
+    if (!unit) continue;
+    // El catno viene con el enlace al release pegado detras; ese enlace es la
+    // pagina de W&S de la que cuelga /assets, o sea el ZIP. Se guarda.
+    const cat = catCell.split('(')[0].trim();
+    const url = (catCell.match(/https?:\/\/[^\s)]+/) || [])[0] || '';
+    if (!cat) continue;
+    const [artist, ...resto] = String(desc).split(/\s+-\s+/);
+    items.push({
+      catno: cat,
+      artist: resto.length ? artist.trim() : '',
+      title: resto.length ? resto.join(' - ').trim() : String(desc).trim(),
+      qty: parseInt(m[1], 10) || 1,
+      dealerPrice: Number(String(unit).replace(',', '.')) || null,
+      // La descarga de W&S cuelga de /assets sobre la pagina del release, que es
+      // lo que el Pre-order tab ya sabe pedir para este distribuidor.
+      zipUrl: url ? url.replace(/\/*$/, '') + '/assets' : '',
+    });
+    i += 4;
+  }
+  return { order: num ? num[1] : '', items };
+}
+
+// ── SEÑAL DE PEDIDO: TRIPLE VISION ─────────────────────────────
+// El shelf list semanal (TVORD__) es la lista de lo reservado. En texto plano
+// cada linea de la tabla cae en su propia fila:
+//   catno / descripcion / pedidos / listos / precio unidad / total
+// "Ready" es lo que ya esta fisicamente listo para salir, que no es lo mismo que
+// lo pedido: un 2/0 significa que lo pediste y aun no ha llegado a su almacen.
+// Es ACUMULATIVO: refleja todo lo reservado hasta la fecha, no solo la semana.
+function parseTvShelfList(rawHtml) {
+  const text = rdHtmlToText(String(rawHtml || ''));
+  const L = text.split('\n').map((x) => x.trim()).filter(Boolean);
+  const total = text.match(/Total amount of records:\s*(\d+)/i);
+  const items = [];
+  for (let i = 0; i < L.length - 5; i++) {
+    if (!/^[A-Z0-9][A-Za-z0-9._#/-]{2,}$/.test(L[i])) continue;
+    const [desc, ped, lis, pu, tt] = [L[i+1], L[i+2], L[i+3], L[i+4], L[i+5]];
+    if (!/^\d+$/.test(ped) || !/^\d+$/.test(lis) || !/^[\d.]+$/.test(pu) || !/^[\d.]+$/.test(tt)) continue;
+    const [artist, ...resto] = String(desc).split(/\s+-\s+/);
+    items.push({
+      catno: L[i],
+      artist: resto.length ? artist.trim() : '',
+      title: resto.length ? resto.join(' - ').trim() : String(desc).trim(),
+      qty: parseInt(ped, 10),
+      ready: parseInt(lis, 10),
+      dealerPrice: Number(pu) || null,
+    });
+    i += 5;
+  }
+  return { total: total ? parseInt(total[1], 10) : null, items };
+}
+
 // ── TRIAGE DEL ARCHIVO DE EMAILS ───────────────────────────────
 // El Apps Script archiva cada email del distribuidor como
 // {PREFIJO}__{asunto}__{fecha}.html y lo empuja al worker. Aqui se clasifica
@@ -8381,15 +8489,26 @@ function PreorderImporter() {
     setMailBusy('todos'); setMailError('');
     setMailProgress({ done: 0, total: material.length });
 
-    // Que releases pediste. El asunto del Fwd/Re es el del original, pero el
-    // Apps Script recorta a ~70 caracteres y "Fwd-" se come 4, asi que el
-    // reenvio puede quedar mas corto: se empareja por prefijo, no por igualdad.
-    const ordered = new Set();
+    // Que pediste. Dos pasos, y el segundo es el que importa:
+    //   1. Emparejar el reenvio con el email original por asunto. Prefijo y no
+    //      igualdad: el Apps Script recorta a ~70 caracteres y "Fwd-" se come 4,
+    //      asi que el reenvio queda mas corto.
+    //   2. Leer QUE dice el reenvio. Marcar el email entero seria un error
+    //      cuando anuncia varios discos: el de Logistic lleva LOG88 y LOG86 y el
+    //      mensaje pide solo el Narcotic Syntax.
+    const señales = new Map();   // nombre del email de material -> {qty, target}
     for (const p of pedidos) {
       const base = p.subject.replace(MAIL_ORDER, '');
-      for (const m of material) {
-        if (m.subject.startsWith(base) || base.startsWith(m.subject)) ordered.add(m.name);
-      }
+      const casan = material.filter(m => m.subject.startsWith(base) || base.startsWith(m.subject));
+      if (!casan.length) continue;
+      let sig = { qty: null, target: '' };
+      try {
+        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(p.name)}`, {
+          headers: { 'Authorization': `Bearer ${mailSecret}` },
+        });
+        if (r.ok) sig = parseOrderSignal((await r.json()).html || '');
+      } catch { /* sin cuerpo, se asume el email entero */ }
+      for (const m of casan) señales.set(m.name, sig);
     }
 
     const fetchOne = async (e) => {
@@ -8423,16 +8542,19 @@ function PreorderImporter() {
       for (const row of rows) {
         if (!row.catno) continue;
         const k = rdKey(row.catno);
+        const sig = señales.get(b.e.name);
+        const pedido = !!sig && orderMatchesRelease(sig.target, row);
         const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
-                       _ordered: ordered.has(b.e.name) };
+                       _ordered: pedido, _qty: pedido ? (sig.qty || null) : null };
         const prev = best.get(k);
         if (!prev || cand._rank > prev._rank ||
             (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
           // El pedido es del release, no del email concreto: si CUALQUIER email
           // suyo venia de un Fwd tuyo, el disco esta pedido.
-          best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false });
+          best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false,
+                        _qty: cand._qty ?? prev?._qty ?? null });
         } else if (cand._ordered && prev) {
-          best.set(k, { ...prev, _ordered: true });
+          best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
         }
       }
     }
@@ -8650,6 +8772,7 @@ function PreorderImporter() {
         setProgress({ done:i, total, current:`${catno} — processing…` });
 
         let coverUrl = '';
+        let coverNamedInZip = null;   // null = no hubo ZIP; false = habia imagenes pero ninguna se llamaba funda
         let tracks   = [];
         let itemError = '';
         let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
@@ -8662,7 +8785,9 @@ function PreorderImporter() {
             const files = Object.values(zip.files).filter(f=>!f.dir);
 
             const imgFiles  = files.filter(f=>/\.(jpg|jpeg|png)$/i.test(f.name));
-            const coverFile = imgFiles.find(f=>/front|cover|artwork/i.test(f.name.toLowerCase())) || imgFiles[0];
+            const namedCover = imgFiles.find(f=>/front|cover|artwork/i.test(f.name.toLowerCase()));
+            coverNamedInZip = !!namedCover;
+            const coverFile = namedCover || imgFiles[0];
             if (coverFile) {
               setProgress({ done:i, total, current:`${catno} — uploading cover…` });
               const blob = await coverFile.async('blob');
@@ -8685,6 +8810,16 @@ function PreorderImporter() {
             // the main W&S ZipImporter uses. Only fill genre when the manifest
             // didn't already provide one (DBH manifests do; W&S don't). The
             // press text also enriches the description.
+            // La descripcion vive en un sitio distinto en cada distribuidor:
+            // W&S en SALESPAPER.pdf, Triple Vision en un {CATNO}_promotext.txt
+            // plano. Solo se buscaba el PDF, asi que las de TV se perdian todas.
+            const txtFile = files.find(f => /_promotext\.txt$/i.test(f.name)) || files.find(f => /\.txt$/i.test(f.name));
+            if (txtFile) {
+              try {
+                const raw = (await txtFile.async('string')).trim();
+                if (raw) zipDesc = raw;
+              } catch (e) { /* mejor sin descripcion que sin producto */ }
+            }
             const pdfFile = files.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || files.find(f => /\.pdf$/i.test(f.name));
             if (pdfFile) {
               try {
@@ -8703,7 +8838,13 @@ function PreorderImporter() {
         // Fallback cover: if no ZIP cover, use the manifest's distributor cover
         // URL (img.php). It's an external hotlink, not on R2, but better than
         // a blank pre-order tile until the ZIP lands.
-        if (!coverUrl && m.coverUrl) coverUrl = m.coverUrl;
+        // Antes el ZIP ganaba siempre y el email solo servia de reserva. Eso vale
+        // con W&S y TV, que nombran la funda (front/cover/artwork), pero los ZIP
+        // de Rubadub traen fotos con nombre de Instagram
+        // (733019542_988549377418142_….jpg) y el selector se quedaba con la
+        // primera que pillara — una cualquiera, no la portada. Si el ZIP no
+        // nombra ninguna imagen como funda, manda la del email.
+        if (m.coverUrl && (!coverUrl || coverNamedInZip === false)) coverUrl = m.coverUrl;
 
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
