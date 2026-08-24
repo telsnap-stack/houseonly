@@ -8499,6 +8499,14 @@ function PreorderImporter() {
   const mailParseAll = async () => {
     if (!mailIdx) return;
     setMailBusy('todos'); setMailError('');
+    // El total se fija ANTES de empezar y cuenta las cuatro fases. Si solo se
+    // cuenta el material, los primeros segundos —leer las señales de pedido— se
+    // pasan en "0/0" y el boton parece colgado.
+    const nSeñales = mailIdx.filter(e => ['WSORD','TVORD'].includes(e.prefix)).length
+                   + mailIdx.filter(e => e.kind === 'pedido' && e.prefix === 'RD').length;
+    const nMaterial = mailIdx.filter(e => e.kind === 'material' && ['RD','TV'].includes(e.prefix)).length;
+    setMailProgress({ done: 0, total: nSeñales + nMaterial, fase: 'leyendo pedidos' });
+    const paso = () => setMailProgress(x => ({ ...x, done: x.done + 1 }));
     const H = { 'Authorization': `Bearer ${mailSecret}` };
     const traer = async (name) => {
       try {
@@ -8527,10 +8535,12 @@ function PreorderImporter() {
     for (const e of mailIdx.filter(x => x.prefix === 'WSORD')) {
       const { items } = parseWsOrder(await traer(e.name));
       for (const it of items) anotar(it.catno, { ...it, src: 'ws', _fecha: e.date });
+      paso();
     }
     for (const e of mailIdx.filter(x => x.prefix === 'TVORD')) {
       const { items } = parseTvShelfList(await traer(e.name));
       for (const it of items) anotar(it.catno, { ...it, src: 'tv', _fecha: e.date });
+      paso();
     }
 
     // ── 2. Material: los emails de anuncio que el parser entiende ──
@@ -8538,8 +8548,6 @@ function PreorderImporter() {
     // confirmacion ya trae la ficha entera.
     const material = mailIdx.filter(e => e.kind === 'material' && (e.prefix === 'RD' || e.prefix === 'TV'));
     const rdPedidos = mailIdx.filter(e => e.kind === 'pedido' && e.prefix === 'RD');
-    setMailProgress({ done: 0, total: material.length + rdPedidos.length });
-
     const señales = new Map();
     for (const p of rdPedidos) {
       const base = p.subject.replace(MAIL_ORDER, '');
@@ -8548,15 +8556,16 @@ function PreorderImporter() {
         const sig = parseOrderSignal(await traer(p.name));
         for (const m of casan) señales.set(m.name, sig);
       }
-      setMailProgress(x => ({ ...x, done: x.done + 1 }));
+      paso();
     }
 
+    setMailProgress(x => ({ ...x, fase: 'parseando anuncios' }));
     const rank = (e) => (e.digest ? 0 : e.revision ? 1 : 2);
     const best = new Map();
     for (let i = 0; i < material.length; i += 8) {
       const tanda = await Promise.all(material.slice(i, i + 8).map(async (e) => {
         const html = await traer(e.name);
-        setMailProgress(x => ({ ...x, done: x.done + 1 }));
+        paso();
         return { e, html };
       }));
       for (const b of tanda) {
@@ -8612,7 +8621,7 @@ function PreorderImporter() {
     // enteros seria tirar peticiones por gusto.
     const porResolver = [...best.values()].filter(r => r._ordered && !r.zipUrl && r._trackers?.length);
     if (porResolver.length) {
-      setMailBusy('enlaces');
+      setMailProgress(x => ({ ...x, fase: 'resolviendo enlaces de promopack' }));
       const urls = [...new Set(porResolver.flatMap(r => r._trackers))].slice(0, 60);
       try {
         const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
@@ -8630,6 +8639,7 @@ function PreorderImporter() {
     }
 
     // ── 5. Clasificar ────────────────────────────────────────
+    setMailProgress(x => ({ ...x, fase: 'comprobando qué hay ya en la tienda' }));
     const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
     const all = [...best.values()].map(r => ({
       ...r,
@@ -9134,7 +9144,22 @@ function PreorderImporter() {
                   {' '}las confirmaciones de Word &amp; Sound y el shelf list de Triple Vision.
                   Se parsean todos y sale una sola lista.
                 </p>
-                <Btn ch={mailBusy==='todos'?`Parseando… ${mailProgress.done}/${mailProgress.total}`:'📖 Parsear todo el archivo'} onClick={mailParseAll} full />
+                {mailBusy
+                  ? (()=>{const pc = mailProgress.total ? Math.round((mailProgress.done/mailProgress.total)*100) : 0; return (
+                    <div style={{padding:12,background:S.surf,borderRadius:3,border:`1px solid ${S.border}`}}>
+                      <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+                        <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>{(mailProgress.fase||'leyendo').toUpperCase()}…</span>
+                        <span style={{fontSize:10,color:S.muted}}>{mailProgress.done} / {mailProgress.total} · {pc}%</span>
+                      </div>
+                      <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden'}}>
+                        <div style={{height:'100%',background:S.accent,width:`${pc}%`,transition:'width 0.3s'}} />
+                      </div>
+                      <div style={{fontSize:9,color:S.muted,marginTop:6}}>
+                        Son {mailProgress.total} correos; tarda unos segundos.
+                      </div>
+                    </div>
+                  );})()
+                  : <Btn ch="📖 Parsear todo el archivo" onClick={mailParseAll} full />}
               </div>
             ):(()=>{
               const ord  = mailRows.filter(r=>r._ordered&&!r._live);
