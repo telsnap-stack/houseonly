@@ -40,6 +40,7 @@ import {
   createDiscogsOrder,
   findOrderByDiscogsOrderId,
   type DiscogsOrderLine,
+  type DiscogsShippingLine,
   type DiscogsBuyer,
   type ShopifyAdminEnv,
 } from './shopify-admin';
@@ -840,7 +841,13 @@ async function processDiscogsOrder(
       await env.SYNC_STATE.put(`sku:${lookup.sku}`, JSON.stringify({
         listing_id: item.id, status, synced_at: new Date().toISOString(),
       }));
-      resolvedLines.push({ variantId: lookup.variantId, quantity: 1 });
+      resolvedLines.push({
+        variantId: lookup.variantId,
+        quantity: 1,
+        // Invoice what Discogs charged, not the Shopify catalog price.
+        unitPrice: item.price?.value,
+        currency: item.price?.currency,
+      });
       audit.items.push(itemAudit);
       continue;
     }
@@ -892,8 +899,16 @@ async function processDiscogsOrder(
 
   // ── Fetch full order for buyer details, parse the shipping address ──
   let buyer: DiscogsBuyer;
+  let shipping: DiscogsShippingLine | undefined;
   try {
     const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+    if (full.shipping && Number.isFinite(full.shipping.value)) {
+      shipping = {
+        title: full.shipping.method || 'Discogs shipping',
+        amount: full.shipping.value,
+        currency: full.shipping.currency,
+      };
+    }
     const parsed = parseDiscogsShippingAddress(full.shipping_address);
     buyer = {
       name: parsed.name,
@@ -919,6 +934,8 @@ async function processDiscogsOrder(
       ok: true,
       dry_run: true,
       would_create_lines: resolvedLines.length,
+      would_total: resolvedLines.reduce((sum, l) => sum + (l.unitPrice || 0), 0)
+        + (shipping?.amount || 0),
       buyer_name: buyer.name,
       buyer_country: buyer.country,
     };
@@ -927,7 +944,7 @@ async function processDiscogsOrder(
   }
 
   // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
-  const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+  const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer, shipping);
   if (orderResult.ok) {
     audit.order_creation = {
       ok: true,

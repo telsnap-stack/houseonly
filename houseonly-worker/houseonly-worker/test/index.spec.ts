@@ -722,3 +722,94 @@ describe("SKU candidate resolution", () => {
 		await env.SYNC_STATE.delete("listing:772");
 	});
 });
+
+// ── The invoice must total what the buyer paid on Discogs ───────────
+//
+// Discogs 147628-33 was created at Shopify catalog prices and came to €402.81
+// against the €390.81 the buyer actually paid. The line price on the factura
+// has to be the Discogs price, and Discogs' shipping charge has to ride along.
+describe("Discogs prices reach the Shopify order", () => {
+	const ORDER_ID = "147628-91";
+	const LISTING_ID = 881;
+
+	const firmOrder = {
+		id: ORDER_ID,
+		status: "Payment Received",
+		created: "2026-08-24T01:50:00-07:00",
+		items: [
+			{
+				id: LISTING_ID,
+				release: { description: "Some Record" },
+				price: { currency: "EUR", value: 19.99 },
+			},
+		],
+	};
+
+	beforeEach(async () => {
+		vi.clearAllMocks();
+		for (const k of [
+			`lock:order:${ORDER_ID}`,
+			`sales-detected:${ORDER_ID}`,
+			`listing:${LISTING_ID}`,
+			"meta:sync_3e_mode",
+			"meta:last_polled_ts",
+			"meta:sync_go_live_ts",
+		]) {
+			await env.SYNC_STATE.delete(k);
+		}
+		await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+		await env.SYNC_STATE.put(
+			`listing:${LISTING_ID}`,
+			JSON.stringify({ sku: "SKU1", status: "Sold" }),
+		);
+		vi.mocked(discogs.getOrders).mockResolvedValue({
+			pagination: { page: 1, pages: 1, per_page: 50, items: 1 },
+			orders: [firmOrder],
+		} as any);
+		vi.mocked(shopifyAdmin.findVariantBySku).mockResolvedValue({
+			variantId: "gid://shopify/ProductVariant/1",
+		} as any);
+		vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+			ok: true,
+			orderId: "gid://shopify/Order/1",
+			orderName: "#1035",
+		} as any);
+	});
+
+	it("passes the Discogs unit price and shipping charge through", async () => {
+		vi.mocked(discogs.getOrder).mockResolvedValue({
+			...firmOrder,
+			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
+			buyer: { email: "jane@example.com" },
+			shipping: { currency: "EUR", method: "Standard", value: 4.5 },
+		} as any);
+
+		await pollDiscogsForSales(env as any);
+
+		const call = vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0];
+		expect(call[2]).toEqual([
+			{
+				variantId: "gid://shopify/ProductVariant/1",
+				quantity: 1,
+				unitPrice: 19.99,
+				currency: "EUR",
+			},
+		]);
+		expect(call[4]).toEqual({
+			title: "Standard",
+			amount: 4.5,
+			currency: "EUR",
+		});
+	});
+
+	it("omits shipping when Discogs charged none of it separately", async () => {
+		vi.mocked(discogs.getOrder).mockResolvedValue({
+			...firmOrder,
+			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
+			buyer: { email: "jane@example.com" },
+		} as any);
+
+		await pollDiscogsForSales(env as any);
+		expect(vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][4]).toBeUndefined();
+	});
+});

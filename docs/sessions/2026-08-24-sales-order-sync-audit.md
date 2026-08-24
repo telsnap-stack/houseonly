@@ -60,21 +60,24 @@ murió entera (¿límite de subrequests/CPU en un pedido de 19 ítems?) o si fal
 
 ## Recuperación aplicada (24 ago 2026)
 
-Pedido Shopify **#1034** creado a mano con el **mismo formato que
+Pedido Shopify **#1035** (bueno) creado a mano con el **mismo formato que
 `createDiscogsOrder`**: `draftOrderCreate` → `draftOrderComplete(paymentPending:
 false)`, `taxExempt: true`, tag `source:discogs`, nota `Discogs order
 147628-33`, atributo `discogs_order_id`, envío a Almeirim (PT). Stock
-decrementado una sola vez (DAT124/DAT120/DAT114/DAT046… a 0) y factura
-disponible para Shoptopus.
+decrementado una sola vez y factura disponible para Shoptopus.
 
-- 17 líneas por `variantId` (precio de catálogo Shopify, como hace el worker).
-- 2 líneas **custom** (`DAT125`, `DAT126`) con título + precio de Discogs
-  (€22,99): no existen como producto en Shopify y no se inventan; así la
+- 17 líneas por `variantId` con **`priceOverride` al precio de Discogs**
+  (15×€19,99, FR013 €21,99, DAT114 €22,99).
+- 2 líneas **custom** (`DAT125`, `DAT126`, €22,99): no existen como producto en
+  Shopify (excluidas del import por falta de artwork) y no se inventan; así la
   factura cubre los 19 ítems vendidos.
-- Total Shopify **€402,81** vs **€390,81** cobrados: el worker siempre factura
-  al precio de catálogo de Shopify (aquí €20,99 vs €19,99 en Discogs). Es el
-  comportamiento de los ~20 pedidos anteriores, no una decisión de esta
-  sesión — pero conviene decidir si la factura debe reflejar lo cobrado.
+- Total **€390,81 = exactamente lo cobrado**.
+
+**#1034 queda por cancelar a mano** (Shopify admin → #1034 → Cancel order,
+*restock* sí, *refund* no: el cobro fue por PayPal/Discogs, no por Shopify). Fue
+el primer intento, construido a precio de catálogo Shopify (€402,81 ≠ €390,81);
+`orderCancel` está bloqueado por la política del MCP de Shopify. Si Shoptopus ya
+emitió factura de #1034, hace falta rectificativa.
 
 ## Arreglo de código para las próximas ventas
 
@@ -83,7 +86,12 @@ disponible para Shoptopus.
    candidato que Shopify reconoce**, nunca el primero que se nos ocurrió — así
    los mapeos ya envenenados (`listing:4330318059` → `"DAT 114"`) se corrigen
    solos en la siguiente resolución, sin tocar KV a mano.
-2. **El veto de factura parcial ahora cubre `variant_not_found`**, no solo
+2. **La factura se emite al precio de Discogs**: cada línea lleva
+   `priceOverride` con `item.price` del pedido de Discogs, y el gasto de envío
+   de Discogs se refleja como `shippingLine`. Antes se facturaba al precio de
+   catálogo de Shopify, que es otro número — de ahí el descuadre de €12,00 en
+   este pedido (y, previsiblemente, en los ~20 anteriores).
+3. **El veto de factura parcial ahora cubre `variant_not_found`**, no solo
    `unmapped_listing`: si *cualquier* línea no resuelve, no se crea el pedido y
    la venta queda parada con `needs_manual` y la lista de líneas irresolubles
    en la auditoría. Facturar 14 de 19 no es un arreglo parcial, es un documento

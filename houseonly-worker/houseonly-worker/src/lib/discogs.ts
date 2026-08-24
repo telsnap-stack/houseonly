@@ -84,6 +84,13 @@ export interface DiscogsOrder {
   // country + trailing "Phone:"/"Paypal address:" lines), NOT structured
   // fields — so we parse it (see parseDiscogsShippingAddress).
   shipping_address?: string;
+  // What the buyer paid for shipping, on the single-order endpoint. Needed so
+  // the Shopify order totals what Discogs actually charged.
+  shipping?: {
+    currency: string;
+    method?: string;
+    value: number;
+  };
   buyer?: {
     id?: number;
     username?: string;

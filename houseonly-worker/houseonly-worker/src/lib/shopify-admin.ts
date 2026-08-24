@@ -529,6 +529,18 @@ export interface DiscogsBuyer {
 export interface DiscogsOrderLine {
   variantId: string;   // gid://shopify/ProductVariant/...
   quantity: number;
+  // What Discogs charged for this record. Shopify's catalog price is a
+  // different number (the shop sells at its own price), so invoicing at the
+  // catalog price produces a factura that doesn't total what the buyer paid.
+  unitPrice?: number;
+  currency?: string;   // ISO code as Discogs reports it, e.g. "EUR"
+}
+
+/** The shipping Discogs charged, mirrored onto the Shopify order. */
+export interface DiscogsShippingLine {
+  title: string;
+  amount: number;
+  currency: string;
 }
 
 export interface CreateDiscogsOrderResult {
@@ -573,6 +585,7 @@ export async function createDiscogsOrder(
   discogsOrderId: string,
   lines: DiscogsOrderLine[],
   buyer: DiscogsBuyer,
+  shipping?: DiscogsShippingLine,
 ): Promise<CreateDiscogsOrderResult> {
   if (lines.length === 0) {
     return { ok: false, error: 'no line items' };
@@ -611,7 +624,19 @@ export async function createDiscogsOrder(
   if (buyer.phone) shippingAddress.phone = buyer.phone;
 
   const draftInput: any = {
-    lineItems: lines.map(l => ({ variantId: l.variantId, quantity: l.quantity })),
+    // priceOverride puts the Discogs price on the invoice line instead of the
+    // Shopify catalog price. Without it the order totals the wrong number —
+    // Discogs 147628-33 came to €402.81 against €390.81 actually paid.
+    lineItems: lines.map(l => {
+      const item: any = { variantId: l.variantId, quantity: l.quantity };
+      if (Number.isFinite(l.unitPrice) && (l.unitPrice as number) >= 0 && l.currency) {
+        item.priceOverride = {
+          amount: String(l.unitPrice),
+          currencyCode: l.currency,
+        };
+      }
+      return item;
+    }),
     taxExempt: true,                       // NO VAT
     shippingAddress,
     tags: ['source:discogs'],
@@ -620,6 +645,16 @@ export async function createDiscogsOrder(
     customAttributes: [{ key: 'discogs_order_id', value: discogsOrderId }],
   };
   if (buyer.email) draftInput.email = buyer.email;
+  // Mirror the shipping Discogs charged (often 0 — the price includes it).
+  if (shipping && Number.isFinite(shipping.amount) && shipping.currency) {
+    draftInput.shippingLine = {
+      title: shipping.title || 'Discogs shipping',
+      priceWithCurrency: {
+        amount: String(shipping.amount),
+        currencyCode: shipping.currency,
+      },
+    };
+  }
 
   const createRes = await shopifyAdminGraphQL(env, createMutation, { input: draftInput });
   if (createRes?.errors?.length) {
