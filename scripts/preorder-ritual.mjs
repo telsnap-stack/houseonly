@@ -343,7 +343,11 @@ function promopack(pats) {
       const html = fs.readFileSync(path.join(SRC, f.name), 'utf8');
       let m = html.match(/https:\/\/www\.dropbox\.com\/scl\/fo\/[^\s"'<)]+/);
       if (!m) {
-        const trackers = [...new Set((html.match(/https:\/\/[a-z0-9.-]*list-manage\.com\/track\/click\?[^\s"'<)]+/g) || [])
+        // Mailchimp usa DOS formas de tracker y ceñirse a una da falsos
+        // negativos: rubadub.us1.list-manage.com/track/click?... y el corto
+        // us.list-manage.com/XXXX. Por buscar solo la primera di por hecho que
+        // FTC12 y WO-KJHBCS no tenian promopack, y si lo tienen.
+        const trackers = [...new Set((html.match(/https:\/\/[a-z0-9.-]*list-manage\.com\/[^\s"'<)]+/g) || [])
           .map(u => u.replace(/&amp;/g, '&')))];
         for (const t of trackers) {
           const dest = execFileSync('curl',
@@ -355,8 +359,9 @@ function promopack(pats) {
       if (!m) {
         // Normal en represses y restocks: el disco ya existe y Rubadub no manda
         // material promocional nuevo. Tambien pasa en los digests.
-        console.error(`  x ${catno}: el email no lleva promopack (habitual en repress/restock/digest).`);
-        console.error(`    Si necesitas portada, sacala de otra fuente o del producto que ya tengas.`);
+        console.error(`  x ${catno}: ningun enlace del email lleva a un promopack.`);
+        console.error(`    Pasa en algunos digests. Si es un per-release, mira el email a mano antes`);
+        console.error(`    de darlo por perdido — puede ser un formato de enlace no contemplado.`);
         continue;
       }
       const tmp = path.join(os.tmpdir(), `rd_${catno.replace(/[^\w-]/g, '_')}.json`);
