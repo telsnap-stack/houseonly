@@ -7655,6 +7655,24 @@ function NewsletterPanel() {
 const RD_MONTHS = ['january','february','march','april','may','june',
                    'july','august','september','october','november','december'];
 
+// Is this paste a DIGEST (a catalogue Rubadub sends out) rather than one or
+// more per-release announcements? It decides the default selection, and the
+// two must not be told apart by row count: three per-release emails pasted in
+// one go are three deliberate picks, while a four-line digest is still a
+// catalogue — and that short digest is the dangerous one, because nobody
+// double-checks four rows.
+//
+// There are TWO kinds of digest and they are not interchangeable:
+//   • shipping digest — "these are all shipping to you today / next Monday":
+//     stock already on its way, NOT pre-orders.
+//   • weekly pre-sales round-up — "All Rubadub Pre-sales (Week …)": these ARE
+//     pre-orders.
+// Both are catalogues, so both default to nothing selected, but only the first
+// implies the records are already shipping. Keep the distinction: collapsing
+// them would mislabel a whole round-up as arriving stock.
+const RD_DIGEST_SHIPPING = /these\s+are\s+all\s+shipping\s+to\s+you|shipping\s+to\s+you\s+(today|next\s+\w+)|New\s+Releases\s+Shipping\s+(This|Next)\s+Week|Imports\s+Shipping\s+Today|Today'?s?\s+New\s+Arrivals/i;
+const RD_DIGEST_PRESALES = /All\s+Rubadub\s+Pre-?sales|WEEKLY\s+ROUND\s*UP/i;
+
 // Normalize pasted HTML into the same shape as Rubadub's plaintext part, so a
 // single parser handles both. Anchors become "label (url)" — exactly how the
 // plaintext renders them — and images become inline [[IMG:url]] markers, which
@@ -7726,6 +7744,11 @@ function rdShipDate(text, emailDate) {
 function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
   const text = rdHtmlToText(String(raw || ''));
   const rows = [];
+  // Document-level, not per-release: a digest states its nature once, in the
+  // opening prose, and that fact belongs to every row it carries.
+  const digestShipping = RD_DIGEST_SHIPPING.test(text);
+  const digestPresales = RD_DIGEST_PRESALES.test(text);
+  const digest = digestShipping ? 'shipping' : digestPresales ? 'presales' : '';
 
   // Locate every field block. "Cat:" is the anchor — a block without a cat-no
   // is not a release. Each block spans from its Artist:/first field line to the
@@ -7820,6 +7843,7 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
       source: 'rd',
       forthcoming: isPreorder,
       _gbp: gbp || null,
+      _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,
     });
   });
@@ -7863,6 +7887,7 @@ function PreorderImporter() {
   const [rdPreview, setRdPreview]   = useState(null);  // parsed rows awaiting confirmation
   const [rdError, setRdError]       = useState('');
   const [rdPasteNote, setRdPasteNote] = useState('');  // set when a paste carried no text/html
+  const [rdChecked, setRdChecked]   = useState({});    // catno -> included in the add
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -8193,12 +8218,22 @@ function PreorderImporter() {
         return;
       }
       setRdPreview(rows);
+      // Per-release paste → everything ticked: pasting three announcements in
+      // one go is three deliberate picks. Digest → nothing ticked: it is a
+      // catalogue, so the operator ticks what was actually ordered.
+      const preselect = !rows[0]._digest;
+      setRdChecked(Object.fromEntries(rows.map(r => [r.catno, preselect])));
     } catch (e) { setRdPreview(null); setRdError(e.message); }
   };
 
+  const rdCheckedRows = () => (rdPreview || []).filter(r => rdChecked[r.catno]);
+  const rdSetAll = (on) =>
+    setRdChecked(Object.fromEntries((rdPreview || []).map(r => [r.catno, on])));
+
   const rdAddToManifest = () => {
-    if (!rdPreview?.length) return;
-    const clean = rdPreview.map(({ _gbp, _warnings, ...row }) => row);
+    const picked = rdCheckedRows();
+    if (!picked.length) return;
+    const clean = picked.map(({ _gbp, _warnings, _digest, ...row }) => row);
     setManifest(prev => {
       const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);  // re-paste overwrites
@@ -8206,6 +8241,7 @@ function PreorderImporter() {
     });
     setManifestName(name => name || 'Rubadub (pegado)');
     setRdPreview(null);
+    setRdChecked({});
     setRdText('');
     setRdPasteNote('');
     setDownloadDone(false);
@@ -8559,19 +8595,36 @@ function PreorderImporter() {
               <button onClick={rdParse} disabled={!rdText.trim()} style={{background:rdText.trim()?S.accent:S.border,border:'none',color:rdText.trim()?'#080808':S.muted,cursor:rdText.trim()?'pointer':'default',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
                 Parsear
               </button>
-              {(rdText||rdPreview)&&<button onClick={()=>{setRdText('');setRdPreview(null);setRdError('');setRdPasteNote('');}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 12px',borderRadius:2,fontFamily:'inherit'}}>Limpiar</button>}
+              {(rdText||rdPreview)&&<button onClick={()=>{setRdText('');setRdPreview(null);setRdChecked({});setRdError('');setRdPasteNote('');}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 12px',borderRadius:2,fontFamily:'inherit'}}>Limpiar</button>}
             </div>
 
             {rdError&&<div style={{marginTop:8,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger}}>{rdError}</div>}
 
-            {rdPreview&&(
+            {rdPreview&&(()=>{
+              const nChecked = rdCheckedRows().length;
+              const kind = rdPreview[0]._digest;
+              return (
               <div style={{marginTop:10}}>
-                <div style={{fontSize:10,color:S.accent,fontWeight:700,marginBottom:6}}>
-                  {rdPreview.length} release{rdPreview.length===1?'':'s'} · revisa antes de añadir
+                <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:6}}>
+                  <span style={{fontSize:10,color:S.accent,fontWeight:700}}>
+                    {rdPreview.length} release{rdPreview.length===1?'':'s'}
+                    {' · '}
+                    <span style={{color:nChecked?S.accent:'#ff8800'}}>{nChecked} marcada{nChecked===1?'':'s'}</span>
+                  </span>
+                  <button onClick={()=>rdSetAll(true)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
+                  <button onClick={()=>rdSetAll(false)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'3px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                 </div>
+                {kind&&(
+                  <div style={{fontSize:9,color:'#ff8800',lineHeight:1.6,marginBottom:8,padding:'6px 10px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:3}}>
+                    {kind==='shipping'
+                      ? <>Es un <b>digest de envíos</b>: es un catálogo de lo que ya sale hacia ti, no un pedido. Nada viene marcado — marca solo lo que pediste.</>
+                      : <>Es el <b>round-up semanal de pre-sales</b>: es un catálogo, no un pedido. Nada viene marcado — marca solo lo que pediste.</>}
+                  </div>
+                )}
                 {rdPreview.map((r,i)=>(
-                  <div key={i} style={{border:`1px solid ${r._warnings.length?'#ff8800':S.border}`,borderRadius:3,padding:'8px 10px',marginBottom:6,background:S.surf}}>
+                  <div key={i} onClick={()=>setRdChecked(c=>({...c,[r.catno]:!c[r.catno]}))} style={{border:`1px solid ${rdChecked[r.catno]?S.accent:r._warnings.length?'#ff8800':S.border}`,borderRadius:3,padding:'8px 10px',marginBottom:6,background:S.surf,opacity:rdChecked[r.catno]?1:0.55,cursor:'pointer',transition:'opacity 0.12s,border 0.12s'}}>
                     <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'baseline'}}>
+                      <input type="checkbox" checked={!!rdChecked[r.catno]} onChange={()=>setRdChecked(c=>({...c,[r.catno]:!c[r.catno]}))} onClick={e=>e.stopPropagation()} style={{accentColor:S.accent,cursor:'pointer'}} />
                       <span style={{fontFamily:'monospace',fontSize:11,color:S.accent,fontWeight:700}}>{r.catno}</span>
                       <span style={{fontSize:11,color:S.text}}>{r.artist} — {r.title}</span>
                       <span style={{fontSize:9,color:S.muted}}>{r.label}</span>
@@ -8588,9 +8641,13 @@ function PreorderImporter() {
                     ))}
                   </div>
                 ))}
-                <Btn ch={`+ Añadir ${rdPreview.length} al manifest`} onClick={rdAddToManifest} full />
+                {/* Says what will actually enter, not what was parsed */}
+                {nChecked>0
+                  ? <Btn ch={`+ Añadir ${nChecked} al manifest`} onClick={rdAddToManifest} full />
+                  : <div style={{textAlign:'center',fontSize:9,color:S.muted,padding:'8px 0',border:`1px dashed ${S.border}`,borderRadius:2}}>Marca al menos un release para añadirlo</div>}
               </div>
-            )}
+              );
+            })()}
           </div>
         </details>
       )}
