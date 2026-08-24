@@ -280,9 +280,19 @@ async function fetchLiveHandles() {
     }`);
     const { edges, pageInfo } = data.products;
     for (const e of edges) {
-      const h = (e.node.handle || '').trim().toLowerCase();
+      // Both sides are stored ALPHANUMERIC-ONLY (rdKey), never as written. The
+      // same record reaches us spelled several ways — handle "yore011ltd",
+      // pre-order SKU "YORE-011LTD", a Rubadub invoice line "YORE 011 LTD" —
+      // and a literal lowercase compare only matches when the spelling happens
+      // to agree. That made the check look like it worked (it does, by luck,
+      // for most of the 41 live source:rd products) while silently missing any
+      // record whose punctuation differed. Normalizing collapses all spellings
+      // onto one key. Handle AND SKU both go in: the two importers disagree on
+      // how they build handles (see the note by each generator), so a record
+      // may only be reachable by one of the two.
+      const h = rdKey(e.node.handle);
       if (h) set.add(h);
-      const sku = (e.node.variants?.edges?.[0]?.node?.sku || '').trim().toLowerCase();
+      const sku = rdKey(e.node.variants?.edges?.[0]?.node?.sku);
       if (sku) set.add(sku);
     }
     if (!pageInfo.hasNextPage) break;
@@ -3625,6 +3635,7 @@ function RubadubImporter() {
   const [margin, setMargin]     = useState(60);
   const [fx, setFx]             = useState(1.15);    // GBP→EUR
   const [genre, setGenre]       = useState('Deep House');
+  const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
   const pdfRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -3635,6 +3646,17 @@ function RubadubImporter() {
       setPdfFile(pdfs[0]);
       try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
       catch (e) { setError('Could not read invoice PDF: ' + e.message); }
+      // An invoiced record may already be a live product — typically one this
+      // shop created as a pre-order weeks earlier, when the record was ordered.
+      // Shopify's CSV import matches on Handle ALONE, so such a row either
+      // silently overwrites that product (blank columns wipe its cover and
+      // body, and its Qty is SET, not added, erasing the oversell demand
+      // ledger) or creates a straight duplicate when the handles disagree.
+      // Neither is acceptable, so matched rows are held out of the CSV.
+      setLiveHandles(null);
+      fetchLiveHandles()
+        .then(setLiveHandles)
+        .catch(() => setLiveHandles(new Set()));   // on failure: never block the import
     }
     if (zips.length) setZipFiles(prev => {
       const existing = new Set(prev.map(f => f.name));
@@ -3755,14 +3777,41 @@ function RubadubImporter() {
         }
         const costEur = typeof inv.cost === 'number' ? (inv.cost * fx).toFixed(2) : '';
 
+        // HANDLE — DEUDA CONOCIDA, divergente a proposito de momento.
+        // Este handle sale de `key` (rdKey: solo alfanumericos), asi que
+        // "YORE-011LTD" -> "yore011ltd". El PreorderImporter conserva los
+        // separadores y genera "yore-011ltd" para el MISMO disco. Se decidio no
+        // unificarlos: no compra dedup (eso lo da el cotejo con
+        // fetchLiveHandles, que compara por rdKey y casa las dos formas) y
+        // añadiria una tercera convencion a las dos que ya conviven en la
+        // tienda. Antes de "arreglarlo", tres cosas que no son obvias:
+        //   1. Las URLs NO salen del handle. El slug de routing se recalcula en
+        //      parseProduct() con makeSlug(artist, title, catalog), duplicado
+        //      literalmente en scripts/prerender.mjs, que escribe las paginas
+        //      estaticas. Cambiar handles no rompe URLs; tocar makeSlug si, y
+        //      hay que tocarlo en los dos sitios a la vez.
+        //   2. fetchShopifyProductByHandle() (carrito/wishlist) busca por el
+        //      handle REAL del producto. Cada producto conserva el handle con el
+        //      que nacio, asi que cambiar la convencion no rompe los vivos —
+        //      pero deja la tienda con dos convenciones para siempre.
+        //   3. Shopify empareja el import CSV SOLO por Handle. Dos handles
+        //      distintos del mismo catno = dos productos, mismo SKU. Shopify no
+        //      exige SKUs unicos y no deduplica por SKU.
+        // Los otros importers (TV, MT, Rush Hour) tienen su propia copia de
+        // esto; si algun dia se unifica, es un barrido, no un parche local.
         const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         const tags = ['vinyl','source:rd', label?`label:${label}`:'', finalGenre].filter(Boolean).join(', ');
 
+        // Compared on the normalized key, so "YORE-011LTD" on the invoice finds
+        // the live product whether it was created as yore011ltd or yore-011ltd.
+        const alreadyLive = liveHandles ? liveHandles.has(rdKey(inv.sku)) : false;
+
         processed.push({
           _catno: inv.sku, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
           _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
+          _alreadyLive: alreadyLive,
           'Handle': handle, 'Title': title || inv.sku, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -3789,8 +3838,13 @@ function RubadubImporter() {
   };
 
   const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    // Rows already in the shop never travel. That makes Shopify's "Overwrite
+    // products with matching handles" checkbox irrelevant for them: there is
+    // no row to match, so neither answer can damage the existing product.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) return;
+    const CSV_KEYS = Object.keys(kept[0]).filter(k => !k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...kept.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_rd.csv'; a.click();
@@ -3802,6 +3856,7 @@ function RubadubImporter() {
   const errors=results.filter(r=>r._error).length;
   const noPrice=results.filter(r=>r._priceFlag).length;
   const noZip=results.filter(r=>r._noZip).length;
+  const liveRows = results.filter(r=>r._alreadyLive);
   const invCount = invoice ? Object.keys(invoice).length : 0;
   const ready = !!invoice;
   const sampleCost = invoice ? (Object.values(invoice).find(r=>typeof r.cost==='number')?.cost || 9.99) : 9.99;
@@ -3850,9 +3905,31 @@ function RubadubImporter() {
       {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
-            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}{liveRows.length>0?` · ${liveRows.length} ya en tienda`:''}</span></div>
+            <Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&(
+            <div style={{marginBottom:10,padding:'8px 12px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,fontSize:10,color:S.muted}}>
+              Comprobando cuáles ya existen en la tienda…
+            </div>
+          )}
+          {liveRows.length>0&&(
+            <div style={{marginBottom:12,padding:'10px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4}}>
+              <div style={{fontSize:10,color:'#ff8800',fontWeight:700,marginBottom:4}}>
+                {liveRows.length} ya en tienda — llegada de stock: súmale inventario a mano
+              </div>
+              <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
+                Estos discos ya son productos vivos (los creaste al pedirlos). <b style={{color:S.text}}>Se quedan fuera del CSV</b>: Shopify empareja solo por Handle, así que dejarlos viajar o duplicaría el producto o lo sobrescribiría — el qty se fija en vez de sumarse, y las columnas vacías borrarían portada y descripción. Añádeles el inventario en Shopify y deja que la graduación del worker les quite <code style={{fontFamily:'monospace'}}>forthcoming</code> sola.
+              </div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                {liveRows.map((r,i)=>(
+                  <span key={i} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:10,padding:'2px 8px',fontSize:9,fontFamily:'monospace',color:S.text}}>
+                    {r._catno} · +{r['Variant Inventory Qty']}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3872,7 +3949,7 @@ function RubadubImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -7983,7 +8060,7 @@ function PreorderImporter() {
     //     a plain anchor-click on the real URL (same as opening it by hand): the
     //     browser downloads it with the user's cookies. Pop-up blockers kill
     //     window.open, but a same-gesture anchor-click on a stagger works.
-    const isLiveDl = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+    const isLiveDl = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     const skipped = { live: 0, dropped: 0 };
     const rows = manifest
       .filter(m => {
@@ -8166,7 +8243,7 @@ function PreorderImporter() {
   const recon = useMemo(() => {
     const ready = [], needZip = [], orphanZip = [];
     const matchedZipNames = new Set();
-    const isLive = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+    const isLive = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     for (const m of manifest) {
       const alreadyLive = isLive(m.catno);
       const zf = zipForCatno(m.catno);
@@ -8226,6 +8303,12 @@ function PreorderImporter() {
         const format = m.format || '';
         const is2LP  = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
         const grams  = is2LP ? '900' : '500';
+        // HANDLE — conserva separadores ("YORE-011LTD" -> "yore-011ltd"),
+        // al reves que el RubadubImporter de facturas, que los quita. Divergen
+        // a proposito: la explicacion completa y lo que hay que saber antes de
+        // unificarlos esta junto al otro generador, en RubadubImporter.
+        // El dedup no depende de que coincidan: fetchLiveHandles compara por
+        // rdKey, que colapsa las dos formas sobre la misma clave.
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const safeKey = catno.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,'');
 
@@ -8422,7 +8505,7 @@ function PreorderImporter() {
           </button>
           {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear ZIPs</button>}
           {manifest.length>0&&manifest.some(m=>m.zipUrl)&&(()=>{
-            const isLiveC = (catno) => liveHandles ? liveHandles.has((catno||'').trim().toLowerCase()) : false;
+            const isLiveC = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
             const total = manifest.filter(m=>m.zipUrl && !isLiveC(m.catno) && !excluded[m.catno]).length;
             const label = downloading
               ? `Downloading… ${downloadProgress}/${total}`
@@ -8530,9 +8613,30 @@ function PreorderImporter() {
             <span>⚠ Orphan ZIP: <b style={{color:'#ff8800'}}>{recon.orphanZip.length}</b></span>
             {liveHandles===null
               ? <span style={{color:S.muted}}>⊘ Already live: <b>checking…</b></span>
-              : (()=>{const n=[...recon.ready,...recon.needZip].filter(r=>r._alreadyLive).length; return <span>⊘ Already live: <b style={{color:n>0?'#ff8800':S.muted}}>{n}</b>{n>0?' (auto-excluded)':''}</span>;})()
+              : (()=>{const n=[...recon.ready,...recon.needZip].filter(r=>r._alreadyLive).length; return <span>⊘ Ya en tienda: <b style={{color:n>0?'#ff8800':S.muted}}>{n}</b>{n>0?' (fuera del CSV)':''}</span>;})()
             }
           </div>
+
+          {/* Same rule as the invoice importer: a record that already exists is
+              a stock arrival, not an import. It never travels in the CSV — a
+              matching row would overwrite the live product (Qty is set, not
+              added; blank columns wipe cover and body) or duplicate it when the
+              handles disagree — and it is never dropped quietly either. */}
+          {(()=>{const live=[...recon.ready,...recon.needZip].filter(r=>r._alreadyLive); return live.length>0&&(
+            <div style={{marginBottom:10,padding:'10px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4}}>
+              <div style={{fontSize:10,color:'#ff8800',fontWeight:700,marginBottom:4}}>
+                {live.length} ya en tienda — llegada de stock: súmale inventario a mano
+              </div>
+              <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
+                Se quedan <b style={{color:S.text}}>fuera del CSV</b>. Añádeles el inventario en Shopify; la graduación del worker les quita <code style={{fontFamily:'monospace'}}>forthcoming</code> sola cuando toca.
+              </div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                {live.map((m,i)=>(
+                  <span key={i} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:10,padding:'2px 8px',fontSize:9,fontFamily:'monospace',color:S.text}}>{m.catno}</span>
+                ))}
+              </div>
+            </div>
+          );})()}
 
           {/* Need-ZIP list: tell the operator exactly what to download */}
           {(()=>{const toGet = recon.needZip.filter(m => !m._alreadyLive && !excluded[m._catno || m.catno]); return toGet.length>0&&(
