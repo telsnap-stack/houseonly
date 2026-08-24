@@ -8481,104 +8481,165 @@ function PreorderImporter() {
   // Verde  = lo pediste (hay un Fwd/Re tuyo al distribuidor para ese release)
   // Gris   = ya esta en la tienda (lo dice fetchLiveHandles, no una suposicion)
   // Rojo   = ni pedido ni en tienda — lo eliges a mano si lo quieres
+  // Parsear TODO el archivo y montar UNA vista, como los demas importers. Nada
+  // de ir email por email: eso era pedirle al operador que hiciera de bucle.
+  //
+  //   verde  = lo pediste — sale de la señal de pedido de cada distribuidor
+  //   gris   = ya esta en la tienda, lo dice fetchLiveHandles y no una suposicion
+  //   rojo   = ni pedido ni en tienda; lo eliges a mano si lo quieres
   const mailParseAll = async () => {
     if (!mailIdx) return;
-    // Solo Rubadub: TV y W&S usan otro formato y tienen su propio importer.
-    const material = mailIdx.filter(e => e.kind === 'material' && e.prefix === 'RD');
-    const pedidos  = mailIdx.filter(e => e.kind === 'pedido'   && e.prefix === 'RD');
     setMailBusy('todos'); setMailError('');
-    setMailProgress({ done: 0, total: material.length });
-
-    // Que pediste. Dos pasos, y el segundo es el que importa:
-    //   1. Emparejar el reenvio con el email original por asunto. Prefijo y no
-    //      igualdad: el Apps Script recorta a ~70 caracteres y "Fwd-" se come 4,
-    //      asi que el reenvio queda mas corto.
-    //   2. Leer QUE dice el reenvio. Marcar el email entero seria un error
-    //      cuando anuncia varios discos: el de Logistic lleva LOG88 y LOG86 y el
-    //      mensaje pide solo el Narcotic Syntax.
-    const señales = new Map();   // nombre del email de material -> {qty, target}
-    for (const p of pedidos) {
-      const base = p.subject.replace(MAIL_ORDER, '');
-      const casan = material.filter(m => m.subject.startsWith(base) || base.startsWith(m.subject));
-      if (!casan.length) continue;
-      let sig = { qty: null, target: '' };
+    const H = { 'Authorization': `Bearer ${mailSecret}` };
+    const traer = async (name) => {
       try {
-        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(p.name)}`, {
-          headers: { 'Authorization': `Bearer ${mailSecret}` },
-        });
-        if (r.ok) sig = parseOrderSignal((await r.json()).html || '');
-      } catch { /* sin cuerpo, se asume el email entero */ }
-      for (const m of casan) señales.set(m.name, sig);
-    }
-
-    const fetchOne = async (e) => {
-      try {
-        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(e.name)}`, {
-          headers: { 'Authorization': `Bearer ${mailSecret}` },
-        });
-        if (!r.ok) return null;
-        const d = await r.json();
-        return { e, html: d.html || '' };
-      } catch { return null; }
-      finally { setMailProgress(p => ({ ...p, done: p.done + 1 })); }
+        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(name)}`, { headers: H });
+        return r.ok ? ((await r.json()).html || '') : '';
+      } catch { return ''; }
     };
 
-    // En tandas: 56 peticiones en serie serian ~9s, en paralelo de 8 son ~2.
-    const bodies = [];
-    for (let i = 0; i < material.length; i += 8) {
-      bodies.push(...(await Promise.all(material.slice(i, i + 8).map(fetchOne))));
+    // ── 1. Señal de pedido, una lectura por distribuidor ──────
+    // Cada uno la deja en otro formato, pero todos producen lo mismo: por catno,
+    // cuanto se pidio y a que precio. W&S y TV lo dicen por catno directamente;
+    // Rubadub va por email y hay que casar el texto con el release.
+    const pedidoPorCatno = new Map();   // rdKey(catno) -> {qty, dealerPrice, zipUrl, src}
+    const anotar = (catno, d) => {
+      const k = rdKey(catno);
+      if (!k) return;
+      const prev = pedidoPorCatno.get(k);
+      // Si el mismo disco aparece en varios pedidos, manda el mas reciente pero
+      // se conserva lo que el otro supiera (precio, enlace). Y se acumula DE
+      // QUIEN vino cada uno: si el mismo disco esta pedido a dos distribuidores
+      // llegara por duplicado, y eso hay que avisarlo antes de que pase.
+      const srcs = new Set([...(prev?.srcs || []), d.src].filter(Boolean));
+      pedidoPorCatno.set(k, { ...prev, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v != null && v !== '')), srcs });
+    };
+
+    for (const e of mailIdx.filter(x => x.prefix === 'WSORD')) {
+      const { items } = parseWsOrder(await traer(e.name));
+      for (const it of items) anotar(it.catno, { ...it, src: 'ws', _fecha: e.date });
+    }
+    for (const e of mailIdx.filter(x => x.prefix === 'TVORD')) {
+      const { items } = parseTvShelfList(await traer(e.name));
+      for (const it of items) anotar(it.catno, { ...it, src: 'tv', _fecha: e.date });
     }
 
-    // Aplanar y quedarse con UNA ficha por catno. Un mismo disco sale en su
-    // email propio, en el digest semanal y a veces en una correccion; gana el
-    // per-release, y entre iguales el mas reciente.
+    // ── 2. Material: los emails de anuncio que el parser entiende ──
+    // W&S y DBH no tienen parser de anuncios; W&S no lo necesita porque su
+    // confirmacion ya trae la ficha entera.
+    const material = mailIdx.filter(e => e.kind === 'material' && (e.prefix === 'RD' || e.prefix === 'TV'));
+    const rdPedidos = mailIdx.filter(e => e.kind === 'pedido' && e.prefix === 'RD');
+    setMailProgress({ done: 0, total: material.length + rdPedidos.length });
+
+    const señales = new Map();
+    for (const p of rdPedidos) {
+      const base = p.subject.replace(MAIL_ORDER, '');
+      const casan = material.filter(m => m.prefix === 'RD' && (m.subject.startsWith(base) || base.startsWith(m.subject)));
+      if (casan.length) {
+        const sig = parseOrderSignal(await traer(p.name));
+        for (const m of casan) señales.set(m.name, sig);
+      }
+      setMailProgress(x => ({ ...x, done: x.done + 1 }));
+    }
+
     const rank = (e) => (e.digest ? 0 : e.revision ? 1 : 2);
     const best = new Map();
-    for (const b of bodies.filter(Boolean)) {
-      let rows = [];
-      try {
-        rows = parseRubadubEmails(b.html, { fx: rdFx, emailDate: parseLocalDate(b.e.date) || new Date() });
-      } catch { /* un email raro no puede tumbar la vista entera */ }
-      for (const row of rows) {
-        if (!row.catno) continue;
-        const k = rdKey(row.catno);
-        const sig = señales.get(b.e.name);
-        const pedido = !!sig && orderMatchesRelease(sig.target, row);
-        const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
-                       _ordered: pedido, _qty: pedido ? (sig.qty || null) : null };
-        const prev = best.get(k);
-        if (!prev || cand._rank > prev._rank ||
-            (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
-          // El pedido es del release, no del email concreto: si CUALQUIER email
-          // suyo venia de un Fwd tuyo, el disco esta pedido.
-          best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false,
-                        _qty: cand._qty ?? prev?._qty ?? null });
-        } else if (cand._ordered && prev) {
-          best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
+    for (let i = 0; i < material.length; i += 8) {
+      const tanda = await Promise.all(material.slice(i, i + 8).map(async (e) => {
+        const html = await traer(e.name);
+        setMailProgress(x => ({ ...x, done: x.done + 1 }));
+        return { e, html };
+      }));
+      for (const b of tanda) {
+        let rows = [];
+        try { rows = parseRubadubEmails(b.html, { fx: rdFx, emailDate: parseLocalDate(b.e.date) || new Date() }); }
+        catch { /* un email raro no puede tumbar la vista entera */ }
+        for (const row of rows) {
+          if (!row.catno) continue;
+          const k = rdKey(row.catno);
+          const sig = señales.get(b.e.name);
+          const pedidoRd = !!sig && orderMatchesRelease(sig.target, row);
+          // Los trackers del email, para resolverlos luego de golpe.
+          const trackers = [...String(b.html || '').matchAll(/https:\/\/[a-z0-9.-]*list-manage\.com\/[^\s"'<)]+/gi)]
+            .map(m2 => m2[0].replace(/&amp;/g, '&')).slice(0, 12);
+          const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
+                         _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers };
+          const prev = best.get(k);
+          if (!prev || cand._rank > prev._rank || (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
+            best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null });
+          } else if (cand._ordered && prev) {
+            best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
+          }
         }
       }
     }
 
-    const live = liveHandles || await fetchLiveHandles().then(s => { setLiveHandles(s); return s; }).catch(() => new Set());
-    const all = [...best.values()].map(r => ({ ...r, _live: live.has(rdKey(r.catno)) }));
-    all.sort((a, b2) => Number(b2._ordered) - Number(a._ordered) ||
-                        (b2.release || '').localeCompare(a.release || ''));
+    // ── 3. Cruzar con la señal de pedido ──────────────────────
+    for (const [k, ped] of pedidoPorCatno) {
+      const r = best.get(k);
+      if (r) {
+        // El precio del pedido es el pactado; gana al del anuncio.
+        const srcs = new Set([...(ped.srcs || []), ...(r._ordered ? [r.source] : [])]);
+        best.set(k, { ...r, _ordered: true, _qty: ped.qty ?? r._qty,
+                      dealerPrice: ped.dealerPrice ?? r.dealerPrice,
+                      zipUrl: r.zipUrl || ped.zipUrl || '', _ready: ped.ready,
+                      _ordSrcs: [...srcs] });
+      } else if (ped.catno) {
+        // Pedido sin email de anuncio que el parser entienda — el caso normal en
+        // W&S. La confirmacion trae ficha suficiente para importarlo igual.
+        best.set(k, {
+          catno: ped.catno, artist: ped.artist || '', title: ped.title || '', label: '', genre: '',
+          release: '', dealerPrice: ped.dealerPrice ?? null, format: '', coverUrl: '',
+          zipUrl: ped.zipUrl || '', source: ped.src, forthcoming: true,
+          _ordered: true, _qty: ped.qty ?? null, _ready: ped.ready, _ordSrcs: [...(ped.srcs || [])],
+          _warnings: ['sin email de anuncio — ficha montada desde la confirmación de pedido'],
+          _trackers: [],
+        });
+      }
+    }
+
+    // ── 4. Resolver los enlaces que van detras del tracker ────
+    // Solo de lo que interesa: pedido o sin ZIP conocido. Resolver 60 emails
+    // enteros seria tirar peticiones por gusto.
+    const porResolver = [...best.values()].filter(r => r._ordered && !r.zipUrl && r._trackers?.length);
+    if (porResolver.length) {
+      setMailBusy('enlaces');
+      const urls = [...new Set(porResolver.flatMap(r => r._trackers))].slice(0, 60);
+      try {
+        const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
+          method: 'POST', headers: { ...H, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls }),
+        });
+        if (r.ok) {
+          const mapa = new Map((await r.json()).results.map(x => [x.url, x]));
+          for (const row of porResolver) {
+            const hit = row._trackers.map(u => mapa.get(u)).find(x => x && (x.kind === 'dropbox' || x.kind === 'tvassets'));
+            if (hit) best.set(rdKey(row.catno), { ...best.get(rdKey(row.catno)), zipUrl: hit.dest });
+          }
+        }
+      } catch { /* sin enlaces resueltos se sigue: el ZIP se baja a mano */ }
+    }
+
+    // ── 5. Clasificar ────────────────────────────────────────
+    const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
+    const all = [...best.values()].map(r => ({
+      ...r,
+      _live: live.has(rdKey(r.catno)),
+      _ordSrcs: r._ordSrcs || (r._ordered ? [r.source] : []),
+    }));
+    all.sort((x, y) => Number(y._ordered) - Number(x._ordered) || (y.release || '').localeCompare(x.release || ''));
 
     setMailRows(all);
-    // Verde preseleccionado; lo que ya esta en tienda nunca, aunque lo pidieras.
     setMailPick(Object.fromEntries(all.map(r => [rdKey(r.catno), r._ordered && !r._live])));
     setMailBusy('');
-    if (!all.length) setMailError('No salio ningun release de los emails de Rubadub.');
+    if (!all.length) setMailError('No salió ningún release del archivo.');
   };
 
-
-
-  // Lo elegido pasa al manifest y de ahi al mismo sitio de siempre: sueltas los
-  // ZIP, procesas y sale el CSV. Ni un camino nuevo.
   const mailAddPicked = () => {
     const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live);
     if (!picked.length) return;
-    const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered, _live, ...row }) => row);
+    const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
+                                _live, _qty, _ready, _ordSrcs, _trackers, _desc, ...row }) => row);
     setManifest(prev => {
       const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
@@ -9042,6 +9103,8 @@ function PreorderImporter() {
               const fila = (r)=>{
                 const k = rdKey(r.catno);
                 const on = !!mailPick[k];
+                // El mismo disco pedido a dos distribuidores llega dos veces.
+                const dup = (r._ordSrcs||[]).length > 1;
                 const col = r._live?S.muted:r._ordered?S.accent:S.danger;
                 return (
                 <div key={k} onClick={()=>{ if(!r._live) setMailPick(p=>({...p,[k]:!p[k]})); }}
@@ -9055,7 +9118,11 @@ function PreorderImporter() {
                   <span style={{fontSize:9,color:S.text,width:54,flexShrink:0,textAlign:'right'}}>
                     {r.dealerPrice!=null?`€${(Math.max(9.99,Math.ceil(r.dealerPrice*(1+margin/100))-0.01)).toFixed(2)}`:'—'}
                   </span>
-                  <span style={{fontSize:8,color:S.muted,width:64,flexShrink:0}}>{r.zipUrl?'ZIP':'sin zip'}{r.forthcoming?'':' · envío'}</span>
+                  <span style={{fontSize:9,color:S.muted,width:34,flexShrink:0,textAlign:'right'}}>{r._qty?`×${r._qty}`:''}</span>
+                  <span style={{fontSize:8,color:S.muted,width:96,flexShrink:0}}>
+                    {(r._ordSrcs||[]).join('+').toUpperCase()}{r.zipUrl?' · zip':''}{r.forthcoming?'':' · envío'}
+                  </span>
+                  {dup&&<span title="Pedido a dos distribuidores — llegará por duplicado" style={{fontSize:8,color:S.danger,fontWeight:700,flexShrink:0}}>⚠ DOBLE</span>}
                 </div>);
               };
               return (
@@ -9069,6 +9136,14 @@ function PreorderImporter() {
                   <button onClick={()=>setMailPick({})} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                   <button onClick={()=>{setMailRows(null);setMailPick({});}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Volver a parsear</button>
                 </div>
+                {(()=>{const d=mailRows.filter(r=>(r._ordSrcs||[]).length>1); return d.length>0&&(
+                  <div style={{marginBottom:8,padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}66`,borderRadius:3,fontSize:10,color:S.danger,lineHeight:1.6}}>
+                    <b>{d.length} pedido{d.length===1?'':'s'} por duplicado a dos distribuidores</b> — llegarán dos veces:
+                    <div style={{marginTop:4,fontFamily:'monospace',fontSize:9,color:S.text}}>
+                      {d.map(r=>`${r.catno} (${(r._ordSrcs||[]).join(' + ').toUpperCase()})`).join(' · ')}
+                    </div>
+                  </div>
+                );})()}
                 <div style={{maxHeight:400,overflowY:'auto',border:`1px solid ${S.border}`,borderRadius:3}}>
                   {ord.length>0&&<div style={{fontSize:8,color:S.accent,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Pedidos — marcados solos</div>}
                   {ord.map(fila)}
