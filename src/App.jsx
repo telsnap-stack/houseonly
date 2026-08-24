@@ -7736,6 +7736,35 @@ function rdShipDate(text, emailDate) {
   return { date: '', approx: false };
 }
 
+// La prosa descriptiva del email, para el Body (HTML) de Shopify. Rubadub la
+// pone antes del bloque de campos y la repite ampliada despues; se coge el
+// trozo mas largo de los dos y se limpian los restos de plantilla de Mailchimp
+// (tracklist, enlaces de descarga, pie de pagina), que no son descripcion.
+function descFromProse(before, after, fields) {
+  const limpia = (t) => String(t || '')
+    .replace(/\[\[IMG:[^\]]*\]\]/g, ' ')
+    .replace(/View this email in your browser[^\n]*/gi, ' ')
+    .replace(/Download Zip[^\n]*/gi, ' ')
+    .replace(/Click here to see our current stocklist[\s\S]*/i, ' ')
+    .replace(/Tracklisting[\s\S]*/i, ' ')
+    .replace(/Sales Note[\s\S]*/i, ' ')
+    .replace(/Order\s+\S+\s+now[\s\S]*/i, ' ')
+    .replace(/unsubscribe from this list[\s\S]*/i, ' ')
+    .replace(/You received this email[\s\S]*/i, ' ')
+    .replace(/(Rubadub (World Exclusive|Import)|Please\s+Pre-?Order|Shipping[^\n]*)/gi, ' ')
+    // Las lineas de campo ya viajan como campos; repetirlas en la descripcion
+    // es ruido en la ficha del producto.
+    .replace(/^[ \t]*(Artist|Title|Label|Catalog|Cat|Format|Price|Barcode|Genre|Release date)[ \t]*:.*$/gim, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .split(/\n\s*\n/).map(x => x.trim()).filter(x => x.length > 60);
+  const trozos = [...limpia(before), ...limpia(after)];
+  if (!trozos.length) return '';
+  // Un parrafo suelto puede ser un titular; la descripcion util suele ser el
+  // bloque mas largo. Se conserva hasta un limite razonable para Shopify.
+  return trozos.sort((a, b) => b.length - a.length).slice(0, 4).join('\n\n').slice(0, 2400);
+}
+
 // Parse one or more pasted Rubadub emails into Pre-order manifest rows.
 // fx converts the email's GBP to EUR HERE, so the row handed to the Pre-order
 // tab carries dealerPrice in EUR like every other distributor's — the tab's
@@ -7753,7 +7782,10 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
   // Locate every field block. "Cat:" is the anchor — a block without a cat-no
   // is not a release. Each block spans from its Artist:/first field line to the
   // last consecutive "Key: value" line.
-  const FIELD_LINE = /^[ \t]*(Artist|Title|Label|Cat|Format|Price|Barcode|Genre)[ \t]*:[ \t]*(.*)$/i;
+  // Rubadub usa 'Cat:'; Triple Vision 'Catalog:' y ademas trae 'Release date:'
+  // y 'Genre:' como campos de verdad, que en Rubadub hay que sacar de la prosa
+  // o del ZIP. Un solo escaner de bloques, los dos juegos de nombres.
+  const FIELD_LINE = /^[ \t]*(Artist|Title|Label|Catalog|Cat|Format|Price|Barcode|Genre|Release date)[ \t]*:[ \t]*(.*)$/i;
   const lines = text.split('\n');
   const offsets = [];
   let pos = 0;
@@ -7766,11 +7798,11 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
     const fields = {};
     while (j < lines.length) {
       const m = lines[j].match(FIELD_LINE);
-      if (m) { fields[m[1].toLowerCase()] = m[2].trim(); j++; continue; }
+      if (m) { fields[m[1].toLowerCase().replace(/\s+/g, '')] = m[2].trim(); j++; continue; }
       if (!lines[j].trim() && j + 1 < lines.length && FIELD_LINE.test(lines[j+1])) { j++; continue; }
       break;
     }
-    if (fields.cat) blocks.push({ fields, start: offsets[i], end: offsets[j-1] + lines[j-1].length });
+    if (fields.cat || fields.catalog) blocks.push({ fields, start: offsets[i], end: offsets[j-1] + lines[j-1].length });
     i = j - 1;
   }
 
@@ -7834,24 +7866,61 @@ function parseRubadubEmails(raw, { fx = 1.17, emailDate = new Date() } = {}) {
     // Cover only exists in the HTML part. Mailchimp puts content images under
     // _compresseds/; gallery.mailchimp.com is the header logo, never the sleeve.
     const imgs = [...`${before}${after}`.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].map(m => m[1]);
-    const coverUrl = imgs.find(u => /mcusercontent\.com\/.*_compresseds\//i.test(u)) || '';
+    // Cada distribuidor sirve la portada desde su sitio: Rubadub por Mailchimp
+    // bajo _compresseds/ (gallery.mailchimp.com es el logo de cabecera, nunca la
+    // funda), y Triple Vision desde su bucket, con el sufijo _front.
+    const coverUrl = imgs.find(u => /mcusercontent\.com\/.*_compresseds\//i.test(u))
+                  || imgs.find(u => /digitaloceanspaces\.com\/.*_front[-.]/i.test(u))
+                  || '';
 
-    // Genre is never a field — it lives in the prose. Left blank on purpose:
-    // the ZIP's press text fills it later, and a wrong guess is worse than none.
+    // ── Triple Vision o Rubadub ───────────────────────────────
+    // Se distingue por el nombre del campo del catalogo, no por un parametro:
+    // "Catalog:" es de TV y "Cat:" de Rubadub, y asi un pegado mixto tambien
+    // sale bien sin que nadie tenga que decir de quien es cada email.
+    const esTV = !!b.fields.catalog;
+
+    // TV pone el precio en euros y ya negociado; Rubadub en libras, y ahi si
+    // hace falta el FX. En los dos casos lo que sale es dealerPrice en EUR.
+    let dealer = null;
+    if (esTV) dealer = gbp ? Number(gbp.toFixed(2)) : null;
+    else      dealer = gbp ? Number((gbp * fx).toFixed(2)) : null;
+
+    // TV trae la fecha como campo en dd-mm-yyyy; Rubadub en prosa inglesa.
+    let release = ship.date;
+    if (esTV && b.fields.releasedate) {
+      const d = b.fields.releasedate.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+      if (d) release = `${d[3]}-${d[2].padStart(2,'0')}-${d[1].padStart(2,'0')}`;
+    }
+
+    // TV no dice "Please Pre-Order": lo que manda es si la fecha de salida
+    // sigue por delante. Rubadub si lo dice, y ahi manda el marcador.
+    const esFuturo = release ? release > new Date(emailDate.getTime()).toISOString().slice(0,10) : false;
+    const forthcoming = esTV ? esFuturo : isPreorder;
+
+    // La descripcion importa para Shopify y cada uno la deja en otro sitio:
+    // W&S en el SALESPAPER.pdf del ZIP, TV en un _promotext.txt dentro del ZIP,
+    // y Rubadub EN NINGUN SITIO salvo el propio email — 6 de sus 7 promopacks
+    // no traen ni txt ni pdf. Asi que aqui se rescata la prosa del email, que
+    // es la unica fuente que tiene ese distribuidor.
+    const prosa = descFromProse(before, after, b.fields);
+
     rows.push({
-      catno: b.fields.cat,
+      catno: b.fields.catalog || b.fields.cat,
       artist,
       title: b.fields.title || '',
       label: b.fields.label || '',
-      genre: '',
-      release: ship.date,
-      dealerPrice: gbp ? Number((gbp * fx).toFixed(2)) : null,   // EUR, like every other source
+      // TV si trae genero como campo; en Rubadub se deja vacio a proposito y lo
+      // rellena el SALESPAPER, porque adivinarlo es peor que no ponerlo.
+      genre: esTV ? (b.fields.genre || '') : '',
+      release,
+      dealerPrice: dealer,
       format: b.fields.format || '',
       coverUrl,
       zipUrl,
-      source: 'rd',
-      forthcoming: isPreorder,
-      _gbp: gbp || null,
+      source: esTV ? 'tv' : 'rd',
+      forthcoming,
+      _gbp: esTV ? null : (gbp || null),
+      _desc: prosa,
       _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,
     });
@@ -7982,7 +8051,9 @@ function PreorderImporter() {
   const [mailBusy, setMailBusy]     = useState('');
   const [mailError, setMailError]   = useState('');
   const [mailShowDone, setMailShowDone] = useState(false);
-  const [mailCurrent, setMailCurrent] = useState(null); // email que produjo la vista previa
+  const [mailRows, setMailRows]     = useState(null);  // vista unica de releases
+  const [mailPick, setMailPick]     = useState({});    // rdKey(catno) -> elegido
+  const [mailProgress, setMailProgress] = useState({ done:0, total:0 });
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -8295,47 +8366,107 @@ function PreorderImporter() {
     finally { setMailBusy(''); }
   };
 
-  // Traer un email y meterlo en el textarea del importer. No se parsea aqui: se
-  // reutiliza el mismo camino que el pegado a mano, asi que hay UN parser y una
-  // sola vista previa con sus avisos y sus checkboxes.
-  const mailOpen = async (e) => {
-    setMailBusy(e.name); setMailError(''); setRdError(''); setMailCurrent(e);
-    try {
-      const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(e.name)}`, {
-        headers: { 'Authorization': `Bearer ${mailSecret}` },
-      });
-      if (!r.ok) throw new Error(`No pude leer el email (${r.status}).`);
-      const d = await r.json();
-      setRdText(d.html || '');
-      setRdPasteNote('');
-      // La fecha del email decide el año de "Shipping 24th August", asi que se
-      // toma del nombre del fichero y no de hoy: un email de agosto abierto en
-      // diciembre rodaria la fecha al año siguiente sin motivo.
-      if (e.date) setRdDate(e.date);
-      const rows = parseRubadubEmails(d.html || '', {
-        fx: rdFx,
-        emailDate: parseLocalDate(e.date) || new Date(),
-      });
-      if (!rows.length) {
-        setRdPreview(null);
-        setRdError(RD_DIGEST_PRESALES.test(d.html || '')
-          ? 'Es el round-up semanal: no trae bloques de campos, solo un enlace por release. Abre el release que quieras desde su propio email.'
-          : 'Este email no trae bloques de campos con "Cat:" — puede ser una nota o una confirmación.');
-      } else {
-        setRdPreview(rows);
-        const preselect = !rows[0]._digest;
-        setRdChecked(Object.fromEntries(rows.map(r => [r.catno, preselect])));
+  // Parsear TODO el archivo de una vez y montar una sola vista, como hacen los
+  // demas importers. Nada de ir email por email: eso era pedirle al operador que
+  // hiciera de bucle.
+  //
+  // Verde  = lo pediste (hay un Fwd/Re tuyo al distribuidor para ese release)
+  // Gris   = ya esta en la tienda (lo dice fetchLiveHandles, no una suposicion)
+  // Rojo   = ni pedido ni en tienda — lo eliges a mano si lo quieres
+  const mailParseAll = async () => {
+    if (!mailIdx) return;
+    // Solo Rubadub: TV y W&S usan otro formato y tienen su propio importer.
+    const material = mailIdx.filter(e => e.kind === 'material' && e.prefix === 'RD');
+    const pedidos  = mailIdx.filter(e => e.kind === 'pedido'   && e.prefix === 'RD');
+    setMailBusy('todos'); setMailError('');
+    setMailProgress({ done: 0, total: material.length });
+
+    // Que releases pediste. El asunto del Fwd/Re es el del original, pero el
+    // Apps Script recorta a ~70 caracteres y "Fwd-" se come 4, asi que el
+    // reenvio puede quedar mas corto: se empareja por prefijo, no por igualdad.
+    const ordered = new Set();
+    for (const p of pedidos) {
+      const base = p.subject.replace(MAIL_ORDER, '');
+      for (const m of material) {
+        if (m.subject.startsWith(base) || base.startsWith(m.subject)) ordered.add(m.name);
       }
-    } catch (err) { setMailError(err.message); }
-    finally { setMailBusy(''); }
+    }
+
+    const fetchOne = async (e) => {
+      try {
+        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(e.name)}`, {
+          headers: { 'Authorization': `Bearer ${mailSecret}` },
+        });
+        if (!r.ok) return null;
+        const d = await r.json();
+        return { e, html: d.html || '' };
+      } catch { return null; }
+      finally { setMailProgress(p => ({ ...p, done: p.done + 1 })); }
+    };
+
+    // En tandas: 56 peticiones en serie serian ~9s, en paralelo de 8 son ~2.
+    const bodies = [];
+    for (let i = 0; i < material.length; i += 8) {
+      bodies.push(...(await Promise.all(material.slice(i, i + 8).map(fetchOne))));
+    }
+
+    // Aplanar y quedarse con UNA ficha por catno. Un mismo disco sale en su
+    // email propio, en el digest semanal y a veces en una correccion; gana el
+    // per-release, y entre iguales el mas reciente.
+    const rank = (e) => (e.digest ? 0 : e.revision ? 1 : 2);
+    const best = new Map();
+    for (const b of bodies.filter(Boolean)) {
+      let rows = [];
+      try {
+        rows = parseRubadubEmails(b.html, { fx: rdFx, emailDate: parseLocalDate(b.e.date) || new Date() });
+      } catch { /* un email raro no puede tumbar la vista entera */ }
+      for (const row of rows) {
+        if (!row.catno) continue;
+        const k = rdKey(row.catno);
+        const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
+                       _ordered: ordered.has(b.e.name) };
+        const prev = best.get(k);
+        if (!prev || cand._rank > prev._rank ||
+            (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
+          // El pedido es del release, no del email concreto: si CUALQUIER email
+          // suyo venia de un Fwd tuyo, el disco esta pedido.
+          best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false });
+        } else if (cand._ordered && prev) {
+          best.set(k, { ...prev, _ordered: true });
+        }
+      }
+    }
+
+    const live = liveHandles || await fetchLiveHandles().then(s => { setLiveHandles(s); return s; }).catch(() => new Set());
+    const all = [...best.values()].map(r => ({ ...r, _live: live.has(rdKey(r.catno)) }));
+    all.sort((a, b2) => Number(b2._ordered) - Number(a._ordered) ||
+                        (b2.release || '').localeCompare(a.release || ''));
+
+    setMailRows(all);
+    // Verde preseleccionado; lo que ya esta en tienda nunca, aunque lo pidieras.
+    setMailPick(Object.fromEntries(all.map(r => [rdKey(r.catno), r._ordered && !r._live])));
+    setMailBusy('');
+    if (!all.length) setMailError('No salio ningun release de los emails de Rubadub.');
   };
 
-  const mailMark = (name, status) => {
-    setMailState(prev => {
-      const next = { ...prev, [name]: { status, fecha: new Date().toISOString().slice(0, 10) } };
-      saveMailState(next);
-      return next;
+
+
+  // Lo elegido pasa al manifest y de ahi al mismo sitio de siempre: sueltas los
+  // ZIP, procesas y sale el CSV. Ni un camino nuevo.
+  const mailAddPicked = () => {
+    const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live);
+    if (!picked.length) return;
+    const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered, _live, ...row }) => row);
+    setManifest(prev => {
+      const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
+      for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
+      return [...byCatno.values()];
     });
+    setManifestName(name => name || 'Rubadub (archivo de emails)');
+    setMailPick({});
+    setDownloadDone(false);
+    setDownloadProgress(0);
+    setDownloadStats({ ok: 0, missing: 0, failed: 0 });
   };
 
   // ── Rubadub paste → manifest rows ───────────────────────────
@@ -8356,7 +8487,6 @@ function PreorderImporter() {
     const start = el.selectionStart ?? rdText.length;
     const end   = el.selectionEnd   ?? rdText.length;
     setRdText(rdText.slice(0, start) + chosen + rdText.slice(end));
-    setMailCurrent(null);          // pegado a mano: ya no viene del archivo
     setRdPasteNote(html ? '' : 'El portapapeles no traía versión HTML — copia desde la página del email en el navegador, no desde un cliente en texto plano.');
     setRdPreview(null);
   };
@@ -8409,9 +8539,6 @@ function PreorderImporter() {
       return [...byCatno.values()];
     });
     setManifestName(name => name || 'Rubadub (pegado)');
-    // El email queda cerrado en el archivo, para que no vuelva a salir en la
-    // lista de sin procesar la proxima vez que abras el tab.
-    if (mailCurrent) { mailMark(mailCurrent.name, 'importado'); setMailCurrent(null); }
     setRdPreview(null);
     setRdChecked({});
     setRdText('');
@@ -8730,76 +8857,89 @@ function PreorderImporter() {
         </div>
       </div>
 
-      {/* Archivo de emails: la lista llega del worker, no del disco */}
+      {/* Archivo de emails → una sola vista de todos los releases */}
       {status==='idle'&&(
-        <details style={{marginBottom:14,border:`1px solid ${S.border}`,borderRadius:4,background:S.bg}}>
+        <details style={{marginBottom:14,border:`1px solid ${S.border}`,borderRadius:4,background:S.bg}} open={!!mailRows}>
           <summary style={{cursor:'pointer',padding:'8px 14px',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',fontWeight:700}}>
-            📥 Archivo de emails {mailIdx?`· ${mailIdx.filter(e=>e.kind==='material'&&!mailState[e.name]).length} sin procesar`:''}
+            📥 Archivo de emails · Rubadub {mailRows?`· ${mailRows.length} releases`:''}
           </summary>
           <div style={{padding:'0 14px 14px'}}>
-            {/* Fuera de las dos ramas a proposito: si la carga falla, mailIdx se
-                queda en null y un error pintado solo dentro de la otra rama no
-                se ve nunca — el sintoma es "no pasa nada al pulsar Cargar". */}
             {mailError&&<div style={{marginBottom:10,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger,lineHeight:1.5}}>{mailError}</div>}
+
             {mailIdx===null?(
               <>
-                <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
-                  Los emails que el Apps Script archiva en Drive los sirve el worker. Pega el <b style={{color:S.text}}>BOOTSTRAP_AUTH_SECRET</b> de producción — vive solo en esta pestaña y se pierde al recargar, nunca va en el código.
+                <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 6px'}}>
+                  Pega el <b style={{color:S.text}}>BOOTSTRAP_AUTH_SECRET</b> — vive solo en esta pestaña y se pierde al recargar, nunca va en el código.
+                </p>
+                <p style={{fontSize:9,color:S.muted,margin:'0 0 10px',fontFamily:'monospace',wordBreak:'break-all'}}>
+                  worker: <span style={{color:S.accent}}>{WORKER_URL.replace('https://','')}</span>
+                  <span style={{fontFamily:'inherit'}}> · usa el secreto de <b style={{color:S.text}}>{WORKER_URL.includes('staging')?'staging':'producción'}</b></span>
                 </p>
                 <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
                   <input type="password" value={mailSecret} onChange={e=>setMailSecret(e.target.value)}
-                    onKeyDown={e=>{if(e.key==='Enter')mailLoad();}}
-                    placeholder="BOOTSTRAP_AUTH_SECRET"
+                    onKeyDown={e=>{if(e.key==='Enter')mailLoad();}} placeholder="BOOTSTRAP_AUTH_SECRET"
                     style={{flex:'1 1 260px',background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'6px 10px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
                   <button onClick={()=>mailLoad()} disabled={mailBusy==='lista'} style={{background:S.accent,border:'none',color:'#080808',cursor:'pointer',fontSize:9,padding:'6px 16px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
                     {mailBusy==='lista'?'Cargando…':'Cargar'}
                   </button>
                 </div>
               </>
+            ):!mailRows?(
+              <div>
+                <p style={{fontSize:10,color:S.muted,lineHeight:1.6,margin:'0 0 10px'}}>
+                  {mailIdx.filter(e=>e.kind==='material'&&e.prefix==='RD').length} emails de Rubadub en el archivo,
+                  {' '}{mailIdx.filter(e=>e.kind==='pedido'&&e.prefix==='RD').length} reenvíos tuyos al distribuidor.
+                  Se parsean todos y sale una sola lista.
+                </p>
+                <Btn ch={mailBusy==='todos'?`Parseando… ${mailProgress.done}/${mailProgress.total}`:'📖 Parsear todo el archivo'} onClick={mailParseAll} full />
+              </div>
             ):(()=>{
-              const material = mailIdx.filter(e=>e.kind==='material');
-              const pend = material.filter(e=>!mailState[e.name]);
-              const done = material.filter(e=>mailState[e.name]);
-              const pedidos = mailIdx.filter(e=>e.kind==='pedido').length;
-              const shown = mailShowDone?material:pend;
-              const g = {};
-              for (const e of shown) (g[e.label]=g[e.label]||[]).push(e);
+              const ord  = mailRows.filter(r=>r._ordered&&!r._live);
+              const live = mailRows.filter(r=>r._live);
+              const rest = mailRows.filter(r=>!r._ordered&&!r._live);
+              const n = Object.values(mailPick).filter(Boolean).length;
+              const fila = (r)=>{
+                const k = rdKey(r.catno);
+                const on = !!mailPick[k];
+                const col = r._live?S.muted:r._ordered?S.accent:S.danger;
+                return (
+                <div key={k} onClick={()=>{ if(!r._live) setMailPick(p=>({...p,[k]:!p[k]})); }}
+                  style={{display:'flex',gap:8,alignItems:'center',padding:'4px 8px',borderLeft:`3px solid ${col}`,
+                          borderBottom:`1px solid ${S.border}44`,background:on?`${S.accent}11`:'transparent',
+                          opacity:r._live?0.45:on?1:0.72,cursor:r._live?'default':'pointer'}}>
+                  <input type="checkbox" checked={on} disabled={r._live} readOnly style={{accentColor:S.accent,flexShrink:0}} />
+                  <span style={{fontSize:10,color:col,fontFamily:'monospace',width:104,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.catno}</span>
+                  <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.artist} — {r.title}</span>
+                  <span style={{fontSize:9,color:S.muted,width:78,flexShrink:0}}>{r.release||'sin fecha'}</span>
+                  <span style={{fontSize:9,color:S.text,width:54,flexShrink:0,textAlign:'right'}}>
+                    {r.dealerPrice!=null?`€${(Math.max(9.99,Math.ceil(r.dealerPrice*(1+margin/100))-0.01)).toFixed(2)}`:'—'}
+                  </span>
+                  <span style={{fontSize:8,color:S.muted,width:64,flexShrink:0}}>{r.zipUrl?'ZIP':'sin zip'}{r.forthcoming?'':' · envío'}</span>
+                </div>);
+              };
               return (
               <>
-                <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',marginBottom:8}}>
-                  <span>Archivo: <b style={{color:S.text}}>{mailIdx.length}</b></span>
-                  <span>Sin procesar: <b style={{color:S.accent}}>{pend.length}</b></span>
-                  <span>Cerrados: <b style={{color:S.text}}>{done.length}</b></span>
-                  <span title="Fwd/Re tuyos al distribuidor y confirmaciones. Aún no se leen.">Señal de pedido: <b style={{color:S.text}}>{pedidos}</b></span>
-                  <button onClick={()=>setMailShowDone(v=>!v)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>
-                    {mailShowDone?'Ocultar cerrados':'Ver cerrados'}
-                  </button>
-                  <button onClick={()=>mailLoad()} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Recargar</button>
+                <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',marginBottom:8,alignItems:'center'}}>
+                  <span><b style={{color:S.accent}}>{ord.length}</b> pedidos</span>
+                  <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
+                  <span><b style={{color:S.danger}}>{rest.length}</b> sin pedir</span>
+                  <span>· <b style={{color:S.text}}>{n}</b> seleccionados</span>
+                  <button onClick={()=>setMailPick(Object.fromEntries(mailRows.filter(r=>!r._live).map(r=>[rdKey(r.catno),true])))} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
+                  <button onClick={()=>setMailPick({})} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
+                  <button onClick={()=>{setMailRows(null);setMailPick({});}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Volver a parsear</button>
                 </div>
-                <div style={{maxHeight:340,overflowY:'auto'}}>
-                  {Object.keys(g).sort().map(label=>(
-                    <div key={label} style={{marginBottom:10}}>
-                      <div style={{fontSize:9,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:4}}>{label} ({g[label].length})</div>
-                      {g[label].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>{
-                        const st = mailState[e.name]?.status;
-                        return (
-                        <div key={e.name} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 6px',borderBottom:`1px solid ${S.border}44`,opacity:st?0.5:1}}>
-                          <span style={{fontSize:9,color:S.muted,fontFamily:'monospace',width:74,flexShrink:0}}>{e.date}</span>
-                          <span style={{fontSize:9,color:e.tipo==='digest'?'#ff8800':S.muted,width:76,flexShrink:0}}>{e.tipo}</span>
-                          <span style={{fontSize:9,color:S.accent,fontFamily:'monospace',width:110,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.catno||'—'}</span>
-                          <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.subject.replace(/-+/g,' ')}</span>
-                          {st&&<span style={{fontSize:8,color:S.muted,flexShrink:0}}>{st}</span>}
-                          <button onClick={()=>mailOpen(e)} disabled={mailBusy===e.name} style={{background:'none',border:`1px solid ${S.accent}`,color:S.accent,cursor:'pointer',fontSize:8,padding:'2px 8px',borderRadius:2,fontFamily:'inherit',flexShrink:0}}>
-                            {mailBusy===e.name?'…':'Parsear'}
-                          </button>
-                          <button onClick={()=>mailMark(e.name, st?undefined:'descartado')} title="Ocultar de la lista" style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:8,padding:'2px 6px',borderRadius:2,fontFamily:'inherit',flexShrink:0}}>
-                            {st?'↺':'✕'}
-                          </button>
-                        </div>);
-                      })}
-                    </div>
-                  ))}
-                  {!shown.length&&<div style={{fontSize:10,color:S.muted,padding:'10px 0'}}>Nada sin procesar. Todo cerrado.</div>}
+                <div style={{maxHeight:400,overflowY:'auto',border:`1px solid ${S.border}`,borderRadius:3}}>
+                  {ord.length>0&&<div style={{fontSize:8,color:S.accent,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Pedidos — marcados solos</div>}
+                  {ord.map(fila)}
+                  {rest.length>0&&<div style={{fontSize:8,color:S.danger,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Sin pedir — márcalos si los quieres</div>}
+                  {rest.map(fila)}
+                  {live.length>0&&<div style={{fontSize:8,color:S.muted,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Ya en tienda — llegada de stock, no se importan</div>}
+                  {live.map(fila)}
+                </div>
+                <div style={{marginTop:10}}>
+                  {n>0
+                    ? <Btn ch={`+ Añadir ${n} al manifest`} onClick={mailAddPicked} full />
+                    : <div style={{textAlign:'center',fontSize:9,color:S.muted,padding:'8px 0',border:`1px dashed ${S.border}`,borderRadius:2}}>Marca al menos un release</div>}
                 </div>
               </>);
             })()}
