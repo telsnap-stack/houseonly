@@ -25,6 +25,13 @@
     {
       "binding": "SYNC_STATE",
       "id": "5c5c0ee16cc34f68bd2109b01894f09d"
+    },
+    // Emails de distribuidor archivados por el Apps Script. Compartido entre
+    // prod y staging a proposito (como WISHLIST): el archivo es el mismo, no
+    // tiene sentido duplicarlo, y solo se escribe desde el Apps Script.
+    {
+      "binding": "EMAILS",
+      "id": "e4966f4a96e84c578bfd96b1d12bdf63"
     }
   ],
   // Cron triggers. Production cron activated May 19 2026 when Fase 3 was migrated
@@ -53,6 +60,10 @@
         {
           "binding": "SYNC_STATE",
           "id": "5069be832df64efdb5e3d1a49f85b0ea"
+        },
+        {
+          "binding": "EMAILS",
+          "id": "e4966f4a96e84c578bfd96b1d12bdf63"
         }
       ],
       // Fase 3E cron: poll Discogs every 15 min. Worker reads meta:sync_3e_mode
