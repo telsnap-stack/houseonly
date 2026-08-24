@@ -76,4 +76,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-07-23-deep-jungle-import.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-08-24-archivo-de-emails-y-vista-unica.md`.
