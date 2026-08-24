@@ -56,19 +56,53 @@ function escapeJson(s) {
 }
 
 // ── Shopify fetch ──────────────────────────────────────────────
-async function shopifyQuery(query) {
-  const r = await fetch(`https://${SHOPIFY_DOMAIN}/api/${SHOPIFY_API}/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN,
-    },
-    body: JSON.stringify({ query }),
-  });
-  if (!r.ok) throw new Error(`Shopify HTTP ${r.status}`);
-  const d = await r.json();
-  if (d.errors) throw new Error(d.errors[0].message);
-  return d.data;
+// This step gates the whole deploy: `npm run build` is `vite build && node
+// scripts/prerender.mjs`, and a non-zero exit here fails the Cloudflare Pages
+// build, so nothing ships. A single ConnectTimeoutError against Shopify — one
+// dropped TCP handshake — was enough to do that. Retry the transient classes
+// (network errors, 429, 5xx, GraphQL throttling) with exponential backoff, and
+// keep failing loudly on everything else: a genuine outage SHOULD stop the
+// deploy rather than publish a site with no prerendered pages, because Pages
+// then keeps the previous good deployment.
+const RETRIES       = 5;
+const RETRY_BASE_MS = 1000;
+const REQ_TIMEOUT_MS = 20000;   // a hung connection must not stall the build
+
+const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+const fatal = (msg) => Object.assign(new Error(msg), { fatal: true });
+
+async function shopifyQuery(query, attempt = 1) {
+  try {
+    const r = await fetch(`https://${SHOPIFY_DOMAIN}/api/${SHOPIFY_API}/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN,
+      },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
+    });
+    // 4xx other than 429 means the request itself is wrong (bad token, bad
+    // query) — retrying just burns five more attempts on the same answer.
+    if (r.status !== 429 && r.status >= 400 && r.status < 500) {
+      throw fatal(`Shopify HTTP ${r.status}`);
+    }
+    if (!r.ok) throw new Error(`Shopify HTTP ${r.status}`);   // 429 / 5xx: retry
+    const d = await r.json();
+    if (d.errors) {
+      const msg = d.errors[0].message || 'GraphQL error';
+      // Storefront throttling arrives as a 200 with an errors array.
+      if (!/throttl/i.test(msg)) throw fatal(msg);
+      throw new Error(msg);
+    }
+    return d.data;
+  } catch (err) {
+    if (err.fatal || attempt > RETRIES) throw err;
+    const wait = RETRY_BASE_MS * 2 ** (attempt - 1);
+    console.warn(`[prerender] ${err.message} — retry ${attempt}/${RETRIES} in ${wait}ms`);
+    await sleep(wait);
+    return shopifyQuery(query, attempt + 1);
+  }
 }
 
 async function fetchAllProducts() {
