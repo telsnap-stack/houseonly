@@ -187,7 +187,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
 // Note: server-side search uses Shopify's relevance scoring which indexes
 // title, vendor, tags, product_type, and metafields exposed to search.
 // Description body is NOT searched by default.
-async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[], dnb=false } = {}) {
+async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTags=[], dnb=false, forthcoming=false } = {}) {
   if (!searchTerm.trim()) {
     // Caller should not invoke us with empty term; bail safely.
     return { products: [], hasNextPage: false, endCursor: null };
@@ -195,9 +195,12 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   const after = cursor ? `, after: "${cursor}"` : '';
   // Combine the free-text search with optional tag filters. The search-syntax
   // is space-separated AND, so we append each `tag:'X'` clause inline.
-  // Also exclude forthcoming pre-orders — they live only in the Forthcoming
-  // section and should never surface in a normal catalogue search.
-  const queryParts = [searchTerm.trim(), `-tag:'forthcoming'`];
+  // El tag `forthcoming` separa los dos mundos y hay que respetarlo EN AMBOS
+  // sentidos: en el catalogo se excluye —un pre-order no debe salir buscando
+  // entre lo que hay en stock— pero DENTRO de la seccion Forthcoming hay que
+  // exigirlo. Estaba clavado a excluir, asi que buscar ahi dejaba fuera
+  // exactamente lo que se estaba mirando.
+  const queryParts = [searchTerm.trim(), forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   // D&B scoping: in the D&B section, require a D&B tag; in the main catalogue,
   // exclude all D&B tags so house searches never surface drum & bass.
@@ -10377,7 +10380,9 @@ export default function App() {
   //     EXCLUDED so pre-orders never appear in the main catalogue
   // The active code path is encapsulated in fetchActivePage so loadMore stays simple.
   const fetchActivePage = useCallback((extraOpts={}) => {
-    if (fetchParams.forthcoming) {
+    // La busqueda manda sobre la seccion: si hay termino, se busca DENTRO de
+    // forthcoming en vez de listar la seccion entera ignorando lo tecleado.
+    if (fetchParams.forthcoming && !fetchParams.searchTerm) {
       return fetchShopifyProducts({
         sortKey: fetchParams.sortKey,
         reverse: fetchParams.reverse,
@@ -10391,6 +10396,7 @@ export default function App() {
         searchTerm: fetchParams.searchTerm,
         filterTags: fetchParams.filterTags,
         dnb: fetchParams.dnb,
+        forthcoming: fetchParams.forthcoming,
         ...extraOpts,
       });
     }
