@@ -304,6 +304,41 @@ async function fetchLiveHandles() {
   return set;
 }
 
+// Catalogo vivo, pero distinguiendo pre-orders del resto. fetchLiveHandles solo
+// dice si un catno existe; aqui hace falta saber SI ADEMAS es un pre-order,
+// porque una fila de factura que casa con un pre-order no es un duplicado a
+// evitar sino una graduacion: hay que dejarla pasar y avisar de que el CSV
+// tiene que subirse con "Overwrite products with matching handles", o Shopify
+// la ignora en silencio.
+// Devuelve rdKey(catno) -> 'forthcoming' | 'live'.
+async function fetchForthcomingKeys() {
+  const out = new Map();
+  let cursor = null;
+  let safety = 25;
+  while (safety-- > 0) {
+    const after = cursor ? `, after: "${cursor}"` : '';
+    const data = await shopifyQuery(`{
+      products(first: 250${after}) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { handle tags variants(first: 1) { edges { node { sku } } } } }
+      }
+    }`);
+    const { edges, pageInfo } = data.products;
+    for (const e of edges) {
+      const estado = (e.node.tags || []).includes('forthcoming') ? 'forthcoming' : 'live';
+      for (const v of [e.node.handle, e.node.variants?.edges?.[0]?.node?.sku]) {
+        const k = rdKey(v);
+        // 'forthcoming' gana: si el mismo catno aparece por handle y por SKU,
+        // lo que importa es que sea un pre-order.
+        if (k && (estado === 'forthcoming' || !out.has(k))) out.set(k, estado);
+      }
+    }
+    if (!pageInfo.hasNextPage) break;
+    cursor = pageInfo.endCursor;
+  }
+  return out;
+}
+
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
 // where the record may not be in our paginated `records` array yet.
 async function fetchShopifyProductByHandle(handle) {
@@ -2937,6 +2972,15 @@ function ZipImporter() {
   const [progress, setProgress]   = useState({ done:0, total:0, current:'' });
   const [results, setResults]     = useState([]);
   const [skippedCount, setSkippedCount] = useState(0);
+  // Discos que la factura pide pero cuyo ZIP no se ha soltado. Sin ZIP no hay
+  // fila en el CSV, asi que ese disco NO se actualiza en Shopify — y hasta
+  // ahora el importer no lo decia: procesaba los que podia y callaba el resto.
+  const [missingZips, setMissingZips] = useState([]);
+  // Cuales de las filas ya existen como pre-order. Esas van a GRADUAR, que es
+  // lo que se quiere, pero solo si el CSV se sube con "Overwrite products with
+  // matching handles" — si no, Shopify ignora la fila en silencio.
+  const [graduating, setGraduating] = useState([]);
+  const [liveTags, setLiveTags] = useState(null);   // null = sin consultar
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
   const excelRef = useRef(null);
@@ -2970,6 +3014,28 @@ function ZipImporter() {
       });
       const matchedZips = zipFiles.filter(f => rowMap[catnoFromFilename(f.name)]);
       const total = matchedZips.length;
+
+      // Lo que la factura pide y no se ha soltado. Se calcula ANTES de procesar
+      // para que salga aunque el procesado falle a mitad.
+      const conZip = new Set(matchedZips.map(f => rdKey(catnoFromFilename(f.name))));
+      const faltan = Object.values(rowMap)
+        .filter(r => !conZip.has(rdKey(String(r.ArtNo || ''))))
+        .map(r => ({ catno: String(r.ArtNo || '').trim(),
+                     titulo: String(r.Titel || r.Title || r.Interpret || '').trim() }))
+        .filter(r => r.catno);
+      setMissingZips(faltan);
+
+      // Y cuales de los que SI van a viajar ya existen como pre-order. Se
+      // consulta el catalogo vivo con los tags, que es lo que distingue un
+      // pre-order de un producto normal.
+      let vivos = liveTags;
+      if (!vivos) {
+        vivos = await fetchForthcomingKeys().catch(() => new Map());
+        setLiveTags(vivos);
+      }
+      setGraduating(matchedZips
+        .map(f => catnoFromFilename(f.name))
+        .filter(c => vivos.get(rdKey(c)) === 'forthcoming'));
       const processed = [];
       for (let i = 0; i < matchedZips.length; i++) {
         const zipFile = matchedZips[i];
@@ -3163,6 +3229,40 @@ function ZipImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span></div>
+            {/* Lo que la factura pide y no viaja en el CSV. Sin ZIP no hay fila, y
+                    sin fila ese disco NO se actualiza en Shopify. Antes se
+                    procesaba lo que se podia y el resto se callaba. */}
+            {missingZips.length>0&&(
+              <div style={{marginBottom:12,padding:'10px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4}}>
+                <div style={{fontSize:10,color:'#ff8800',fontWeight:700,marginBottom:4}}>
+                  {missingZips.length} de la factura sin ZIP — NO viajan en el CSV
+                </div>
+                <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
+                  Este importer usa los ZIP como espina dorsal: si no sueltas el promopack de un disco, no se genera su fila y en Shopify se queda como estaba. Búscalos en <code style={{fontFamily:'monospace'}}>Assets/wordandsound/</code> y suéltalos, o acepta que estos se quedan fuera.
+                </div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                  {missingZips.slice(0,60).map((m,i2)=>(
+                    <span key={i2} title={m.titulo} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:S.text}}>{m.catno}</span>
+                  ))}
+                  {missingZips.length>60&&<span style={{fontSize:9,color:S.muted}}>y {missingZips.length-60} más</span>}
+                </div>
+              </div>
+            )}
+            {graduating.length>0&&(
+              <div style={{marginBottom:12,padding:'10px 14px',background:'#001a0d',border:`1px solid ${S.accent}66`,borderRadius:4}}>
+                <div style={{fontSize:10,color:S.accent,fontWeight:700,marginBottom:4}}>
+                  {graduating.length} vienen de Forthcoming — marca «Overwrite» al subir el CSV
+                </div>
+                <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
+                  Ya existen como pre-order y esta importación es su llegada: se les quita <code style={{fontFamily:'monospace'}}>forthcoming</code> y entran con el inventario de la factura. Pero Shopify empareja por Handle y, si <b style={{color:S.text}}>no</b> marcas <i>Overwrite products with matching handles</i>, <b style={{color:S.text}}>ignora esas filas en silencio</b> y se quedan en Forthcoming con stock 0.
+                </div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                  {graduating.map((c,i2)=>(
+                    <span key={i2} style={{background:S.bg,border:`1px solid ${S.accent}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:S.accent}}>{c}</span>
+                  ))}
+                </div>
+              </div>
+            )}
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
