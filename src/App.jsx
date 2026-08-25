@@ -7808,8 +7808,19 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
     i = j - 1;
   }
 
+  // Lo que hay ANTES del primer bloque de campos vale para todo el email: un
+  // anuncio de dos discos pone "Please pre-order" y "Shipping late September"
+  // una sola vez, arriba. Buscarlos solo en la ventana de cada release hacia que
+  // los viera el primero y ninguno mas — el segundo entraba sin fecha y sin
+  // forthcoming, y sin fecha no hay etiqueta de año, y sin año el escaparate lo
+  // da por agotado de verdad en vez de ofrecer la peticion.
+  const cabecera = blocks.length ? text.slice(0, blocks[0].start) : '';
+
   blocks.forEach((b, idx) => {
-    const before = text.slice(idx === 0 ? 0 : blocks[idx-1].end, b.start);
+    const propio = text.slice(idx === 0 ? 0 : blocks[idx-1].end, b.start);
+    // La ventana propia manda; la cabecera solo se consulta si esa calla. Asi un
+    // release con su propia fecha no hereda la de la cabecera.
+    const before = propio;
     const after  = text.slice(b.end, idx === blocks.length-1 ? text.length : blocks[idx+1].start);
     const warnings = [];
 
@@ -7828,7 +7839,8 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
     // says "shipping to you today/next Monday": that stock is already on its
     // way, so it must NOT be tagged forthcoming or the graduation cron strips
     // the tag ~15 min later and it reads as a sync bug.
-    const isPreorder = /Please\s+Pre-?Order/i.test(before);
+    const MARCA_PRE = /Please\s+Pre-?Order/i;
+    const isPreorder = MARCA_PRE.test(propio) || (idx > 0 && MARCA_PRE.test(cabecera));
     // The digest's opening line covers every release it carries; the
     // per-release windows only get consulted when this is not a digest.
     const shipped    = digest === 'shipping' ||
@@ -7850,7 +7862,8 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
             : 'no aparece "Please Pre-Order" NI "shipping to you" → queda SIN tag forthcoming. Si es un pre-order, te faltó copiar el texto de encima del bloque de campos: selecciona el email entero.');
     }
 
-    const ship = rdShipDate(before, emailDate);
+    let ship = rdShipDate(propio, emailDate);
+    if (!ship.date && idx > 0) ship = rdShipDate(cabecera, emailDate);
     if (!ship.date) warnings.push('sin fecha de envío reconocible — el tag release: irá vacío');
     else if (ship.approx) warnings.push(`fecha aproximada ("${ship.raw}") → ${ship.date}, revísala`);
 
@@ -9040,7 +9053,13 @@ function PreorderImporter() {
         const label  = m.label;
         let   genre  = mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
         const release = m.release;                          // YYYY-MM-DD (raw street date)
-        const year    = release ? new Date(release).getFullYear() : '';
+        // Nunca sin año. El escaparate trata la ausencia de etiqueta de año como
+        // "agotado de verdad" (isBackorderEligible corta con `if (!y) return
+        // false`), asi que un disco sin fecha entraba sin boton de peticion —
+        // aunque estuviera de camino. Lo que se importa aqui viene de un feed de
+        // distribuidor, o sea que es actual por definicion: si no hay fecha, el
+        // año en curso es mejor suposicion que ninguna.
+        const year    = release ? new Date(release).getFullYear() : new Date().getFullYear();
         const dealer  = m.dealerPrice != null ? m.dealerPrice : 0;
         const rawPrice = dealer * (1 + margin / 100);
         let price = Math.ceil(rawPrice) - 0.01;
