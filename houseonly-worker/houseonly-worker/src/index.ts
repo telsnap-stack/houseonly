@@ -1624,17 +1624,65 @@ export default {
       if (parsed.protocol !== 'https:' || !PERMITIDO.test(parsed.hostname)) {
         return jsonRes({ error: `host no permitido: ${parsed.hostname}` }, 400);
       }
+      // Dropbox distingue dl=0 y dl=1 y NO es un detalle: dl=0 devuelve la
+      // pagina de vista previa —HTML con 200— y dl=1 el fichero. Los enlaces que
+      // vienen del email traen dl=0, asi que sin esto el proxy pedia la pagina
+      // de preview en TODOS los promopacks de Rubadub y guardaba HTML disfrazado
+      // de ZIP. rd-download.sh ya lo reescribia; aqui faltaba.
+      let objetivo = target;
+      if (/dropbox\.com$/i.test(parsed.hostname.replace(/^www\./, ''))) {
+        objetivo = objetivo.replace(/([?&])dl=0(&|$)/i, '$1dl=1$2');
+        if (!/[?&]dl=1(&|$)/i.test(objetivo)) objetivo += (objetivo.includes('?') ? '&' : '?') + 'dl=1';
+      }
       try {
-        const upstream = await fetch(target, {
+        const upstream = await fetch(objetivo, {
           redirect: 'follow',
           headers: { 'User-Agent': 'Mozilla/5.0' },
         });
         if (!upstream.ok) {
           return jsonRes({ error: `upstream ${upstream.status}` }, 502);
         }
-        // El cuerpo se pasa TAL CUAL, sin bufferizarlo: hay promopacks de mas de
-        // 100 MB y cargarlos en memoria reventaria el limite del worker.
-        return new Response(upstream.body, {
+
+        // NO basta con que responda 200. Cuando el token st= de un enlace de
+        // Dropbox caduca —y caduca en cuestion de horas—, Dropbox devuelve la
+        // pagina de login con HTTP 200, no un error. Marcar eso como
+        // application/zip guardaria 250 KB de HTML llamados PACE009.zip, y el
+        // fallo solo aparecería mucho despues, al abrirlo. rd-download.sh ya
+        // validaba con unzip -tq precisamente por esto; aqui faltaba.
+        const ctype = (upstream.headers.get('content-type') || '').toLowerCase();
+        if (ctype.includes('text/html')) {
+          return jsonRes({ error: 'enlace caducado: el distribuidor devolvio una pagina web, no un ZIP',
+                           hint: 'el token st= de Dropbox dura horas — hace falta el enlace fresco del email' }, 410);
+        }
+
+        // Y ademas se comprueba la firma del fichero, que es lo unico que no
+        // miente: todo ZIP empieza por "PK\x03\x04". Se lee el primer trozo, se
+        // valida y se vuelve a emitir junto al resto — sin bufferizar el fichero
+        // entero, que hay promopacks de mas de 100 MB.
+        const reader = upstream.body?.getReader();
+        if (!reader) return jsonRes({ error: 'respuesta sin cuerpo' }, 502);
+        const primero = await reader.read();
+        const cab = primero.value || new Uint8Array();
+        if (cab.length >= 4 && !(cab[0] === 0x50 && cab[1] === 0x4b)) {
+          try { await reader.cancel(); } catch { /* da igual */ }
+          return jsonRes({ error: 'lo descargado no es un ZIP (firma incorrecta)',
+                           hint: 'suele ser un enlace caducado o que pide login' }, 410);
+        }
+        const stream = new ReadableStream({
+          start(controller) {
+            if (primero.value) controller.enqueue(primero.value);
+            if (primero.done) { controller.close(); return; }
+            (function bombear() {
+              reader.read().then(({ done, value }) => {
+                if (done) { controller.close(); return; }
+                controller.enqueue(value);
+                bombear();
+              }).catch((e) => controller.error(e));
+            })();
+          },
+          cancel() { try { reader.cancel(); } catch { /* da igual */ } },
+        });
+        return new Response(stream, {
           headers: {
             ...CORS,
             'Content-Type': 'application/zip',
