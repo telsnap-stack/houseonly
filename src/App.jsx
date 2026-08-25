@@ -8032,11 +8032,14 @@ function parseTvShelfList(rawHtml) {
     if (!/^[A-Z0-9][A-Za-z0-9._#/-]{2,}$/.test(L[i])) continue;
     const [desc, ped, lis, pu, tt] = [L[i+1], L[i+2], L[i+3], L[i+4], L[i+5]];
     if (!/^\d+$/.test(ped) || !/^\d+$/.test(lis) || !/^[\d.]+$/.test(pu) || !/^[\d.]+$/.test(tt)) continue;
-    const [artist, ...resto] = String(desc).split(/\s+-\s+/);
+    // Algunas lineas del shelf list vienen sin artista (" - Sweet Terrorist EP"),
+    // y partir por " - " dejaba artista vacio y el titulo empezando por guion.
+    const limpio = String(desc).replace(/^\s*[-–]\s*/, '').trim();
+    const [artist, ...resto] = limpio.split(/\s+-\s+/);
     items.push({
       catno: L[i],
       artist: resto.length ? artist.trim() : '',
-      title: resto.length ? resto.join(' - ').trim() : String(desc).trim(),
+      title: resto.length ? resto.join(' - ').trim() : limpio,
       qty: parseInt(ped, 10),
       ready: parseInt(lis, 10),
       dealerPrice: Number(pu) || null,
@@ -9579,15 +9582,23 @@ function PreorderImporter() {
                         <div style={{marginTop:6,fontSize:9,color:'#ff8800',lineHeight:1.6}}>
                           Sin promopack en la carpeta — bájalos y vuelve a escanear:
                           <div style={{marginTop:3,display:'flex',flexWrap:'wrap',gap:4}}>
-                            {falta.map(r=>(
-                              <span key={rdKey(r.catno)} title={r.zipUrl?'tiene enlace: entra en "Bajar los ZIP"':'sin enlace conocido'}
-                                style={{background:S.surf,border:`1px solid ${r.zipUrl?S.accent:S.border}`,borderRadius:10,padding:'1px 8px',fontFamily:'monospace',color:r.zipUrl?S.accent:S.muted}}>
-                                {r.catno}{r.zipUrl?' ↓':''}
-                              </span>
-                            ))}
+                            {falta.map(r=>{
+                              // Sin enlace y de Triple Vision: su pagina de release
+                              // si tiene el promopack, pero pide sesion. Se enlaza
+                              // para que sea un clic y no una busqueda. Pasa sobre
+                              // todo con lo anterior a que empezara el archivo de
+                              // correos: sin email no hay tracker que seguir.
+                              const portal = !r.zipUrl && (r.source === 'tv' || (r._ordSrcs||[]).includes('tv'))
+                                ? `https://distribution.triplevision.nl/release/${encodeURIComponent(r.catno)}/` : '';
+                              const contenido = <>{r.catno}{r.zipUrl?' ↓':portal?' ↗':''}</>;
+                              const estilo = {background:S.surf,border:`1px solid ${r.zipUrl?S.accent:portal?'#ff8800':S.border}`,borderRadius:10,padding:'1px 8px',fontFamily:'monospace',color:r.zipUrl?S.accent:portal?'#ff8800':S.muted,textDecoration:'none'};
+                              return portal
+                                ? <a key={rdKey(r.catno)} href={portal} target="_blank" rel="noreferrer" title="Abrir en Triple Vision (necesitas tu sesión) y bajar el promopack" style={estilo}>{contenido}</a>
+                                : <span key={rdKey(r.catno)} title={r.zipUrl?'tiene enlace: entra en "Bajar los ZIP"':'sin enlace conocido — búscalo a mano'} style={estilo}>{contenido}</span>;
+                            })}
                           </div>
                           <div style={{color:S.muted,marginTop:4}}>
-                            Los que llevan ↓ tienen enlace y se bajan con el botón de abajo; el resto hay que buscarlos a mano.
+                            Los que llevan ↓ se bajan con el botón de abajo. Los ↗ abren su página en Triple Vision, donde con tu sesión sí está el promopack — suele pasar con lo anterior a julio, que no tiene email archivado. El resto hay que buscarlos a mano.
                           </div>
                         </div>
                       )}
