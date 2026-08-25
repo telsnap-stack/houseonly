@@ -8255,6 +8255,7 @@ function PreorderImporter() {
   const [zipDir, setZipDir]         = useState(null);   // {idx:Map, vistos:number}
   const [zipDirName, setZipDirName] = useState('');
   const [zipDirBusy, setZipDirBusy] = useState(false);
+  const [mailLinking, setMailLinking] = useState(null);  // {done,total} al resolver enlaces bajo demanda
   const [downloading, setDownloading] = useState(false);
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
@@ -8584,7 +8585,7 @@ function PreorderImporter() {
   // sin truncar: antes se cortaba en 60 URLs, y como cada email aporta hasta 12
   // trackers eso eran unos cinco discos — el resto se quedaba sin ZIP en
   // silencio, que es justo el sintoma que veia Eduardo en Triple Vision.
-  const resolverTrackers = async (filas) => {
+  const resolverTrackers = async (filas, onAvance) => {
     const out = new Map();
     const urls = [...new Set(filas.flatMap(r => r._trackers || []))];
     if (!urls.length) return out;
@@ -8599,6 +8600,7 @@ function PreorderImporter() {
         if (r.ok) for (const x of (await r.json()).results || []) mapa.set(x.url, x);
       } catch { /* una tanda fallida no tumba las demas */ }
       setMailProgress(x => x.total ? { ...x, fase: `resolviendo enlaces ${Math.min(i + 40, urls.length)}/${urls.length}` } : x);
+      if (onAvance) onAvance(Math.min(i + 40, urls.length), urls.length);
     }
     for (const row of filas) {
       const hit = (row._trackers || []).map(u => mapa.get(u))
@@ -8839,17 +8841,23 @@ function PreorderImporter() {
     // Las filas rojas —lo que no salio en ninguna señal de pedido— no se
     // resolvieron al parsear, para no gastar cientos de peticiones en discos que
     // nadie va a importar. Se resuelven ahora, que es cuando se sabe cuales son.
-    const faltan = picked.filter(r => !r.zipUrl && r._trackers?.length);
+    // SOLO las que de verdad lo necesitan. El enlace sirve para UNA cosa:
+    // descargar el ZIP. Si ya lo tienes en la carpeta de Drive no hay nada que
+    // descargar y resolverlo es trabajo tirado. Sin este filtro, marcar "Todos"
+    // lanzaba ~1.200 peticiones y la interfaz se quedaba minutos sin dar señal,
+    // que es exactamente lo que parecia un bloqueo.
+    const faltan = picked.filter(r =>
+      !r.zipUrl && r._trackers?.length && !(zipDir && zipDir.idx.has(rdKey(r.catno))));
     if (faltan.length) {
-      setMailBusy('enlaces');
+      setMailLinking({ done: 0, total: faltan.length });
       try {
-        const res = await resolverTrackers(faltan);
+        const res = await resolverTrackers(faltan, (h, t) => setMailLinking({ done: h, total: t }));
         for (const r of picked) { const d = res.get(rdKey(r.catno)); if (d) r.zipUrl = d; }
         setMailRows(rows => (rows || []).map(r => {
           const d = res.get(rdKey(r.catno));
           return d ? { ...r, zipUrl: d } : r;
         }));
-      } finally { setMailBusy(''); }
+      } finally { setMailLinking(null); }
     }
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
                                 _live, _qty, _ready, _ordSrcs, _trackers, _desc, ...row }) => row);
@@ -9437,7 +9445,19 @@ function PreorderImporter() {
                   {live.map(fila)}
                 </div>
                 <div style={{marginTop:10}}>
-                  {n>0
+  {mailLinking
+                    ? (()=>{const pc = mailLinking.total ? Math.round((mailLinking.done/mailLinking.total)*100) : 0; return (
+                      <div style={{padding:12,background:S.surf,borderRadius:3,border:`1px solid ${S.border}`}}>
+                        <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+                          <span style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1}}>BUSCANDO ENLACES DE PROMOPACK…</span>
+                          <span style={{fontSize:10,color:S.muted}}>{mailLinking.done} / {mailLinking.total} · {pc}%</span>
+                        </div>
+                        <div style={{height:3,background:S.border,borderRadius:2,overflow:'hidden'}}>
+                          <div style={{height:'100%',background:S.accent,width:`${pc}%`,transition:'width 0.3s'}} />
+                        </div>
+                        <div style={{fontSize:9,color:S.muted,marginTop:6}}>Solo de los que no tienes ya en la carpeta. No cierres la pestaña.</div>
+                      </div>);})()
+                    : n>0
                     ? <Btn ch={`+ Añadir ${n} al manifest`} onClick={mailAddPicked} full />
                     : <div style={{textAlign:'center',fontSize:9,color:S.muted,padding:'8px 0',border:`1px dashed ${S.border}`,borderRadius:2}}>Marca al menos un release</div>}
                 </div>
