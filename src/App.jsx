@@ -9389,6 +9389,7 @@ function PreorderImporter() {
                 // El mismo disco pedido a dos distribuidores llega dos veces.
                 const dup = (r._ordSrcs||[]).length > 1;
                 const bloqueada = r._live || r._added;
+                const enCarpeta = !!(zipDir && zipDir.idx.has(k));
                 const col = r._live?S.muted:r._ordered?S.accent:S.danger;
                 return (
                 <div key={k} onClick={()=>{ if(!bloqueada) setMailPick(p=>({...p,[k]:!p[k]})); }}
@@ -9406,15 +9407,32 @@ function PreorderImporter() {
                         style={{width:30,height:30,objectFit:'cover',borderRadius:2,flexShrink:0,background:S.bg}} />
                     : <span style={{width:30,height:30,flexShrink:0,borderRadius:2,background:S.bg,border:`1px solid ${S.border}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:S.border}}>♪</span>}
                   <span style={{fontSize:10,color:col,fontFamily:'monospace',width:104,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.catno}</span>
-                  <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.artist} — {r.title}</span>
+                  {/* Sin artista no se pinta separador: el shelf list trae lineas
+                      donde solo hay titulo y salia un "— Titulo" huerfano. */}
+                  <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {r.artist ? `${r.artist} — ${r.title}` : r.title}
+                  </span>
                   <span style={{fontSize:9,color:S.muted,width:78,flexShrink:0}}>{r.release||'sin fecha'}</span>
                   <span style={{fontSize:9,color:S.text,width:54,flexShrink:0,textAlign:'right'}}>
                     {r.dealerPrice!=null?`€${(Math.max(9.99,Math.ceil(r.dealerPrice*(1+margin/100))-0.01)).toFixed(2)}`:'—'}
                   </span>
                   <span style={{fontSize:9,color:S.muted,width:34,flexShrink:0,textAlign:'right'}}>{r._qty?`×${r._qty}`:''}</span>
                   <span style={{fontSize:8,color:S.muted,width:96,flexShrink:0}}>
-                    {(r._ordSrcs||[]).join('+').toUpperCase()}{r.zipUrl?' · zip':''}{r.forthcoming?'':' · envío'}
+                    {(r._ordSrcs||[]).join('+').toUpperCase()}{enCarpeta?' · 📁':r.zipUrl?' · zip':''}{r.forthcoming?'':' · envío'}
                   </span>
+                  {/* Sin ZIP y de Triple Vision: su pagina del portal SI tiene el
+                      promopack, pero pide sesion. Va aqui, en la fila, porque es
+                      donde se mira — antes solo estaba en el panel de "faltan", que
+                      encima solo aparece con la carpeta conectada. Pasa sobre todo
+                      con lo anterior a julio, que no tiene email archivado. */}
+                  {!r.zipUrl && !enCarpeta && (r.source==='tv' || (r._ordSrcs||[]).includes('tv')) && (
+                    <a href={`https://distribution.triplevision.nl/release/${encodeURIComponent(r.catno)}/`}
+                       target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()}
+                       title="Abrir en Triple Vision (con tu sesión) para bajar el promopack"
+                       style={{fontSize:8,color:'#ff8800',flexShrink:0,textDecoration:'none',border:'1px solid #ff880066',borderRadius:2,padding:'1px 5px'}}>
+                      buscar ↗
+                    </a>
+                  )}
                   {r._added&&<span style={{fontSize:8,color:S.accent,fontWeight:700,flexShrink:0}}>✓ EN EL MANIFEST</span>}
                   {dup&&<span title="Pedido a dos distribuidores — llegará por duplicado" style={{fontSize:8,color:S.danger,fontWeight:700,flexShrink:0}}>⚠ DOBLE</span>}
                 </div>);
