@@ -8580,6 +8580,34 @@ function PreorderImporter() {
     setDownloadDone(true);
   };
 
+  // Resolver los enlaces que van detras del tracker de Mailchimp. POR TANDAS y
+  // sin truncar: antes se cortaba en 60 URLs, y como cada email aporta hasta 12
+  // trackers eso eran unos cinco discos — el resto se quedaba sin ZIP en
+  // silencio, que es justo el sintoma que veia Eduardo en Triple Vision.
+  const resolverTrackers = async (filas) => {
+    const out = new Map();
+    const urls = [...new Set(filas.flatMap(r => r._trackers || []))];
+    if (!urls.length) return out;
+    const mapa = new Map();
+    for (let i = 0; i < urls.length; i += 40) {
+      try {
+        const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${mailSecret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: urls.slice(i, i + 40) }),
+        });
+        if (r.ok) for (const x of (await r.json()).results || []) mapa.set(x.url, x);
+      } catch { /* una tanda fallida no tumba las demas */ }
+      setMailProgress(x => x.total ? { ...x, fase: `resolviendo enlaces ${Math.min(i + 40, urls.length)}/${urls.length}` } : x);
+    }
+    for (const row of filas) {
+      const hit = (row._trackers || []).map(u => mapa.get(u))
+        .find(x => x && (x.kind === 'dropbox' || x.kind === 'tvassets'));
+      if (hit) out.set(rdKey(row.catno), hit.dest);
+    }
+    return out;
+  };
+
   // ── Carpeta local de promopacks ─────────────────────────────
   const zipDirConnect = async (handleGuardado) => {
     if (!window.showDirectoryPicker && !handleGuardado) {
@@ -8785,20 +8813,8 @@ function PreorderImporter() {
     const porResolver = [...best.values()].filter(r => r._ordered && !r.zipUrl && r._trackers?.length);
     if (porResolver.length) {
       setMailProgress(x => ({ ...x, fase: 'resolviendo enlaces de promopack' }));
-      const urls = [...new Set(porResolver.flatMap(r => r._trackers))].slice(0, 60);
-      try {
-        const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
-          method: 'POST', headers: { ...H, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls }),
-        });
-        if (r.ok) {
-          const mapa = new Map((await r.json()).results.map(x => [x.url, x]));
-          for (const row of porResolver) {
-            const hit = row._trackers.map(u => mapa.get(u)).find(x => x && (x.kind === 'dropbox' || x.kind === 'tvassets'));
-            if (hit) best.set(rdKey(row.catno), { ...best.get(rdKey(row.catno)), zipUrl: hit.dest });
-          }
-        }
-      } catch { /* sin enlaces resueltos se sigue: el ZIP se baja a mano */ }
+      const resueltos = await resolverTrackers(porResolver);
+      for (const [k, dest] of resueltos) best.set(k, { ...best.get(k), zipUrl: dest });
     }
 
     // ── 5. Clasificar ────────────────────────────────────────
@@ -8817,9 +8833,24 @@ function PreorderImporter() {
     if (!all.length) setMailError('No salió ningún release del archivo.');
   };
 
-  const mailAddPicked = () => {
+  const mailAddPicked = async () => {
     const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live && !r._added);
     if (!picked.length) return;
+    // Las filas rojas —lo que no salio en ninguna señal de pedido— no se
+    // resolvieron al parsear, para no gastar cientos de peticiones en discos que
+    // nadie va a importar. Se resuelven ahora, que es cuando se sabe cuales son.
+    const faltan = picked.filter(r => !r.zipUrl && r._trackers?.length);
+    if (faltan.length) {
+      setMailBusy('enlaces');
+      try {
+        const res = await resolverTrackers(faltan);
+        for (const r of picked) { const d = res.get(rdKey(r.catno)); if (d) r.zipUrl = d; }
+        setMailRows(rows => (rows || []).map(r => {
+          const d = res.get(rdKey(r.catno));
+          return d ? { ...r, zipUrl: d } : r;
+        }));
+      } finally { setMailBusy(''); }
+    }
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
                                 _live, _qty, _ready, _ordSrcs, _trackers, _desc, ...row }) => row);
     setManifest(prev => {

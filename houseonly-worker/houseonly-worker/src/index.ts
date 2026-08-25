@@ -1667,7 +1667,11 @@ export default {
       }
       let body: any;
       try { body = await request.json(); } catch { return jsonRes({ error: 'bad json' }, 400); }
-      const urls: string[] = Array.isArray(body?.urls) ? body.urls.slice(0, 60) : [];
+      // 60 era poco y el cliente truncaba a ciegas: cada email aporta hasta 12
+      // trackers, asi que un lote de 60 cubria unos cinco discos y el resto se
+      // quedaba sin resolver en silencio. El cliente ahora manda por tandas; el
+      // tope de aqui solo es una red contra una peticion desmedida.
+      const urls: string[] = Array.isArray(body?.urls) ? body.urls.slice(0, 200) : [];
       if (!urls.length) return jsonRes({ error: 'urls required' }, 400);
 
       const PERMITIDO = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
