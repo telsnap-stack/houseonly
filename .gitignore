@@ -26,5 +26,3 @@ dist-ssr
 # Worker backups (local-only, not tracked)
 *.backup-*
 
-# Estado local del ritual de sesion (no se comparte)
-scripts/.preorder-state.json
