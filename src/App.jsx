@@ -355,6 +355,27 @@ async function fetchShopifyProductByHandle(handle) {
   return parseProduct({ node: data.product });
 }
 
+// Resolve a pre-order by SLUG. Companion to the handle lookup above, for the
+// direct-load path when the page carries no handle to look up: a `forthcoming`
+// product created after the last deploy has no prerendered page at all
+// (scripts/prerender.mjs runs at build time), so /products/<slug>/ serves the
+// bare SPA shell. Pre-orders are the case that never self-heals — the main
+// catalogue query excludes `forthcoming`, so the record cannot arrive in
+// `records` on a later page either. Newest first, so the un-prerendered ones
+// (the newest by definition) come first; the bound still covers the whole
+// pre-order list at its current size, and caps the cost of a genuine miss.
+async function fetchForthcomingBySlug(slug, maxPages = 5) {
+  let cursor = null;
+  for (let i = 0; i < maxPages; i++) {
+    const { products, hasNextPage, endCursor } = await fetchShopifyProducts({ cursor, forthcoming: true });
+    const hit = products.find(p => p.slug === slug);
+    if (hit) return hit;
+    if (!hasNextPage) break;
+    cursor = endCursor;
+  }
+  return null;
+}
+
 // ── CHECKOUT ───────────────────────────────────────────────────
 async function shopifyCheckout(cartItems, session=null) {
   const lines = cartItems
@@ -10407,8 +10428,11 @@ export default function App() {
       } catch { /* ignore */ }
       handle = sku.toLowerCase().replace(/\s+/g, '-');
     }
-    if (!handle) return; // nothing to resolve with (e.g. dev server without prerender)
-    fetchShopifyProductByHandle(handle)
+    // With a handle, resolve that product directly. Without one the page was
+    // never prerendered (dev server, or a product created after the last
+    // deploy) — fall back to matching the slug against the pre-order list,
+    // which is where an unprerendered record is reachable at all.
+    (handle ? fetchShopifyProductByHandle(handle) : fetchForthcomingBySlug(slug))
       .then(prod => {
         if (!prod) return;
         // Open only if the URL still points at this slug. (No effect-cleanup
