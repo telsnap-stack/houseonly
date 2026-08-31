@@ -362,15 +362,18 @@ async function fetchShopifyProductByHandle(handle) {
 // bare SPA shell. Pre-orders are the case that never self-heals — the main
 // catalogue query excludes `forthcoming`, so the record cannot arrive in
 // `records` on a later page either. Newest first, so the un-prerendered ones
-// (the newest by definition) come first; the bound still covers the whole
-// pre-order list at its current size, and caps the cost of a genuine miss.
-async function fetchForthcomingBySlug(slug, maxPages = 5) {
+// (the newest by definition) hit on the first page; a miss walks the list to
+// its end rather than stopping at a fixed depth the pre-order list can outgrow
+// (it is already 119 long). `safety` only guards against a pageInfo that never
+// terminates, mirroring fetchLiveHandles above.
+async function fetchForthcomingBySlug(slug) {
   let cursor = null;
-  for (let i = 0; i < maxPages; i++) {
+  let safety = 40; // 40 x 24 = 960 pre-orders; a stop, not an expected limit
+  while (safety-- > 0) {
     const { products, hasNextPage, endCursor } = await fetchShopifyProducts({ cursor, forthcoming: true });
     const hit = products.find(p => p.slug === slug);
     if (hit) return hit;
-    if (!hasNextPage) break;
+    if (!hasNextPage) return null;
     cursor = endCursor;
   }
   return null;
