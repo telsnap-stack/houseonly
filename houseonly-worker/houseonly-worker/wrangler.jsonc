@@ -66,10 +66,21 @@
           "id": "e4966f4a96e84c578bfd96b1d12bdf63"
         }
       ],
-      // Fase 3E cron: poll Discogs every 15 min. Worker reads meta:sync_3e_mode
-      // from KV to decide between dry (default, log only) and live (adjust stock).
+      // NO cron on staging (2026-09-02). It polled Discogs every 15 min in dry
+      // mode — creating nothing — while spending requests from the SAME 60/min
+      // Discogs budget prod needs, at the same instant prod polls. With an
+      // external consumer already saturating that budget, staging was pure
+      // competition for it.
+      //
+      // MUST be an explicit empty list, not a deleted block: `triggers` is an
+      // inheritable key, so omitting it makes staging inherit the top-level
+      // */15 rather than have no cron.
+      //
+      // Nothing depended on it. The staging worker itself stays — six scripts
+      // POST to its fetch endpoints (webhook registration/tests, backfills) —
+      // and graduation can still be driven by hand via ?action=graduation-run.
       "triggers": {
-        "crons": ["*/15 * * * *"]
+        "crons": []
       }
     }
   }
