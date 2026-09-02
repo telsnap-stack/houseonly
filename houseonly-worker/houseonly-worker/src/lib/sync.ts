@@ -208,7 +208,6 @@ async function retryParkedSales(
     const resolvedLines: DiscogsOrderLine[] = items.map((i) => ({
       variantId: i.shopify_variant_id as string,
       quantity: i.quantity || 1,
-      ...(i.price ? { price: i.price } : {}),
     }));
 
     result.parked_retried++;
@@ -1015,8 +1014,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         quantity: 1,  // Discogs marketplace items are always quantity 1
         sku: null as string | null,
         shopify_variant_id: null as string | null,
-        // What Discogs charged. Stored so the parked-retry pass can invoice the
-        // same figure without re-fetching the order.
+        // What Discogs charged. Recorded for reconciliation only — the invoice
+        // uses the Shopify catalogue price, not this.
         price: item.price
           ? { amount: String(item.price.value), currencyCode: item.price.currency }
           : null,
@@ -1079,11 +1078,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       }
       itemAudit.shopify_variant_id = variant.variantId;
       itemAudit.outcome = 'resolved';
-      resolvedLines.push({
-        variantId: variant.variantId,
-        quantity: 1,
-        ...(itemAudit.price ? { price: itemAudit.price } : {}),
-      });
+      resolvedLines.push({ variantId: variant.variantId, quantity: 1 });
       audit.items.push(itemAudit);
     }
 
