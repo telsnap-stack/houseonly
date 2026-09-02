@@ -140,6 +140,133 @@ const ORDER_LOCK_INFLIGHT_TTL_SECONDS = 10 * 60;
 const ORDER_LOCK_INFLIGHT = 'in-flight';
 const ORDER_LOCK_COMMITTED = '1';
 
+// ── OPS ALERTS ──────────────────────────────────────────────────────
+// Why this exists: on 2026-09-02 a Discogs sale failed to reach Shopify and
+// NOTHING said so. It was found by hand, hours later, because a human happened
+// to notice the order missing. The sync being self-healing is only half the
+// job — when it cannot heal, it has to say so.
+//
+// Reuses the newsletter sender: that domain is already verified in Resend, and
+// an alert that bounces is worse than no alert.
+const OPS_ALERT_FROM = 'House Only <newsletter@houseonly.store>';
+const OPS_ALERT_TO = 'info@houseonly.store';
+// How long a firm sale may sit un-synced before we email. 45 min ≈ 3 polls:
+// long enough that a transient blip resolves itself silently, short enough to
+// act on the same morning.
+const SALE_STUCK_ALERT_MS = 45 * 60 * 1000;
+// Consecutive whole-poll failures before we email. The poll dying outright
+// (e.g. getOrders rate-limited) means NO sale can sync, so it needs its own
+// alarm — the per-order one never fires if we never see the orders.
+const POLL_FAIL_ALERT_STREAK = 3;
+// Don't re-send the poll alarm more than once per this window. Discogs quota
+// exhaustion can last hours; one email is a signal, twelve is noise people
+// learn to ignore.
+const POLL_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Send an ops alert. Best-effort by design: any failure is swallowed so a
+ * broken alert can never take down the poll it is reporting on.
+ */
+async function sendOpsAlert(env: SyncEnv, subject: string, lines: string[]): Promise<boolean> {
+  if (!env.RESEND_API_KEY) return false;
+  try {
+    const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#111;">`
+      + lines.map(l => `<p style="margin:0 0 10px;">${l}</p>`).join('')
+      + `</div>`;
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+      },
+      body: JSON.stringify({ from: OPS_ALERT_FROM, to: OPS_ALERT_TO, subject, html }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist one order's audit record and, if that sale has been stuck too long,
+ * email once. "Stuck" is measured from first_detected_at — the first poll that
+ * saw it as a firm sale — NOT from this attempt, so repeated failures escalate
+ * instead of resetting the clock.
+ */
+async function recordOrderAttempt(env: SyncEnv, orderId: string, audit: any): Promise<void> {
+  await env.SYNC_STATE.put(
+    `sales-detected:${orderId}`,
+    JSON.stringify(audit),
+    { expirationTtl: 30 * 24 * 60 * 60 },
+  );
+
+  // A dry-run counts as fine: it did what it was asked to do.
+  if (audit.order_creation?.ok) return;
+
+  const firstSeen = Date.parse(audit.first_detected_at || audit.processed_at || '');
+  if (!firstSeen || Date.now() - firstSeen < SALE_STUCK_ALERT_MS) return;
+
+  // One email per order, ever — the retry loop runs every 15 min and we are
+  // not going to mail them every 15 min.
+  const alertKey = `alert-sent:${orderId}`;
+  if (await env.SYNC_STATE.get(alertKey)) return;
+
+  const items = (audit.items || [])
+    .map((i: any) => `${i.sku || '(no SKU)'} — ${i.release_title || ''}`)
+    .join('<br>') || '(no items resolved)';
+  const mins = Math.round((Date.now() - firstSeen) / 60000);
+
+  const sent = await sendOpsAlert(
+    env,
+    `Discogs sale ${orderId} has not reached Shopify`,
+    [
+      `<strong>Discogs order ${orderId}</strong> was detected as a firm sale but has not become a Shopify order.`,
+      `Stuck for <strong>${mins} min</strong> across <strong>${audit.attempts || 1}</strong> attempt(s).`,
+      `<strong>Items</strong><br>${items}`,
+      `<strong>Last error</strong><br>${audit.order_creation?.error || 'unknown'}`,
+      audit.order_creation?.will_retry === false
+        ? `This will NOT retry on its own — it needs a look.`
+        : `It keeps retrying every 15 min, so it may still resolve by itself.`,
+      `Full status: <code>?action=sync-pending</code>`,
+    ],
+  );
+  if (sent) {
+    await env.SYNC_STATE.put(alertKey, '1', { expirationTtl: 30 * 24 * 60 * 60 });
+  }
+}
+
+/**
+ * The whole poll failed (typically getOrders rate-limited). Count consecutive
+ * failures and alert once the streak looks like an outage rather than a blip.
+ * This alarm is separate from the per-order one for a reason: if the poll dies
+ * before listing orders, we never see the sales, so the per-order alarm can
+ * never fire.
+ */
+async function notePollFailure(env: SyncEnv, error: string): Promise<void> {
+  const streak = Number(await env.SYNC_STATE.get('meta:poll_fail_streak') || '0') + 1;
+  await env.SYNC_STATE.put('meta:poll_fail_streak', String(streak));
+  if (streak < POLL_FAIL_ALERT_STREAK) return;
+
+  const lastAlert = Number(await env.SYNC_STATE.get('meta:poll_alert_last') || '0');
+  if (Date.now() - lastAlert < POLL_ALERT_COOLDOWN_MS) return;
+
+  const rateLimited = /429/.test(error);
+  const sent = await sendOpsAlert(
+    env,
+    'Discogs sync is down — no sale can reach Shopify',
+    [
+      `The Discogs poll has failed <strong>${streak} times in a row</strong>.`,
+      `While this lasts, <strong>no Discogs sale can become a Shopify order</strong>. Nothing is lost — every order is retried every 15 min — but nothing is syncing either.`,
+      `<strong>Error</strong><br><code>${error}</code>`,
+      rateLimited
+        ? `A 429 means Discogs is refusing us for exceeding its 60 requests/minute budget. The poll itself only makes a handful of calls per run, so if this persists, something ELSE is spending that budget on the same Discogs account. The <code>discogs_429</code> line in the Worker logs shows the live counter.`
+        : ``,
+      `Full status: <code>?action=sync-status</code>`,
+    ].filter(Boolean),
+  );
+  if (sent) await env.SYNC_STATE.put('meta:poll_alert_last', String(Date.now()));
+}
+
 // ── ENV ─────────────────────────────────────────────────────────────
 
 /** Subset of Env that sync handlers need. */
@@ -148,6 +275,9 @@ export interface SyncEnv {
   DISCOGS_TOKEN: string;
   BOOTSTRAP_AUTH_SECRET: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
+  // Optional on purpose: without it the alerts below are skipped rather than
+  // throwing. A missing alert must never break the sync it is watching.
+  RESEND_API_KEY?: string;
 }
 
 /** Combined Env type for handlers that need both sync + Shopify admin access. */
@@ -775,9 +905,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     }
     result.orders_examined = orders.length;
   } catch (e: any) {
-    errors.push(`getOrders failed: ${e?.message || e}`);
+    const msg = `getOrders failed: ${e?.message || e}`;
+    errors.push(msg);
     result.ok = false;
     result.errors = errors;
+    // The poll died before it could see any order — raise the outage alarm.
+    await notePollFailure(env, msg);
     return result;
   }
 
@@ -818,13 +951,24 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       expirationTtl: ORDER_LOCK_INFLIGHT_TTL_SECONDS,
     });
 
-    // Build the audit record for this order.
+    // Build the audit record for this order. first_detected_at and attempts
+    // are carried over from any earlier attempt so the stuck-sale alarm
+    // measures from the FIRST sighting, not from this run.
+    let prev: any = null;
+    try {
+      const prevRaw = await env.SYNC_STATE.get(`sales-detected:${orderIdStr}`);
+      prev = prevRaw ? JSON.parse(prevRaw) : null;
+    } catch { /* a corrupt audit must not stop the sale */ }
+
+    const nowIso = new Date().toISOString();
     const audit: any = {
       order_id: orderIdStr,
       status: order.status,
       created: order.created,
       mode,
-      processed_at: new Date().toISOString(),
+      processed_at: nowIso,
+      first_detected_at: prev?.first_detected_at || nowIso,
+      attempts: (prev?.attempts || 0) + 1,
       items: [],
       order_creation: null as any,
     };
@@ -920,11 +1064,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         error: 'order has unmapped item(s); skipped to avoid partial factura',
       };
       result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit);
       continue;
     }
 
@@ -938,11 +1078,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         will_retry: true,
         error: 'no resolvable line items',
       };
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit);
       continue;
     }
 
@@ -972,11 +1108,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         error: `getOrder failed: ${e?.message || e}`,
       };
       result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit);
       continue;
     }
 
@@ -994,11 +1126,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         buyer_country: buyer.country,
       };
       result.shopify_adjustments_succeeded++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit);
       continue;
     }
 
@@ -1034,12 +1162,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     }
 
     // Save audit trail (30 day TTL)
-    await env.SYNC_STATE.put(
-      `sales-detected:${orderIdStr}`,
-      JSON.stringify(audit),
-      { expirationTtl: 30 * 24 * 60 * 60 },
-    );
+    await recordOrderAttempt(env, orderIdStr, audit);
   }
+
+  // The poll completed, so whatever was breaking it has passed. Clear the
+  // streak — the next outage should be counted from zero.
+  await env.SYNC_STATE.put('meta:poll_fail_streak', '0');
 
   // ── 4. Record newest order seen (observability only; see header) ─
   if (newestSeen) {
@@ -1056,6 +1184,59 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
 // GET  ?action=sync-mode   → returns current mode (no auth, non-sensitive)
 // POST ?action=sync-mode   → set mode (auth: Bearer BOOTSTRAP_AUTH_SECRET)
 //   body: {"mode": "dry"} or {"mode": "live"}
+
+/**
+ * GET ?action=sync-pending — every Discogs sale we have SEEN but not turned
+ * into a Shopify order, newest first, with why. Auth: Bearer.
+ *
+ * This exists so the question "is anything stuck?" is one URL, not an
+ * archaeology session in KV. It reads the same sales-detected audit records
+ * the poll writes.
+ */
+export async function handleSyncPending(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (!checkBearer(request, env)) {
+    return jsonResponse({ error: 'unauthorized' }, 401);
+  }
+
+  const { keys } = await env.SYNC_STATE.list({ prefix: 'sales-detected:' });
+  const pending: any[] = [];
+  let synced = 0;
+
+  for (const k of keys) {
+    const raw = await env.SYNC_STATE.get(k.name);
+    if (!raw) continue;
+    let a: any;
+    try { a = JSON.parse(raw); } catch { continue; }
+    if (a.order_creation?.ok) { synced++; continue; }
+    pending.push({
+      order_id: a.order_id,
+      status: a.status,
+      created: a.created,
+      first_detected_at: a.first_detected_at || a.processed_at,
+      last_attempt_at: a.processed_at,
+      attempts: a.attempts || 1,
+      // false only where the code deliberately gives up; see the audit paths.
+      will_retry: a.order_creation?.will_retry !== false,
+      needs_manual: Boolean(a.order_creation?.needs_manual),
+      error: a.order_creation?.error || null,
+      items: (a.items || []).map((i: any) => ({ sku: i.sku, title: i.release_title, outcome: i.outcome })),
+    });
+  }
+
+  pending.sort((x, y) => String(y.created).localeCompare(String(x.created)));
+
+  const streak = Number(await env.SYNC_STATE.get('meta:poll_fail_streak') || '0');
+  return jsonResponse({
+    pending_count: pending.length,
+    synced_count: synced,
+    poll_fail_streak: streak,
+    poll_healthy: streak === 0,
+    pending,
+  });
+}
 
 export async function handleSyncMode(
   request: Request,

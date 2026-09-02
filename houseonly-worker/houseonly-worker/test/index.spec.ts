@@ -1,11 +1,7 @@
 import {
 	env,
-	createExecutionContext,
-	waitOnExecutionContext,
-	SELF,
 } from "cloudflare:test";
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import worker from "../src";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { pollDiscogsForSales } from "../src/lib/sync";
 import * as discogs from "../src/lib/discogs";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
@@ -21,51 +17,6 @@ vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	return { ...actual, findVariantBySku: vi.fn(), createDiscogsOrder: vi.fn() };
 });
 
-describe("Hello World user worker", () => {
-	describe("request for /message", () => {
-		it('/ responds with "Hello, World!" (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>(
-				"http://example.com/message"
-			);
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
-
-		it('responds with "Hello, World!" (integration style)', async () => {
-			const request = new Request("http://example.com/message");
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
-	});
-
-	describe("request for /random", () => {
-		it("/ responds with a random UUID (unit style)", async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>(
-				"http://example.com/random"
-			);
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatch(
-				/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/
-			);
-		});
-
-		it("responds with a random UUID (integration style)", async () => {
-			const request = new Request("http://example.com/random");
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatch(
-				/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/
-			);
-		});
-	});
-});
 
 // ── FASE 3H: poll window / cursor regression ────────────────────────
 //
@@ -352,6 +303,100 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			const res = await pollDiscogsForSales(env as any);
 			expect(res.shopify_adjustments_succeeded).toBe(1);
 			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	// ── The other half of the 2026-09-02 incident: nothing ALERTED ──
+	// The sale failed at 10:15 and was found by hand hours later. Self-healing
+	// is not enough; when the sync cannot heal it has to say so.
+	describe("ops alerting", () => {
+		let sent: any[];
+
+		beforeEach(async () => {
+			sent = [];
+			await env.SYNC_STATE.delete(`alert-sent:${ORDER_ID}`);
+			await env.SYNC_STATE.delete("meta:poll_fail_streak");
+			await env.SYNC_STATE.delete("meta:poll_alert_last");
+			(env as any).RESEND_API_KEY = "re_test";
+			vi.stubGlobal("fetch", vi.fn(async (url: any, init: any) => {
+				if (String(url).includes("api.resend.com")) {
+					sent.push(JSON.parse(init.body));
+					return new Response(JSON.stringify({ id: "e1" }), { status: 200 });
+				}
+				return new Response("{}", { status: 200 });
+			}));
+		});
+
+		afterEach(() => { vi.unstubAllGlobals(); });
+
+		it("emails when a sale has been stuck past the threshold", async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			// An earlier attempt, first seen well over the 45 min threshold.
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				first_detected_at: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
+				attempts: 5,
+			}));
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(discogs.getOrder).mockRejectedValue(new Error("429 too quickly"));
+
+			await pollDiscogsForSales(env as any);
+
+			expect(sent).toHaveLength(1);
+			expect(sent[0].subject).toContain(ORDER_ID);
+			expect(sent[0].html).toContain("429");
+			// And only once, however many times it retries.
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(1);
+		});
+
+		it("stays quiet while the sale is still young", async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(discogs.getOrder).mockRejectedValue(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(0);
+		});
+
+		it("never emails for a sale that actually synced", async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				first_detected_at: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
+			}));
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/1", orderName: "#1001",
+			} as any);
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(0);
+		});
+
+		it("raises the outage alarm after a streak of whole-poll failures", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(
+				new Error('Discogs getOrders failed: 429 {"message":"You are making requests too quickly."}'),
+			);
+			await pollDiscogsForSales(env as any);
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(0);          // still just a blip
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(1);          // third strike
+			expect(sent[0].subject).toContain("Discogs sync is down");
+			expect(sent[0].html).toContain("60 requests/minute");
+
+			// Cooldown: an ongoing outage must not become a mail flood.
+			await pollDiscogsForSales(env as any);
+			expect(sent).toHaveLength(1);
+		});
+
+		it("clears the failure streak once a poll gets through", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValueOnce(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(await env.SYNC_STATE.get("meta:poll_fail_streak")).toBe("1");
+
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
+			await pollDiscogsForSales(env as any);
+			expect(await env.SYNC_STATE.get("meta:poll_fail_streak")).toBe("0");
 		});
 	});
 

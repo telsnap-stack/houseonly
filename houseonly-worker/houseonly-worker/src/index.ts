@@ -833,6 +833,7 @@ import { findVariantBySku, getPrimaryLocationId, adjustInventory } from './lib/s
 import {
   handleSyncBootstrap,
   handleSyncStatus,
+  handleSyncPending,
   handleRegisterWebhook,
   handleShopifyOrderWebhook,
   handleSyncMode,
@@ -1284,6 +1285,13 @@ export default {
     // data is non-sensitive (stats only, no SKUs).
     if (action === 'sync-status' && request.method === 'GET') {
       return await handleSyncStatus(request, env);
+    }
+
+    // ── PENDING SALES ───────────────────────────────────────
+    // GET ?action=sync-pending — Discogs sales seen but not yet turned into a
+    // Shopify order, and why. Auth: Bearer BOOTSTRAP_AUTH_SECRET.
+    if (action === 'sync-pending' && request.method === 'GET') {
+      return await handleSyncPending(request, env);
     }
 
     // ── SYNC MODE (Fase 3E dry/live switch) ─────────────────
