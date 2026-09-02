@@ -140,58 +140,10 @@ const ORDER_LOCK_INFLIGHT_TTL_SECONDS = 10 * 60;
 const ORDER_LOCK_INFLIGHT = 'in-flight';
 const ORDER_LOCK_COMMITTED = '1';
 
-// ── OPS ALERTS ──────────────────────────────────────────────────────
-// Why this exists: on 2026-09-02 a Discogs sale failed to reach Shopify and
-// NOTHING said so. It was found by hand, hours later, because a human happened
-// to notice the order missing. The sync being self-healing is only half the
-// job — when it cannot heal, it has to say so.
-//
-// Reuses the newsletter sender: that domain is already verified in Resend, and
-// an alert that bounces is worse than no alert.
-const OPS_ALERT_FROM = 'House Only <newsletter@houseonly.store>';
-const OPS_ALERT_TO = 'info@houseonly.store';
-// How long a firm sale may sit un-synced before we email. 45 min ≈ 3 polls:
-// long enough that a transient blip resolves itself silently, short enough to
-// act on the same morning.
-const SALE_STUCK_ALERT_MS = 45 * 60 * 1000;
-// Consecutive whole-poll failures before we email. The poll dying outright
-// (e.g. getOrders rate-limited) means NO sale can sync, so it needs its own
-// alarm — the per-order one never fires if we never see the orders.
-const POLL_FAIL_ALERT_STREAK = 3;
-// Don't re-send the poll alarm more than once per this window. Discogs quota
-// exhaustion can last hours; one email is a signal, twelve is noise people
-// learn to ignore.
-const POLL_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-
 /**
- * Send an ops alert. Best-effort by design: any failure is swallowed so a
- * broken alert can never take down the poll it is reporting on.
- */
-async function sendOpsAlert(env: SyncEnv, subject: string, lines: string[]): Promise<boolean> {
-  if (!env.RESEND_API_KEY) return false;
-  try {
-    const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#111;">`
-      + lines.map(l => `<p style="margin:0 0 10px;">${l}</p>`).join('')
-      + `</div>`;
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-      },
-      body: JSON.stringify({ from: OPS_ALERT_FROM, to: OPS_ALERT_TO, subject, html }),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Persist one order's audit record and, if that sale has been stuck too long,
- * email once. "Stuck" is measured from first_detected_at — the first poll that
- * saw it as a firm sale — NOT from this attempt, so repeated failures escalate
- * instead of resetting the clock.
+ * Persist one order's audit record. first_detected_at / attempts are carried
+ * by the caller so ?action=sync-pending can show how long a sale has been
+ * stuck and how many times it has been tried.
  */
 async function recordOrderAttempt(env: SyncEnv, orderId: string, audit: any): Promise<void> {
   await env.SYNC_STATE.put(
@@ -199,72 +151,16 @@ async function recordOrderAttempt(env: SyncEnv, orderId: string, audit: any): Pr
     JSON.stringify(audit),
     { expirationTtl: 30 * 24 * 60 * 60 },
   );
-
-  // A dry-run counts as fine: it did what it was asked to do.
-  if (audit.order_creation?.ok) return;
-
-  const firstSeen = Date.parse(audit.first_detected_at || audit.processed_at || '');
-  if (!firstSeen || Date.now() - firstSeen < SALE_STUCK_ALERT_MS) return;
-
-  // One email per order, ever — the retry loop runs every 15 min and we are
-  // not going to mail them every 15 min.
-  const alertKey = `alert-sent:${orderId}`;
-  if (await env.SYNC_STATE.get(alertKey)) return;
-
-  const items = (audit.items || [])
-    .map((i: any) => `${i.sku || '(no SKU)'} — ${i.release_title || ''}`)
-    .join('<br>') || '(no items resolved)';
-  const mins = Math.round((Date.now() - firstSeen) / 60000);
-
-  const sent = await sendOpsAlert(
-    env,
-    `Discogs sale ${orderId} has not reached Shopify`,
-    [
-      `<strong>Discogs order ${orderId}</strong> was detected as a firm sale but has not become a Shopify order.`,
-      `Stuck for <strong>${mins} min</strong> across <strong>${audit.attempts || 1}</strong> attempt(s).`,
-      `<strong>Items</strong><br>${items}`,
-      `<strong>Last error</strong><br>${audit.order_creation?.error || 'unknown'}`,
-      audit.order_creation?.will_retry === false
-        ? `This will NOT retry on its own — it needs a look.`
-        : `It keeps retrying every 15 min, so it may still resolve by itself.`,
-      `Full status: <code>?action=sync-pending</code>`,
-    ],
-  );
-  if (sent) {
-    await env.SYNC_STATE.put(alertKey, '1', { expirationTtl: 30 * 24 * 60 * 60 });
-  }
 }
 
 /**
- * The whole poll failed (typically getOrders rate-limited). Count consecutive
- * failures and alert once the streak looks like an outage rather than a blip.
- * This alarm is separate from the per-order one for a reason: if the poll dies
- * before listing orders, we never see the sales, so the per-order alarm can
- * never fire.
+ * The whole poll failed (typically getOrders refused). Count consecutive
+ * failures; ?action=sync-pending reports the streak so "is the sync healthy?"
+ * is answerable without reading logs.
  */
-async function notePollFailure(env: SyncEnv, error: string): Promise<void> {
+async function notePollFailure(env: SyncEnv): Promise<void> {
   const streak = Number(await env.SYNC_STATE.get('meta:poll_fail_streak') || '0') + 1;
   await env.SYNC_STATE.put('meta:poll_fail_streak', String(streak));
-  if (streak < POLL_FAIL_ALERT_STREAK) return;
-
-  const lastAlert = Number(await env.SYNC_STATE.get('meta:poll_alert_last') || '0');
-  if (Date.now() - lastAlert < POLL_ALERT_COOLDOWN_MS) return;
-
-  const rateLimited = /429/.test(error);
-  const sent = await sendOpsAlert(
-    env,
-    'Discogs sync is down — no sale can reach Shopify',
-    [
-      `The Discogs poll has failed <strong>${streak} times in a row</strong>.`,
-      `While this lasts, <strong>no Discogs sale can become a Shopify order</strong>. Nothing is lost — every order is retried every 15 min — but nothing is syncing either.`,
-      `<strong>Error</strong><br><code>${error}</code>`,
-      rateLimited
-        ? `A 429 means Discogs is refusing us for exceeding its 60 requests/minute budget. The poll itself only makes a handful of calls per run, so if this persists, something ELSE is spending that budget on the same Discogs account. The <code>discogs_429</code> line in the Worker logs shows the live counter.`
-        : ``,
-      `Full status: <code>?action=sync-status</code>`,
-    ].filter(Boolean),
-  );
-  if (sent) await env.SYNC_STATE.put('meta:poll_alert_last', String(Date.now()));
 }
 
 /**
@@ -396,9 +292,6 @@ export interface SyncEnv {
   DISCOGS_TOKEN: string;
   BOOTSTRAP_AUTH_SECRET: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
-  // Optional on purpose: without it the alerts below are skipped rather than
-  // throwing. A missing alert must never break the sync it is watching.
-  RESEND_API_KEY?: string;
 }
 
 /** Combined Env type for handlers that need both sync + Shopify admin access. */
@@ -1043,8 +936,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     errors.push(msg);
     result.ok = false;
     result.errors = errors;
-    // The poll died before it could see any order — raise the outage alarm.
-    await notePollFailure(env, msg);
+    // The poll died before it could see any order.
+    await notePollFailure(env);
     return result;
   }
 
