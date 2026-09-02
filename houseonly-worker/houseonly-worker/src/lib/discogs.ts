@@ -184,6 +184,38 @@ async function discogsFetch(
   const r = await fetch(url, { ...init, headers });
 
   // Rate limited: wait and retry once
+  if (r.status === 429) {
+    // ── 429 FORENSICS (2026-09-02) ────────────────────────────────
+    // We were 429ing on every cron while making ~3 calls per 15 min — about
+    // 0.2/min against a documented 60/min authenticated budget. That mismatch
+    // is the whole question, and it lives in these headers:
+    //
+    //   x-discogs-ratelimit           the ceiling being applied to US.
+    //                                 60 = our token is recognised and its
+    //                                 budget really is exhausted (something
+    //                                 else is spending it).
+    //                                 25 = Discogs is treating us as ANONYMOUS
+    //                                 and counting per source IP — i.e. the
+    //                                 token isn't landing, and we're sharing a
+    //                                 bucket with every other Worker on the
+    //                                 same Cloudflare egress IP.
+    //   x-discogs-ratelimit-used      how much of it is spent.
+    //
+    // token_len distinguishes "secret missing/empty" from "secret present but
+    // rejected". NEVER log the token itself.
+    console.warn(JSON.stringify({
+      tag: 'discogs_429',
+      path: path.split('?')[0],
+      is_retry: Boolean(init?._retry),
+      limit: r.headers.get('x-discogs-ratelimit'),
+      used: r.headers.get('x-discogs-ratelimit-used'),
+      remaining: r.headers.get('x-discogs-ratelimit-remaining'),
+      retry_after: r.headers.get('retry-after'),
+      token_present: Boolean(token),
+      token_len: (token || '').length,
+    }));
+  }
+
   if (r.status === 429 && !init?._retry) {
     const retryAfter = parseInt(r.headers.get('retry-after') || '60', 10);
     await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
