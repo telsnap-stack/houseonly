@@ -307,6 +307,59 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		});
 	});
 
+	// #1037 was invoiced at $36.00 USD (= EUR 31.06) when the buyer had paid
+	// EUR 34.99 and the variant lists at EUR 29.99. A shippingAddress makes
+	// Shopify pick a Market and price the draft in ITS currency, so the invoice
+	// must carry the Discogs figure explicitly.
+	describe("invoices the price Discogs charged", () => {
+		const pricedOrder = {
+			...firmOrder,
+			items: [{
+				id: LISTING_ID,
+				release: { description: "Some Record" },
+				price: { currency: "EUR", value: 34.99 },
+			}],
+		};
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1038",
+			} as any);
+		});
+
+		it("passes the Discogs price and currency on the line", async () => {
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([pricedOrder]) as any);
+			await pollDiscogsForSales(env as any);
+
+			const lines = vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2];
+			expect(lines[0].price).toEqual({ amount: "34.99", currencyCode: "EUR" });
+		});
+
+		it("keeps the price through a parked retry", async () => {
+			// First pass resolves the line but cannot finish the sale.
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([pricedOrder]) as any);
+			vi.mocked(discogs.getOrder).mockRejectedValueOnce(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			await pollDiscogsForSales(env as any);
+
+			// Recovered off the stored audit — the price must survive the trip.
+			const lines = vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2];
+			expect(lines[0].price).toEqual({ amount: "34.99", currencyCode: "EUR" });
+		});
+
+		it("falls back to the catalog price when Discogs sent none", async () => {
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			await pollDiscogsForSales(env as any);
+			const lines = vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2];
+			expect(lines[0].price).toBeUndefined();
+		});
+	});
+
 	// A parked sale must not be starved by the order LIST being refused. On
 	// 2026-09-02 every run died on getOrders while 147628-C-22 sat one call from
 	// done, its variants already resolved.

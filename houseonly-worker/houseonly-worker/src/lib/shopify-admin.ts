@@ -529,6 +529,10 @@ export interface DiscogsBuyer {
 export interface DiscogsOrderLine {
   variantId: string;   // gid://shopify/ProductVariant/...
   quantity: number;
+  // What Discogs actually charged for this record, straight off the order item.
+  // Absent only for sales recorded before we started carrying it, which fall
+  // back to the Shopify catalog price.
+  price?: { amount: string; currencyCode: string };
 }
 
 export interface CreateDiscogsOrderResult {
@@ -610,8 +614,35 @@ export async function createDiscogsOrder(
   }
   if (buyer.phone) shippingAddress.phone = buyer.phone;
 
+  // Invoice the price DISCOGS CHARGED, not whatever Shopify would price it at.
+  //
+  // Order #1037 (Discogs 147628-C-22, 2026-09-02) was invoiced at $36.00 USD =
+  // €31.06. The buyer had paid €34.99, and the variant is listed at €29.99 —
+  // three different numbers, none of them right. Passing a shippingAddress makes
+  // Shopify assign a Market from the destination (Denmark), price the draft in
+  // THAT market's currency, and convert back to shop currency. The catalog price
+  // was never involved.
+  //
+  // Two fields fix it, and both are needed:
+  //   presentmentCurrencyCode — pins the draft's currency so no market decides it
+  //   priceOverride           — "used in place of the product variant's catalog
+  //                             price"; unlike originalUnitPriceWithCurrency it
+  //                             is honoured alongside variantId
+  // Shopify requires every line's presentment currency to match the draft's, so
+  // both come from the same Discogs figure.
+  //
+  // Shipping is deliberately NOT modelled: it is a shipping cost, not part of
+  // the record's invoice line.
+  const priced = lines.filter(l => l.price);
+  const currencyCode = priced[0]?.price?.currencyCode || 'EUR';
+
   const draftInput: any = {
-    lineItems: lines.map(l => ({ variantId: l.variantId, quantity: l.quantity })),
+    lineItems: lines.map(l => ({
+      variantId: l.variantId,
+      quantity: l.quantity,
+      ...(l.price ? { priceOverride: { amount: l.price.amount, currencyCode } } : {}),
+    })),
+    presentmentCurrencyCode: currencyCode,
     taxExempt: true,                       // NO VAT
     shippingAddress,
     tags: ['source:discogs'],
