@@ -168,10 +168,22 @@ export interface DiscogsApiError {
 
 // ── INTERNAL FETCH HELPER ───────────────────────────────────────────
 
+// A 429 is not a dead end: Discogs' budget is a rolling 60-second window, and
+// we measured it fluctuating (used 76, then 63 a minute later) while an
+// external consumer saturated the account. Retrying ONCE was a coin flip — two
+// shots every 15 minutes, then give up, which is why sales sat unsynced for
+// hours. Keep trying across a couple of windows instead; a cron has ~15 min of
+// wall clock and we are spending it on the one call that matters.
+const DISCOGS_429_MAX_ATTEMPTS = 6;
+// Shorter than the 60s window on purpose: the window slides, so probing every
+// 20s catches the moment usage dips under the limit instead of waiting out a
+// whole window each time.
+const DISCOGS_429_BACKOFF_MS = 20_000;
+
 async function discogsFetch(
   token: string,
   path: string,
-  init?: RequestInit & { _retry?: boolean },
+  init?: RequestInit & { _attempt?: number },
 ): Promise<Response> {
   const url = path.startsWith('http') ? path : `${DISCOGS_BASE}${path}`;
   const headers: Record<string, string> = {
@@ -184,6 +196,8 @@ async function discogsFetch(
   const r = await fetch(url, { ...init, headers });
 
   // Rate limited: wait and retry once
+  const attempt = init?._attempt ?? 0;
+
   if (r.status === 429) {
     // ── 429 FORENSICS (2026-09-02) ────────────────────────────────
     // We were 429ing on every cron while making ~3 calls per 15 min — about
@@ -206,7 +220,8 @@ async function discogsFetch(
     console.warn(JSON.stringify({
       tag: 'discogs_429',
       path: path.split('?')[0],
-      is_retry: Boolean(init?._retry),
+      attempt: attempt + 1,
+      of: DISCOGS_429_MAX_ATTEMPTS,
       limit: r.headers.get('x-discogs-ratelimit'),
       used: r.headers.get('x-discogs-ratelimit-used'),
       remaining: r.headers.get('x-discogs-ratelimit-remaining'),
@@ -216,10 +231,15 @@ async function discogsFetch(
     }));
   }
 
-  if (r.status === 429 && !init?._retry) {
-    const retryAfter = parseInt(r.headers.get('retry-after') || '60', 10);
-    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-    return discogsFetch(token, path, { ...init, _retry: true });
+  if (r.status === 429 && attempt + 1 < DISCOGS_429_MAX_ATTEMPTS) {
+    // Honour Retry-After when Discogs sends one; it has been null in practice,
+    // so fall back to probing the sliding window.
+    const retryAfter = parseInt(r.headers.get('retry-after') || '', 10);
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : DISCOGS_429_BACKOFF_MS;
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    return discogsFetch(token, path, { ...init, _attempt: attempt + 1 });
   }
 
   return r;
