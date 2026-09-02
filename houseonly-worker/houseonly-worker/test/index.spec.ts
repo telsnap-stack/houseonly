@@ -192,8 +192,10 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const res = await pollDiscogsForSales(env as any);
 
 		expect(res.firm_sales_found).toBe(1);
+		// Dry mode creates nothing, so it takes only the short in-flight claim —
+		// it must NOT lock the order out of the eventual live run.
 		const lock = await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`);
-		expect(lock).toBe("1");
+		expect(lock).toBe("in-flight");
 		const auditRaw = await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`);
 		expect(auditRaw).not.toBeNull();
 		const audit = JSON.parse(auditRaw!);
@@ -254,6 +256,103 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const res = await pollDiscogsForSales(env as any);
 		expect(res.unmapped_listings).toBe(1);
 		expect(res.shopify_adjustments_succeeded).toBe(0);
+	});
+
+	// ── 147628-C-22 regression: transient failure must not pin the order ──
+	//
+	// A Discogs 429 on getOrder made order creation fail AFTER the durable
+	// 60-day lock had already been taken, so every later poll counted the sale
+	// as `skipped_duplicate`. The order never reached Shopify and nothing
+	// alerted — the sale was silently lost. The lock is now taken in two
+	// stages: a short in-flight claim while resolving, promoted to the durable
+	// lock only immediately before an order can be created.
+	describe("lock staging (transient failure recovery)", () => {
+		/** Seconds until the order lock expires, read off the KV listing. */
+		async function lockTtlSeconds() {
+			const { keys } = await env.SYNC_STATE.list({
+				prefix: `lock:order:${ORDER_ID}`,
+			});
+			expect(keys).toHaveLength(1);
+			return keys[0].expiration! - Math.floor(Date.now() / 1000);
+		}
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true,
+				orderId: "gid://shopify/Order/1",
+				orderName: "#1001",
+			} as any);
+			vi.mocked(discogs.getOrders).mockResolvedValue(
+				ordersPage([firmOrder]) as any,
+			);
+		});
+
+		it("keeps the lock SHORT-lived when getOrder fails (429)", async () => {
+			vi.mocked(discogs.getOrder).mockRejectedValue(
+				new Error('Discogs getOrder failed: 429 {"message":"You are making requests too quickly."}'),
+			);
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.shopify_adjustments_failed).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			// The bug: this used to be the 60-day durable TTL.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			expect(await lockTtlSeconds()).toBeLessThanOrEqual(10 * 60);
+			// And the audit says so, rather than looking like a dead end.
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.will_retry).toBe(true);
+		});
+
+		it("recovers the sale on the next poll after a 429", async () => {
+			vi.mocked(discogs.getOrder).mockRejectedValueOnce(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+
+			// The in-flight claim expires before the next cron (10 min < 15 min).
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.skipped_duplicate).toBe(0);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.ok).toBe(true);
+		});
+
+		it("promotes to the durable lock once an order is created", async () => {
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+			// Must outlive the 10-day fetch window, or the next poll inside the
+			// window creates a second paid order — a duplicate factura.
+			expect(await lockTtlSeconds()).toBeGreaterThan(10 * 24 * 60 * 60);
+		});
+
+		it("holds the durable lock even when order creation fails", async () => {
+			// createDiscogsOrder may have completed the draft before the error
+			// surfaced, so the order can be real. Never retry past this point.
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: false,
+				error: "draftOrderComplete userErrors",
+			} as any);
+			await pollDiscogsForSales(env as any);
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+			expect(await lockTtlSeconds()).toBeGreaterThan(10 * 24 * 60 * 60);
+		});
+
+		it("a dry-mode rehearsal does not lock the order out of the live run", async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "dry");
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			expect(await lockTtlSeconds()).toBeLessThanOrEqual(10 * 60);
+
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	it("does not re-process (no duplicate) once locked", async () => {

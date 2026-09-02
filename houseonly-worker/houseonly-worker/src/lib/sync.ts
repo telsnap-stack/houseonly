@@ -117,11 +117,28 @@ function formatInOffset(epochMs: number, offset: string): string {
 // Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
 // real volume; prevents a runaway loop if pagination ever misbehaves.
 const MAX_POLL_PAGES = 20;
-// lock:order:{id} TTL. MUST exceed the lookback window: a firm order we already
-// turned into a paid Shopify order stays inside the fetch window for
-// POLL_LOOKBACK_DAYS, and the lock is the ONLY thing stopping us from creating
-// a second one (a duplicate factura). 60d >> 10d leaves a wide safety margin.
+// lock:order:{id} DURABLE TTL. Taken only once we are about to create a paid
+// Shopify order. MUST exceed the lookback window: an order we already turned
+// into a Shopify order stays inside the fetch window for POLL_LOOKBACK_DAYS,
+// and the lock is the ONLY thing stopping us from creating a second one (a
+// duplicate factura). 60d >> 10d leaves a wide safety margin.
 const ORDER_LOCK_TTL_SECONDS = 60 * 24 * 60 * 60;
+// lock:order:{id} IN-FLIGHT TTL, held while we merely RESOLVE an order (all
+// read-only lookups: Discogs getListing/getOrder, Shopify findVariantBySku).
+// It deliberately EXPIRES so a transient failure — or an isolate that dies
+// mid-run — leaves the order free for the next poll to retry.
+//
+// This is the fix for the 147628-C-22 incident (2026-09-02): a Discogs 429 on
+// getOrder made order creation fail, but the durable 60d lock had already been
+// taken, so every later poll counted the order as `skipped_duplicate` and the
+// sale was silently lost — no Shopify order, no factura, no alert.
+//
+// Must be LONGER than one poll run (a 429 costs a 60s retry sleep) and SHORTER
+// than the cron interval (15 min), so the very next run may retry.
+const ORDER_LOCK_INFLIGHT_TTL_SECONDS = 10 * 60;
+// Marker values for the two stages, so KV/audit forensics can tell them apart.
+const ORDER_LOCK_INFLIGHT = 'in-flight';
+const ORDER_LOCK_COMMITTED = '1';
 
 // ── ENV ─────────────────────────────────────────────────────────────
 
@@ -642,11 +659,17 @@ export async function getListingMapping(
 //   duplicate facturas for sales already handled manually.
 //
 // Idempotency (fiscal safety — a duplicate order is a duplicate factura):
-//   lock:order:{order_id}, TTL ORDER_LOCK_TTL_SECONDS — set BEFORE order
-//   creation is attempted and kept on every outcome. Its TTL MUST exceed the
-//   lookback window: a firm order we already turned into a Shopify order stays
-//   inside the window for POLL_LOOKBACK_DAYS, and the lock is the only thing
-//   stopping a second creation. 60d >> 10d.
+//   lock:order:{order_id}, taken in TWO stages so that "don't duplicate" does
+//   not silently become "don't retry":
+//     1. in-flight (ORDER_LOCK_INFLIGHT_TTL_SECONDS, ~10 min) while we resolve
+//        the order through read-only lookups. Expires by design, so a 429, a
+//        network blip or a dead isolate leaves the order retryable next poll.
+//     2. committed (ORDER_LOCK_TTL_SECONDS, 60d) promoted immediately BEFORE
+//        createDiscogsOrder. Its TTL MUST exceed the lookback window: an order
+//        we already created stays inside the window for POLL_LOOKBACK_DAYS and
+//        this lock is the only thing stopping a second creation. 60d >> 10d.
+//   Dry mode never reaches stage 2 — it creates nothing, so it must not lock
+//   the order out of the eventual live run.
 //
 // Audit:
 //   sales-detected:{order_id} JSON entry kept 30 days — for forensics.
@@ -781,11 +804,19 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
-    // Set lock IMMEDIATELY and keep it on every outcome. This is the single
-    // guard against creating a duplicate paid Shopify order (a duplicate
-    // factura): its TTL must outlive the fetch window so an order we've already
-    // handled is never re-created while it's still inside the window.
-    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
+    // ── LOCK STAGE 1: in-flight ─────────────────────────────────
+    // Claim the order for THIS run only. Everything between here and the
+    // creation call below is read-only (Discogs + Shopify lookups), so if any
+    // of it fails we want the next poll to try again — hence a TTL that
+    // expires rather than the durable one. Taking the durable lock here is
+    // what silently lost order 147628-C-22 to a transient Discogs 429.
+    //
+    // Fail-safe direction: if the isolate dies anywhere below, the worst case
+    // is a short wait for this marker to expire, never a duplicate factura —
+    // the durable lock is taken before anything can create an order.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_INFLIGHT, {
+      expirationTtl: ORDER_LOCK_INFLIGHT_TTL_SECONDS,
+    });
 
     // Build the audit record for this order.
     const audit: any = {
@@ -882,6 +913,10 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       audit.order_creation = {
         ok: false,
         needs_manual: true,
+        // The in-flight lock expires, so every later poll retries this order.
+        // That is deliberate: once the missing listing:{id} mapping is fixed
+        // (by hand or by the self-heal above), the sale recovers on its own.
+        will_retry: true,
         error: 'order has unmapped item(s); skipped to avoid partial factura',
       };
       result.shopify_adjustments_failed++;
@@ -893,9 +928,16 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
-    // If nothing resolved, record and move on (lock stays set so we don't spin).
+    // If nothing resolved, record and move on. The in-flight lock expires, so
+    // later polls retry — a listing that resolves once its mapping is fixed
+    // still turns into an order without manual intervention.
     if (resolvedLines.length === 0) {
-      audit.order_creation = { ok: false, error: 'no resolvable line items' };
+      audit.order_creation = {
+        ok: false,
+        needs_manual: true,
+        will_retry: true,
+        error: 'no resolvable line items',
+      };
       await env.SYNC_STATE.put(
         `sales-detected:${orderIdStr}`,
         JSON.stringify(audit),
@@ -921,7 +963,14 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         phone: parsed.phone,
       };
     } catch (e: any) {
-      audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
+      // Transient by nature (Discogs 429 / network). The in-flight lock
+      // expires, so the next poll retries instead of losing the sale — this is
+      // exactly what happened to 147628-C-22 under the old durable lock.
+      audit.order_creation = {
+        ok: false,
+        will_retry: true,
+        error: `getOrder failed: ${e?.message || e}`,
+      };
       result.shopify_adjustments_failed++;
       await env.SYNC_STATE.put(
         `sales-detected:${orderIdStr}`,
@@ -934,6 +983,9 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     result.shopify_adjustments_attempted++;
 
     if (mode === 'dry') {
+      // No durable lock in dry mode: nothing was created, so the order must
+      // stay eligible for the real run. (Committing here used to mean a spell
+      // in dry mode permanently locked out every order it rehearsed.)
       audit.order_creation = {
         ok: true,
         dry_run: true,
@@ -949,6 +1001,16 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       );
       continue;
     }
+
+    // ── LOCK STAGE 2: commit ────────────────────────────────────
+    // From here on a paid Shopify order may exist, so the lock must outlive
+    // the fetch window. Promote BEFORE the call, never after: if
+    // createDiscogsOrder completes the draft but we lose the response (timeout,
+    // isolate eviction), the order is real and this lock is the only thing
+    // stopping the next poll from creating a second factura for it.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_COMMITTED, {
+      expirationTtl: ORDER_LOCK_TTL_SECONDS,
+    });
 
     // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
     const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
