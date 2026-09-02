@@ -267,6 +267,127 @@ async function notePollFailure(env: SyncEnv, error: string): Promise<void> {
   if (sent) await env.SYNC_STATE.put('meta:poll_alert_last', String(Date.now()));
 }
 
+/**
+ * Retry sales we ALREADY know about, before (and independently of) the window
+ * scan.
+ *
+ * Why this is separate: the scan opens with getOrders, and when that call is
+ * refused the whole poll returns early — so a sale sitting in sales-detected
+ * never gets an attempt, even though it needs only ONE call (getOrder, for the
+ * buyer address) and its line items are already resolved to Shopify variants.
+ * On 2026-09-02 that starved order 147628-C-22 for hours: every run died on the
+ * order LIST while the sale itself was one successful call from done.
+ *
+ * Line items come from the stored audit, so this pass makes no Shopify lookups
+ * and no getListing calls — the cheapest possible path to finishing the sale.
+ */
+async function retryParkedSales(
+  env: SyncAdminEnv,
+  mode: SyncMode,
+  result: PollResult,
+): Promise<void> {
+  const { keys } = await env.SYNC_STATE.list({ prefix: 'sales-detected:' });
+
+  for (const k of keys) {
+    const raw = await env.SYNC_STATE.get(k.name);
+    if (!raw) continue;
+    let audit: any;
+    try { audit = JSON.parse(raw); } catch { continue; }
+
+    if (audit.order_creation?.ok) continue;                    // already synced
+    if (audit.order_creation?.will_retry === false) continue;  // deliberate dead end
+
+    const orderIdStr = String(audit.order_id || '').trim();
+    if (!orderIdStr) continue;
+
+    // Never step on an order the window scan has already committed to.
+    const lockKey = `lock:order:${orderIdStr}`;
+    if (await env.SYNC_STATE.get(lockKey) === ORDER_LOCK_COMMITTED) continue;
+
+    // Only sales whose items are ALREADY resolved; anything else needs the full
+    // resolution path and belongs to the window scan.
+    const items = (audit.items || []) as any[];
+    if (items.length === 0) continue;
+    if (!items.every((i) => i.shopify_variant_id)) continue;
+    const resolvedLines: DiscogsOrderLine[] = items.map((i) => ({
+      variantId: i.shopify_variant_id as string,
+      quantity: i.quantity || 1,
+    }));
+
+    result.parked_retried++;
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_INFLIGHT, {
+      expirationTtl: ORDER_LOCK_INFLIGHT_TTL_SECONDS,
+    });
+
+    audit.processed_at = new Date().toISOString();
+    audit.attempts = (audit.attempts || 0) + 1;
+    audit.retry_pass = 'parked';
+
+    let buyer: DiscogsBuyer;
+    try {
+      const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+      const parsed = parseDiscogsShippingAddress(full.shipping_address);
+      buyer = {
+        name: parsed.name,
+        email: full.buyer?.email,
+        address1: parsed.address1,
+        address2: parsed.address2,
+        city: parsed.city,
+        province: parsed.province,
+        zip: parsed.zip,
+        country: parsed.country,
+        phone: parsed.phone,
+      };
+    } catch (e: any) {
+      audit.order_creation = {
+        ok: false,
+        will_retry: true,
+        error: `getOrder failed: ${e?.message || e}`,
+      };
+      await recordOrderAttempt(env, orderIdStr, audit);
+      continue;
+    }
+
+    if (mode === 'dry') {
+      audit.order_creation = {
+        ok: true,
+        dry_run: true,
+        would_create_lines: resolvedLines.length,
+        buyer_name: buyer.name,
+      };
+      await recordOrderAttempt(env, orderIdStr, audit);
+      continue;
+    }
+
+    // Same two-stage lock discipline as the main path: promote BEFORE the call
+    // that can create a factura.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_COMMITTED, {
+      expirationTtl: ORDER_LOCK_TTL_SECONDS,
+    });
+
+    const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+    if (orderResult.ok) {
+      audit.order_creation = {
+        ok: true,
+        shopify_order_id: orderResult.orderId,
+        shopify_order_name: orderResult.orderName,
+        draft_order_id: orderResult.draftOrderId,
+        lines: resolvedLines.length,
+        recovered_by: 'parked-retry',
+      };
+      result.parked_recovered++;
+    } else {
+      audit.order_creation = {
+        ok: false,
+        error: orderResult.error,
+        userErrors: orderResult.userErrors,
+        draft_order_id: orderResult.draftOrderId,
+      };
+    }
+    await recordOrderAttempt(env, orderIdStr, audit);
+  }
+}
+
 // ── ENV ─────────────────────────────────────────────────────────────
 
 /** Subset of Env that sync handlers need. */
@@ -817,6 +938,8 @@ interface PollResult {
   shopify_adjustments_failed: number;
   unmapped_listings: number;
   variant_not_found: number;
+  parked_retried: number;
+  parked_recovered: number;
   new_cursor: string | null;
   errors?: string[];
 }
@@ -861,8 +984,19 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     shopify_adjustments_failed: 0,
     unmapped_listings: 0,
     variant_not_found: 0,
+    parked_retried: 0,
+    parked_recovered: 0,
     new_cursor: null,
   };
+
+  // ── 0. Finish what we already started ───────────────────────────
+  // Runs BEFORE the window scan so a refused getOrders cannot starve a sale
+  // that is one call from done. Never allowed to break the scan behind it.
+  try {
+    await retryParkedSales(env, mode, result);
+  } catch (e: any) {
+    errors.push(`retryParkedSales failed: ${e?.message || e}`);
+  }
 
   // ── 1. Fetch every order created within the lookback window ─────
   // NOT a high-water cursor: an order first seen while still pre-firm must be

@@ -264,8 +264,9 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
 
 			const res = await pollDiscogsForSales(env as any);
-			expect(res.skipped_duplicate).toBe(0);
-			expect(res.shopify_adjustments_succeeded).toBe(1);
+			// Either route may claim it — the parked pass now runs first and
+			// usually wins — but the sale must be created exactly ONCE.
+			expect(res.parked_recovered + res.shopify_adjustments_succeeded).toBe(1);
 			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
 			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
 			expect(audit.order_creation.ok).toBe(true);
@@ -397,6 +398,79 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([]) as any);
 			await pollDiscogsForSales(env as any);
 			expect(await env.SYNC_STATE.get("meta:poll_fail_streak")).toBe("0");
+		});
+	});
+
+	// A parked sale must not be starved by the order LIST being refused. On
+	// 2026-09-02 every run died on getOrders while 147628-C-22 sat one call from
+	// done, its variants already resolved.
+	describe("parked sale retry (independent of the window scan)", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				status: "Payment Received",
+				created: firmOrder.created,
+				first_detected_at: new Date().toISOString(),
+				attempts: 1,
+				items: [{
+					listing_id: LISTING_ID,
+					sku: "SKU1",
+					shopify_variant_id: "gid://shopify/ProductVariant/1",
+					quantity: 1,
+					outcome: "resolved",
+				}],
+				order_creation: { ok: false, will_retry: true, error: "getOrder failed: 429" },
+			}));
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1037",
+			} as any);
+		});
+
+		it("recovers the sale even when getOrders is refused", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429 too quickly"));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.ok).toBe(false);            // the scan still failed...
+			expect(res.parked_recovered).toBe(1);  // ...but the sale went through
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.ok).toBe(true);
+			expect(audit.order_creation.recovered_by).toBe("parked-retry");
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+		});
+
+		it("uses the stored variants — no Shopify or listing lookups", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.findVariantBySku).not.toHaveBeenCalled();
+			expect(discogs.getListing).not.toHaveBeenCalled();
+		});
+
+		it("leaves it parked when getOrder is still refused", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			vi.mocked(discogs.getOrder).mockRejectedValue(new Error("429 too quickly"));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.parked_recovered).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			// Retryable, and NOT holding the durable lock.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.will_retry).toBe(true);
+			expect(audit.attempts).toBe(2);
+		});
+
+		it("never touches a sale that already became a Shopify order", async () => {
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				items: [{ shopify_variant_id: "gid://shopify/ProductVariant/1" }],
+				order_creation: { ok: true, shopify_order_name: "#1000" },
+			}));
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.parked_retried).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
 		});
 	});
 
