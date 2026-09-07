@@ -145,12 +145,24 @@ const ORDER_LOCK_COMMITTED = '1';
  * by the caller so ?action=sync-pending can show how long a sale has been
  * stuck and how many times it has been tried.
  */
-async function recordOrderAttempt(env: SyncEnv, orderId: string, audit: any): Promise<void> {
+async function recordOrderAttempt(
+  env: SyncEnv,
+  orderId: string,
+  audit: any,
+  result?: PollResult,
+): Promise<void> {
   await env.SYNC_STATE.put(
     `sales-detected:${orderId}`,
     JSON.stringify(audit),
     { expirationTtl: 30 * 24 * 60 * 60 },
   );
+  if (result && !audit.order_creation?.ok) {
+    (result.failures ||= []).push({
+      order_id: orderId,
+      attempts: audit.attempts || 1,
+      error: String(audit.order_creation?.error || 'unknown').slice(0, 300),
+    });
+  }
 }
 
 /**
@@ -240,7 +252,7 @@ async function retryParkedSales(
         will_retry: true,
         error: `getOrder failed: ${e?.message || e}`,
       };
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -251,7 +263,7 @@ async function retryParkedSales(
         would_create_lines: resolvedLines.length,
         buyer_name: buyer.name,
       };
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -280,7 +292,7 @@ async function retryParkedSales(
         draft_order_id: orderResult.draftOrderId,
       };
     }
-    await recordOrderAttempt(env, orderIdStr, audit);
+    await recordOrderAttempt(env, orderIdStr, audit, result);
   }
 }
 
@@ -835,6 +847,11 @@ interface PollResult {
   parked_recovered: number;
   new_cursor: string | null;
   errors?: string[];
+  // Why each unsynced sale is unsynced. Without this the run reported
+  // ok:true / failed:2 and NOTHING said what "failed" meant — the sync looked
+  // healthy for four days while two sales sat stuck (2026-09-03 → 09-07).
+  // sync-status stores this whole object, so the reason is one URL away.
+  failures?: Array<{ order_id: string; attempts: number; error: string }>;
 }
 
 /**
@@ -1096,7 +1113,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         error: 'order has unmapped item(s); skipped to avoid partial factura',
       };
       result.shopify_adjustments_failed++;
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -1104,13 +1121,20 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     // later polls retry — a listing that resolves once its mapping is fixed
     // still turns into an order without manual intervention.
     if (resolvedLines.length === 0) {
+      // Say WHY nothing resolved. "no resolvable line items" on its own sent us
+      // hunting for a data problem when the cause was dead Shopify credentials.
+      const firstErr = (audit.items || [])
+        .map((i: any) => i.error)
+        .find((e: any) => e);
       audit.order_creation = {
         ok: false,
         needs_manual: true,
         will_retry: true,
-        error: 'no resolvable line items',
+        error: firstErr
+          ? `no resolvable line items: ${String(firstErr).slice(0, 300)}`
+          : 'no resolvable line items',
       };
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -1140,7 +1164,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         error: `getOrder failed: ${e?.message || e}`,
       };
       result.shopify_adjustments_failed++;
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -1158,7 +1182,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         buyer_country: buyer.country,
       };
       result.shopify_adjustments_succeeded++;
-      await recordOrderAttempt(env, orderIdStr, audit);
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -1194,7 +1218,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     }
 
     // Save audit trail (30 day TTL)
-    await recordOrderAttempt(env, orderIdStr, audit);
+    await recordOrderAttempt(env, orderIdStr, audit, result);
   }
 
   // The poll completed, so whatever was breaking it has passed. Clear the

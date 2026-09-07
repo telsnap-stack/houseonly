@@ -60,7 +60,21 @@ async function fetchFreshAdminToken(env: ShopifyAdminEnv): Promise<string> {
   });
   if (!r.ok) {
     const text = await r.text();
-    throw new Error(`Shopify token endpoint returned ${r.status}: ${text}`);
+    // Shopify answers this endpoint with a full HTML error PAGE, not JSON. Left
+    // raw it buried ~8KB of markup in every audit record and log line, which is
+    // how a dead app went unnoticed for four days (2026-09-03 → 09-07): the real
+    // message, "Oauth error application_cannot_be_found", was invisible in the
+    // noise. Pull out the sentence that matters and throw that.
+    const plain = text
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const oauth = plain.match(/Oauth error [^.]*/i);
+    const detail = (oauth ? oauth[0] : plain).slice(0, 200);
+    // Name the cause plainly: these credentials are the Custom App's, and when
+    // they stop working EVERY Shopify call fails, so callers surface it as a
+    // credentials problem rather than as whatever they happened to be doing.
+    throw new Error(`Shopify admin credentials rejected (${r.status}): ${detail}`);
   }
   const data: any = await r.json();
   const token = data?.access_token;

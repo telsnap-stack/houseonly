@@ -344,6 +344,37 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		});
 	});
 
+	// The 2026-09-03 → 09-07 outage: dead Shopify app credentials stalled two
+	// sales for four days while the run reported ok:true. "failed: 2" with no
+	// reason anywhere is why it went unnoticed.
+	describe("failures say why", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+		});
+
+		it("names the underlying cause, not just 'no resolvable line items'", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySku).mockRejectedValue(
+				new Error("Shopify admin credentials rejected (400): Oauth error application_cannot_be_found"),
+			);
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.failures).toHaveLength(1);
+			expect(res.failures![0].order_id).toBe(ORDER_ID);
+			expect(res.failures![0].error).toContain("application_cannot_be_found");
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.error).toContain("application_cannot_be_found");
+		});
+
+		it("reports no failures when the sale syncs", async () => {
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1041",
+			} as any);
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.failures).toBeUndefined();
+		});
+	});
+
 	// A parked sale must not be starved by the order LIST being refused. On
 	// 2026-09-02 every run died on getOrders while 147628-C-22 sat one call from
 	// done, its variants already resolved.
