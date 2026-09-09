@@ -14,7 +14,7 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, findVariantBySku: vi.fn(), createDiscogsOrder: vi.fn() };
+	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn() };
 });
 
 
@@ -63,7 +63,7 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			`listing:${LISTING_ID}`,
 			JSON.stringify({ sku: "SKU1", status: "Draft" }),
 		);
-		vi.mocked(shopifyAdmin.findVariantBySku).mockResolvedValue({
+		vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
 			variantId: "gid://shopify/ProductVariant/1",
 		} as any);
 		vi.mocked(discogs.getOrder).mockResolvedValue({
@@ -354,7 +354,7 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		});
 
 		it("names the underlying cause, not just 'no resolvable line items'", async () => {
-			vi.mocked(shopifyAdmin.findVariantBySku).mockRejectedValue(
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockRejectedValue(
 				new Error("Shopify admin credentials rejected (400): Oauth error application_cannot_be_found"),
 			);
 			const res = await pollDiscogsForSales(env as any);
@@ -372,6 +372,46 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			} as any);
 			const res = await pollDiscogsForSales(env as any);
 			expect(res.failures).toBeUndefined();
+		});
+	});
+
+	// Two sales stalled in two days on separators Discogs uses and Shopify does
+	// not: "[QR]V.205.DTON.26" vs QRV205DTON26, "TEMPA 131" vs TEMPA131.
+	describe("normalized SKU fallback", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1044",
+			} as any);
+			// The cached mapping holds the raw Discogs catno, as the self-heal left it.
+			await env.SYNC_STATE.put(`listing:${LISTING_ID}`,
+				JSON.stringify({ sku: "TEMPA 131", status: "Sold" }));
+			// Shopify resolves it only once the separator is gone.
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
+				variantId: "gid://shopify/ProductVariant/1",
+				sku: "TEMPA131",
+			} as any);
+		});
+
+		it("syncs the sale despite the separator mismatch", async () => {
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.variant_not_found).toBe(0);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+		});
+
+		it("writes the real SKU back so it never needs repairing by hand", async () => {
+			await pollDiscogsForSales(env as any);
+			expect(JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku)
+				.toBe("TEMPA131");
+			expect(await env.SYNC_STATE.get("sku:TEMPA131")).not.toBeNull();
+		});
+
+		it("records both SKUs in the audit", async () => {
+			await pollDiscogsForSales(env as any);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.items[0].sku).toBe("TEMPA131");
+			expect(audit.items[0].sku_from_discogs).toBe("TEMPA 131");
 		});
 	});
 
@@ -417,7 +457,7 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		it("uses the stored variants — no Shopify or listing lookups", async () => {
 			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
 			await pollDiscogsForSales(env as any);
-			expect(shopifyAdmin.findVariantBySku).not.toHaveBeenCalled();
+			expect(shopifyAdmin.findVariantBySkuLoose).not.toHaveBeenCalled();
 			expect(discogs.getListing).not.toHaveBeenCalled();
 		});
 

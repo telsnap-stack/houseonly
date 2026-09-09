@@ -34,7 +34,7 @@ import {
   validateShopifyWebhookHmac,
   registerShopifyWebhook,
   listShopifyWebhooks,
-  findVariantBySku,
+  findVariantBySkuLoose,
   getPrimaryLocationId,
   adjustInventory,
   createDiscogsOrder,
@@ -1079,7 +1079,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       // Resolve sku → Shopify variant
       let variant;
       try {
-        variant = await findVariantBySku(env, sku);
+        variant = await findVariantBySkuLoose(env, sku);
       } catch (e: any) {
         itemAudit.outcome = 'shopify_lookup_failed';
         itemAudit.error = e?.message || String(e);
@@ -1092,6 +1092,21 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         result.variant_not_found++;
         audit.items.push(itemAudit);
         continue;
+      }
+      // Resolved through the normalized fallback: the cached mapping holds a
+      // SKU Shopify does not have (a raw Discogs catno). Write the real one
+      // back so this listing resolves directly from now on and no one has to
+      // repair KV by hand.
+      if (variant.sku && variant.sku !== sku) {
+        itemAudit.sku_from_discogs = sku;
+        sku = variant.sku;
+        itemAudit.sku = sku;
+        try {
+          await env.SYNC_STATE.put(`listing:${item.id}`,
+            JSON.stringify({ sku, status: 'Sold' }));
+          await env.SYNC_STATE.put(`sku:${sku}`,
+            JSON.stringify({ listing_id: item.id, status: 'Sold', synced_at: new Date().toISOString() }));
+        } catch { /* the sale matters more than the cache */ }
       }
       itemAudit.shopify_variant_id = variant.variantId;
       itemAudit.outcome = 'resolved';
