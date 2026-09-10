@@ -10023,7 +10023,7 @@ let entitiesSecret = '';
 
 async function recomputeEntitiesQueue(secretOverride) {
   const sec = secretOverride || entitiesSecret;
-  if (!sec) return { ran: false, reason: 'sin secreto: conecta la pestaña Entidades' };
+  if (!sec) return { ran: false, reason: 'no secret: connect the Entities tab' };
   const out = { ran: true, artist: 0, label: 0, candidates: 0 };
   for (const kind of ['artist', 'label']) {
     let cursor = null;
@@ -10052,12 +10052,12 @@ function autoRecomputeEntities(tag) {
     .catch(e => console.log(`[entidades] recompute tras ${tag} fallo:`, e?.message || e));
 }
 
-const WHY_ES = {
-  candidates: 'tiene candidato',
-  multi: 'multi-artista',
-  truncated: 'truncado',
-  parens: 'paréntesis',
-  va: 'varios / desconocido',
+const WHY_EN = {
+  candidates: 'has candidate',
+  multi: 'multi-artist',
+  truncated: 'truncated',
+  parens: 'parentheses',
+  va: 'various / unknown',
 };
 
 function EntitiesPanel() {
@@ -10089,8 +10089,8 @@ function EntitiesPanel() {
           const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-list${qs}`, {
             headers: { 'Authorization': `Bearer ${useSecret}` },
           });
-          if (r.status === 401) { setError('No autorizado — revisa el secreto.'); setAuthed(false); setLoading(false); return; }
-          if (!r.ok) { setError(`Fallo al listar (HTTP ${r.status})`); setLoading(false); return; }
+          if (r.status === 401) { setError('Unauthorized — check the secret.'); setAuthed(false); setLoading(false); return; }
+          if (!r.ok) { setError(`List failed (HTTP ${r.status})`); setLoading(false); return; }
           const d = await r.json();
           for (const rec of (d.records || [])) all.push({ ...rec, kind });
           if (!d.hasMore || !d.cursor) break;
@@ -10111,7 +10111,7 @@ function EntitiesPanel() {
       }
       setDisp(d0); setParts(p0); setSel(s0);
     } catch (e) {
-      setError(`Error de red: ${e.message}`);
+      setError(`Network error: ${e.message}`);
     }
     setLoading(false);
   }
@@ -10144,7 +10144,7 @@ function EntitiesPanel() {
           ok += d.approved || 0; ko += d.failed || 0;
         }
       }
-      setMsg(`${ok} entidades creadas${ko ? ` · ${ko} fallaron` : ''}.`);
+      setMsg(`${ok} entities created${ko ? ` · ${ko} failed` : ''}.`);
       await loadAll();
     } catch (e) { setError(`Error: ${e.message}`); }
     setBusy(false);
@@ -10176,9 +10176,9 @@ function EntitiesPanel() {
   }
 
   async function manualRecompute() {
-    setBusy(true); setMsg('Recalculando candidatos…');
+    setBusy(true); setMsg('Recomputing candidates…');
     const res = await recomputeEntitiesQueue(secret);
-    setMsg(res.error ? `Recompute con error: ${res.error}` : `Recalculadas ${res.artist + res.label} filas.`);
+    setMsg(res.error ? `Recompute failed: ${res.error}` : `Recomputed ${res.artist + res.label} rows.`);
     await loadAll();
     setBusy(false);
   }
@@ -10186,14 +10186,14 @@ function EntitiesPanel() {
   if (!authed) {
     return (
       <div style={{maxWidth:420}}>
-        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Entidades · Admin Secret</div>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Entities · Admin Secret</div>
         <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-          BOOTSTRAP_AUTH_SECRET del worker de <strong>staging</strong>. Solo en memoria, se pierde al recargar.
+          Worker BOOTSTRAP_AUTH_SECRET for <strong>staging</strong>. Held in memory only — gone on refresh.
         </div>
         <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
           onKeyDown={e=>e.key==='Enter'&&loadAll()} placeholder="BOOTSTRAP_AUTH_SECRET"
           style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
-        <Btn ch={loading?'Conectando…':'Conectar'} onClick={()=>loadAll()} disabled={!secret||loading} full />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadAll()} disabled={!secret||loading} full />
         {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
       </div>
     );
@@ -10205,7 +10205,7 @@ function EntitiesPanel() {
 
   const meta = r => (
     <div style={{fontSize:10,color:S.muted,marginTop:3}}>
-      {r.kind === 'artist' ? 'artista' : 'sello'} · {r.count} producto{r.count===1?'':'s'}
+      {r.kind === 'artist' ? 'artist' : 'label'} · {r.count} product{r.count===1?'':'s'}
       {samples(r).length ? ` · ${samples(r).join(' · ')}` : ''}
     </div>
   );
@@ -10213,17 +10213,17 @@ function EntitiesPanel() {
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <div style={{fontSize:10,color:S.muted}}>{rows.length} filas en la cola · worker de staging</div>
+        <div style={{fontSize:10,color:S.muted}}>{rows.length} rows in queue · staging worker</div>
         <div style={{display:'flex',gap:6}}>
-          <Btn ch={busy?'…':'↻ Recalcular candidatos'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
-          <Btn ch={loading?'…':'↻ Recargar'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
+          <Btn ch={busy?'…':'↻ Recompute candidates'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
+          <Btn ch={loading?'…':'↻ Reload'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
         </div>
       </div>
       <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
         {viewBtn('bulk','Bulk',bulk.length)}
-        {viewBtn('split','Troceo',split.length)}
+        {viewBtn('split','Split',split.length)}
         {viewBtn('merge','Merge',merge.length)}
-        {otras.length>0 && viewBtn('otras','Otras',otras.length)}
+        {otras.length>0 && viewBtn('otras','Other',otras.length)}
       </div>
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
@@ -10234,13 +10234,13 @@ function EntitiesPanel() {
             <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
               <input type="checkbox" checked={bulk.length>0&&bulk.every(r=>sel[rk(r)])}
                 onChange={e=>{const n={...sel};bulk.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
-              Seleccionar todo
+              Select all
             </label>
-            <Btn ch={busy?'Aprobando…':`Aprobar seleccionadas (${bulk.filter(r=>sel[rk(r)]).length})`}
+            <Btn ch={busy?'Approving…':`Approve selected (${bulk.filter(r=>sel[rk(r)]).length})`}
               onClick={approveBulk} disabled={busy||!bulk.some(r=>sel[rk(r)])} />
           </div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-            Un nombre suelto, sin candidatos ni separadores. Llegan marcadas; el display es editable.
+            A single name, no candidates, no separators. Pre-selected; the display is editable.
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
             {bulk.map(r=>{const k=rk(r);return(
@@ -10260,8 +10260,8 @@ function EntitiesPanel() {
       {view==='split' && (
         <div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-            Varios artistas en un campo. El corte es una <strong>propuesta</strong>: revísalo antes de aprobar.
-            Un nombre que no debía partirse se arregla con «no partir».
+            Several artists in one field. The split is a <strong>proposal</strong> — check it before approving.
+            A name that shouldn't be split is fixed with "keep as one".
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
             {split.map(r=>{const k=rk(r);const ps=parts[k]||[];return(
@@ -10275,16 +10275,16 @@ function EntitiesPanel() {
                       <input value={p} onChange={e=>{const n=[...ps];n[i]=e.target.value;setParts({...parts,[k]:n});}}
                         style={{flex:1,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
                       {r.proposal?.parts?.[i]?.existingSlug &&
-                        <span style={{fontSize:9,color:S.accent,whiteSpace:'nowrap'}}>ya existe</span>}
+                        <span style={{fontSize:9,color:S.accent,whiteSpace:'nowrap'}}>already exists</span>}
                       <button onClick={()=>setParts({...parts,[k]:ps.filter((_,j)=>j!==i)})}
                         style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:12}}>×</button>
                     </div>
                   ))}
                 </div>
                 <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-                  <Btn ch="Partir" onClick={()=>approveOne(r,{action:'split',parts:ps.filter(Boolean).map(d=>({display:d}))})} disabled={busy||ps.filter(Boolean).length<2} />
-                  <Btn ch="No partir" variant="ghost" onClick={()=>approveOne(r,{action:'create',parts:[{display:r.raw}]})} disabled={busy} />
-                  <Btn ch="Ignorar" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                  <Btn ch="Split" onClick={()=>approveOne(r,{action:'split',parts:ps.filter(Boolean).map(d=>({display:d}))})} disabled={busy||ps.filter(Boolean).length<2} />
+                  <Btn ch="Keep as one" variant="ghost" onClick={()=>approveOne(r,{action:'create',parts:[{display:r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignore" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
                 </div>
               </div>
             );})}
@@ -10295,8 +10295,8 @@ function EntitiesPanel() {
       {view==='merge' && (
         <div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-            Hay algo parecido. Puede ser la misma cosa escrita de dos maneras, un sub-sello, o
-            <strong> nada</strong>: AXIS y Axis Of People son sellos distintos. Por defecto no se toca.
+            Something looks similar. It may be the same thing spelled two ways, a sub-label, or
+            <strong> nothing</strong>: AXIS and Axis Of People are different labels. Nothing is merged by default.
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
             {merge.map(r=>{const k=rk(r);const ch=choice[k]||'';return(
@@ -10311,19 +10311,19 @@ function EntitiesPanel() {
                       <label key={c.slug} style={{fontSize:11,color:S.text,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
                         <input type="radio" name={`m-${k}`} checked={ch===val} onChange={()=>setChoice({...choice,[k]:val})} />
                         <span>{c.display}</span>
-                        <span style={{fontSize:9,color:S.muted}}>{isRow?'· otra fila de la cola':'· entidad existente'}</span>
+                        <span style={{fontSize:9,color:S.muted}}>{isRow?'· another queue row':'· existing entity'}</span>
                       </label>
                     );
                   })}
                   <label style={{fontSize:11,color:S.muted,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
                     <input type="radio" name={`m-${k}`} checked={ch===''} onChange={()=>setChoice({...choice,[k]:''})} />
-                    Ninguno — crear como entidad aparte
+                    None — create as its own entity
                   </label>
                 </div>
                 <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
                   <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
                     style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
-                  <Btn ch={ch.startsWith('row:')?'Fusionar filas':ch.startsWith('ent:')?'Fusionar en la entidad':'Crear aparte'}
+                  <Btn ch={ch.startsWith('row:')?'Merge rows':ch.startsWith('ent:')?'Merge into entity':'Create separately'}
                     disabled={busy}
                     onClick={()=>{
                       if (ch.startsWith('row:')) {
@@ -10335,7 +10335,7 @@ function EntitiesPanel() {
                         approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]});
                       }
                     }} />
-                  <Btn ch="Sub-sello de…" variant="ghost" disabled={busy||!ch.startsWith('ent:')}
+                  <Btn ch="Sub-label of…" variant="ghost" disabled={busy||!ch.startsWith('ent:')}
                     onClick={()=>approveOne(r,{action:'child',parentSlug:ch.slice('ent:'.length),parts:[{display:disp[k]??r.raw}]})} />
                 </div>
               </div>
@@ -10346,17 +10346,17 @@ function EntitiesPanel() {
 
       {view==='otras' && (
         <div>
-          <div style={{fontSize:10,color:S.muted,marginBottom:12}}>Truncados y paréntesis: el display propuesto ya viene limpio, pero conviene mirarlo.</div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12}}>Truncated and parenthesised: the proposed display is already cleaned up, but worth a look.</div>
           <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:520,overflowY:'auto'}}>
             {otras.map(r=>{const k=rk(r);return(
               <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
-                <div style={{fontSize:11,color:S.muted}}>{WHY_ES[r.bucketWhy]||r.bucketWhy} · crudo: <span style={{color:S.text}}>{r.raw}</span></div>
+                <div style={{fontSize:11,color:S.muted}}>{WHY_EN[r.bucketWhy]||r.bucketWhy} · raw: <span style={{color:S.text}}>{r.raw}</span></div>
                 {meta(r)}
                 <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
                   <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
                     style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
-                  <Btn ch="Crear" onClick={()=>approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]})} disabled={busy} />
-                  <Btn ch="Ignorar" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                  <Btn ch="Create" onClick={()=>approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignore" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
                 </div>
               </div>
             );})}
@@ -10397,7 +10397,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
-          {tabBtn('entities','🏷️ Entidades')}
+          {tabBtn('entities','🏷️ Entities')}
           {tabBtn('newsletter','✉️ Newsletter')}
         </div>
         {tab==='zip'   && <ZipImporter />}
