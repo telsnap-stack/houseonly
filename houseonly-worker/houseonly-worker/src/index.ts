@@ -855,6 +855,8 @@ import {
   handleEntityResolve,
   handleEntityReviewList,
   handleEntityReviewApprove,
+  handleEntityReviewApproveBulk,
+  handleEntityReviewRecompute,
   handleEntityReviewReject,
   handleEntityGet,
 } from './lib/entities';
@@ -1310,6 +1312,12 @@ export default {
     }
     if (action === 'entity-review-approve' && request.method === 'POST') {
       return await handleEntityReviewApprove(request, env);
+    }
+    if (action === 'entity-review-approve-bulk' && request.method === 'POST') {
+      return await handleEntityReviewApproveBulk(request, env);
+    }
+    if (action === 'entity-review-recompute' && request.method === 'POST') {
+      return await handleEntityReviewRecompute(request, env);
     }
     if (action === 'entity-review-reject' && request.method === 'POST') {
       return await handleEntityReviewReject(request, env);

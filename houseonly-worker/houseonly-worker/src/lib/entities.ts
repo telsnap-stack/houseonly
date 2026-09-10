@@ -57,6 +57,11 @@ export interface ReviewRecord {
     separator?: string;
   };
   candidates: Array<{ slug: string; display: string; why: 'normalized' | 'prefix' }>;
+  // Como hay que tratar esta fila. 'bulk' = no pide ninguna decision y se puede
+  // aprobar en bloque; 'decide' = alguien tiene que mirarla, y bucketWhy dice
+  // por que. Es lo que permite que la pantalla marque sola la mayoria.
+  bucket: 'bulk' | 'decide';
+  bucketWhy?: 'candidates' | 'multi' | 'parens' | 'truncated' | 'va';
   sources: string[];
   samples: string[];       // primeros handles, para que la UI ensene de que va
   handles?: string[];      // handles ya contados, para que count no se infle
@@ -169,6 +174,32 @@ export function proposeSplit(raw: string): { parts: string[]; separator?: string
 
   if (parts.length < 2) return { parts: [s] };
   return { parts, separator: (m?.[0] || '').trim() };
+}
+
+// Nombres que no son un artista: varios artistas, desconocido, o el nombre de
+// la tienda colandose como vendor. No se siguen; van a ignore:.
+export const NON_ENTITY_RE = /^\s*(v\s*[/.]?\s*a\b|various|unknown|house only\s*$)/i;
+
+/**
+ * Decide si una fila se puede aprobar en bloque o si pide una decision.
+ *
+ * 'bulk' es un nombre suelto, sin candidatos, sin separadores, sin parentesis y
+ * sin pinta de truncado: se acepta tal cual y punto. Todo lo demas es 'decide',
+ * y bucketWhy dice por que, para que la pantalla pueda ordenarlo y explicarlo.
+ *
+ * El orden importa: una fila cae en el PRIMER motivo que la reclama, y van
+ * primero los que mas trabajo humano exigen.
+ */
+export function computeBucket(rec: ReviewRecord): Pick<ReviewRecord, 'bucket' | 'bucketWhy'> {
+  const raw = rec.raw || '';
+  if (NON_ENTITY_RE.test(raw)) return { bucket: 'decide', bucketWhy: 'va' };
+  if ((rec.candidates || []).length > 0) return { bucket: 'decide', bucketWhy: 'candidates' };
+  if (rec.proposal?.action === 'split') return { bucket: 'decide', bucketWhy: 'multi' };
+  if (/[\s,;.]$/.test(raw) || raw.length === 49 || raw.length === 50) {
+    return { bucket: 'decide', bucketWhy: 'truncated' };
+  }
+  if (raw.includes('(') || raw.includes(')')) return { bucket: 'decide', bucketWhy: 'parens' };
+  return { bucket: 'bulk' };
 }
 
 // ── LECTURA ─────────────────────────────────────────────────────────
@@ -302,6 +333,7 @@ async function upsertReview(
       variants: [],
       proposal: { action: 'create', parts: [] },
       candidates: [],
+      bucket: 'bulk',
       sources: [],
       samples: [],
       count: 0,
@@ -335,6 +367,7 @@ async function upsertReview(
   // entidad que casa con un trozo, aparece como existingSlug sin repetir barrido.
   rec.proposal = await buildProposal(env, kind, raw);
   rec.candidates = await findCandidates(env, kind, norm);
+  Object.assign(rec, computeBucket(rec));
 
   await env.ENTITIES.put(key, JSON.stringify(rec));
 }
@@ -523,9 +556,13 @@ export async function handleEntityReviewList(request: Request, env: EntitiesEnv)
   const url = new URL(request.url);
   const kind = parseKind(url.searchParams.get('kind'));
   const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 500);
+  const cursor = url.searchParams.get('cursor') || undefined;
   const prefix = kind ? `review:${kind}:` : 'review:';
 
-  const listing = await env.ENTITIES.list({ prefix, limit: 1000 });
+  // Paginacion de verdad sobre el listado de KV. Antes se listaba entero y se
+  // cortaba a 500, asi que un cliente que pidiera "todo" recibia 500 filas de
+  // 877 creyendo que eran todas — y el resumen del barrido salio mal por eso.
+  const listing = await env.ENTITIES.list({ prefix, limit, cursor });
   const records: ReviewRecord[] = [];
   for (const k of listing.keys) {
     const raw = await env.ENTITIES.get(k.name);
@@ -533,13 +570,124 @@ export async function handleEntityReviewList(request: Request, env: EntitiesEnv)
     try { records.push(JSON.parse(raw) as ReviewRecord); } catch { /* fila corrupta, se salta */ }
   }
 
-  // Por count descendente: primero lo que mas catalogo desbloquea.
+  // Orden por count DENTRO de la pagina. El orden global lo hace quien pagina:
+  // KV lista por nombre de clave y no sabe nada de count.
   records.sort((a, b) => (b.count || 0) - (a.count || 0));
 
+  // `total` cuenta las claves, sin leer los valores: barato y exacto.
+  let total = 0;
+  let c: string | undefined;
+  for (let i = 0; i < 40; i++) {
+    const l = await env.ENTITIES.list({ prefix, limit: 1000, cursor: c });
+    total += l.keys.length;
+    if (l.list_complete) break;
+    c = (l as any).cursor;
+  }
+
   return json({
-    total: records.length,
-    truncated: listing.list_complete === false,
-    records: records.slice(0, limit),
+    total,
+    returned: records.length,
+    cursor: listing.list_complete ? null : (listing as any).cursor,
+    hasMore: !listing.list_complete,
+    records,
+  });
+}
+
+/**
+ * POST ?action=entity-review-recompute — recalcula candidates[] y bucket.
+ *
+ * Por que hace falta un paso aparte: findCandidates solo mira los alias de
+ * entidades YA aprobadas, asi que en el barrido inicial —cuando no hay ninguna—
+ * devuelve siempre vacio. Justo cuando mas falta hacen: Freerange / Freerange
+ * Records, FXHE / fxhe records, chiwax / chiwax classic edition llegaban a la
+ * cola como filas sueltas, sin ninguna señal de estar emparentadas.
+ *
+ * Esto compara FILA CONTRA FILA de la cola. El norm va dentro del nombre de la
+ * clave (review:{kind}:{norm}), asi que el universo entero se saca de un
+ * list() sin leer un solo valor.
+ *
+ * Se procesa por tandas con cursor: son ~900 lecturas y ~900 escrituras por
+ * rol y no caben en una peticion.
+ *
+ * Los candidatos siguen siendo SUGERENCIAS. Entre los pares de prefijo hay
+ * falsos positivos conocidos —AXIS / Axis Of People, Base / Based Faith,
+ * NOTON / Not On Label— y por eso una fila con candidatos cae en 'decide'.
+ */
+export async function handleEntityReviewRecompute(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  let body: any = {};
+  try { body = await request.json(); } catch { /* cuerpo opcional */ }
+
+  const kind = parseKind(body?.kind);
+  if (!kind) return json({ error: "kind must be 'artist' or 'label'" }, 400);
+  const limit = Math.min(Number(body?.limit) || 150, 300);
+  const cursor: string | undefined = body?.cursor || undefined;
+  const prefix = `review:${kind}:`;
+
+  // Universo de norms: solo nombres de clave, sin leer valores.
+  const allNorms: string[] = [];
+  let c: string | undefined;
+  for (let i = 0; i < 40; i++) {
+    const l = await env.ENTITIES.list({ prefix, limit: 1000, cursor: c });
+    for (const k of l.keys) allNorms.push(k.name.slice(prefix.length));
+    if (l.list_complete) break;
+    c = (l as any).cursor;
+  }
+
+  const page = await env.ENTITIES.list({ prefix, limit, cursor });
+  let updated = 0;
+  let withCandidates = 0;
+
+  for (const k of page.keys) {
+    const raw = await env.ENTITIES.get(k.name);
+    if (!raw) continue;
+    let rec: ReviewRecord;
+    try { rec = JSON.parse(raw) as ReviewRecord; } catch { continue; }
+
+    const norm = k.name.slice(prefix.length);
+    const found: ReviewRecord['candidates'] = [];
+
+    // a) contra entidades ya aprobadas (lo que ya hacia findCandidates)
+    for (const cand of await findCandidates(env, kind, norm)) found.push(cand);
+
+    // b) contra las demas filas de la cola: prefijo en cualquier direccion,
+    //    con un minimo de 4 caracteres para no emparejar siglas cortas.
+    if (norm.length >= 4) {
+      for (const other of allNorms) {
+        if (other === norm || other.length < 4) continue;
+        if (!other.startsWith(norm) && !norm.startsWith(other)) continue;
+        if (found.some(f => f.slug === `review:${other}`)) continue;
+        const otherRaw = await env.ENTITIES.get(`${prefix}${other}`);
+        if (!otherRaw) continue;
+        let o: ReviewRecord;
+        try { o = JSON.parse(otherRaw) as ReviewRecord; } catch { continue; }
+        found.push({
+          // Todavia no es una entidad: se marca como fila de la cola para que
+          // la pantalla sepa que el merge implica aprobar las dos.
+          slug: `review:${other}`,
+          display: o.raw,
+          why: 'prefix',
+        });
+        if (found.length >= 6) break;
+      }
+    }
+
+    rec.candidates = found;
+    Object.assign(rec, computeBucket(rec));
+    await env.ENTITIES.put(k.name, JSON.stringify(rec));
+    updated++;
+    if (found.length) withCandidates++;
+  }
+
+  return json({
+    ok: true,
+    kind,
+    universe: allNorms.length,
+    updated,
+    withCandidates,
+    cursor: page.list_complete ? null : (page as any).cursor,
+    hasMore: !page.list_complete,
   });
 }
 
@@ -616,6 +764,67 @@ export async function handleEntityReviewApprove(request: Request, env: EntitiesE
   await env.ENTITIES.delete(key);
 
   return json({ ok: true, action, kind, norm, slugs });
+}
+
+/**
+ * POST ?action=entity-review-approve-bulk — aprueba muchas filas de golpe.
+ *
+ * Existe para el caso mayoritario: filas 'bulk', que son un nombre suelto sin
+ * nada que decidir. Con 1366 filas en la cola tras el barrido, aprobarlas de
+ * una en una serian horas de clics.
+ *
+ * Solo hace la accion 'create' con una parte. Merge, split y parent siguen
+ * yendo de una en una por entity-review-approve: son las que piden criterio, y
+ * abaratar el clic ahi seria abaratar justo lo que no conviene abaratar.
+ *
+ * No es atomico —KV no tiene transacciones— asi que devuelve el resultado fila
+ * a fila: lo que fallo no impide lo demas.
+ */
+export async function handleEntityReviewApproveBulk(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  let body: any;
+  try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+
+  const kind = parseKind(body?.kind);
+  if (!kind) return json({ error: "kind must be 'artist' or 'label'" }, 400);
+
+  const items: Array<{ norm?: string; display?: string }> = Array.isArray(body?.items) ? body.items : [];
+  if (!items.length) return json({ error: 'items required' }, 400);
+  if (items.length > 200) return json({ error: 'max 200 items per call' }, 400);
+
+  const results: Array<{ norm: string; ok: boolean; slug?: string; error?: string }> = [];
+
+  for (const it of items) {
+    const norm = String(it?.norm || '').trim();
+    if (!norm) { results.push({ norm: '', ok: false, error: 'norm required' }); continue; }
+
+    const key = K.review(kind, norm);
+    const rawRec = await env.ENTITIES.get(key);
+    if (!rawRec) { results.push({ norm, ok: false, error: 'not found' }); continue; }
+
+    let rec: ReviewRecord;
+    try { rec = JSON.parse(rawRec) as ReviewRecord; }
+    catch { results.push({ norm, ok: false, error: 'corrupt' }); continue; }
+
+    const display = cleanDisplay(String(it?.display || rec.proposal?.parts?.[0]?.display || rec.raw));
+    const slug = slugify(display);
+    if (!display || !slug) { results.push({ norm, ok: false, error: 'empty display' }); continue; }
+
+    const aliasRaws = [rec.raw, ...rec.variants];
+    await upsertEntity(env, slug, display, kind, { aliases: aliasRaws, sources: rec.sources });
+    await pointAlias(env, kind, aliasRaws, [slug]);
+    await env.ENTITIES.delete(key);
+    results.push({ norm, ok: true, slug });
+  }
+
+  return json({
+    ok: true,
+    kind,
+    approved: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+    results,
+  });
 }
 
 /** POST ?action=entity-review-reject */

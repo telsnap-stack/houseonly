@@ -10,6 +10,9 @@ import {
 	handleEntityReviewApprove,
 	handleEntityReviewReject,
 	handleEntityReviewList,
+	handleEntityReviewApproveBulk,
+	handleEntityReviewRecompute,
+	computeBucket,
 } from "../src/lib/entities";
 
 // Todo lo que se prueba aqui sale de datos reales del catalogo (1266 productos,
@@ -239,6 +242,162 @@ describe("un slug nunca lleva coma", () => {
 		const r = await resolveOne(env as any, "artist", { raw: "Delano Smith & Brian Kage" }, "ws");
 		expect(r.slugs).toHaveLength(2);
 		for (const s of r.slugs) expect(s).not.toContain(",");
+	});
+});
+
+describe("bucket: bulk vs decide", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	const bucketOf = async (kind: "artist" | "label", raw: string) => {
+		await resolveOne(env as any, kind, { raw }, "sweep");
+		return JSON.parse((await env.ENTITIES.get(`review:${kind}:${normalizeName(raw)}`))!);
+	};
+
+	it("un nombre suelto y limpio es bulk", async () => {
+		for (const raw of ["Session Victim", "Ian Pooley", "Theo Parrish"]) {
+			const r = await bucketOf("artist", raw);
+			expect(r.bucket).toBe("bulk");
+			expect(r.bucketWhy).toBeUndefined();
+		}
+		expect((await bucketOf("label", "Toy Tonics")).bucket).toBe("bulk");
+	});
+
+	it("cada motivo de decide sale etiquetado", async () => {
+		expect(await bucketOf("artist", "Delano Smith & Brian Kage"))
+			.toMatchObject({ bucket: "decide", bucketWhy: "multi" });
+		expect(await bucketOf("artist", "Echelon (Jeroen Search)"))
+			.toMatchObject({ bucket: "decide", bucketWhy: "parens" });
+		expect(await bucketOf("artist", "Cinthie, Fireground, Toobris, DJ Babatr, DJ Maria,"))
+			.toMatchObject({ bucket: "decide" });
+		for (const raw of ["V/A", "Various Artists", "Unknown Artist", "House Only"]) {
+			expect(await bucketOf("artist", raw))
+				.toMatchObject({ bucket: "decide", bucketWhy: "va" });
+		}
+	});
+
+	it("tener candidato manda a decide, por encima de todo lo demas", () => {
+		const base: any = {
+			raw: "Freerange", variants: [], proposal: { action: "create", parts: [] },
+			candidates: [{ slug: "review:freerangerecords", display: "Freerange Records", why: "prefix" }],
+		};
+		expect(computeBucket(base)).toEqual({ bucket: "decide", bucketWhy: "candidates" });
+	});
+});
+
+describe("recompute: candidatos fila contra fila", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("empareja filas de la cola entre si, que es lo que el barrido inicial no podia", async () => {
+		// Ninguna entidad aprobada: findCandidates por si solo devolveria vacio.
+		for (const raw of ["Freerange", "Freerange Records", "Toy Tonics"]) {
+			await resolveOne(env as any, "label", { raw }, "sweep");
+		}
+		let before = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Freerange")}`))!);
+		expect(before.candidates).toHaveLength(0);
+		expect(before.bucket).toBe("bulk");
+
+		const res: any = await (await handleEntityReviewRecompute(req("https://x/", {
+			method: "POST", body: JSON.stringify({ kind: "label" }),
+		}), env as any)).json();
+		expect(res.updated).toBe(3);
+		expect(res.withCandidates).toBe(2);   // las dos Freerange, no Toy Tonics
+
+		const after = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Freerange")}`))!);
+		expect(after.candidates[0].display).toBe("Freerange Records");
+		expect(after.bucket).toBe("decide");
+		expect(after.bucketWhy).toBe("candidates");
+
+		// Y el que no tiene pariente se queda en bulk.
+		const toy = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Toy Tonics")}`))!);
+		expect(toy.bucket).toBe("bulk");
+	});
+
+	it("no empareja siglas cortas ni cosas que solo se parecen de lejos", async () => {
+		// Los falsos positivos reales conviven: AXIS es de 4, asi que SI se
+		// propone como candidato de Axis Of People — y por eso va a decide, para
+		// que lo mire una persona, en vez de fusionarse solo.
+		for (const raw of ["R2", "R&S", "Yore", "Yoruba", "Text", "Text Records"]) {
+			await resolveOne(env as any, "label", { raw }, "sweep");
+		}
+		await handleEntityReviewRecompute(req("https://x/", {
+			method: "POST", body: JSON.stringify({ kind: "label" }),
+		}), env as any);
+
+		// "r2" y "rs" tienen menos de 4 caracteres: no entran a comparar.
+		const r2 = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("R2")}`))!);
+		expect(r2.candidates).toHaveLength(0);
+
+		// "yore" y "yoruba" se parecen a la vista pero divergen en la cuarta
+		// letra, asi que no son prefijo uno de otro y NO se emparejan.
+		const yore = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Yore")}`))!);
+		expect(yore.candidates).toHaveLength(0);
+		expect(yore.bucket).toBe("bulk");
+
+		// "text" SI es prefijo de "textrecords": se propone, y ambas a decide.
+		const text = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Text")}`))!);
+		expect(text.candidates.map((c: any) => c.display)).toContain("Text Records");
+		expect(text.bucket).toBe("decide");
+	});
+});
+
+describe("approve-bulk", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("aprueba muchas filas de golpe y todas resuelven despues", async () => {
+		const names = ["Session Victim", "Ian Pooley", "Theo Parrish"];
+		for (const raw of names) await resolveOne(env as any, "artist", { raw }, "sweep");
+
+		const res: any = await (await handleEntityReviewApproveBulk(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "artist",
+				items: names.map(n => ({ norm: normalizeName(n) })),
+			}),
+		}), env as any)).json();
+
+		expect(res.approved).toBe(3);
+		expect(res.failed).toBe(0);
+		for (const n of names) {
+			const r = await resolveOne(env as any, "artist", { raw: n }, "sweep");
+			expect(r.status).toBe("resolved");
+		}
+		expect((await env.ENTITIES.list({ prefix: "review:artist:" })).keys).toHaveLength(0);
+	});
+
+	it("lo que falla no arrastra a lo demas", async () => {
+		await resolveOne(env as any, "artist", { raw: "Ian Pooley" }, "sweep");
+		const res: any = await (await handleEntityReviewApproveBulk(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", items: [
+				{ norm: normalizeName("Ian Pooley") },
+				{ norm: "estonoexiste" },
+			] }),
+		}), env as any)).json();
+		expect(res.approved).toBe(1);
+		expect(res.failed).toBe(1);
+		expect(res.results.find((r: any) => r.norm === "estonoexiste").error).toBe("not found");
+	});
+
+	it("nunca produce un slug con coma, venga como venga el display", async () => {
+		await resolveOne(env as any, "artist", { raw: "Charlie Rice, Nay Barr" }, "sweep");
+		await handleEntityReviewApproveBulk(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", items: [
+				{ norm: normalizeName("Charlie Rice, Nay Barr"), display: "Charlie Rice, Nay Barr" },
+			] }),
+		}), env as any);
+		for (const k of (await env.ENTITIES.list({ prefix: "entity:" })).keys) {
+			expect(k.name).not.toContain(",");
+		}
 	});
 });
 
