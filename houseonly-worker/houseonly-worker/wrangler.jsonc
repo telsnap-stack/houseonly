@@ -32,6 +32,15 @@
     {
       "binding": "EMAILS",
       "id": "e4966f4a96e84c578bfd96b1d12bdf63"
+    },
+    // ENTITIES: artistas y sellos canonicos (docs/entities.md). Separado de
+    // WISHLIST a proposito: aqui se hace list({prefix}) a menudo, que recorre
+    // el namespace entero, y WISHLIST ya mezcla wl:, sess:, authstate: y mas.
+    // Staging tiene el suyo: su cola es un banco de pruebas y no debe ensuciar
+    // las entidades reales.
+    {
+      "binding": "ENTITIES",
+      "id": "e1148360f4af4c72ad608e60c03e9813"
     }
   ],
   // Cron triggers. Production cron activated May 19 2026 when Fase 3 was migrated
@@ -64,6 +73,10 @@
         {
           "binding": "EMAILS",
           "id": "e4966f4a96e84c578bfd96b1d12bdf63"
+        },
+        {
+          "binding": "ENTITIES",
+          "id": "bf137c15dc6d4c4f8f21a9987108f2f2"
         }
       ],
       // NO cron on staging (2026-09-02). It polled Discogs every 15 min in dry

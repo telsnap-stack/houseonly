@@ -13,6 +13,10 @@ interface Env {
   // El worker NO parsea nada de esto: el parseo vive en App.jsx y punto. Aqui
   // solo se guarda y se sirve.
   EMAILS: KVNamespace;
+  // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
+  // Claves: entity:{slug}, alias:a:/alias:l:{norm}, ignore:*, children:*,
+  // review:{kind}:{norm}, y mas adelante follow:/fanout:.
+  ENTITIES: KVNamespace;
   SHOPIFY_ADMIN_CLIENT_ID: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
   // DISCOGS_TOKEN: Personal Access Token for Discogs API.
@@ -847,6 +851,14 @@ import {
 
 import { searchRelease } from './lib/discogs';
 
+import {
+  handleEntityResolve,
+  handleEntityReviewList,
+  handleEntityReviewApprove,
+  handleEntityReviewReject,
+  handleEntityGet,
+} from './lib/entities';
+
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 
 import {
@@ -1285,6 +1297,25 @@ export default {
     // data is non-sensitive (stats only, no SKUs).
     if (action === 'sync-status' && request.method === 'GET') {
       return await handleSyncStatus(request, env);
+    }
+
+    // ── ENTIDADES: ARTISTAS Y SELLOS (fase 1) ───────────────
+    // docs/entities.md. Todo detras de Bearer BOOTSTRAP_AUTH_SECRET, como
+    // pending-review-*. Aditivo: no cambia nada de lo que ya hay.
+    if (action === 'entity-resolve' && request.method === 'POST') {
+      return await handleEntityResolve(request, env);
+    }
+    if (action === 'entity-review-list' && request.method === 'GET') {
+      return await handleEntityReviewList(request, env);
+    }
+    if (action === 'entity-review-approve' && request.method === 'POST') {
+      return await handleEntityReviewApprove(request, env);
+    }
+    if (action === 'entity-review-reject' && request.method === 'POST') {
+      return await handleEntityReviewReject(request, env);
+    }
+    if (action === 'entity-get' && request.method === 'GET') {
+      return await handleEntityGet(request, env);
     }
 
     // ── PENDING SALES ───────────────────────────────────────
