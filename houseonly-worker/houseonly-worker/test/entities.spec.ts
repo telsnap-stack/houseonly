@@ -139,10 +139,19 @@ describe("pickDisplay: acronimos", () => {
 		expect(pickDisplay(["R2"])).toEqual({ display: "R2", auto: false });
 		// Sin vocales.
 		expect(pickDisplay(["DRS"])).toEqual({ display: "DRS", auto: false });
-		expect(pickDisplay(["stl"])).toEqual({ display: "STL", auto: false });
+		expect(pickDisplay(["STL", "stl"])).toEqual({ display: "STL", auto: false });
 		expect(pickDisplay(["BB"])).toEqual({ display: "BB", auto: false });
 		// La 'y' cuenta como vocal: "rhythm" es una palabra, no un acronimo.
 		expect(pickDisplay(["rhythm"])).toEqual({ display: "Rhythm", auto: true });
+	});
+
+	it("si NO existe una grafia en mayusculas, no se inventa", () => {
+		// Estos se escriben asi en el catalogo: pasarlos a mayusculas por llevar
+		// un digito los estropea igual que Title Case estropeaba CV313.
+		expect(pickDisplay(["2lanes"])).toEqual({ display: "2lanes", auto: false });
+		expect(pickDisplay(["dot13"])).toEqual({ display: "dot13", auto: false });
+		expect(pickDisplay(["4yo4u"])).toEqual({ display: "4yo4u", auto: false });
+		expect(pickDisplay(["123.ro"])).toEqual({ display: "123.ro", auto: false });
 	});
 
 	it("las palabras de verdad y los slugs si van a Title Case, con badge", () => {

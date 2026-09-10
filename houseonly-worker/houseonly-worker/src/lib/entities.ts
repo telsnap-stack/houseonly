@@ -248,8 +248,12 @@ export function pickDisplay(
     // a/e/i/o/u— pasaba por acronimo y salia como RHYTHM.
     const acronym = clean.find(v => v.length <= 6 && (/\d/.test(v) || !/[aeiouy]/i.test(v)));
     if (acronym) {
+      // Solo se CONSERVA una grafia en mayusculas que exista de verdad. Si no
+      // la hay, se deja el nombre tal cual y no se inventa: "2lanes", "dot13",
+      // "4yo4u" y "123.ro" se escriben asi, y pasarlos a mayusculas por llevar
+      // un digito los estropea igual que Title Case estropeaba CV313.
       const upper = clean.find(v => v === v.toUpperCase() && /[A-Z]/.test(v));
-      return { display: upper || acronym.toUpperCase(), auto: false };
+      return { display: upper || acronym, auto: false };
     }
   }
 
