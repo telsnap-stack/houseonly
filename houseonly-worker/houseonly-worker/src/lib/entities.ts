@@ -51,10 +51,18 @@ export interface ReviewRecord {
   norm: string;
   raw: string;
   variants: string[];
+  variantCounts?: Record<string, number>;   // productos por grafia
   proposal: {
     action: 'create' | 'split';
     parts: ReviewProposalPart[];
     separator?: string;
+    // Que hacer por defecto con un multi-artista. 'keep' = probablemente sea un
+    // nombre solo y no haya que partirlo; ver shouldSplit().
+    recommend?: 'split' | 'keep';
+    recommendWhy?: string;
+    // true si el display no sale de ninguna grafia real sino de aplicar Title
+    // Case: hay que mirarlo antes de aceptarlo.
+    displayAuto?: boolean;
   };
   candidates: Array<{ slug: string; display: string; why: 'normalized' | 'prefix' }>;
   // Como hay que tratar esta fila. 'bulk' = no pide ninguna decision y se puede
@@ -205,6 +213,62 @@ export function computeBucket(rec: ReviewRecord): Pick<ReviewRecord, 'bucket' | 
   return { bucket: 'bulk' };
 }
 
+/**
+ * Elige que grafia proponer como display, entre todas las vistas.
+ *
+ * Antes se cogia la PRIMERA que hubiera entrado, y eso proponia "ALTON MILLER"
+ * en mayusculas teniendo "Alton Miller" a mano. Aprobando mil filas en bloque
+ * nadie corrige eso a mano, asi que la propuesta tiene que venir bien de fabrica.
+ *
+ * Orden: grafia con mayusculas Y minusculas mezcladas primero; entre esas, la
+ * que mas productos tenga. Si TODAS son de un solo caso (o parecen un slug),
+ * se aplica Title Case y se marca displayAuto para que se revise.
+ */
+export function pickDisplay(
+  variants: string[],
+  counts: Record<string, number> = {},
+): { display: string; auto: boolean } {
+  const clean = (variants || []).map(v => cleanDisplay(v)).filter(Boolean);
+  if (!clean.length) return { display: '', auto: false };
+
+  const mixed = clean.filter(v => /[a-z]/.test(v) && /[A-Z]/.test(v));
+  const pool = mixed.length ? mixed : clean;
+  const best = pool.slice().sort((a, b) => (counts[b] || 0) - (counts[a] || 0))[0];
+
+  if (mixed.length) return { display: best, auto: false };
+
+  // Solo mayusculas, solo minusculas o pinta de slug: se propone Title Case.
+  // Las particulas cortas se dejan en minuscula salvo al principio.
+  const SMALL = new Set(['de', 'del', 'la', 'el', 'y', 'of', 'the', 'and', 'in', 'on', 'a']);
+  const titled = best
+    .replace(/[-_]+/g, ' ')
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w, i) => (i > 0 && SMALL.has(w)) ? w : w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+  return { display: titled, auto: true };
+}
+
+/**
+ * Decide si conviene partir un multi-artista o dejarlo entero.
+ *
+ * "Bread & Souls" (5 productos) y "Fresh & Low" (4) son bandas, no dos artistas,
+ * y el troceador las parte igual porque solo mira separadores. La señal que las
+ * distingue: si el nombre completo tiene peso en el catalogo y NINGUNA de sus
+ * partes existe por su cuenta, casi seguro que es un nombre solo.
+ */
+export function shouldSplit(
+  count: number,
+  partsExistAlone: boolean[],
+): { recommend: 'split' | 'keep'; why: string } {
+  const anyAlone = partsExistAlone.some(Boolean);
+  if (count >= 3 && !anyAlone) {
+    return { recommend: 'keep', why: `${count} productos con el nombre entero y ninguna parte aparece sola` };
+  }
+  if (anyAlone) return { recommend: 'split', why: 'alguna parte ya existe por su cuenta' };
+  return { recommend: 'split', why: 'lleva separador' };
+}
+
 // ── LECTURA ─────────────────────────────────────────────────────────
 
 export async function getEntity(env: EntitiesEnv, slug: string): Promise<EntityRecord | null> {
@@ -347,6 +411,11 @@ async function upsertReview(
   }
 
   if (!rec.variants.includes(raw) && rec.variants.length < MAX_VARIANTS) rec.variants.push(raw);
+  // Cuantos productos usan CADA grafia: es lo que desempata al elegir display.
+  rec.variantCounts ||= {};
+  if (!handle || !(rec.handles || []).includes(handle)) {
+    rec.variantCounts[raw] = (rec.variantCounts[raw] || 0) + 1;
+  }
   if (source && !rec.sources.includes(source)) rec.sources.push(source);
 
   // Compatibilidad: las filas escritas antes de esto guardaban el handle pelado.
@@ -379,7 +448,7 @@ async function upsertReview(
 
   // La propuesta se recalcula en cada pasada: si entretanto se ha aprobado una
   // entidad que casa con un trozo, aparece como existingSlug sin repetir barrido.
-  rec.proposal = await buildProposal(env, kind, raw);
+  rec.proposal = await buildProposal(env, kind, rec.raw, rec.variants, rec.variantCounts, rec.count);
   // findCandidates solo mira entidades YA aprobadas, asi que durante un barrido
   // devuelve casi siempre vacio. Si aqui se asignara, cada nueva pasada del
   // barrido BORRARIA los candidatos que entity-review-recompute habia
@@ -401,16 +470,24 @@ async function buildProposal(
   env: EntitiesEnv,
   kind: EntityKind,
   raw: string,
+  variants: string[] = [],
+  counts: Record<string, number> = {},
+  rowCount = 0,
 ): Promise<ReviewRecord['proposal']> {
   // Los sellos no se trocean: "Vibes & Pepper Records" es un solo sello, y
   // partirlo por el "&" seria justo el error que este modulo evita.
   const split = kind === 'artist' ? proposeSplit(raw) : { parts: [raw] as string[], separator: undefined };
 
   const parts: ReviewProposalPart[] = [];
+  const alone: boolean[] = [];
   for (const p of split.parts) {
     const display = cleanDisplay(p);
     const pnorm = normalizeName(display);
     const existing = pnorm ? await env.ENTITIES.get(K.alias(kind, pnorm)) : null;
+    // "Existe sola" es tener entidad propia O fila propia en la cola: en un
+    // barrido inicial casi nada es entidad todavia.
+    const ownRow = pnorm ? await env.ENTITIES.get(K.review(kind, pnorm)) : null;
+    alone.push(Boolean(existing || ownRow));
     parts.push({
       raw: p,
       display,
@@ -419,10 +496,42 @@ async function buildProposal(
     });
   }
 
+  if (parts.length > 1) {
+    // Las partes heredan las mayusculas del crudo, y "rhythm & sound" proponia
+    // partir en 'rhythm' y 'sound'. Se les aplica el mismo criterio de display,
+    // pero SOLO si el crudo entero es de un solo caso: si ya venia mezclado,
+    // cada parte se queda como estaba — asi "Calibre & DRS" conserva DRS en
+    // vez de convertirlo en "Drs".
+    const rawMixed = /[a-z]/.test(raw) && /[A-Z]/.test(raw);
+    let anyAuto = false;
+    if (!rawMixed) {
+      for (const part of parts) {
+        const picked = pickDisplay([part.display]);
+        if (picked.display) {
+          part.display = picked.display;
+          part.norm = normalizeName(picked.display);
+          if (picked.auto) anyAuto = true;
+        }
+      }
+    }
+
+    const { recommend, why } = shouldSplit(rowCount, alone);
+    return {
+      action: 'split',
+      parts,
+      recommend,
+      recommendWhy: why,
+      ...(anyAuto ? { displayAuto: true } : {}),
+      ...(split.separator ? { separator: split.separator } : {}),
+    };
+  }
+
+  // Una sola parte: el display sale de la MEJOR grafia vista, no de la primera.
+  const picked = pickDisplay(variants.length ? variants : [raw], counts);
   return {
-    action: parts.length > 1 ? 'split' : 'create',
-    parts,
-    ...(split.separator ? { separator: split.separator } : {}),
+    action: 'create',
+    parts: [{ raw, display: picked.display || parts[0]?.display || raw, norm: normalizeName(picked.display) }],
+    ...(picked.auto ? { displayAuto: true } : {}),
   };
 }
 

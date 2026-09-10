@@ -13,6 +13,8 @@ import {
 	handleEntityReviewApproveBulk,
 	handleEntityReviewRecompute,
 	computeBucket,
+	pickDisplay,
+	shouldSplit,
 } from "../src/lib/entities";
 
 // Todo lo que se prueba aqui sale de datos reales del catalogo (1266 productos,
@@ -73,6 +75,76 @@ describe("cleanDisplay", () => {
 		expect(cleanDisplay("Cinthie, Fireground, Toobris, DJ Babatr, DJ Maria,"))
 			.toBe("Cinthie, Fireground, Toobris, DJ Babatr, DJ Maria");
 		expect(cleanDisplay("  DJ   Koze ")).toBe("DJ Koze");
+	});
+});
+
+describe("pickDisplay", () => {
+	it("prefiere mayusculas mixtas sobre TODO MAYUSCULAS o todo minusculas", () => {
+		// Caso real: la fila se creo con ALTON MILLER y proponia eso.
+		expect(pickDisplay(["ALTON MILLER", "Alton Miller"])).toEqual({ display: "Alton Miller", auto: false });
+		expect(pickDisplay(["omar s", "Omar S", "Omar-S"]).display).toMatch(/Omar/);
+		expect(pickDisplay(["JOHANNES ALBERT", "johannes albert", "Johannes Albert"]))
+			.toEqual({ display: "Johannes Albert", auto: false });
+	});
+
+	it("entre varias mixtas, gana la de mas productos", () => {
+		const got = pickDisplay(["Dj Koze", "DJ Koze"], { "Dj Koze": 2, "DJ Koze": 11 });
+		expect(got.display).toBe("DJ Koze");
+	});
+
+	it("si TODAS son de un solo caso, Title Case y marcado como automatico", () => {
+		// "of" se queda en minuscula, igual que en "Axis of People": es la misma regla.
+		expect(pickDisplay(["RHYHM OF PARADISE"])).toEqual({ display: "Rhyhm of Paradise", auto: true });
+		expect(pickDisplay(["deep space orchestra"])).toEqual({ display: "Deep Space Orchestra", auto: true });
+		// Un slug tambien: los sellos de Deep Jungle vienen asi.
+		expect(pickDisplay(["deep-jungle"])).toEqual({ display: "Deep Jungle", auto: true });
+	});
+
+	it("deja las particulas cortas en minuscula salvo al principio", () => {
+		expect(pickDisplay(["LA RAMA RECORDS"]).display).toBe("La Rama Records");
+		expect(pickDisplay(["AXIS OF PEOPLE"]).display).toBe("Axis of People");
+	});
+});
+
+describe("mayusculas de las partes de un troceo", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("arregla las partes cuando el crudo viene todo en minusculas", async () => {
+		await resolveOne(env as any, "artist", { raw: "rhythm & sound" }, "sweep");
+		const rec = JSON.parse((await env.ENTITIES.get(
+			`review:artist:${normalizeName("rhythm & sound")}`))!);
+		expect(rec.proposal.parts.map((p: any) => p.display)).toEqual(["Rhythm", "Sound"]);
+		expect(rec.proposal.displayAuto).toBe(true);
+	});
+
+	it("NO toca las partes si el crudo ya venia con mayusculas mezcladas", async () => {
+		// "DRS" es un acronimo: pasarlo por Title Case lo convertiria en "Drs".
+		await resolveOne(env as any, "artist", { raw: "Calibre & DRS" }, "sweep");
+		const rec = JSON.parse((await env.ENTITIES.get(
+			`review:artist:${normalizeName("Calibre & DRS")}`))!);
+		expect(rec.proposal.parts.map((p: any) => p.display)).toEqual(["Calibre", "DRS"]);
+		expect(rec.proposal.displayAuto).toBeUndefined();
+	});
+});
+
+describe("shouldSplit", () => {
+	it("no parte un nombre con peso cuyas partes no existen solas", () => {
+		// "Bread & Souls" (5 productos) es una banda, no dos artistas.
+		expect(shouldSplit(5, [false, false]).recommend).toBe("keep");
+		expect(shouldSplit(4, [false, false]).recommend).toBe("keep");
+	});
+
+	it("parte si alguna parte ya existe por su cuenta", () => {
+		// "Delano Smith & Brian Kage": Delano Smith tiene discos propios.
+		expect(shouldSplit(5, [true, false]).recommend).toBe("split");
+	});
+
+	it("parte si el nombre entero apenas aparece", () => {
+		expect(shouldSplit(1, [false, false]).recommend).toBe("split");
+		expect(shouldSplit(2, [false, false]).recommend).toBe("split");
 	});
 });
 

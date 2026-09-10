@@ -10107,7 +10107,11 @@ function EntitiesPanel() {
         const k = `${r.kind}:${r.norm}`;
         d0[k] = r.proposal?.parts?.[0]?.display || r.raw;
         p0[k] = (r.proposal?.parts || []).map(x => x.display);
-        if (r.bucket === 'bulk') s0[k] = true;   // las bulk llegan marcadas
+        // Las bulk llegan marcadas, PERO no las de display automatico: ese
+        // nombre no sale de ninguna grafia real sino de aplicar Title Case, y
+        // eso destroza los acronimos — 'CV313' se convierte en 'Cv313'. Son
+        // ~193 de 1060, demasiadas para colarlas en el monton de un clic.
+        if (r.bucket === 'bulk' && !r.proposal?.displayAuto) s0[k] = true;
       }
       setDisp(d0); setParts(p0); setSel(s0);
     } catch (e) {
@@ -10240,15 +10244,22 @@ function EntitiesPanel() {
               onClick={approveBulk} disabled={busy||!bulk.some(r=>sel[rk(r)])} />
           </div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-            A single name, no candidates, no separators. Pre-selected; the display is editable.
+            A single name, no candidates, no separators. Pre-selected — except rows marked
+            <strong> auto</strong>, whose display was guessed by Title Case and needs a look
+            (it turns <code>CV313</code> into <code>Cv313</code>).
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
             {bulk.map(r=>{const k=rk(r);return(
               <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
                 <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
                 <div style={{flex:1,minWidth:0}}>
-                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
-                    style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                      style={{flex:1,background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                    {r.proposal?.displayAuto &&
+                      <span title={`Auto Title Case from "${r.raw}" — check acronyms`}
+                        style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:'#ffd24a',padding:'2px 5px',borderRadius:2,whiteSpace:'nowrap'}}>auto</span>}
+                  </div>
                   {meta(r)}
                 </div>
               </div>
