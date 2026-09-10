@@ -380,7 +380,13 @@ async function upsertReview(
   // La propuesta se recalcula en cada pasada: si entretanto se ha aprobado una
   // entidad que casa con un trozo, aparece como existingSlug sin repetir barrido.
   rec.proposal = await buildProposal(env, kind, raw);
-  rec.candidates = await findCandidates(env, kind, norm);
+  // findCandidates solo mira entidades YA aprobadas, asi que durante un barrido
+  // devuelve casi siempre vacio. Si aqui se asignara, cada nueva pasada del
+  // barrido BORRARIA los candidatos que entity-review-recompute habia
+  // encontrado comparando fila contra fila. Se suman, no se reemplazan.
+  const fresh = await findCandidates(env, kind, norm);
+  const seenSlugs = new Set((rec.candidates || []).map(c => c.slug));
+  for (const c of fresh) if (!seenSlugs.has(c.slug)) rec.candidates.push(c);
   Object.assign(rec, computeBucket(rec));
 
   await env.ENTITIES.put(key, JSON.stringify(rec));
@@ -676,6 +682,11 @@ export async function handleEntityReviewRecompute(request: Request, env: Entitie
         if (!otherRaw) continue;
         let o: ReviewRecord;
         try { o = JSON.parse(otherRaw) as ReviewRecord; } catch { continue; }
+        // Una fila que se va a PARTIR no es candidata a fusionarse con nadie:
+        // "Harmony" y "Harmony & Kid Lib" no son la misma cosa escrita de dos
+        // maneras — la segunda contendra a la primera DESPUES del troceo.
+        // Ofrecer ahi un merge es invitar a destruir el dato.
+        if (o.proposal?.action === 'split') continue;
         found.push({
           // Todavia no es una entidad: se marca como fila de la cola para que
           // la pantalla sepa que el merge implica aprobar las dos.

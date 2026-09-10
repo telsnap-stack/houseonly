@@ -318,6 +318,40 @@ describe("recompute: candidatos fila contra fila", () => {
 		expect(toy.bucket).toBe("bulk");
 	});
 
+	it("una fila que se va a PARTIR no se ofrece como merge", async () => {
+		// "Harmony" y "Harmony & Kid Lib" no son la misma cosa escrita de dos
+		// maneras: la segunda CONTIENE a la primera y se va a trocear. Ofrecer
+		// ahi un merge es invitar a destruir el dato.
+		for (const raw of ["Harmony", "Harmony & Kid Lib", "Harmony & Xtreme"]) {
+			await resolveOne(env as any, "artist", { raw }, "sweep");
+		}
+		await handleEntityReviewRecompute(req("https://x/", {
+			method: "POST", body: JSON.stringify({ kind: "artist" }),
+		}), env as any);
+
+		const h = JSON.parse((await env.ENTITIES.get(`review:artist:${normalizeName("Harmony")}`))!);
+		expect(h.candidates).toHaveLength(0);
+		expect(h.bucket).toBe("bulk");
+	});
+
+	it("un barrido posterior NO borra los candidatos del recompute", async () => {
+		for (const raw of ["Text", "Text Records"]) {
+			await resolveOne(env as any, "label", { raw }, "sweep");
+		}
+		await handleEntityReviewRecompute(req("https://x/", {
+			method: "POST", body: JSON.stringify({ kind: "label" }),
+		}), env as any);
+		const before = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Text")}`))!);
+		expect(before.candidates).toHaveLength(1);
+
+		// Segunda pasada del barrido sobre la misma fila.
+		await resolveOne(env as any, "label", { raw: "Text", context: { handle: "otro" } }, "sweep");
+
+		const after = JSON.parse((await env.ENTITIES.get(`review:label:${normalizeName("Text")}`))!);
+		expect(after.candidates).toHaveLength(1);
+		expect(after.bucket).toBe("decide");
+	});
+
 	it("no empareja siglas cortas ni cosas que solo se parecen de lejos", async () => {
 		// Los falsos positivos reales conviven: AXIS es de 4, asi que SI se
 		// propone como candidato de Axis Of People — y por eso va a decide, para
