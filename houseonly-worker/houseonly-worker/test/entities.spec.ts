@@ -106,6 +106,58 @@ describe("pickDisplay", () => {
 	});
 });
 
+// Los dos casos que Eduardo tiene que ver bien antes de aprobar nada.
+describe("recommend contra el catalogo real", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("Rhythm & Sound queda como NO partir: ni Rhythm ni Sound existen solos", async () => {
+		await resolveOne(env as any, "artist", { raw: "Rhythm & Sound" }, "sweep");
+		const rec = JSON.parse((await env.ENTITIES.get(
+			`review:artist:${normalizeName("Rhythm & Sound")}`))!);
+		expect(rec.proposal.action).toBe("split");        // sigue en la vista Split
+		expect(rec.proposal.recommend).toBe("keep");      // pero recomienda dejarlo
+	});
+
+	it("Delano Smith & Brian Kage SI se parte: Delano Smith existe solo", async () => {
+		// Delano Smith tiene discos a su nombre, asi que hay fila propia.
+		await resolveOne(env as any, "artist", { raw: "Delano Smith" }, "sweep");
+		await resolveOne(env as any, "artist", { raw: "Delano Smith & Brian Kage" }, "sweep");
+		const rec = JSON.parse((await env.ENTITIES.get(
+			`review:artist:${normalizeName("Delano Smith & Brian Kage")}`))!);
+		expect(rec.proposal.recommend).toBe("split");
+		expect(rec.proposal.recommendWhy).toContain("por su cuenta");
+	});
+});
+
+describe("pickDisplay: acronimos", () => {
+	it("conserva el acronimo en mayusculas y NO lo marca como automatico", () => {
+		// Con digitos.
+		expect(pickDisplay(["CV313", "cv313"])).toEqual({ display: "CV313", auto: false });
+		expect(pickDisplay(["R2"])).toEqual({ display: "R2", auto: false });
+		// Sin vocales.
+		expect(pickDisplay(["DRS"])).toEqual({ display: "DRS", auto: false });
+		expect(pickDisplay(["stl"])).toEqual({ display: "STL", auto: false });
+		expect(pickDisplay(["BB"])).toEqual({ display: "BB", auto: false });
+		// La 'y' cuenta como vocal: "rhythm" es una palabra, no un acronimo.
+		expect(pickDisplay(["rhythm"])).toEqual({ display: "Rhythm", auto: true });
+	});
+
+	it("las palabras de verdad y los slugs si van a Title Case, con badge", () => {
+		expect(pickDisplay(["deep-jungle"])).toEqual({ display: "Deep Jungle", auto: true });
+		expect(pickDisplay(["RHYHM OF PARADISE"])).toEqual({ display: "Rhyhm of Paradise", auto: true });
+		expect(pickDisplay(["deep space orchestra"]).auto).toBe(true);
+		// "rawax" tiene vocales y no es corto-sin-vocales: es una palabra.
+		expect(pickDisplay(["rawax"])).toEqual({ display: "Rawax", auto: true });
+	});
+
+	it("una grafia mixta siempre gana al acronimo", () => {
+		expect(pickDisplay(["MSYMIAKOS", "Msymiakos"])).toEqual({ display: "Msymiakos", auto: false });
+	});
+});
+
 describe("mayusculas de las partes de un troceo", () => {
 	beforeEach(async () => {
 		await wipe();
@@ -116,8 +168,10 @@ describe("mayusculas de las partes de un troceo", () => {
 		await resolveOne(env as any, "artist", { raw: "rhythm & sound" }, "sweep");
 		const rec = JSON.parse((await env.ENTITIES.get(
 			`review:artist:${normalizeName("rhythm & sound")}`))!);
+		// Aunque se recomiende NO partir, si se parte las partes salen bien.
 		expect(rec.proposal.parts.map((p: any) => p.display)).toEqual(["Rhythm", "Sound"]);
 		expect(rec.proposal.displayAuto).toBe(true);
+		expect(rec.proposal.recommend).toBe("keep");
 	});
 
 	it("NO toca las partes si el crudo ya venia con mayusculas mezcladas", async () => {
@@ -131,20 +185,16 @@ describe("mayusculas de las partes de un troceo", () => {
 });
 
 describe("shouldSplit", () => {
-	it("no parte un nombre con peso cuyas partes no existen solas", () => {
-		// "Bread & Souls" (5 productos) es una banda, no dos artistas.
-		expect(shouldSplit(5, [false, false]).recommend).toBe("keep");
-		expect(shouldSplit(4, [false, false]).recommend).toBe("keep");
+	it("solo parte si hay EVIDENCIA: alguna parte existe sola en el catalogo", () => {
+		expect(shouldSplit([true, false]).recommend).toBe("split");
+		expect(shouldSplit([true, true]).recommend).toBe("split");
 	});
 
-	it("parte si alguna parte ya existe por su cuenta", () => {
-		// "Delano Smith & Brian Kage": Delano Smith tiene discos propios.
-		expect(shouldSplit(5, [true, false]).recommend).toBe("split");
-	});
-
-	it("parte si el nombre entero apenas aparece", () => {
-		expect(shouldSplit(1, [false, false]).recommend).toBe("split");
-		expect(shouldSplit(2, [false, false]).recommend).toBe("split");
+	it("sin evidencia no parte, tenga los productos que tenga", () => {
+		// El numero de productos ya no pinta nada: antes habia un umbral de 3 y
+		// dejaba fuera lo que menos stock tiene.
+		expect(shouldSplit([false, false]).recommend).toBe("keep");
+		expect(shouldSplit([false, false, false]).recommend).toBe("keep");
 	});
 });
 

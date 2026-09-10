@@ -237,6 +237,22 @@ export function pickDisplay(
 
   if (mixed.length) return { display: best, auto: false };
 
+  // Acronimos y nombres estilizados. Title Case los destroza: CV313 se queda
+  // en 'Cv313' y DRS en 'Drs'. Cuando todas las grafias son la misma palabra
+  // salvo mayusculas, y alguna es corta y "no parece una palabra" —lleva
+  // digitos o no tiene ni una vocal— se conserva en mayusculas y NO se marca
+  // como propuesta automatica, porque no lo es: es el nombre.
+  const sameWord = new Set(clean.map(v => v.toLowerCase())).size === 1;
+  if (sameWord) {
+    // La 'y' cuenta como vocal aqui: sin ella "rhythm" —6 letras, ni una
+    // a/e/i/o/u— pasaba por acronimo y salia como RHYTHM.
+    const acronym = clean.find(v => v.length <= 6 && (/\d/.test(v) || !/[aeiouy]/i.test(v)));
+    if (acronym) {
+      const upper = clean.find(v => v === v.toUpperCase() && /[A-Z]/.test(v));
+      return { display: upper || acronym.toUpperCase(), auto: false };
+    }
+  }
+
   // Solo mayusculas, solo minusculas o pinta de slug: se propone Title Case.
   // Las particulas cortas se dejan en minuscula salvo al principio.
   const SMALL = new Set(['de', 'del', 'la', 'el', 'y', 'of', 'the', 'and', 'in', 'on', 'a']);
@@ -258,15 +274,16 @@ export function pickDisplay(
  * partes existe por su cuenta, casi seguro que es un nombre solo.
  */
 export function shouldSplit(
-  count: number,
   partsExistAlone: boolean[],
 ): { recommend: 'split' | 'keep'; why: string } {
-  const anyAlone = partsExistAlone.some(Boolean);
-  if (count >= 3 && !anyAlone) {
-    return { recommend: 'keep', why: `${count} productos con el nombre entero y ninguna parte aparece sola` };
+  const alone = partsExistAlone.filter(Boolean).length;
+  if (alone > 0) {
+    return { recommend: 'split', why: `${alone} de las partes ya existe por su cuenta en el catalogo` };
   }
-  if (anyAlone) return { recommend: 'split', why: 'alguna parte ya existe por su cuenta' };
-  return { recommend: 'split', why: 'lleva separador' };
+  // Sin evidencia no se parte, tenga el nombre 1 producto o 50. Antes habia un
+  // umbral por numero de productos y dejaba fuera justo lo que menos stock
+  // tiene: "Rhythm & Sound" son 2 discos y un duo de toda la vida.
+  return { recommend: 'keep', why: 'ninguna parte aparece sola en el catalogo' };
 }
 
 // ── LECTURA ─────────────────────────────────────────────────────────
@@ -515,7 +532,7 @@ async function buildProposal(
       }
     }
 
-    const { recommend, why } = shouldSplit(rowCount, alone);
+    const { recommend, why } = shouldSplit(alone);
     return {
       action: 'split',
       parts,

@@ -10120,7 +10120,12 @@ function EntitiesPanel() {
     setLoading(false);
   }
 
-  const bulk   = rows.filter(r => r.bucket === 'bulk');
+  const bulkAll = rows.filter(r => r.bucket === 'bulk');
+  // Dentro de Bulk hay dos cosas distintas y conviene no mezclarlas: nombres
+  // que vienen tal cual del catalogo, y nombres que nos hemos inventado
+  // aplicando Title Case porque no habia ninguna grafia decente.
+  const bulk   = bulkAll.filter(r => !r.proposal?.displayAuto);
+  const bulkAuto = bulkAll.filter(r => r.proposal?.displayAuto);
   const split  = rows.filter(r => r.bucketWhy === 'multi');
   const merge  = rows.filter(r => r.bucketWhy === 'candidates');
   const otras  = rows.filter(r => r.bucket === 'decide' && !['multi', 'candidates'].includes(r.bucketWhy));
@@ -10130,7 +10135,7 @@ function EntitiesPanel() {
     .filter(Boolean).slice(0, 3);
 
   async function approveBulk() {
-    const chosen = bulk.filter(r => sel[rk(r)]);
+    const chosen = bulkAll.filter(r => sel[rk(r)]);
     if (!chosen.length) return;
     setBusy(true); setError(''); setMsg('');
     try {
@@ -10224,7 +10229,7 @@ function EntitiesPanel() {
         </div>
       </div>
       <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
-        {viewBtn('bulk','Bulk',bulk.length)}
+        {viewBtn('bulk','Bulk',bulkAll.length)}
         {viewBtn('split','Split',split.length)}
         {viewBtn('merge','Merge',merge.length)}
         {otras.length>0 && viewBtn('otras','Other',otras.length)}
@@ -10238,15 +10243,14 @@ function EntitiesPanel() {
             <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
               <input type="checkbox" checked={bulk.length>0&&bulk.every(r=>sel[rk(r)])}
                 onChange={e=>{const n={...sel};bulk.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
-              Select all
+              Select all verbatim
             </label>
-            <Btn ch={busy?'Approving…':`Approve selected (${bulk.filter(r=>sel[rk(r)]).length})`}
-              onClick={approveBulk} disabled={busy||!bulk.some(r=>sel[rk(r)])} />
+            <Btn ch={busy?'Approving…':`Approve selected (${bulkAll.filter(r=>sel[rk(r)]).length})`}
+              onClick={approveBulk} disabled={busy||!bulkAll.some(r=>sel[rk(r)])} />
           </div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-            A single name, no candidates, no separators. Pre-selected — except rows marked
-            <strong> auto</strong>, whose display was guessed by Title Case and needs a look
-            (it turns <code>CV313</code> into <code>Cv313</code>).
+            A single name, no candidates, no separators — the display comes straight from the
+            catalogue. Pre-selected.
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
             {bulk.map(r=>{const k=rk(r);return(
@@ -10265,6 +10269,40 @@ function EntitiesPanel() {
               </div>
             );})}
           </div>
+
+          {bulkAuto.length>0 && (
+            <div style={{marginTop:22,paddingTop:18,borderTop:`1px solid ${S.border}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
+                <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
+                  Auto-proposed name · {bulkAuto.length}
+                </div>
+                <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                  <input type="checkbox" checked={bulkAuto.length>0&&bulkAuto.every(r=>sel[rk(r)])}
+                    onChange={e=>{const n={...sel};bulkAuto.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+                  Select all auto
+                </label>
+              </div>
+              <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+                No usable spelling existed in the catalogue, so the name below was produced by
+                Title Case — <code>deep-jungle</code> → <code>Deep Jungle</code>. Read them before
+                approving. Not pre-selected on purpose.
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:380,overflowY:'auto'}}>
+                {bulkAuto.map(r=>{const k=rk(r);return(
+                  <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
+                    <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
+                    <div style={{flex:1,minWidth:0}}>
+                      <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                        style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                      <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+                        from <span style={{fontFamily:'monospace'}}>{r.raw}</span> · {r.count} product{r.count===1?'':'s'}
+                      </div>
+                    </div>
+                  </div>
+                );})}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
