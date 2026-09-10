@@ -10064,6 +10064,7 @@ function EntitiesPanel() {
   const [secret, setSecret]   = useState('');
   const [authed, setAuthed]   = useState(false);
   const [view, setView]       = useState('bulk');
+  const [kindTab, setKindTab] = useState('artist');
   const [rows, setRows]       = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy]       = useState(false);
@@ -10120,6 +10121,13 @@ function EntitiesPanel() {
     setLoading(false);
   }
 
+  // Cada vista se parte ademas por rol. Artistas y sellos son trabajos
+  // distintos —un sello no se trocea nunca, un artista si— y verlos juntos
+  // obliga a cambiar de cabeza en cada fila. Las listas sin sufijo son el
+  // total, que es lo que cuentan las pestañas; las *K son la sub-pestaña
+  // activa, que es sobre lo que actuan los botones.
+  const ofKind = list => list.filter(r => r.kind === kindTab);
+
   const bulkAll = rows.filter(r => r.bucket === 'bulk');
   // Dentro de Bulk hay dos cosas distintas y conviene no mezclarlas: nombres
   // que vienen tal cual del catalogo, y nombres que nos hemos inventado
@@ -10130,12 +10138,23 @@ function EntitiesPanel() {
   const merge  = rows.filter(r => r.bucketWhy === 'candidates');
   const otras  = rows.filter(r => r.bucket === 'decide' && !['multi', 'candidates'].includes(r.bucketWhy));
 
+  const bulkAllK = ofKind(bulkAll);
+  const bulkK    = ofKind(bulk);
+  const bulkAutoK= ofKind(bulkAuto);
+  const splitK   = ofKind(split);
+  const mergeK   = ofKind(merge);
+  const otrasK   = ofKind(otras);
+
+  const viewRows = { bulk: bulkAll, split, merge, otras }[view] || [];
+
   const samples = r => (r.samples || [])
     .map(x => (typeof x === 'string' ? x : (x.t || x.h)))
     .filter(Boolean).slice(0, 3);
 
   async function approveBulk() {
-    const chosen = bulkAll.filter(r => sel[rk(r)]);
+    // Solo lo seleccionado en la sub-pestaña visible: aprobar artistas no debe
+    // arrastrar sellos que quedaron marcados al otro lado.
+    const chosen = bulkAllK.filter(r => sel[rk(r)]);
     if (!chosen.length) return;
     setBusy(true); setError(''); setMsg('');
     try {
@@ -10212,6 +10231,23 @@ function EntitiesPanel() {
     <button onClick={()=>setView(k)} style={{background:view===k?S.accent:S.border,color:view===k?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:view===k?700:400,letterSpacing:1.2,textTransform:'uppercase',padding:'6px 12px'}}>{label} · {n}</button>
   );
 
+  const kindBtn = (k, label) => {
+    const n = viewRows.filter(r => r.kind === k).length;
+    return (
+      <button onClick={()=>setKindTab(k)} style={{background:'none',border:'none',borderBottom:`2px solid ${kindTab===k?S.accent:'transparent'}`,color:kindTab===k?S.text:S.muted,cursor:'pointer',fontSize:10,fontWeight:kindTab===k?700:400,letterSpacing:1,textTransform:'uppercase',padding:'5px 2px',marginRight:18}}>{label} · {n}</button>
+    );
+  };
+
+  // Una sub-pestaña puede estar vacia de forma perfectamente normal: los
+  // sellos NUNCA se trocean, asi que Split/Labels siempre sale a cero. Sin
+  // este aviso parece que algo no ha cargado.
+  const emptyNote = (list, what) => list.length === 0 && (
+    <div style={{fontSize:11,color:S.muted,padding:'20px 0',textAlign:'center'}}>
+      No {kindTab === 'artist' ? 'artists' : 'labels'} in {what}.
+      {view === 'split' && kindTab === 'label' && ' Labels are never split — "Vibes & Pepper Records" is one label.'}
+    </div>
+  );
+
   const meta = r => (
     <div style={{fontSize:10,color:S.muted,marginTop:3}}>
       {r.kind === 'artist' ? 'artist' : 'label'} · {r.count} product{r.count===1?'':'s'}
@@ -10234,6 +10270,10 @@ function EntitiesPanel() {
         {viewBtn('merge','Merge',merge.length)}
         {otras.length>0 && viewBtn('otras','Other',otras.length)}
       </div>
+      <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
+        {kindBtn('artist','Artists')}
+        {kindBtn('label','Labels')}
+      </div>
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
 
@@ -10241,19 +10281,20 @@ function EntitiesPanel() {
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,gap:8,flexWrap:'wrap'}}>
             <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
-              <input type="checkbox" checked={bulk.length>0&&bulk.every(r=>sel[rk(r)])}
-                onChange={e=>{const n={...sel};bulk.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+              <input type="checkbox" checked={bulkK.length>0&&bulkK.every(r=>sel[rk(r)])}
+                onChange={e=>{const n={...sel};bulkK.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
               Select all verbatim
             </label>
-            <Btn ch={busy?'Approving…':`Approve selected (${bulkAll.filter(r=>sel[rk(r)]).length})`}
-              onClick={approveBulk} disabled={busy||!bulkAll.some(r=>sel[rk(r)])} />
+            <Btn ch={busy?'Approving…':`Approve selected (${bulkAllK.filter(r=>sel[rk(r)]).length})`}
+              onClick={approveBulk} disabled={busy||!bulkAllK.some(r=>sel[rk(r)])} />
           </div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
             A single name, no candidates, no separators — the display comes straight from the
             catalogue. Pre-selected.
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
-            {bulk.map(r=>{const k=rk(r);return(
+            {emptyNote(bulkK, 'Bulk')}
+            {bulkK.map(r=>{const k=rk(r);return(
               <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
                 <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
                 <div style={{flex:1,minWidth:0}}>
@@ -10270,15 +10311,15 @@ function EntitiesPanel() {
             );})}
           </div>
 
-          {bulkAuto.length>0 && (
+          {bulkAutoK.length>0 && (
             <div style={{marginTop:22,paddingTop:18,borderTop:`1px solid ${S.border}`}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
                 <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
-                  Auto-proposed name · {bulkAuto.length}
+                  Auto-proposed name · {bulkAutoK.length}
                 </div>
                 <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
-                  <input type="checkbox" checked={bulkAuto.length>0&&bulkAuto.every(r=>sel[rk(r)])}
-                    onChange={e=>{const n={...sel};bulkAuto.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+                  <input type="checkbox" checked={bulkAutoK.length>0&&bulkAutoK.every(r=>sel[rk(r)])}
+                    onChange={e=>{const n={...sel};bulkAutoK.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
                   Select all auto
                 </label>
               </div>
@@ -10288,14 +10329,14 @@ function EntitiesPanel() {
                 approving. Not pre-selected on purpose.
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:380,overflowY:'auto'}}>
-                {bulkAuto.map(r=>{const k=rk(r);return(
+                {bulkAutoK.map(r=>{const k=rk(r);return(
                   <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
                     <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
                     <div style={{flex:1,minWidth:0}}>
                       <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
                         style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
                       <div style={{fontSize:10,color:S.muted,marginTop:3}}>
-                        from <span style={{fontFamily:'monospace'}}>{r.raw}</span> · {r.count} product{r.count===1?'':'s'}
+                        {r.kind === 'artist' ? 'artist' : 'label'} · from <span style={{fontFamily:'monospace'}}>{r.raw}</span> · {r.count} product{r.count===1?'':'s'}
                       </div>
                     </div>
                   </div>
@@ -10313,7 +10354,8 @@ function EntitiesPanel() {
             A name that shouldn't be split is fixed with "keep as one".
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
-            {split.map(r=>{const k=rk(r);const ps=parts[k]||[];return(
+            {emptyNote(splitK, 'Split')}
+            {splitK.map(r=>{const k=rk(r);const ps=parts[k]||[];return(
               <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
                 <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
                 {meta(r)}
@@ -10348,7 +10390,8 @@ function EntitiesPanel() {
             <strong> nothing</strong>: AXIS and Axis Of People are different labels. Nothing is merged by default.
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
-            {merge.map(r=>{const k=rk(r);const ch=choice[k]||'';return(
+            {emptyNote(mergeK, 'Merge')}
+            {mergeK.map(r=>{const k=rk(r);const ch=choice[k]||'';return(
               <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
                 <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
                 {meta(r)}
@@ -10397,7 +10440,8 @@ function EntitiesPanel() {
         <div>
           <div style={{fontSize:10,color:S.muted,marginBottom:12}}>Truncated and parenthesised: the proposed display is already cleaned up, but worth a look.</div>
           <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:520,overflowY:'auto'}}>
-            {otras.map(r=>{const k=rk(r);return(
+            {emptyNote(otrasK, 'Other')}
+            {otrasK.map(r=>{const k=rk(r);return(
               <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
                 <div style={{fontSize:11,color:S.muted}}>{WHY_EN[r.bucketWhy]||r.bucketWhy} · raw: <span style={{color:S.text}}>{r.raw}</span></div>
                 {meta(r)}
