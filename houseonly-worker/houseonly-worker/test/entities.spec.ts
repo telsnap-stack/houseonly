@@ -117,14 +117,21 @@ describe("resolveOne", () => {
 		expect(rec.count).toBe(1);
 	});
 
-	it("agrupa variantes en una sola fila y suma count", async () => {
-		for (const raw of ["DJ Koze", "Dj Koze", "DJ Koze"]) {
-			await resolveOne(env as any, "artist", { raw, context: { handle: `h-${raw}` } }, "ws");
+	it("agrupa variantes en una sola fila; count son PRODUCTOS distintos", async () => {
+		// Tres productos, dos grafias, y el tercero repite el handle del primero:
+		// son 2 productos distintos, no 3 apariciones.
+		const seen: Array<[string, string]> = [
+			["DJ Koze", "pampa045"],
+			["Dj Koze", "pampa046"],
+			["DJ Koze", "pampa045"],
+		];
+		for (const [raw, handle] of seen) {
+			await resolveOne(env as any, "artist", { raw, context: { handle } }, "ws");
 		}
 		const l = await env.ENTITIES.list({ prefix: "review:artist:" });
 		expect(l.keys).toHaveLength(1);
 		const rec = JSON.parse((await env.ENTITIES.get(l.keys[0].name))!);
-		expect(rec.count).toBe(3);
+		expect(rec.count).toBe(2);
 		expect(rec.variants.sort()).toEqual(["DJ Koze", "Dj Koze"]);
 	});
 
@@ -183,6 +190,55 @@ describe("resolveOne", () => {
 		const r = await resolveOne(env as any, "artist", { raw: "V/A" }, "ws");
 		expect(r.status).toBe("ignored");
 		expect(await env.ENTITIES.get(`review:artist:${normalizeName("V/A")}`)).toBeNull();
+	});
+});
+
+// El valor de alias:{k}:{norm} son slugs separados por COMA — asi es como una
+// grafia cruda resuelve a N entidades tras un split. Un slug con una coma
+// dentro romperia ese split y resolveria a entidades inexistentes.
+describe("un slug nunca lleva coma", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("slugify no puede producir una, ni con nombres llenos de comas", () => {
+		const nasty = [
+			"Cinthie, Fireground, Toobris, DJ Babatr, DJ Maria,",
+			"luciano, felipe venegas, diego errázuriz",
+			"Aybee, Dego, Fred P, Gerald Mitchell, Ian O’Brien, K15",
+			"Charlie Rice, Nay Barr",
+			",,,",
+		];
+		for (const n of nasty) expect(slugify(n)).not.toContain(",");
+	});
+
+	it("approve saneа un slug con coma en vez de guardarlo tal cual", async () => {
+		await resolveOne(env as any, "artist", { raw: "Charlie Rice, Nay Barr" }, "ws");
+		const norm = normalizeName("Charlie Rice, Nay Barr");
+
+		await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", norm, action: "create",
+				parts: [{ display: "Charlie Rice", slug: "charlie,rice" }] }),
+		}), env as any);
+
+		const l = await env.ENTITIES.list({ prefix: "entity:" });
+		for (const k of l.keys) expect(k.name.slice("entity:".length)).not.toContain(",");
+	});
+
+	it("ningun slug de un split lleva coma, y el alias sigue partiendose bien", async () => {
+		await resolveOne(env as any, "artist", { raw: "Delano Smith & Brian Kage" }, "ws");
+		const norm = normalizeName("Delano Smith & Brian Kage");
+		await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", norm, action: "split",
+				parts: [{ display: "Delano Smith" }, { display: "Brian Kage" }] }),
+		}), env as any);
+
+		const r = await resolveOne(env as any, "artist", { raw: "Delano Smith & Brian Kage" }, "ws");
+		expect(r.slugs).toHaveLength(2);
+		for (const s of r.slugs) expect(s).not.toContain(",");
 	});
 });
 
@@ -300,6 +356,18 @@ describe("cola: aprobar y rechazar", () => {
 		expect(await env.ENTITIES.get(`ignore:a:${norm}`)).toBe("1");
 		expect(await env.ENTITIES.get(`review:artist:${norm}`)).toBeNull();
 		expect((await resolveOne(env as any, "artist", { raw: "V/A" }, "ws")).status).toBe("ignored");
+	});
+
+	it("repetir el barrido no infla el conteo", async () => {
+		// Dos pasadas identicas sobre los mismos dos productos.
+		for (let pass = 0; pass < 2; pass++) {
+			for (const handle of ["pampa045", "pampa046"]) {
+				await resolveOne(env as any, "artist", { raw: "DJ Koze", context: { handle } }, "sweep");
+			}
+		}
+		const rec = JSON.parse((await env.ENTITIES.get(`review:artist:${normalizeName("DJ Koze")}`))!);
+		expect(rec.count).toBe(2);          // no 4
+		expect(rec.countApprox).toBeFalsy();
 	});
 
 	it("la cola sale ordenada por count descendente", async () => {

@@ -58,7 +58,9 @@ export interface ReviewRecord {
   };
   candidates: Array<{ slug: string; display: string; why: 'normalized' | 'prefix' }>;
   sources: string[];
-  samples: string[];
+  samples: string[];       // primeros handles, para que la UI ensene de que va
+  handles?: string[];      // handles ya contados, para que count no se infle
+  countApprox?: boolean;   // true si se paso del tope y count deja de ser exacto
   count: number;
   firstSeen: number;
   lastSeen: number;
@@ -86,6 +88,11 @@ const K = {
 // persona vea de que va y se pueda pinchar; no queremos 900 handles en KV.
 const MAX_SAMPLES = 8;
 const MAX_VARIANTS = 12;
+// Handles recordados por fila para deduplicar el conteo. El barrido se puede
+// repetir, y sin esto `count` se doblaria en cada pasada. Con 1266 productos la
+// fila mas poblada no llega ni de lejos a este tope, asi que en la practica el
+// conteo es exacto; si alguna vez se pasa, se marca countApprox.
+const MAX_HANDLES = 200;
 
 // ── NORMALIZACION ───────────────────────────────────────────────────
 
@@ -306,7 +313,22 @@ async function upsertReview(
   if (!rec.variants.includes(raw) && rec.variants.length < MAX_VARIANTS) rec.variants.push(raw);
   if (source && !rec.sources.includes(source)) rec.sources.push(source);
   if (handle && !rec.samples.includes(handle) && rec.samples.length < MAX_SAMPLES) rec.samples.push(handle);
-  rec.count++;
+
+  // Conteo idempotente: un producto ya contado no vuelve a sumar, asi que
+  // repetir el barrido reordena la cola igual pero no infla los numeros. Sin
+  // handle no hay forma de deduplicar y se suma a ciegas.
+  rec.handles ||= [];
+  if (!handle) {
+    rec.count++;
+  } else if (!rec.handles.includes(handle)) {
+    if (rec.handles.length < MAX_HANDLES) {
+      rec.handles.push(handle);
+      rec.count++;
+    } else {
+      rec.count++;
+      rec.countApprox = true;
+    }
+  }
   rec.lastSeen = now;
 
   // La propuesta se recalcula en cada pasada: si entretanto se ha aprobado una
@@ -566,7 +588,11 @@ export async function handleEntityReviewApprove(request: Request, env: EntitiesE
     for (const p of parts) {
       const display = cleanDisplay(String(p?.display || p?.raw || ''));
       if (!display) continue;
-      const slug = String(p?.slug || '').trim() || slugify(display);
+      // Siempre por slugify, incluso si el cliente manda un slug ya hecho. El
+      // valor de alias:{k}:{norm} son slugs separados por COMA, asi que un slug
+      // con una coma dentro romperia el split y resolveria a entidades que no
+      // existen. slugify no puede producir una.
+      const slug = slugify(String(p?.slug || '').trim() || display);
       if (!slug) continue;
       await upsertEntity(env, slug, display, kind, {
         // Un split reparte el alias entre las partes, asi que el crudo completo
