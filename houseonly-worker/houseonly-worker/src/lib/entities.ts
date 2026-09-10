@@ -646,14 +646,16 @@ async function upsertEntity(
 /** Apunta un alias (crudo y normalizado) a uno o varios slugs. */
 async function pointAlias(env: EntitiesEnv, kind: EntityKind, raws: string[], slugs: string[]): Promise<void> {
   const value = slugs.join(',');
-  const norms = new Set<string>();
+  const keys = new Set<string>();
   for (const r of raws) {
     if (!r) continue;
-    await env.ENTITIES.put(K.alias(kind, r), value);   // exacto
+    keys.add(K.alias(kind, r));                        // exacto
     const n = normalizeName(r);
-    if (n) norms.add(n);
+    if (n) keys.add(K.alias(kind, n));                 // normalizado
   }
-  for (const n of norms) await env.ENTITIES.put(K.alias(kind, n), value);
+  // Claves distintas y valor identico: no hay lectura-modificacion-escritura
+  // que pueda pisarse, asi que van a la vez.
+  await Promise.all([...keys].map(k => env.ENTITIES.put(k, value)));
 }
 
 // ── HANDLERS HTTP ───────────────────────────────────────────────────
@@ -977,35 +979,84 @@ export async function handleEntityReviewApproveBulk(request: Request, env: Entit
   if (!items.length) return json({ error: 'items required' }, 400);
   if (items.length > 200) return json({ error: 'max 200 items per call' }, 400);
 
-  const results: Array<{ norm: string; ok: boolean; slug?: string; error?: string }> = [];
+  const results: Array<{ norm: string; ok: boolean; slug?: string; error?: string; alreadyDone?: boolean }> = [];
 
-  for (const it of items) {
+  /** Aprueba una fila. Devuelve el resultado en vez de lanzar. */
+  const approveRow = async (it: { norm?: string; display?: string }) => {
     const norm = String(it?.norm || '').trim();
-    if (!norm) { results.push({ norm: '', ok: false, error: 'norm required' }); continue; }
+    if (!norm) return { norm: '', ok: false, error: 'norm required' };
 
     const key = K.review(kind, norm);
     const rawRec = await env.ENTITIES.get(key);
-    if (!rawRec) { results.push({ norm, ok: false, error: 'not found' }); continue; }
+
+    if (!rawRec) {
+      // Idempotencia: si la fila ya no esta pero el alias apunta a una entidad
+      // viva, es que ya se aprobo. Reintentar un lote no debe contarlo como
+      // fallo — el cliente trocea y reintenta, y un "not found" ahi asustaria
+      // sin motivo.
+      const hit = await env.ENTITIES.get(K.alias(kind, norm));
+      const slug = (hit || '').split(',')[0].trim();
+      if (slug && await getEntity(env, slug)) {
+        return { norm, ok: true, slug, alreadyDone: true };
+      }
+      return { norm, ok: false, error: 'not found' };
+    }
 
     let rec: ReviewRecord;
     try { rec = JSON.parse(rawRec) as ReviewRecord; }
-    catch { results.push({ norm, ok: false, error: 'corrupt' }); continue; }
+    catch { return { norm, ok: false, error: 'corrupt' }; }
 
     const display = cleanDisplay(String(it?.display || rec.proposal?.parts?.[0]?.display || rec.raw));
     const slug = slugify(display);
-    if (!display || !slug) { results.push({ norm, ok: false, error: 'empty display' }); continue; }
+    if (!display || !slug) return { norm, ok: false, error: 'empty display' };
 
     const aliasRaws = [rec.raw, ...rec.variants];
+    // upsertEntity es lectura-modificacion-escritura sobre entity:{slug} y va
+    // sola. Lo de despues toca claves independientes y puede ir a la vez.
     await upsertEntity(env, slug, display, kind, { aliases: aliasRaws, sources: rec.sources });
-    await pointAlias(env, kind, aliasRaws, [slug]);
-    await env.ENTITIES.delete(key);
-    results.push({ norm, ok: true, slug });
+    await Promise.all([
+      pointAlias(env, kind, aliasRaws, [slug]),
+      env.ENTITIES.delete(key),
+    ]);
+    return { norm, ok: true, slug };
+  };
+
+  // Paralelismo POR SLUG, no por item.
+  //
+  // upsertEntity lee entity:{slug}, lo modifica y lo escribe. Dos filas del
+  // mismo lote pueden acabar en el MISMO slug —dos grafias que limpian igual—
+  // y lanzarlas a la vez haria que una pisara los alias de la otra: KV no
+  // tiene transacciones. Asi que las filas que comparten slug van en fila
+  // india, y los grupos distintos en paralelo.
+  //
+  // Ojo con lo que esto NO arregla: el limite de subrequests de una peticion
+  // cuenta operaciones, no concurrencia. Esto acorta el reloj, no el gasto;
+  // quien evita el limite es el troceo en lotes de 50 del cliente.
+  const groups = new Map<string, Array<{ norm?: string; display?: string }>>();
+  for (const it of items) {
+    const norm = String(it?.norm || '').trim();
+    const display = String(it?.display || '') || norm;
+    const gk = slugify(cleanDisplay(display)) || `#${norm}`;
+    if (!groups.has(gk)) groups.set(gk, []);
+    groups.get(gk)!.push(it);
   }
+
+  const CONCURRENCY = 8;
+  const pending = [...groups.values()];
+  const workers = Array.from({ length: Math.min(CONCURRENCY, pending.length) }, async () => {
+    for (;;) {
+      const group = pending.shift();
+      if (!group) return;
+      for (const it of group) results.push(await approveRow(it));
+    }
+  });
+  await Promise.all(workers);
 
   return json({
     ok: true,
     kind,
     approved: results.filter(r => r.ok).length,
+    alreadyDone: results.filter(r => r.alreadyDone).length,
     failed: results.filter(r => !r.ok).length,
     results,
   });

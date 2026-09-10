@@ -618,6 +618,60 @@ describe("approve-bulk", () => {
 		expect((await env.ENTITIES.list({ prefix: "review:artist:" })).keys).toHaveLength(0);
 	});
 
+	it("aprobar dos veces la misma fila es idempotente", async () => {
+		await resolveOne(env as any, "artist", { raw: "Session Victim" }, "sweep");
+		const norm = normalizeName("Session Victim");
+		const body = JSON.stringify({ kind: "artist", items: [{ norm }] });
+
+		const first: any = await (await handleEntityReviewApproveBulk(
+			req("https://x/", { method: "POST", body }), env as any)).json();
+		expect(first.approved).toBe(1);
+		expect(first.results[0].alreadyDone).toBeUndefined();
+
+		// Segunda vez: la fila ya no existe, pero el alias apunta a la entidad.
+		const second: any = await (await handleEntityReviewApproveBulk(
+			req("https://x/", { method: "POST", body }), env as any)).json();
+		expect(second.approved).toBe(1);          // NO cuenta como fallo
+		expect(second.failed).toBe(0);
+		expect(second.alreadyDone).toBe(1);
+		expect(second.results[0].slug).toBe("session-victim");
+
+		// Y no ha duplicado nada.
+		const ents = await env.ENTITIES.list({ prefix: "entity:" });
+		expect(ents.keys).toHaveLength(1);
+		const e = await getEntity(env as any, "session-victim");
+		expect(e?.aliases).toEqual(["Session Victim"]);
+	});
+
+	it("un norm que no existe SI es un fallo, no un 'ya hecho'", async () => {
+		const res: any = await (await handleEntityReviewApproveBulk(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", items: [{ norm: "nuncaexistio" }] }),
+		}), env as any)).json();
+		expect(res.failed).toBe(1);
+		expect(res.alreadyDone).toBe(0);
+		expect(res.results[0].error).toBe("not found");
+	});
+
+	it("dos filas que acaban en el MISMO slug no se pisan los alias", async () => {
+		// Van al mismo grupo y por tanto en fila india: si fueran en paralelo,
+		// la lectura-modificacion-escritura de entity:{slug} perderia un alias.
+		await resolveOne(env as any, "artist", { raw: "Los Hermanos" }, "sweep");
+		await resolveOne(env as any, "artist", { raw: "los hermanos!" }, "sweep");
+
+		const res: any = await (await handleEntityReviewApproveBulk(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind: "artist", items: [
+				{ norm: normalizeName("Los Hermanos"), display: "Los Hermanos" },
+				{ norm: normalizeName("los hermanos!"), display: "Los Hermanos" },
+			] }),
+		}), env as any)).json();
+
+		expect(res.approved).toBe(2);
+		const e = await getEntity(env as any, "los-hermanos");
+		expect(e?.aliases.sort()).toEqual(["Los Hermanos", "los hermanos!"]);
+	});
+
 	it("lo que falla no arrastra a lo demas", async () => {
 		await resolveOne(env as any, "artist", { raw: "Ian Pooley" }, "sweep");
 		const res: any = await (await handleEntityReviewApproveBulk(req("https://x/", {

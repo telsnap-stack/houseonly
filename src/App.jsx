@@ -10074,6 +10074,7 @@ function EntitiesPanel() {
   const [disp, setDisp]       = useState({});
   const [parts, setParts]     = useState({});
   const [choice, setChoice]   = useState({});
+  const [progress, setProgress] = useState(null);   // {done,total} mientras se aprueba
 
   const rk = r => `${r.kind}:${r.norm}`;
   const hdrs = sec => ({ 'Authorization': `Bearer ${sec || secret}`, 'Content-Type': 'application/json' });
@@ -10151,30 +10152,57 @@ function EntitiesPanel() {
     .map(x => (typeof x === 'string' ? x : (x.t || x.h)))
     .filter(Boolean).slice(0, 3);
 
+  // 50 por peticion. Cada fila hace del orden de 7-8 operaciones de KV, asi
+  // que un lote de 518 se acercaba al limite de subrequests de una peticion
+  // del Worker y ademas dejaba la pantalla muerta durante minutos.
+  const APPROVE_CHUNK = 50;
+
   async function approveBulk() {
     // Solo lo seleccionado en la sub-pestaña visible: aprobar artistas no debe
     // arrastrar sellos que quedaron marcados al otro lado.
     const chosen = bulkAllK.filter(r => sel[rk(r)]);
     if (!chosen.length) return;
+
     setBusy(true); setError(''); setMsg('');
-    try {
-      let ok = 0, ko = 0;
-      for (const kind of ['artist', 'label']) {
-        const mine = chosen.filter(r => r.kind === kind);
-        for (let i = 0; i < mine.length; i += 200) {
-          const chunk = mine.slice(i, i + 200);
-          const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve-bulk`, {
-            method: 'POST', headers: hdrs(),
-            body: JSON.stringify({ kind, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
-          });
-          if (!r.ok) { ko += chunk.length; continue; }
+    setProgress({ done: 0, total: chosen.length });
+
+    let ok = 0, already = 0, ko = 0;
+    const failures = [];
+
+    for (let i = 0; i < chosen.length; i += APPROVE_CHUNK) {
+      const chunk = chosen.slice(i, i + APPROVE_CHUNK);
+      try {
+        const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve-bulk`, {
+          method: 'POST', headers: hdrs(),
+          body: JSON.stringify({ kind: kindTab, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
+        });
+        if (!r.ok) {
+          // Un lote caido no para el resto: se anota y se sigue con el
+          // siguiente. Aprobar es idempotente, asi que reintentar luego los
+          // que fallaron no duplica nada.
+          ko += chunk.length;
+          failures.push(`HTTP ${r.status} × ${chunk.length}`);
+        } else {
           const d = await r.json();
-          ok += d.approved || 0; ko += d.failed || 0;
+          ok += d.approved || 0;
+          already += d.alreadyDone || 0;
+          ko += d.failed || 0;
+          for (const res of (d.results || [])) if (!res.ok) failures.push(`${res.norm}: ${res.error}`);
         }
+      } catch (e) {
+        ko += chunk.length;
+        failures.push(`${e.message} × ${chunk.length}`);
       }
-      setMsg(`${ok} entities created${ko ? ` · ${ko} failed` : ''}.`);
-      await loadAll();
-    } catch (e) { setError(`Error: ${e.message}`); }
+      setProgress({ done: Math.min(i + APPROVE_CHUNK, chosen.length), total: chosen.length });
+    }
+
+    setProgress(null);
+    const parts = [`${ok} approved`];
+    if (already) parts.push(`${already} already done`);
+    if (ko) parts.push(`${ko} failed`);
+    setMsg(parts.join(' · ') + '.');
+    if (failures.length) setError(`Failures: ${failures.slice(0, 5).join(' · ')}${failures.length > 5 ? ` · and ${failures.length - 5} more` : ''}`);
+    await loadAll();
     setBusy(false);
   }
 
@@ -10276,6 +10304,16 @@ function EntitiesPanel() {
       </div>
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
+      {progress && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,marginBottom:4}}>
+            Approving {progress.done} of {progress.total}…
+          </div>
+          <div style={{height:4,background:S.border,borderRadius:2,overflow:'hidden'}}>
+            <div style={{height:'100%',width:`${Math.round(100*progress.done/(progress.total||1))}%`,background:S.accent,transition:'width .2s'}} />
+          </div>
+        </div>
+      )}
 
       {view==='bulk' && (
         <div>
