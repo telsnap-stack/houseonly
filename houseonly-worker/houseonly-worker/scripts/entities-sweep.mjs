@@ -102,7 +102,7 @@ const PRODUCTS_QUERY = `
   query sweep($cursor: String) {
     products(first: ${PAGE}, after: $cursor) {
       pageInfo { hasNextPage endCursor }
-      nodes { handle vendor tags }
+      nodes { handle title vendor tags }
     }
   }
 `;
@@ -386,9 +386,10 @@ async function main() {
   const labels = [];
   for (const p of products) {
     const vendor = (p.vendor || '').trim();
-    if (vendor) artists.push({ raw: vendor, context: { handle: p.handle } });
+    const ctx = { handle: p.handle, title: p.title };
+    if (vendor) artists.push({ raw: vendor, context: ctx });
     const label = labelOf(p.tags);
-    if (label) labels.push({ raw: label, context: { handle: p.handle } });
+    if (label) labels.push({ raw: label, context: ctx });
   }
 
   console.log(`\n  ${products.length} productos`);

@@ -3188,6 +3188,7 @@ function ZipImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('W&S');
       setSkippedCount(zipFiles.length - matchedZips.length);
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
@@ -3563,6 +3564,7 @@ function TripleVisionImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Triple Vision');
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
@@ -3960,6 +3962,7 @@ function RubadubImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Rubadub');
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
@@ -4260,6 +4263,7 @@ function KudosImporter() {
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');a.href=url;a.download='shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv';
     document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+    autoRecomputeEntities('Kudos');
   }
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
@@ -4594,6 +4598,7 @@ function DBHImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('DBH');
       setStatus('review');
     } catch(e) {
       setError(e.message);
@@ -5459,6 +5464,7 @@ function MotherTongueImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('Mother Tongue');
       setStatus('review');
     } catch (e) {
       setError(e.message); setStatus('idle');
@@ -5969,6 +5975,7 @@ function RushHourImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('Rush Hour');
       setStatus('review');
     } catch (e) {
       setError(e.message); setStatus('idle');
@@ -9385,6 +9392,7 @@ function PreorderImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Pre-order');
       setStatus('review');
     } catch(e) {
       setError(e.message);
@@ -9992,6 +10000,373 @@ function PreorderImporter() {
   );
 }
 
+// ── ENTIDADES: ARTISTAS Y SELLOS (fase 2) ──────────────────────
+// docs/entities.md. Tres vistas porque son tres problemas distintos y
+// mezclarlos es lo que convierte 1348 filas en una tarde perdida:
+//   Bulk   — un nombre suelto, nada que decidir. Llegan marcadas y se aprueban
+//            en bloque. Son ~76 % de la cola.
+//   Troceo — un campo con varios artistas dentro. Hay que partirlo.
+//   Merge  — hay otra fila o entidad que se le parece. Puede ser la misma cosa
+//            escrita de dos maneras, un sub-sello, o nada (AXIS / Axis Of
+//            People son sellos distintos). Por eso lo mira una persona.
+//
+// La cola vive SOLO en staging: la fase 1 no esta en produccion todavia.
+// Cuando suba, esta constante desaparece y se usa REVIEW_WORKER_URL.
+const ENTITIES_WORKER_URL = 'https://houseonly-worker-staging.emontagut.workers.dev';
+
+// El recompute automatico al terminar un importer necesita el Bearer, y los
+// importers no lo piden a nadie. Se guarda aqui cuando alguien conecta la
+// pestaña Entidades y se borra al recargar. Si nadie la ha conectado en esta
+// sesion, el recompute NO corre — y la pestaña lo dice, para que no sea una
+// sorpresa silenciosa.
+let entitiesSecret = '';
+
+async function recomputeEntitiesQueue(secretOverride) {
+  const sec = secretOverride || entitiesSecret;
+  if (!sec) return { ran: false, reason: 'sin secreto: conecta la pestaña Entidades' };
+  const out = { ran: true, artist: 0, label: 0, candidates: 0 };
+  for (const kind of ['artist', 'label']) {
+    let cursor = null;
+    for (let i = 0; i < 60; i++) {
+      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-recompute`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${sec}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, limit: 150, cursor }),
+      });
+      if (!r.ok) return { ran: true, error: `${kind}: HTTP ${r.status}` };
+      const d = await r.json();
+      out[kind] += d.updated || 0;
+      out.candidates += d.withCandidates || 0;
+      if (!d.hasMore) break;
+      cursor = d.cursor;
+    }
+  }
+  return out;
+}
+
+/** Lo llaman los importers al terminar. Silencioso si no hay secreto. */
+function autoRecomputeEntities(tag) {
+  if (!entitiesSecret) return;
+  recomputeEntitiesQueue()
+    .then(r => console.log(`[entidades] recompute tras ${tag}:`, r))
+    .catch(e => console.log(`[entidades] recompute tras ${tag} fallo:`, e?.message || e));
+}
+
+const WHY_ES = {
+  candidates: 'tiene candidato',
+  multi: 'multi-artista',
+  truncated: 'truncado',
+  parens: 'paréntesis',
+  va: 'varios / desconocido',
+};
+
+function EntitiesPanel() {
+  const [secret, setSecret]   = useState('');
+  const [authed, setAuthed]   = useState(false);
+  const [view, setView]       = useState('bulk');
+  const [rows, setRows]       = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy]       = useState(false);
+  const [error, setError]     = useState('');
+  const [msg, setMsg]         = useState('');
+  const [sel, setSel]         = useState({});
+  const [disp, setDisp]       = useState({});
+  const [parts, setParts]     = useState({});
+  const [choice, setChoice]   = useState({});
+
+  const rk = r => `${r.kind}:${r.norm}`;
+  const hdrs = sec => ({ 'Authorization': `Bearer ${sec || secret}`, 'Content-Type': 'application/json' });
+
+  async function loadAll(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError(''); setMsg('');
+    try {
+      const all = [];
+      for (const kind of ['artist', 'label']) {
+        let cursor = null;
+        for (let i = 0; i < 60; i++) {
+          const qs = `&kind=${kind}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+          const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-list${qs}`, {
+            headers: { 'Authorization': `Bearer ${useSecret}` },
+          });
+          if (r.status === 401) { setError('No autorizado — revisa el secreto.'); setAuthed(false); setLoading(false); return; }
+          if (!r.ok) { setError(`Fallo al listar (HTTP ${r.status})`); setLoading(false); return; }
+          const d = await r.json();
+          for (const rec of (d.records || [])) all.push({ ...rec, kind });
+          if (!d.hasMore || !d.cursor) break;
+          cursor = d.cursor;
+        }
+      }
+      all.sort((a, b) => (b.count || 0) - (a.count || 0));
+      setRows(all);
+      setAuthed(true);
+      entitiesSecret = useSecret;   // arma el recompute automatico de los importers
+      // Precarga: display propuesto y partes propuestas, editables por fila.
+      const d0 = {}, p0 = {}, s0 = {};
+      for (const r of all) {
+        const k = `${r.kind}:${r.norm}`;
+        d0[k] = r.proposal?.parts?.[0]?.display || r.raw;
+        p0[k] = (r.proposal?.parts || []).map(x => x.display);
+        if (r.bucket === 'bulk') s0[k] = true;   // las bulk llegan marcadas
+      }
+      setDisp(d0); setParts(p0); setSel(s0);
+    } catch (e) {
+      setError(`Error de red: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  const bulk   = rows.filter(r => r.bucket === 'bulk');
+  const split  = rows.filter(r => r.bucketWhy === 'multi');
+  const merge  = rows.filter(r => r.bucketWhy === 'candidates');
+  const otras  = rows.filter(r => r.bucket === 'decide' && !['multi', 'candidates'].includes(r.bucketWhy));
+
+  const samples = r => (r.samples || [])
+    .map(x => (typeof x === 'string' ? x : (x.t || x.h)))
+    .filter(Boolean).slice(0, 3);
+
+  async function approveBulk() {
+    const chosen = bulk.filter(r => sel[rk(r)]);
+    if (!chosen.length) return;
+    setBusy(true); setError(''); setMsg('');
+    try {
+      let ok = 0, ko = 0;
+      for (const kind of ['artist', 'label']) {
+        const mine = chosen.filter(r => r.kind === kind);
+        for (let i = 0; i < mine.length; i += 200) {
+          const chunk = mine.slice(i, i + 200);
+          const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve-bulk`, {
+            method: 'POST', headers: hdrs(),
+            body: JSON.stringify({ kind, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
+          });
+          if (!r.ok) { ko += chunk.length; continue; }
+          const d = await r.json();
+          ok += d.approved || 0; ko += d.failed || 0;
+        }
+      }
+      setMsg(`${ok} entidades creadas${ko ? ` · ${ko} fallaron` : ''}.`);
+      await loadAll();
+    } catch (e) { setError(`Error: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function approveOne(r, body) {
+    setBusy(true); setError('');
+    try {
+      const res = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve`, {
+        method: 'POST', headers: hdrs(),
+        body: JSON.stringify({ kind: r.kind, norm: r.norm, ...body }),
+      });
+      const d = await res.json();
+      if (!res.ok) setError(d.error || `HTTP ${res.status}`);
+      else { setRows(rows.filter(x => rk(x) !== rk(r) && !(body.mergeNorms || []).includes(x.norm))); setMsg(`✓ ${r.raw}`); }
+    } catch (e) { setError(`Error: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function rejectOne(r) {
+    setBusy(true);
+    try {
+      await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-reject`, {
+        method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: r.kind, norm: r.norm }),
+      });
+      setRows(rows.filter(x => rk(x) !== rk(r)));
+    } catch (e) { setError(`Error: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function manualRecompute() {
+    setBusy(true); setMsg('Recalculando candidatos…');
+    const res = await recomputeEntitiesQueue(secret);
+    setMsg(res.error ? `Recompute con error: ${res.error}` : `Recalculadas ${res.artist + res.label} filas.`);
+    await loadAll();
+    setBusy(false);
+  }
+
+  if (!authed) {
+    return (
+      <div style={{maxWidth:420}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Entidades · Admin Secret</div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+          BOOTSTRAP_AUTH_SECRET del worker de <strong>staging</strong>. Solo en memoria, se pierde al recargar.
+        </div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&loadAll()} placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={loading?'Conectando…':'Conectar'} onClick={()=>loadAll()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  const viewBtn = (k, label, n) => (
+    <button onClick={()=>setView(k)} style={{background:view===k?S.accent:S.border,color:view===k?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:view===k?700:400,letterSpacing:1.2,textTransform:'uppercase',padding:'6px 12px'}}>{label} · {n}</button>
+  );
+
+  const meta = r => (
+    <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+      {r.kind === 'artist' ? 'artista' : 'sello'} · {r.count} producto{r.count===1?'':'s'}
+      {samples(r).length ? ` · ${samples(r).join(' · ')}` : ''}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <div style={{fontSize:10,color:S.muted}}>{rows.length} filas en la cola · worker de staging</div>
+        <div style={{display:'flex',gap:6}}>
+          <Btn ch={busy?'…':'↻ Recalcular candidatos'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
+          <Btn ch={loading?'…':'↻ Recargar'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
+        </div>
+      </div>
+      <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+        {viewBtn('bulk','Bulk',bulk.length)}
+        {viewBtn('split','Troceo',split.length)}
+        {viewBtn('merge','Merge',merge.length)}
+        {otras.length>0 && viewBtn('otras','Otras',otras.length)}
+      </div>
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
+      {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
+
+      {view==='bulk' && (
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,gap:8,flexWrap:'wrap'}}>
+            <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={bulk.length>0&&bulk.every(r=>sel[rk(r)])}
+                onChange={e=>{const n={...sel};bulk.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+              Seleccionar todo
+            </label>
+            <Btn ch={busy?'Aprobando…':`Aprobar seleccionadas (${bulk.filter(r=>sel[rk(r)]).length})`}
+              onClick={approveBulk} disabled={busy||!bulk.some(r=>sel[rk(r)])} />
+          </div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Un nombre suelto, sin candidatos ni separadores. Llegan marcadas; el display es editable.
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
+            {bulk.map(r=>{const k=rk(r);return(
+              <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+                <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
+                <div style={{flex:1,minWidth:0}}>
+                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                    style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                  {meta(r)}
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {view==='split' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Varios artistas en un campo. El corte es una <strong>propuesta</strong>: revísalo antes de aprobar.
+            Un nombre que no debía partirse se arregla con «no partir».
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
+            {split.map(r=>{const k=rk(r);const ps=parts[k]||[];return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
+                {meta(r)}
+                <div style={{display:'flex',flexDirection:'column',gap:5,margin:'10px 0'}}>
+                  {ps.map((p,i)=>(
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:10,color:S.muted,width:14}}>{i+1}</span>
+                      <input value={p} onChange={e=>{const n=[...ps];n[i]=e.target.value;setParts({...parts,[k]:n});}}
+                        style={{flex:1,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      {r.proposal?.parts?.[i]?.existingSlug &&
+                        <span style={{fontSize:9,color:S.accent,whiteSpace:'nowrap'}}>ya existe</span>}
+                      <button onClick={()=>setParts({...parts,[k]:ps.filter((_,j)=>j!==i)})}
+                        style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:12}}>×</button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                  <Btn ch="Partir" onClick={()=>approveOne(r,{action:'split',parts:ps.filter(Boolean).map(d=>({display:d}))})} disabled={busy||ps.filter(Boolean).length<2} />
+                  <Btn ch="No partir" variant="ghost" onClick={()=>approveOne(r,{action:'create',parts:[{display:r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignorar" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {view==='merge' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Hay algo parecido. Puede ser la misma cosa escrita de dos maneras, un sub-sello, o
+            <strong> nada</strong>: AXIS y Axis Of People son sellos distintos. Por defecto no se toca.
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
+            {merge.map(r=>{const k=rk(r);const ch=choice[k]||'';return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
+                {meta(r)}
+                <div style={{margin:'10px 0',display:'flex',flexDirection:'column',gap:4}}>
+                  {(r.candidates||[]).map(c=>{
+                    const isRow = String(c.slug).startsWith('review:');
+                    const val = `${isRow?'row':'ent'}:${c.slug}`;
+                    return (
+                      <label key={c.slug} style={{fontSize:11,color:S.text,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
+                        <input type="radio" name={`m-${k}`} checked={ch===val} onChange={()=>setChoice({...choice,[k]:val})} />
+                        <span>{c.display}</span>
+                        <span style={{fontSize:9,color:S.muted}}>{isRow?'· otra fila de la cola':'· entidad existente'}</span>
+                      </label>
+                    );
+                  })}
+                  <label style={{fontSize:11,color:S.muted,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
+                    <input type="radio" name={`m-${k}`} checked={ch===''} onChange={()=>setChoice({...choice,[k]:''})} />
+                    Ninguno — crear como entidad aparte
+                  </label>
+                </div>
+                <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                    style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                  <Btn ch={ch.startsWith('row:')?'Fusionar filas':ch.startsWith('ent:')?'Fusionar en la entidad':'Crear aparte'}
+                    disabled={busy}
+                    onClick={()=>{
+                      if (ch.startsWith('row:')) {
+                        const otherNorm = ch.slice('row:review:'.length);
+                        approveOne(r,{action:'merge-rows',mergeNorms:[otherNorm],display:disp[k]??r.raw});
+                      } else if (ch.startsWith('ent:')) {
+                        approveOne(r,{action:'merge',targetSlug:ch.slice('ent:'.length)});
+                      } else {
+                        approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]});
+                      }
+                    }} />
+                  <Btn ch="Sub-sello de…" variant="ghost" disabled={busy||!ch.startsWith('ent:')}
+                    onClick={()=>approveOne(r,{action:'child',parentSlug:ch.slice('ent:'.length),parts:[{display:disp[k]??r.raw}]})} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {view==='otras' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12}}>Truncados y paréntesis: el display propuesto ya viene limpio, pero conviene mirarlo.</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:520,overflowY:'auto'}}>
+            {otras.map(r=>{const k=rk(r);return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:11,color:S.muted}}>{WHY_ES[r.bucketWhy]||r.bucketWhy} · crudo: <span style={{color:S.text}}>{r.raw}</span></div>
+                {meta(r)}
+                <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
+                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                    style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                  <Btn ch="Crear" onClick={()=>approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignorar" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -10022,6 +10397,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
+          {tabBtn('entities','🏷️ Entidades')}
           {tabBtn('newsletter','✉️ Newsletter')}
         </div>
         {tab==='zip'   && <ZipImporter />}
@@ -10033,6 +10409,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='rd'    && <RubadubImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
+        {tab==='entities'&& <EntitiesPanel />}
         {tab==='newsletter'&& <NewsletterPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>

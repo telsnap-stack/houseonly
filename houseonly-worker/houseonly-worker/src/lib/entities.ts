@@ -63,7 +63,10 @@ export interface ReviewRecord {
   bucket: 'bulk' | 'decide';
   bucketWhy?: 'candidates' | 'multi' | 'parens' | 'truncated' | 'va';
   sources: string[];
-  samples: string[];       // primeros handles, para que la UI ensene de que va
+  // Primeros productos afectados, para que la pantalla enseñe de que va la
+  // fila sin tener que ir a Shopify. Las filas viejas guardaban solo el handle
+  // como cadena; se normalizan al vuelo a { h, t }.
+  samples: Array<{ h: string; t?: string }>;
   handles?: string[];      // handles ya contados, para que count no se infle
   countApprox?: boolean;   // true si se paso del tope y count deja de ser exacto
   count: number;
@@ -236,7 +239,7 @@ export interface ResolveResult {
 
 export interface ResolveItem {
   raw: string;
-  context?: { handle?: string };
+  context?: { handle?: string; title?: string };
 }
 
 /**
@@ -290,7 +293,7 @@ export async function resolveOne(
   }
 
   // 4. a la cola
-  await upsertReview(env, kind, raw, norm, source, item.context?.handle);
+  await upsertReview(env, kind, raw, norm, source, item.context?.handle, item.context?.title);
   return base;
 }
 
@@ -318,6 +321,7 @@ async function upsertReview(
   norm: string,
   source: string,
   handle?: string,
+  title?: string,
 ): Promise<void> {
   const key = K.review(kind, norm);
   let rec: ReviewRecord | null = null;
@@ -344,7 +348,17 @@ async function upsertReview(
 
   if (!rec.variants.includes(raw) && rec.variants.length < MAX_VARIANTS) rec.variants.push(raw);
   if (source && !rec.sources.includes(source)) rec.sources.push(source);
-  if (handle && !rec.samples.includes(handle) && rec.samples.length < MAX_SAMPLES) rec.samples.push(handle);
+
+  // Compatibilidad: las filas escritas antes de esto guardaban el handle pelado.
+  rec.samples = (rec.samples || []).map((x: any) => typeof x === 'string' ? { h: x } : x);
+  if (handle) {
+    const existing = rec.samples.find(x => x.h === handle);
+    if (existing) {
+      if (title && !existing.t) existing.t = title;   // una pasada posterior lo enriquece
+    } else if (rec.samples.length < MAX_SAMPLES) {
+      rec.samples.push(title ? { h: handle, t: title } : { h: handle });
+    }
+  }
 
   // Conteo idempotente: un producto ya contado no vuelve a sumar, asi que
   // repetir el barrido reordena la cola igual pero no infla los numeros. Sin
@@ -712,6 +726,35 @@ export async function handleEntityReviewApprove(request: Request, env: EntitiesE
 
   const aliasRaws = [rec.raw, ...rec.variants];
   const slugs: string[] = [];
+
+  if (action === 'merge-rows') {
+    // Fusion de VARIAS filas de la cola en una entidad nueva. Es el caso que el
+    // barrido inicial destapa: Freerange y Freerange Records llegan como filas
+    // sueltas y ninguna es todavia una entidad, asi que no hay `targetSlug` al
+    // que apuntar. Se crea una y TODOS los raws de todas las filas quedan como
+    // alias suyos.
+    const norms: string[] = Array.isArray(body?.mergeNorms) ? body.mergeNorms : [];
+    const all = [norm, ...norms.filter((n: string) => n && n !== norm)];
+
+    const recs: ReviewRecord[] = [];
+    for (const n of all) {
+      const r = await env.ENTITIES.get(K.review(kind, n));
+      if (!r) return json({ error: `review row ${n} not found` }, 400);
+      try { recs.push(JSON.parse(r) as ReviewRecord); } catch { return json({ error: `corrupt row ${n}` }, 500); }
+    }
+
+    const display = cleanDisplay(String(body?.display || recs[0].raw));
+    const slug = slugify(display);
+    if (!slug) return json({ error: 'empty display' }, 400);
+
+    const aliases = recs.flatMap(r => [r.raw, ...r.variants]);
+    const sources = [...new Set(recs.flatMap(r => r.sources))];
+    await upsertEntity(env, slug, display, kind, { aliases, sources });
+    await pointAlias(env, kind, aliases, [slug]);
+    for (const n of all) await env.ENTITIES.delete(K.review(kind, n));
+
+    return json({ ok: true, action, kind, norm, slugs: [slug], merged: all.length });
+  }
 
   if (action === 'merge') {
     const target = String(body?.targetSlug || '').trim();

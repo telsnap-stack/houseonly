@@ -346,6 +346,86 @@ describe("recompute: candidatos fila contra fila", () => {
 	});
 });
 
+// El barrido inicial destapa pares donde NINGUNA de las dos es entidad todavia
+// —Freerange / Freerange Records—, asi que no hay targetSlug al que apuntar.
+describe("merge-rows: fusionar dos filas de la cola", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("crea UNA entidad y deja los dos raws como alias suyos", async () => {
+		await resolveOne(env as any, "label", { raw: "Freerange" }, "sweep");
+		await resolveOne(env as any, "label", { raw: "Freerange Records" }, "sweep");
+
+		const res: any = await (await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "label",
+				norm: normalizeName("Freerange"),
+				action: "merge-rows",
+				mergeNorms: [normalizeName("Freerange Records")],
+				display: "Freerange Records",
+			}),
+		}), env as any)).json();
+
+		expect(res.merged).toBe(2);
+		expect(res.slugs).toEqual(["freerange-records"]);
+
+		// Las dos grafias resuelven a la misma entidad…
+		for (const raw of ["Freerange", "Freerange Records"]) {
+			const r = await resolveOne(env as any, "label", { raw }, "sweep");
+			expect(r.status).toBe("resolved");
+			expect(r.slugs).toEqual(["freerange-records"]);
+		}
+		// …y las dos filas se han ido de la cola.
+		expect((await env.ENTITIES.list({ prefix: "review:label:" })).keys).toHaveLength(0);
+		const e = await getEntity(env as any, "freerange-records");
+		expect(e?.aliases.sort()).toEqual(["Freerange", "Freerange Records"]);
+	});
+
+	it("no fusiona nada si alguna fila no existe", async () => {
+		await resolveOne(env as any, "label", { raw: "Freerange" }, "sweep");
+		const res = await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "label", norm: normalizeName("Freerange"),
+				action: "merge-rows", mergeNorms: ["noexiste"],
+			}),
+		}), env as any);
+		expect(res.status).toBe(400);
+		// La fila buena sigue en su sitio: no se ha aplicado media fusion.
+		expect(await env.ENTITIES.get(`review:label:${normalizeName("Freerange")}`)).not.toBeNull();
+	});
+});
+
+describe("muestras con titulo", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	it("guarda handle y titulo, y enriquece una fila vieja sin romperla", async () => {
+		// Fila al estilo antiguo: samples eran cadenas sueltas.
+		await env.ENTITIES.put(`review:artist:${normalizeName("Calibre")}`, JSON.stringify({
+			kind: "artist", norm: normalizeName("Calibre"), raw: "Calibre",
+			variants: ["Calibre"], proposal: { action: "create", parts: [] },
+			candidates: [], bucket: "bulk", sources: [], samples: ["taciturn"],
+			handles: ["taciturn"], count: 1, firstSeen: 1, lastSeen: 1,
+		}));
+
+		await resolveOne(env as any, "artist",
+			{ raw: "Calibre", context: { handle: "taciturn", title: "Taciturn" } }, "sweep");
+		await resolveOne(env as any, "artist",
+			{ raw: "Calibre", context: { handle: "planet-hearth", title: "Planet Hearth" } }, "sweep");
+
+		const rec = JSON.parse((await env.ENTITIES.get(`review:artist:${normalizeName("Calibre")}`))!);
+		expect(rec.samples[0]).toEqual({ h: "taciturn", t: "Taciturn" });
+		expect(rec.samples[1]).toEqual({ h: "planet-hearth", t: "Planet Hearth" });
+		expect(rec.count).toBe(2);
+	});
+});
+
 describe("approve-bulk", () => {
 	beforeEach(async () => {
 		await wipe();
