@@ -32,7 +32,15 @@ export interface MetafieldDefinitionSpec {
   ownerType: 'PRODUCT';
   description: string;
   pin: boolean;
-  access: { admin: 'MERCHANT_READ_WRITE'; storefront: 'PUBLIC_READ' };
+  /**
+   * SOLO `storefront`. `houseonly` es un namespace del comerciante, no del app,
+   * y ahi Shopify fija el acceso de admin el mismo en `public_read_write`: el
+   * comerciante manda siempre sobre sus propios metafields. Mandar
+   * `access.admin` —aunque `MetafieldAdminAccessInput` lo acepte como tipo— lo
+   * rechaza con INVALID: "must be one of [public_read_write]". Comprobado
+   * contra la tienda el 2026-09-11.
+   */
+  access: { storefront: 'PUBLIC_READ' };
   capabilities: { adminFilterable: { enabled: boolean } };
 }
 
@@ -56,7 +64,7 @@ export const ENTITY_MF_DEFINITIONS: MetafieldDefinitionSpec[] = [
     ownerType: 'PRODUCT',
     description: 'Slugs canonicos de artista, separados por coma. Ver docs/entities.md.',
     pin: true,
-    access: { admin: 'MERCHANT_READ_WRITE', storefront: 'PUBLIC_READ' },
+    access: { storefront: 'PUBLIC_READ' },
     capabilities: { adminFilterable: { enabled: true } },
   },
   {
@@ -67,7 +75,7 @@ export const ENTITY_MF_DEFINITIONS: MetafieldDefinitionSpec[] = [
     ownerType: 'PRODUCT',
     description: 'Slugs canonicos de sello, separados por coma. Ver docs/entities.md.',
     pin: true,
-    access: { admin: 'MERCHANT_READ_WRITE', storefront: 'PUBLIC_READ' },
+    access: { storefront: 'PUBLIC_READ' },
     capabilities: { adminFilterable: { enabled: true } },
   },
 ];

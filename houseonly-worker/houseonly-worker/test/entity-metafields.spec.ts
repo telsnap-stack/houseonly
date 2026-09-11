@@ -51,6 +51,14 @@ describe("definiciones", () => {
 		for (const d of ENTITY_MF_DEFINITIONS) expect(d.access.storefront).toBe("PUBLIC_READ");
 	});
 
+	it("NO mandan access.admin: en un namespace del comerciante lo fija Shopify", () => {
+		// La tienda contesta INVALID —"must be one of [public_read_write]"— si se
+		// manda, y public_read_write ni siquiera existe en MetafieldAdminAccessInput.
+		for (const d of ENTITY_MF_DEFINITIONS) {
+			expect(Object.keys(d.access)).toEqual(["storefront"]);
+		}
+	});
+
 	it("son filtrables en el admin y estan fijadas", () => {
 		for (const d of ENTITY_MF_DEFINITIONS) {
 			expect(d.capabilities.adminFilterable.enabled).toBe(true);
