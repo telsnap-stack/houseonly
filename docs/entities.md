@@ -291,6 +291,88 @@ Después del barrido, una segunda pasada opcional escribe el slug resuelto en un
 metafield del producto para que la tienda pueda pintar y filtrar sin volver a
 resolver. Eso ya es fase 4.
 
+## Operación de la cola
+
+La cola no es un trámite de una vez: **cada importación mete filas nuevas** y se
+revisan con esta misma pantalla. Esto es el procedimiento, tal como se aplicó el
+2026-09-10 para vaciar las 1353 filas del barrido inicial.
+
+### El orden: Bulk → auto → Merge → Split → Other
+
+No es una preferencia, es que **cada paso encoge el siguiente**. Aprobar Bulk
+crea entidades; el `Recompute candidates` posterior hace que filas que estaban en
+Merge resuelvan solas contra esas entidades recién creadas. Empezar por Merge es
+trabajar con la foto vieja: en la pasada real, Merge bajó de 147 a 112 filas solo
+por aprobar los artistas primero.
+
+| Vista | Qué es | Cómo se despacha |
+|---|---|---|
+| **Bulk** | Un nombre suelto: sin candidatos, sin separadores, sin paréntesis, sin pinta de truncado | `Select all verbatim` → aprobar. Es ~76 % de la cola |
+| **auto** | Bulk cuyo display se lo ha inventado el Title Case (`displayAuto`) porque no había ninguna grafía decente | Se mira la lista antes de aprobar. Llega **desmarcado a propósito** |
+| **Merge** | Hay otra fila o entidad que se le parece | Una a una. Es donde están los falsos positivos |
+| **Split** | Un campo con varios artistas dentro | Una a una. Los sellos **nunca** se trocean: Split/Labels siempre sale a cero |
+| **Other** | V.A., truncados y paréntesis | Una a una, casi siempre `Reject` |
+
+### Reglas de decisión
+
+**Bulk.** Se aprueba verbatim, sin leer fila a fila: por construcción no hay nada
+que decidir. Se manda en lotes de 50 con barra de progreso, y un lote que falle
+no aborta los demás. En un reintento aparecen filas como `already done`: es la
+idempotencia del endpoint, **no es un fallo** — son las que la pasada anterior
+llegó a escribir.
+
+**auto.** Aquí sí se lee. El Title Case es una propuesta, no un dato: los
+acrónimos ya vienen respetados (`CV313`, `DRS`, `2lanes`, `123.ro` se conservan),
+pero un nombre estilizado que solo aparece en mayúsculas se corrige a mano en la
+propia fila antes de aprobar.
+
+**Merge.** La pregunta es una sola: *¿es la misma cosa del mundo real?*
+
+- Misma cosa escrita de dos maneras → `Merge rows` si ninguna es aún entidad
+  (`Freerange` / `Freerange Records`), `Merge into entity` si ya existe una.
+- Parecido de prefijo que **no** es la misma cosa → `Create separately`.
+  Los casos reales del catálogo: `AXIS` / `Axis Of People`, `Base` / `Based
+  Faith`, `NOTON` / `Not On Label`. Ante la duda, separar: deshacer un merge es
+  más caro que hacerlo luego.
+- Sub-sello de verdad → `hijo de` (`chiwax` → `chiwax classic edition`). Solo
+  cuando el padre es un sello distinto y existente; **nunca** se pone a un nombre
+  como hijo de sí mismo.
+
+**Split.** Solo se parte **con evidencia**: que alguna de las partes exista sola
+en el catálogo. La propuesta ya viene con esa recomendación calculada. Si ninguna
+parte aparece por su cuenta es un nombre solo y se aprueba entero, tenga 2
+productos o 50 — `Bread & Souls`, `Fresh & Low` y `Rhythm & Sound` son bandas, no
+pares de artistas. Los `feat.`, `ft.`, `pres.` y `&` de un remix (`Atjazz & MdCL
+/ Mist Works (Aybee Rmx)`) se aprueban como alias del artista principal.
+
+**Other.** `V/A`, `Various`, `Unknown` y `House Only` → `Reject`, que escribe
+`ignore:` y no vuelve a preguntar. Los truncados (49–50 caracteres exactos, o
+terminados en coma o punto) y los paréntesis piden abrir el producto: el nombre
+bueno está en el título del disco.
+
+### Después de cada importación
+
+1. El importer deja filas nuevas en la cola (fase 4; hasta entonces, las mete
+   `entities-sweep.mjs`, que es idempotente y se puede repetir sin miedo).
+2. `Recompute candidates` antes de tocar nada: con el fondo ya poblado, mucho de
+   lo nuevo cae solo en Merge contra una entidad existente.
+3. Mismo orden que arriba. Con la cola de régimen —decenas de filas, no miles—
+   son minutos.
+
+### Estado al cerrar la fase 2 (2026-09-10)
+
+Cola a **0 filas**. En `ENTITIES` de staging:
+
+| | |
+|---|---|
+| Entidades | **1445** — 970 solo artista, 462 solo sello, **13 con los dos roles** |
+| Alias | 2703 claves (`alias:a:` 1736 · `alias:l:` 967) |
+| `ignore:` | 19 (18 artistas, 1 sello) |
+| Sub-sellos (`parent`) | 1 |
+
+Los 13 de doble rol son los previstos en el diseño: `2000Black`, `Neroli`,
+`Rhythm & Sound` y compañía, que son vendor y sello a la vez.
+
 ## Fases
 
 | Fase | Qué | Dónde | Despliegue |
