@@ -60,7 +60,24 @@ async function fetchFreshAdminToken(env: ShopifyAdminEnv): Promise<string> {
   });
   if (!r.ok) {
     const text = await r.text();
-    throw new Error(`Shopify token endpoint returned ${r.status}: ${text}`);
+    // Shopify answers this endpoint with a full HTML error PAGE, not JSON. Left
+    // raw it buried ~8KB of markup in every audit record and log line, which is
+    // how a dead app went unnoticed for four days (2026-09-03 → 09-07): the real
+    // message, "Oauth error application_cannot_be_found", was invisible in the
+    // noise. Pull out the sentence that matters and throw that.
+    const plain = text
+      // Drop <style>/<script> BODIES first — tag-stripping alone leaves their
+      // contents behind, which dragged a wall of CSS into the message.
+      .replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const oauth = plain.match(/Oauth error [^.]*/i);
+    const detail = (oauth ? oauth[0] : plain).slice(0, 200);
+    // Name the cause plainly: these credentials are the Custom App's, and when
+    // they stop working EVERY Shopify call fails, so callers surface it as a
+    // credentials problem rather than as whatever they happened to be doing.
+    throw new Error(`Shopify admin credentials rejected (${r.status}): ${detail}`);
   }
   const data: any = await r.json();
   const token = data?.access_token;
@@ -194,6 +211,43 @@ export async function findVariantBySku(
     productId: exact.node.product?.id,
     sku: exact.node.sku,
   };
+}
+
+/**
+ * Strip a SKU down to its alphanumerics: "TEMPA 131" -> "TEMPA131",
+ * "[QR]V.205.DTON.26" -> "QRV205DTON26". Case is preserved on purpose — a shop
+ * with lowercase SKUs would otherwise stop matching.
+ */
+function normalizeSku(sku: string): string {
+  return sku.replace(/[^a-zA-Z0-9]/g, '');
+}
+
+/**
+ * Find a variant by SKU, retrying once with punctuation and whitespace removed.
+ *
+ * Discogs catalogue numbers carry separators that Shopify SKUs don't, and when
+ * a listing has no external_id we fall back to the raw catno — so the two never
+ * meet. It stalled two sales in two days: "[QR]V.205.DTON.26" vs QRV205DTON26
+ * (2026-09-07) and "TEMPA 131" vs TEMPA131 (2026-09-08). Each needed a hand-
+ * written KV mapping to unstick.
+ *
+ * This is NOT fuzzy matching. It strips separators from OUR string and asks for
+ * that exact SKU; findVariantBySku still requires a character-for-character
+ * match on the result, so a near-miss resolves to nothing rather than to the
+ * wrong record. Nothing is inferred from Discogs metadata.
+ */
+export async function findVariantBySkuLoose(
+  env: ShopifyAdminEnv,
+  sku: string,
+): Promise<VariantInventoryInfo | null> {
+  const exact = await findVariantBySku(env, sku);
+  if (exact?.variantId) return exact;
+
+  const normalized = normalizeSku(sku);
+  // Nothing to gain if the SKU had no separators to begin with.
+  if (!normalized || normalized === sku) return null;
+
+  return await findVariantBySku(env, normalized);
 }
 
 // ── LOCATION LOOKUP ─────────────────────────────────────────────────
@@ -612,6 +666,19 @@ export async function createDiscogsOrder(
 
   const draftInput: any = {
     lineItems: lines.map(l => ({ variantId: l.variantId, quantity: l.quantity })),
+    // Price from the Shopify catalogue, in EUR — the shop currency.
+    //
+    // Order #1037 (Discogs 147628-C-22, 2026-09-02) was invoiced at $36.00 USD
+    // = EUR 31.06, when the variant lists at EUR 29.99. Passing a
+    // shippingAddress makes Shopify assign a Market from the destination
+    // (Denmark), price the draft in THAT market's currency and convert back to
+    // shop currency, so the catalogue price never got a look in.
+    //
+    // Pinning presentment to EUR keeps the line at the euro catalogue price.
+    // We deliberately do NOT override with what Discogs charged: the invoice
+    // records the shop's own price for the record. Shipping is not modelled
+    // either — that is a shipping cost, not part of the record's line.
+    presentmentCurrencyCode: 'EUR',
     taxExempt: true,                       // NO VAT
     shippingAddress,
     tags: ['source:discogs'],

@@ -1,11 +1,7 @@
 import {
 	env,
-	createExecutionContext,
-	waitOnExecutionContext,
-	SELF,
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import worker from "../src";
 import { pollDiscogsForSales } from "../src/lib/sync";
 import * as discogs from "../src/lib/discogs";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
@@ -18,54 +14,9 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, findVariantBySku: vi.fn(), createDiscogsOrder: vi.fn() };
+	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn() };
 });
 
-describe("Hello World user worker", () => {
-	describe("request for /message", () => {
-		it('/ responds with "Hello, World!" (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>(
-				"http://example.com/message"
-			);
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
-
-		it('responds with "Hello, World!" (integration style)', async () => {
-			const request = new Request("http://example.com/message");
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
-	});
-
-	describe("request for /random", () => {
-		it("/ responds with a random UUID (unit style)", async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>(
-				"http://example.com/random"
-			);
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatch(
-				/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/
-			);
-		});
-
-		it("responds with a random UUID (integration style)", async () => {
-			const request = new Request("http://example.com/random");
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatch(
-				/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/
-			);
-		});
-	});
-});
 
 // ── FASE 3H: poll window / cursor regression ────────────────────────
 //
@@ -112,7 +63,7 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			`listing:${LISTING_ID}`,
 			JSON.stringify({ sku: "SKU1", status: "Draft" }),
 		);
-		vi.mocked(shopifyAdmin.findVariantBySku).mockResolvedValue({
+		vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
 			variantId: "gid://shopify/ProductVariant/1",
 		} as any);
 		vi.mocked(discogs.getOrder).mockResolvedValue({
@@ -192,8 +143,10 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const res = await pollDiscogsForSales(env as any);
 
 		expect(res.firm_sales_found).toBe(1);
+		// Dry mode creates nothing, so it takes only the short in-flight claim —
+		// it must NOT lock the order out of the eventual live run.
 		const lock = await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`);
-		expect(lock).toBe("1");
+		expect(lock).toBe("in-flight");
 		const auditRaw = await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`);
 		expect(auditRaw).not.toBeNull();
 		const audit = JSON.parse(auditRaw!);
@@ -254,6 +207,285 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const res = await pollDiscogsForSales(env as any);
 		expect(res.unmapped_listings).toBe(1);
 		expect(res.shopify_adjustments_succeeded).toBe(0);
+	});
+
+	// ── 147628-C-22 regression: transient failure must not pin the order ──
+	//
+	// A Discogs 429 on getOrder made order creation fail AFTER the durable
+	// 60-day lock had already been taken, so every later poll counted the sale
+	// as `skipped_duplicate`. The order never reached Shopify and nothing
+	// alerted — the sale was silently lost. The lock is now taken in two
+	// stages: a short in-flight claim while resolving, promoted to the durable
+	// lock only immediately before an order can be created.
+	describe("lock staging (transient failure recovery)", () => {
+		/** Seconds until the order lock expires, read off the KV listing. */
+		async function lockTtlSeconds() {
+			const { keys } = await env.SYNC_STATE.list({
+				prefix: `lock:order:${ORDER_ID}`,
+			});
+			expect(keys).toHaveLength(1);
+			return keys[0].expiration! - Math.floor(Date.now() / 1000);
+		}
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true,
+				orderId: "gid://shopify/Order/1",
+				orderName: "#1001",
+			} as any);
+			vi.mocked(discogs.getOrders).mockResolvedValue(
+				ordersPage([firmOrder]) as any,
+			);
+		});
+
+		it("keeps the lock SHORT-lived when getOrder fails (429)", async () => {
+			vi.mocked(discogs.getOrder).mockRejectedValue(
+				new Error('Discogs getOrder failed: 429 {"message":"You are making requests too quickly."}'),
+			);
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.shopify_adjustments_failed).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			// The bug: this used to be the 60-day durable TTL.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			expect(await lockTtlSeconds()).toBeLessThanOrEqual(10 * 60);
+			// And the audit says so, rather than looking like a dead end.
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.will_retry).toBe(true);
+		});
+
+		it("recovers the sale on the next poll after a 429", async () => {
+			vi.mocked(discogs.getOrder).mockRejectedValueOnce(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+
+			// The in-flight claim expires before the next cron (10 min < 15 min).
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+
+			const res = await pollDiscogsForSales(env as any);
+			// Either route may claim it — the parked pass now runs first and
+			// usually wins — but the sale must be created exactly ONCE.
+			expect(res.parked_recovered + res.shopify_adjustments_succeeded).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.ok).toBe(true);
+		});
+
+		it("promotes to the durable lock once an order is created", async () => {
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+			// Must outlive the 10-day fetch window, or the next poll inside the
+			// window creates a second paid order — a duplicate factura.
+			expect(await lockTtlSeconds()).toBeGreaterThan(10 * 24 * 60 * 60);
+		});
+
+		it("holds the durable lock even when order creation fails", async () => {
+			// createDiscogsOrder may have completed the draft before the error
+			// surfaced, so the order can be real. Never retry past this point.
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: false,
+				error: "draftOrderComplete userErrors",
+			} as any);
+			await pollDiscogsForSales(env as any);
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+			expect(await lockTtlSeconds()).toBeGreaterThan(10 * 24 * 60 * 60);
+		});
+
+		it("a dry-mode rehearsal does not lock the order out of the live run", async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "dry");
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			expect(await lockTtlSeconds()).toBeLessThanOrEqual(10 * 60);
+
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	// #1037 was invoiced at $36.00 USD (= EUR 31.06) when the variant lists at
+	// EUR 29.99: a shippingAddress makes Shopify pick a Market and price the
+	// draft in ITS currency. The invoice must carry the shop's own euro price.
+	describe("records what Discogs charged, invoices the catalogue price", () => {
+		const pricedOrder = {
+			...firmOrder,
+			items: [{
+				id: LISTING_ID,
+				release: { description: "Some Record" },
+				price: { currency: "EUR", value: 34.99 },
+			}],
+		};
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1038",
+			} as any);
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([pricedOrder]) as any);
+		});
+
+		it("never overrides the line price — Shopify prices from the catalogue", async () => {
+			await pollDiscogsForSales(env as any);
+			const lines = vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2];
+			expect(lines[0]).toEqual({
+				variantId: "gid://shopify/ProductVariant/1",
+				quantity: 1,
+			});
+		});
+
+		it("still records the Discogs figure for reconciliation", async () => {
+			await pollDiscogsForSales(env as any);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.items[0].price).toEqual({ amount: "34.99", currencyCode: "EUR" });
+		});
+	});
+
+	// The 2026-09-03 → 09-07 outage: dead Shopify app credentials stalled two
+	// sales for four days while the run reported ok:true. "failed: 2" with no
+	// reason anywhere is why it went unnoticed.
+	describe("failures say why", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+		});
+
+		it("names the underlying cause, not just 'no resolvable line items'", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockRejectedValue(
+				new Error("Shopify admin credentials rejected (400): Oauth error application_cannot_be_found"),
+			);
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.failures).toHaveLength(1);
+			expect(res.failures![0].order_id).toBe(ORDER_ID);
+			expect(res.failures![0].error).toContain("application_cannot_be_found");
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.error).toContain("application_cannot_be_found");
+		});
+
+		it("reports no failures when the sale syncs", async () => {
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1041",
+			} as any);
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.failures).toBeUndefined();
+		});
+	});
+
+	// Two sales stalled in two days on separators Discogs uses and Shopify does
+	// not: "[QR]V.205.DTON.26" vs QRV205DTON26, "TEMPA 131" vs TEMPA131.
+	describe("normalized SKU fallback", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1044",
+			} as any);
+			// The cached mapping holds the raw Discogs catno, as the self-heal left it.
+			await env.SYNC_STATE.put(`listing:${LISTING_ID}`,
+				JSON.stringify({ sku: "TEMPA 131", status: "Sold" }));
+			// Shopify resolves it only once the separator is gone.
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
+				variantId: "gid://shopify/ProductVariant/1",
+				sku: "TEMPA131",
+			} as any);
+		});
+
+		it("syncs the sale despite the separator mismatch", async () => {
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.variant_not_found).toBe(0);
+			expect(res.shopify_adjustments_succeeded).toBe(1);
+		});
+
+		it("writes the real SKU back so it never needs repairing by hand", async () => {
+			await pollDiscogsForSales(env as any);
+			expect(JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku)
+				.toBe("TEMPA131");
+			expect(await env.SYNC_STATE.get("sku:TEMPA131")).not.toBeNull();
+		});
+
+		it("records both SKUs in the audit", async () => {
+			await pollDiscogsForSales(env as any);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.items[0].sku).toBe("TEMPA131");
+			expect(audit.items[0].sku_from_discogs).toBe("TEMPA 131");
+		});
+	});
+
+	// A parked sale must not be starved by the order LIST being refused. On
+	// 2026-09-02 every run died on getOrders while 147628-C-22 sat one call from
+	// done, its variants already resolved.
+	describe("parked sale retry (independent of the window scan)", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				status: "Payment Received",
+				created: firmOrder.created,
+				first_detected_at: new Date().toISOString(),
+				attempts: 1,
+				items: [{
+					listing_id: LISTING_ID,
+					sku: "SKU1",
+					shopify_variant_id: "gid://shopify/ProductVariant/1",
+					quantity: 1,
+					outcome: "resolved",
+				}],
+				order_creation: { ok: false, will_retry: true, error: "getOrder failed: 429" },
+			}));
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1037",
+			} as any);
+		});
+
+		it("recovers the sale even when getOrders is refused", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429 too quickly"));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.ok).toBe(false);            // the scan still failed...
+			expect(res.parked_recovered).toBe(1);  // ...but the sale went through
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.ok).toBe(true);
+			expect(audit.order_creation.recovered_by).toBe("parked-retry");
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("1");
+		});
+
+		it("uses the stored variants — no Shopify or listing lookups", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.findVariantBySkuLoose).not.toHaveBeenCalled();
+			expect(discogs.getListing).not.toHaveBeenCalled();
+		});
+
+		it("leaves it parked when getOrder is still refused", async () => {
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			vi.mocked(discogs.getOrder).mockRejectedValue(new Error("429 too quickly"));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.parked_recovered).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			// Retryable, and NOT holding the durable lock.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.will_retry).toBe(true);
+			expect(audit.attempts).toBe(2);
+		});
+
+		it("never touches a sale that already became a Shopify order", async () => {
+			await env.SYNC_STATE.put(`sales-detected:${ORDER_ID}`, JSON.stringify({
+				order_id: ORDER_ID,
+				items: [{ shopify_variant_id: "gid://shopify/ProductVariant/1" }],
+				order_creation: { ok: true, shopify_order_name: "#1000" },
+			}));
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.parked_retried).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		});
 	});
 
 	it("does not re-process (no duplicate) once locked", async () => {

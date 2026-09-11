@@ -13,6 +13,10 @@ interface Env {
   // El worker NO parsea nada de esto: el parseo vive en App.jsx y punto. Aqui
   // solo se guarda y se sirve.
   EMAILS: KVNamespace;
+  // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
+  // Claves: entity:{slug}, alias:a:/alias:l:{norm}, ignore:*, children:*,
+  // review:{kind}:{norm}, y mas adelante follow:/fanout:.
+  ENTITIES: KVNamespace;
   SHOPIFY_ADMIN_CLIENT_ID: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
   // DISCOGS_TOKEN: Personal Access Token for Discogs API.
@@ -519,26 +523,9 @@ function nlEsc(s: string): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Slug helpers — MUST mirror scripts/prerender.mjs and App.jsx EXACTLY.
-// The site (links, sitemap, prerendered pages) is keyed by this slug, NOT by
-// the Shopify handle. The handle is usually the SKU (e.g. "chiwax027ltd")
-// while the slug is artist+title (e.g. "jakobiin-a-place-called-jack"), so a
-// link built from the handle 404s to home. Build email links from the slug.
-function nlSlugify(str: string): string {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-function nlMakeSlug(artist: string, title: string, catalog: string): string {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = nlSlugify(base);
-  if (s) return s;
-  return nlSlugify(catalog) || 'release';
-}
+// El slug del sitio vive ahora en ./lib/slug, que comparten el newsletter, el
+// feed y el portal: eran dos copias de lo mismo y la tercera habria sido la que
+// se desincronizara.
 
 function nlProductUrl(p: NLProduct): string {
   const slug = nlMakeSlug(p.vendor, p.title, p.sku);
@@ -696,6 +683,15 @@ async function nlCreateBroadcastDraft(env: Env, subject: string, html: string, n
 
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 
+// La expresion diaria de los avisos de novedades (fase 6). Se compara tal cual
+// con event.cron, asi que tiene que ser IDENTICA a la de wrangler.jsonc.
+// 06:00 UTC = 08:00 en Madrid en verano, 07:00 en invierno. El cron es UTC y
+// eso se acepta: ver "decisiones abiertas" en docs/entities.md.
+const DAILY_CRON = '0 6 * * *';
+// El enlace de baja tiene que apuntar al worker que manda el correo, y en el
+// cron no hay peticion de la que sacar el origen.
+const FOLLOW_ALERTS_ORIGIN = 'https://houseonly-worker.emontagut.workers.dev';
+
 interface WishlistItem {
   handle: string;
   title?: string;
@@ -833,6 +829,7 @@ import { findVariantBySku, getPrimaryLocationId, adjustInventory } from './lib/s
 import {
   handleSyncBootstrap,
   handleSyncStatus,
+  handleSyncPending,
   handleRegisterWebhook,
   handleShopifyOrderWebhook,
   handleSyncMode,
@@ -845,6 +842,39 @@ import {
 } from './lib/sync';
 
 import { searchRelease } from './lib/discogs';
+
+import {
+  handleEntityResolve,
+  handleEntityReviewList,
+  handleEntityReviewApprove,
+  handleEntityReviewApproveBulk,
+  handleEntityReviewRecompute,
+  handleEntityReviewReject,
+  handleEntityGet,
+} from './lib/entities';
+
+// Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
+import {
+  listFollows,
+  addFollow,
+  removeFollow,
+  mergeFollows,
+  buildFeed,
+  entityPage,
+  accountHome,
+  lookupPublic,
+  entityIndex,
+} from './lib/follows';
+import {
+  getAlertsState,
+  setEmailAlerts,
+  refreshStoredEmail,
+  unsubscribeByToken,
+  getMode as getAlertsMode,
+  setMode as setAlertsMode,
+  runFollowAlerts,
+} from './lib/alerts';
+import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './lib/slug';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 
@@ -1284,6 +1314,38 @@ export default {
     // data is non-sensitive (stats only, no SKUs).
     if (action === 'sync-status' && request.method === 'GET') {
       return await handleSyncStatus(request, env);
+    }
+
+    // ── ENTIDADES: ARTISTAS Y SELLOS (fase 1) ───────────────
+    // docs/entities.md. Todo detras de Bearer BOOTSTRAP_AUTH_SECRET, como
+    // pending-review-*. Aditivo: no cambia nada de lo que ya hay.
+    if (action === 'entity-resolve' && request.method === 'POST') {
+      return await handleEntityResolve(request, env);
+    }
+    if (action === 'entity-review-list' && request.method === 'GET') {
+      return await handleEntityReviewList(request, env);
+    }
+    if (action === 'entity-review-approve' && request.method === 'POST') {
+      return await handleEntityReviewApprove(request, env);
+    }
+    if (action === 'entity-review-approve-bulk' && request.method === 'POST') {
+      return await handleEntityReviewApproveBulk(request, env);
+    }
+    if (action === 'entity-review-recompute' && request.method === 'POST') {
+      return await handleEntityReviewRecompute(request, env);
+    }
+    if (action === 'entity-review-reject' && request.method === 'POST') {
+      return await handleEntityReviewReject(request, env);
+    }
+    if (action === 'entity-get' && request.method === 'GET') {
+      return await handleEntityGet(request, env);
+    }
+
+    // ── PENDING SALES ───────────────────────────────────────
+    // GET ?action=sync-pending — Discogs sales seen but not yet turned into a
+    // Shopify order, and why. Auth: Bearer BOOTSTRAP_AUTH_SECRET.
+    if (action === 'sync-pending' && request.method === 'GET') {
+      return await handleSyncPending(request, env);
     }
 
     // ── SYNC MODE (Fase 3E dry/live switch) ─────────────────
@@ -2586,6 +2648,199 @@ export default {
       return jsonRes({ error: 'method not allowed' }, 405);
     }
 
+    // ── FOLLOWS Y FEED (fase 5a) ─────────────────────────────
+    // Misma autenticacion que la wishlist, a proposito: mismo id numerico de
+    // Shopify, misma resolveCustomerId, y por tanto el mismo merge
+    // invitado→logueado que ya funciona.
+    if (action === 'follows' || action === 'follows-merge' || action === 'feed') {
+      const isGet = request.method === 'GET';
+      let body: any = {};
+      if (!isGet) {
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      }
+      const session = isGet ? (url.searchParams.get('session') || '') : (body.session || '');
+      const token   = isGet ? (url.searchParams.get('token')   || '') : (body.token   || '');
+      const cid = await resolveCustomerId(env, { session, token });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      if (action === 'feed') {
+        if (!isGet) return jsonRes({ error: 'method not allowed' }, 405);
+        const feed = await buildFeed(env, cid, {
+          days: url.searchParams.get('days'),
+          limit: url.searchParams.get('limit'),
+          cursor: url.searchParams.get('cursor') || '',
+        });
+        return jsonRes(feed);
+      }
+
+      if (action === 'follows-merge') {
+        if (request.method !== 'POST') return jsonRes({ error: 'method not allowed' }, 405);
+        const incoming = Array.isArray(body.entities) ? body.entities : [];
+        return jsonRes(await mergeFollows(env, cid, incoming));
+      }
+
+      if (isGet) return jsonRes(await listFollows(env, cid));
+
+      if (request.method === 'POST' || request.method === 'DELETE') {
+        const res = request.method === 'POST'
+          ? await addFollow(env, cid, body.slug)
+          : await removeFollow(env, cid, body.slug);
+        if ('error' in res) return jsonRes({ error: res.error }, res.status);
+        return jsonRes(res);
+      }
+
+      return jsonRes({ error: 'method not allowed' }, 405);
+    }
+
+    // Home del portal: estanterias, "ya lo tienes" y sugerencias, en UNA llamada.
+    // Tres peticiones encadenadas para pintar una pantalla se notan en el movil.
+    if (action === 'account-home' && request.method === 'GET') {
+      const cid = await resolveCustomerId(env, {
+        session: url.searchParams.get('session') || '',
+        token: url.searchParams.get('token') || '',
+      });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      // Que discos tiene ya. La Customer Account API es la unica que sabe lo que
+      // ha comprado ESTE cliente, y da el gid del producto por linea de pedido.
+      let ownedIds: string[] = [];
+      try {
+        const d: any = await caapiQueryBySession(env, url.searchParams.get('session') || '', `
+          query {
+            customer {
+              orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+                nodes { lineItems(first: 50) { nodes { productId } } }
+              }
+            }
+          }
+        `);
+        for (const o of d?.data?.customer?.orders?.nodes || []) {
+          for (const li of o?.lineItems?.nodes || []) if (li?.productId) ownedIds.push(li.productId);
+        }
+      } catch {
+        // Sin pedidos legibles se pinta igual: "ya lo tienes" es un adorno util,
+        // no un requisito para ver tus estanterias.
+      }
+
+      const wl = await env.WISHLIST.get(`wl:${cid}`);
+      let wishlistRaws: any[] = [];
+      try { wishlistRaws = JSON.parse(wl || '{}').items || []; } catch { /* wishlist ilegible */ }
+
+      const home = await accountHome(env, cid, ownedIds, wishlistRaws);
+      // De paso se refresca el correo guardado: aqui hay sesion, y el cron que
+      // manda los avisos no la tendra.
+      const alerts = await getAlertsState(env, cid);
+      try {
+        const d: any = await caapiQueryBySession(env, url.searchParams.get('session') || '',
+          `query { customer { emailAddress { emailAddress } } }`);
+        const email = d?.data?.customer?.emailAddress?.emailAddress || '';
+        if (email) await refreshStoredEmail(env, cid, email);
+      } catch { /* el correo viejo sigue sirviendo */ }
+      return jsonRes({ ...home, alerts });
+    }
+
+    // Avisos de novedades (fase 6). El interruptor es del cliente, con su
+    // sesion; el correo se captura AQUI, que es el unico momento en que el
+    // worker puede saberlo.
+    if (action === 'follow-alerts') {
+      const isGet = request.method === 'GET';
+      let body: any = {};
+      if (!isGet) {
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      }
+      const session = isGet ? (url.searchParams.get('session') || '') : (body.session || '');
+      const cid = await resolveCustomerId(env, { session, token: isGet ? (url.searchParams.get('token') || '') : (body.token || '') });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      if (isGet) return jsonRes(await getAlertsState(env, cid));
+      if (request.method !== 'POST') return jsonRes({ error: 'method not allowed' }, 405);
+
+      // El correo sale de la Customer Account API, que es la unica que lo sabe,
+      // y solo mientras haya sesion. Por eso se guarda al decir que si.
+      let email = '';
+      if (body.enabled) {
+        try {
+          const d: any = await caapiQueryBySession(env, session,
+            `query { customer { emailAddress { emailAddress } } }`);
+          email = d?.data?.customer?.emailAddress?.emailAddress || '';
+        } catch { /* sin correo no se puede avisar; se responde igual */ }
+      }
+      const r = await setEmailAlerts(env, cid, body.enabled === true, email);
+      return jsonRes({ ...r, email });
+    }
+
+    // Baja desde el enlace del correo. Publica y con token opaco: apaga los
+    // avisos y NADA MAS — el newsletter tiene su propia baja.
+    if (action === 'follow-alerts-unsubscribe' && (request.method === 'GET' || request.method === 'POST')) {
+      const ok = await unsubscribeByToken(env, url.searchParams.get('t') || '');
+      // One-Click: el cliente de correo manda un POST y no espera pagina, solo
+      // un 200. Si aqui se devolviera HTML, Gmail lo daria por fallido.
+      if (request.method === 'POST') {
+        return new Response(ok ? 'unsubscribed' : 'unknown token', { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      return new Response(
+        `<!doctype html><meta charset="utf-8"><title>House Only</title>
+         <body style="margin:0;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+         <div><p style="font-size:22px;font-weight:900;letter-spacing:-1px">HOUSE<span style="color:#c8ff00">ONLY</span></p>
+         <p style="font-size:15px">${ok ? "Done — we won't email you about new releases." : "That link is no longer valid."}</p>
+         <p style="color:#585858;font-size:12px">Your newsletter subscription hasn't changed.</p>
+         <p style="margin-top:22px"><a href="https://houseonly.store/account" style="color:#c8ff00;font-size:12px">Back to your shelves</a></p>
+         </div></body>`,
+        { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      );
+    }
+
+    // Modo y disparo manual de la tanda. Bearer, como el resto de lo operativo.
+    if (action === 'follow-alerts-mode') {
+      const authA = request.headers.get('authorization') || '';
+      if (authA !== `Bearer ${env.BOOTSTRAP_AUTH_SECRET}`) return jsonRes({ error: 'unauthorized' }, 401);
+      if (request.method === 'POST') {
+        let body: any = {};
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+        const m = body?.mode;
+        if (m !== 'off' && m !== 'test' && m !== 'live') return jsonRes({ error: "mode must be off|test|live" }, 400);
+        await setAlertsMode(env, m);
+        return jsonRes({ ok: true, mode: m });
+      }
+      return jsonRes({ mode: await getAlertsMode(env) });
+    }
+
+    if (action === 'follow-alerts-run' && request.method === 'POST') {
+      const authA = request.headers.get('authorization') || '';
+      if (authA !== `Bearer ${env.BOOTSTRAP_AUTH_SECRET}`) return jsonRes({ error: 'unauthorized' }, 401);
+      let body: any = {};
+      try { body = await request.json(); } catch { /* todo por defecto */ }
+      const summary = await runFollowAlerts(env, {
+        mode: body.mode, testTo: body.testTo,
+        sinceMs: body.hours ? Number(body.hours) * 3600000 : undefined,
+        workerUrl: url.origin,
+      });
+      return jsonRes(summary);
+    }
+
+    // Todas las entidades con producto vivo. Lo lee el prerender para generar
+    // una pagina por artista y por sello, y el sitemap.
+    if (action === 'entity-index' && request.method === 'GET') {
+      return jsonRes({ entities: await entityIndex(env) });
+    }
+
+    // De un nombre crudo a su entidad. Publico y de solo lectura: lo llama la
+    // ficha de producto para saber a donde enlazar el artista y el sello.
+    if (action === 'entity-lookup' && request.method === 'GET') {
+      const kind = url.searchParams.get('kind') === 'label' ? 'label' : 'artist';
+      const entities = await lookupPublic(env, kind, url.searchParams.get('raw') || '');
+      return jsonRes({ entities });
+    }
+
+    // Ficha publica de una entidad. Sin Bearer: es lo que pintara la tienda.
+    if (action === 'entity-public' && request.method === 'GET') {
+      const page = await entityPage(env, url.searchParams.get('slug') || '', {
+        limit: url.searchParams.get('limit'),
+      });
+      if (!page) return jsonRes({ error: 'unknown entity' }, 404);
+      return jsonRes(page);
+    }
+
     // ── POST: upload file to R2 ──────────────────────────────
     if (request.method === 'POST') {
       if (action === 'upload') {
@@ -2701,6 +2956,23 @@ export default {
   // returns before pollDiscogsForSales is done. Errors are caught so a
   // bad poll doesn't crash the Worker — we want next run to try again.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // ── AVISOS DE NOVEDADES (fase 6) ────────────────────────
+    // La tanda diaria va en SU PROPIA expresion de cron, y aqui se bifurca.
+    // Sin esta bifurcacion, activar un cron en staging —que hoy no tiene
+    // ninguno a proposito— devolveria el poll de Discogs que se quito para no
+    // competir por el cupo de 60/min que necesita produccion.
+    if (event.cron === DAILY_CRON) {
+      ctx.waitUntil(
+        runFollowAlerts(env, { workerUrl: FOLLOW_ALERTS_ORIGIN }).then(
+          (summary) => env.ENTITIES.put('meta:follow_alerts_last_run',
+            JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ...summary })),
+          (err) => env.ENTITIES.put('meta:follow_alerts_last_run',
+            JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+        ),
+      );
+      return;
+    }
+
     ctx.waitUntil(
       pollDiscogsForSales(env).then(
         (result) => {

@@ -34,7 +34,7 @@ import {
   validateShopifyWebhookHmac,
   registerShopifyWebhook,
   listShopifyWebhooks,
-  findVariantBySku,
+  findVariantBySkuLoose,
   getPrimaryLocationId,
   adjustInventory,
   createDiscogsOrder,
@@ -117,11 +117,184 @@ function formatInOffset(epochMs: number, offset: string): string {
 // Safety cap: 20 pages × 50 = 1000 orders per window. Far beyond a vinyl shop's
 // real volume; prevents a runaway loop if pagination ever misbehaves.
 const MAX_POLL_PAGES = 20;
-// lock:order:{id} TTL. MUST exceed the lookback window: a firm order we already
-// turned into a paid Shopify order stays inside the fetch window for
-// POLL_LOOKBACK_DAYS, and the lock is the ONLY thing stopping us from creating
-// a second one (a duplicate factura). 60d >> 10d leaves a wide safety margin.
+// lock:order:{id} DURABLE TTL. Taken only once we are about to create a paid
+// Shopify order. MUST exceed the lookback window: an order we already turned
+// into a Shopify order stays inside the fetch window for POLL_LOOKBACK_DAYS,
+// and the lock is the ONLY thing stopping us from creating a second one (a
+// duplicate factura). 60d >> 10d leaves a wide safety margin.
 const ORDER_LOCK_TTL_SECONDS = 60 * 24 * 60 * 60;
+// lock:order:{id} IN-FLIGHT TTL, held while we merely RESOLVE an order (all
+// read-only lookups: Discogs getListing/getOrder, Shopify findVariantBySku).
+// It deliberately EXPIRES so a transient failure — or an isolate that dies
+// mid-run — leaves the order free for the next poll to retry.
+//
+// This is the fix for the 147628-C-22 incident (2026-09-02): a Discogs 429 on
+// getOrder made order creation fail, but the durable 60d lock had already been
+// taken, so every later poll counted the order as `skipped_duplicate` and the
+// sale was silently lost — no Shopify order, no factura, no alert.
+//
+// Must be LONGER than one poll run (a 429 costs a 60s retry sleep) and SHORTER
+// than the cron interval (15 min), so the very next run may retry.
+const ORDER_LOCK_INFLIGHT_TTL_SECONDS = 10 * 60;
+// Marker values for the two stages, so KV/audit forensics can tell them apart.
+const ORDER_LOCK_INFLIGHT = 'in-flight';
+const ORDER_LOCK_COMMITTED = '1';
+
+/**
+ * Persist one order's audit record. first_detected_at / attempts are carried
+ * by the caller so ?action=sync-pending can show how long a sale has been
+ * stuck and how many times it has been tried.
+ */
+async function recordOrderAttempt(
+  env: SyncEnv,
+  orderId: string,
+  audit: any,
+  result?: PollResult,
+): Promise<void> {
+  await env.SYNC_STATE.put(
+    `sales-detected:${orderId}`,
+    JSON.stringify(audit),
+    { expirationTtl: 30 * 24 * 60 * 60 },
+  );
+  if (result && !audit.order_creation?.ok) {
+    (result.failures ||= []).push({
+      order_id: orderId,
+      attempts: audit.attempts || 1,
+      error: String(audit.order_creation?.error || 'unknown').slice(0, 300),
+    });
+  }
+}
+
+/**
+ * The whole poll failed (typically getOrders refused). Count consecutive
+ * failures; ?action=sync-pending reports the streak so "is the sync healthy?"
+ * is answerable without reading logs.
+ */
+async function notePollFailure(env: SyncEnv): Promise<void> {
+  const streak = Number(await env.SYNC_STATE.get('meta:poll_fail_streak') || '0') + 1;
+  await env.SYNC_STATE.put('meta:poll_fail_streak', String(streak));
+}
+
+/**
+ * Retry sales we ALREADY know about, before (and independently of) the window
+ * scan.
+ *
+ * Why this is separate: the scan opens with getOrders, and when that call is
+ * refused the whole poll returns early — so a sale sitting in sales-detected
+ * never gets an attempt, even though it needs only ONE call (getOrder, for the
+ * buyer address) and its line items are already resolved to Shopify variants.
+ * On 2026-09-02 that starved order 147628-C-22 for hours: every run died on the
+ * order LIST while the sale itself was one successful call from done.
+ *
+ * Line items come from the stored audit, so this pass makes no Shopify lookups
+ * and no getListing calls — the cheapest possible path to finishing the sale.
+ */
+async function retryParkedSales(
+  env: SyncAdminEnv,
+  mode: SyncMode,
+  result: PollResult,
+): Promise<void> {
+  const { keys } = await env.SYNC_STATE.list({ prefix: 'sales-detected:' });
+
+  for (const k of keys) {
+    const raw = await env.SYNC_STATE.get(k.name);
+    if (!raw) continue;
+    let audit: any;
+    try { audit = JSON.parse(raw); } catch { continue; }
+
+    if (audit.order_creation?.ok) continue;                    // already synced
+    if (audit.order_creation?.will_retry === false) continue;  // deliberate dead end
+
+    const orderIdStr = String(audit.order_id || '').trim();
+    if (!orderIdStr) continue;
+
+    // Never step on an order the window scan has already committed to.
+    const lockKey = `lock:order:${orderIdStr}`;
+    if (await env.SYNC_STATE.get(lockKey) === ORDER_LOCK_COMMITTED) continue;
+
+    // Only sales whose items are ALREADY resolved; anything else needs the full
+    // resolution path and belongs to the window scan.
+    const items = (audit.items || []) as any[];
+    if (items.length === 0) continue;
+    if (!items.every((i) => i.shopify_variant_id)) continue;
+    const resolvedLines: DiscogsOrderLine[] = items.map((i) => ({
+      variantId: i.shopify_variant_id as string,
+      quantity: i.quantity || 1,
+    }));
+
+    result.parked_retried++;
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_INFLIGHT, {
+      expirationTtl: ORDER_LOCK_INFLIGHT_TTL_SECONDS,
+    });
+
+    audit.processed_at = new Date().toISOString();
+    audit.attempts = (audit.attempts || 0) + 1;
+    audit.retry_pass = 'parked';
+
+    let buyer: DiscogsBuyer;
+    try {
+      const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+      const parsed = parseDiscogsShippingAddress(full.shipping_address);
+      buyer = {
+        name: parsed.name,
+        email: full.buyer?.email,
+        address1: parsed.address1,
+        address2: parsed.address2,
+        city: parsed.city,
+        province: parsed.province,
+        zip: parsed.zip,
+        country: parsed.country,
+        phone: parsed.phone,
+      };
+    } catch (e: any) {
+      audit.order_creation = {
+        ok: false,
+        will_retry: true,
+        error: `getOrder failed: ${e?.message || e}`,
+      };
+      await recordOrderAttempt(env, orderIdStr, audit, result);
+      continue;
+    }
+
+    if (mode === 'dry') {
+      audit.order_creation = {
+        ok: true,
+        dry_run: true,
+        would_create_lines: resolvedLines.length,
+        buyer_name: buyer.name,
+      };
+      await recordOrderAttempt(env, orderIdStr, audit, result);
+      continue;
+    }
+
+    // Same two-stage lock discipline as the main path: promote BEFORE the call
+    // that can create a factura.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_COMMITTED, {
+      expirationTtl: ORDER_LOCK_TTL_SECONDS,
+    });
+
+    const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
+    if (orderResult.ok) {
+      audit.order_creation = {
+        ok: true,
+        shopify_order_id: orderResult.orderId,
+        shopify_order_name: orderResult.orderName,
+        draft_order_id: orderResult.draftOrderId,
+        lines: resolvedLines.length,
+        recovered_by: 'parked-retry',
+      };
+      result.parked_recovered++;
+    } else {
+      audit.order_creation = {
+        ok: false,
+        error: orderResult.error,
+        userErrors: orderResult.userErrors,
+        draft_order_id: orderResult.draftOrderId,
+      };
+    }
+    await recordOrderAttempt(env, orderIdStr, audit, result);
+  }
+}
 
 // ── ENV ─────────────────────────────────────────────────────────────
 
@@ -642,11 +815,17 @@ export async function getListingMapping(
 //   duplicate facturas for sales already handled manually.
 //
 // Idempotency (fiscal safety — a duplicate order is a duplicate factura):
-//   lock:order:{order_id}, TTL ORDER_LOCK_TTL_SECONDS — set BEFORE order
-//   creation is attempted and kept on every outcome. Its TTL MUST exceed the
-//   lookback window: a firm order we already turned into a Shopify order stays
-//   inside the window for POLL_LOOKBACK_DAYS, and the lock is the only thing
-//   stopping a second creation. 60d >> 10d.
+//   lock:order:{order_id}, taken in TWO stages so that "don't duplicate" does
+//   not silently become "don't retry":
+//     1. in-flight (ORDER_LOCK_INFLIGHT_TTL_SECONDS, ~10 min) while we resolve
+//        the order through read-only lookups. Expires by design, so a 429, a
+//        network blip or a dead isolate leaves the order retryable next poll.
+//     2. committed (ORDER_LOCK_TTL_SECONDS, 60d) promoted immediately BEFORE
+//        createDiscogsOrder. Its TTL MUST exceed the lookback window: an order
+//        we already created stays inside the window for POLL_LOOKBACK_DAYS and
+//        this lock is the only thing stopping a second creation. 60d >> 10d.
+//   Dry mode never reaches stage 2 — it creates nothing, so it must not lock
+//   the order out of the eventual live run.
 //
 // Audit:
 //   sales-detected:{order_id} JSON entry kept 30 days — for forensics.
@@ -664,8 +843,15 @@ interface PollResult {
   shopify_adjustments_failed: number;
   unmapped_listings: number;
   variant_not_found: number;
+  parked_retried: number;
+  parked_recovered: number;
   new_cursor: string | null;
   errors?: string[];
+  // Why each unsynced sale is unsynced. Without this the run reported
+  // ok:true / failed:2 and NOTHING said what "failed" meant — the sync looked
+  // healthy for four days while two sales sat stuck (2026-09-03 → 09-07).
+  // sync-status stores this whole object, so the reason is one URL away.
+  failures?: Array<{ order_id: string; attempts: number; error: string }>;
 }
 
 /**
@@ -708,8 +894,19 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     shopify_adjustments_failed: 0,
     unmapped_listings: 0,
     variant_not_found: 0,
+    parked_retried: 0,
+    parked_recovered: 0,
     new_cursor: null,
   };
+
+  // ── 0. Finish what we already started ───────────────────────────
+  // Runs BEFORE the window scan so a refused getOrders cannot starve a sale
+  // that is one call from done. Never allowed to break the scan behind it.
+  try {
+    await retryParkedSales(env, mode, result);
+  } catch (e: any) {
+    errors.push(`retryParkedSales failed: ${e?.message || e}`);
+  }
 
   // ── 1. Fetch every order created within the lookback window ─────
   // NOT a high-water cursor: an order first seen while still pre-firm must be
@@ -752,9 +949,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     }
     result.orders_examined = orders.length;
   } catch (e: any) {
-    errors.push(`getOrders failed: ${e?.message || e}`);
+    const msg = `getOrders failed: ${e?.message || e}`;
+    errors.push(msg);
     result.ok = false;
     result.errors = errors;
+    // The poll died before it could see any order.
+    await notePollFailure(env);
     return result;
   }
 
@@ -781,19 +981,38 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
-    // Set lock IMMEDIATELY and keep it on every outcome. This is the single
-    // guard against creating a duplicate paid Shopify order (a duplicate
-    // factura): its TTL must outlive the fetch window so an order we've already
-    // handled is never re-created while it's still inside the window.
-    await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: ORDER_LOCK_TTL_SECONDS });
+    // ── LOCK STAGE 1: in-flight ─────────────────────────────────
+    // Claim the order for THIS run only. Everything between here and the
+    // creation call below is read-only (Discogs + Shopify lookups), so if any
+    // of it fails we want the next poll to try again — hence a TTL that
+    // expires rather than the durable one. Taking the durable lock here is
+    // what silently lost order 147628-C-22 to a transient Discogs 429.
+    //
+    // Fail-safe direction: if the isolate dies anywhere below, the worst case
+    // is a short wait for this marker to expire, never a duplicate factura —
+    // the durable lock is taken before anything can create an order.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_INFLIGHT, {
+      expirationTtl: ORDER_LOCK_INFLIGHT_TTL_SECONDS,
+    });
 
-    // Build the audit record for this order.
+    // Build the audit record for this order. first_detected_at and attempts
+    // are carried over from any earlier attempt so the stuck-sale alarm
+    // measures from the FIRST sighting, not from this run.
+    let prev: any = null;
+    try {
+      const prevRaw = await env.SYNC_STATE.get(`sales-detected:${orderIdStr}`);
+      prev = prevRaw ? JSON.parse(prevRaw) : null;
+    } catch { /* a corrupt audit must not stop the sale */ }
+
+    const nowIso = new Date().toISOString();
     const audit: any = {
       order_id: orderIdStr,
       status: order.status,
       created: order.created,
       mode,
-      processed_at: new Date().toISOString(),
+      processed_at: nowIso,
+      first_detected_at: prev?.first_detected_at || nowIso,
+      attempts: (prev?.attempts || 0) + 1,
       items: [],
       order_creation: null as any,
     };
@@ -812,6 +1031,11 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         quantity: 1,  // Discogs marketplace items are always quantity 1
         sku: null as string | null,
         shopify_variant_id: null as string | null,
+        // What Discogs charged. Recorded for reconciliation only — the invoice
+        // uses the Shopify catalogue price, not this.
+        price: item.price
+          ? { amount: String(item.price.value), currencyCode: item.price.currency }
+          : null,
         outcome: 'pending',
         error: null as string | null,
       };
@@ -855,7 +1079,7 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       // Resolve sku → Shopify variant
       let variant;
       try {
-        variant = await findVariantBySku(env, sku);
+        variant = await findVariantBySkuLoose(env, sku);
       } catch (e: any) {
         itemAudit.outcome = 'shopify_lookup_failed';
         itemAudit.error = e?.message || String(e);
@@ -868,6 +1092,21 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         result.variant_not_found++;
         audit.items.push(itemAudit);
         continue;
+      }
+      // Resolved through the normalized fallback: the cached mapping holds a
+      // SKU Shopify does not have (a raw Discogs catno). Write the real one
+      // back so this listing resolves directly from now on and no one has to
+      // repair KV by hand.
+      if (variant.sku && variant.sku !== sku) {
+        itemAudit.sku_from_discogs = sku;
+        sku = variant.sku;
+        itemAudit.sku = sku;
+        try {
+          await env.SYNC_STATE.put(`listing:${item.id}`,
+            JSON.stringify({ sku, status: 'Sold' }));
+          await env.SYNC_STATE.put(`sku:${sku}`,
+            JSON.stringify({ listing_id: item.id, status: 'Sold', synced_at: new Date().toISOString() }));
+        } catch { /* the sale matters more than the cache */ }
       }
       itemAudit.shopify_variant_id = variant.variantId;
       itemAudit.outcome = 'resolved';
@@ -882,25 +1121,35 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       audit.order_creation = {
         ok: false,
         needs_manual: true,
+        // The in-flight lock expires, so every later poll retries this order.
+        // That is deliberate: once the missing listing:{id} mapping is fixed
+        // (by hand or by the self-heal above), the sale recovers on its own.
+        will_retry: true,
         error: 'order has unmapped item(s); skipped to avoid partial factura',
       };
       result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
-    // If nothing resolved, record and move on (lock stays set so we don't spin).
+    // If nothing resolved, record and move on. The in-flight lock expires, so
+    // later polls retry — a listing that resolves once its mapping is fixed
+    // still turns into an order without manual intervention.
     if (resolvedLines.length === 0) {
-      audit.order_creation = { ok: false, error: 'no resolvable line items' };
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      // Say WHY nothing resolved. "no resolvable line items" on its own sent us
+      // hunting for a data problem when the cause was dead Shopify credentials.
+      const firstErr = (audit.items || [])
+        .map((i: any) => i.error)
+        .find((e: any) => e);
+      audit.order_creation = {
+        ok: false,
+        needs_manual: true,
+        will_retry: true,
+        error: firstErr
+          ? `no resolvable line items: ${String(firstErr).slice(0, 300)}`
+          : 'no resolvable line items',
+      };
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
@@ -921,19 +1170,25 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         phone: parsed.phone,
       };
     } catch (e: any) {
-      audit.order_creation = { ok: false, error: `getOrder failed: ${e?.message || e}` };
+      // Transient by nature (Discogs 429 / network). The in-flight lock
+      // expires, so the next poll retries instead of losing the sale — this is
+      // exactly what happened to 147628-C-22 under the old durable lock.
+      audit.order_creation = {
+        ok: false,
+        will_retry: true,
+        error: `getOrder failed: ${e?.message || e}`,
+      };
       result.shopify_adjustments_failed++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
 
     result.shopify_adjustments_attempted++;
 
     if (mode === 'dry') {
+      // No durable lock in dry mode: nothing was created, so the order must
+      // stay eligible for the real run. (Committing here used to mean a spell
+      // in dry mode permanently locked out every order it rehearsed.)
       audit.order_creation = {
         ok: true,
         dry_run: true,
@@ -942,13 +1197,19 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         buyer_country: buyer.country,
       };
       result.shopify_adjustments_succeeded++;
-      await env.SYNC_STATE.put(
-        `sales-detected:${orderIdStr}`,
-        JSON.stringify(audit),
-        { expirationTtl: 30 * 24 * 60 * 60 },
-      );
+      await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
+
+    // ── LOCK STAGE 2: commit ────────────────────────────────────
+    // From here on a paid Shopify order may exist, so the lock must outlive
+    // the fetch window. Promote BEFORE the call, never after: if
+    // createDiscogsOrder completes the draft but we lose the response (timeout,
+    // isolate eviction), the order is real and this lock is the only thing
+    // stopping the next poll from creating a second factura for it.
+    await env.SYNC_STATE.put(lockKey, ORDER_LOCK_COMMITTED, {
+      expirationTtl: ORDER_LOCK_TTL_SECONDS,
+    });
 
     // ── LIVE: create the paid Shopify order (this decrements inventory once) ──
     const orderResult = await createDiscogsOrder(env, orderIdStr, resolvedLines, buyer);
@@ -972,12 +1233,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     }
 
     // Save audit trail (30 day TTL)
-    await env.SYNC_STATE.put(
-      `sales-detected:${orderIdStr}`,
-      JSON.stringify(audit),
-      { expirationTtl: 30 * 24 * 60 * 60 },
-    );
+    await recordOrderAttempt(env, orderIdStr, audit, result);
   }
+
+  // The poll completed, so whatever was breaking it has passed. Clear the
+  // streak — the next outage should be counted from zero.
+  await env.SYNC_STATE.put('meta:poll_fail_streak', '0');
 
   // ── 4. Record newest order seen (observability only; see header) ─
   if (newestSeen) {
@@ -994,6 +1255,59 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
 // GET  ?action=sync-mode   → returns current mode (no auth, non-sensitive)
 // POST ?action=sync-mode   → set mode (auth: Bearer BOOTSTRAP_AUTH_SECRET)
 //   body: {"mode": "dry"} or {"mode": "live"}
+
+/**
+ * GET ?action=sync-pending — every Discogs sale we have SEEN but not turned
+ * into a Shopify order, newest first, with why. Auth: Bearer.
+ *
+ * This exists so the question "is anything stuck?" is one URL, not an
+ * archaeology session in KV. It reads the same sales-detected audit records
+ * the poll writes.
+ */
+export async function handleSyncPending(
+  request: Request,
+  env: SyncEnv,
+): Promise<Response> {
+  if (!checkBearer(request, env)) {
+    return jsonResponse({ error: 'unauthorized' }, 401);
+  }
+
+  const { keys } = await env.SYNC_STATE.list({ prefix: 'sales-detected:' });
+  const pending: any[] = [];
+  let synced = 0;
+
+  for (const k of keys) {
+    const raw = await env.SYNC_STATE.get(k.name);
+    if (!raw) continue;
+    let a: any;
+    try { a = JSON.parse(raw); } catch { continue; }
+    if (a.order_creation?.ok) { synced++; continue; }
+    pending.push({
+      order_id: a.order_id,
+      status: a.status,
+      created: a.created,
+      first_detected_at: a.first_detected_at || a.processed_at,
+      last_attempt_at: a.processed_at,
+      attempts: a.attempts || 1,
+      // false only where the code deliberately gives up; see the audit paths.
+      will_retry: a.order_creation?.will_retry !== false,
+      needs_manual: Boolean(a.order_creation?.needs_manual),
+      error: a.order_creation?.error || null,
+      items: (a.items || []).map((i: any) => ({ sku: i.sku, title: i.release_title, outcome: i.outcome })),
+    });
+  }
+
+  pending.sort((x, y) => String(y.created).localeCompare(String(x.created)));
+
+  const streak = Number(await env.SYNC_STATE.get('meta:poll_fail_streak') || '0');
+  return jsonResponse({
+    pending_count: pending.length,
+    synced_count: synced,
+    poll_fail_streak: streak,
+    poll_healthy: streak === 0,
+    pending,
+  });
+}
 
 export async function handleSyncMode(
   request: Request,

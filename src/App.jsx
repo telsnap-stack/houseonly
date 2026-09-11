@@ -1,4 +1,10 @@
 import { useState, useRef, useEffect, useMemo, createContext, useContext, useCallback } from "react";
+// Fase 4 (docs/entities.md): cabeceras y formato de los metafields de entidad.
+// Es el MISMO modulo que usan el script de definiciones y el backfill, no una
+// copia: Vite resuelve el .ts del worker y lo mete en el bundle.
+import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
+// Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
+import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -1976,7 +1982,7 @@ function TrackPlayer({ tracks, release }) {
   );
 }
 
-function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
+function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth, onSignIn, followSlugs, onFollowChange }) {
   // Variant choice (Deep Jungle colour editions: Black / Coloured). Hook must
   // run unconditionally, so it sits before the null guard. When the selected
   // id belongs to a previously-opened product we fall back to the first
@@ -2009,9 +2015,22 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
           </div>
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
             <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
-            <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>{r.label} · {r.catalog}</div>
+            {/* Fase 5b: el sello y el artista llevan a su ficha de entidad. Si el
+                nombre no resuelve, EntityLink pinta el texto de siempre. */}
+            {/* El sello con su control; el catno baja a su propia linea para que
+                el control no lo empuje fuera de la vista en movil. */}
+            <div style={{ fontSize:11, color:S.muted, letterSpacing:1, marginBottom:6, lineHeight:2 }}>
+              <EntityLink kind="label" raw={r.label} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} />
+            </div>
+            {r.catalog && <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>{r.catalog}</div>}
             <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
-            <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>{r.artist}</div>
+            {/* Mismo tratamiento que el titulo, por decision de Eduardo: en un
+                disco el artista y el titulo son la misma cosa leida en dos
+                partes. El sello se queda pequeño y apagado, que alli si es
+                contexto. */}
+            <div style={{ fontSize:18, color:S.text, fontWeight:800, marginBottom:14, lineHeight:1.9 }}>
+              <EntityLink kind="artist" raw={r.artist} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} />
+            </div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
               {[r.genre,r.year].filter(Boolean).map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
             </div>
@@ -2194,6 +2213,7 @@ function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout }) {
     setView('orders');
     if (orders === null) loadOrders();
   };
+
 
   // Header text varies by view
   const headerLabel = !auth ? 'Sign In' : (view === 'orders' ? 'My Orders' : 'My Account');
@@ -2729,7 +2749,13 @@ function cleanSourceNotes(text) {
     s = keep.join('\n');
   }
 
-  // 6) Safe ligature fixes — only apply where the join is unambiguous:
+  // 6a) Ligaduras tipograficas de verdad, las que el PDF trae como UN caracter
+  // (U+FB00–U+FB06). Esto no adivina nada: son equivalencias exactas. Si no se
+  // deshacen aqui, el caracter viaja hasta Shopify y cualquier paso que no sea
+  // UTF-8 limpio lo convierte en "?" — que es como aparecio "Ancient In?nity".
+  s = normalizeLigatures(s);
+
+  // 6b) Safe ligature fixes — only apply where the join is unambiguous:
   // a letter, then space, then a ligature pair, then space, then a lowercase letter.
   // Catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
   // (which would need a dictionary to resolve correctly).
@@ -2808,6 +2834,10 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
 
   // Source notes — included only if they pass quality checks
   const cleaned = cleanSourceNotes(sourceNotes);
+  const sospechosas = suspectLigatureDamage(cleaned);
+  if (sospechosas.length) {
+    console.warn(`[ligaduras] "${String(title || '').slice(0, 40)}": ${sospechosas.join(', ')} — revisar antes de subir`);
+  }
   if (notesPassQualityCheck(sourceNotes, cleaned)) {
     const paragraphs = cleaned.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
     parts.push(...paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`));
@@ -3188,14 +3218,21 @@ function ZipImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('W&S');
       setSkippedCount(zipFiles.length - matchedZips.length);
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_ws.csv'; a.click();
@@ -3563,13 +3600,20 @@ function TripleVisionImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Triple Vision');
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_tv.csv'; a.click();
@@ -3960,18 +4004,25 @@ function RubadubImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Rubadub');
       setStatus('review');
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
+  const downloadCSV = async () => {
     // Rows already in the shop never travel. That makes Shopify's "Overwrite
     // products with matching handles" checkbox irrelevant for them: there is
     // no row to match, so neither answer can damage the existing product.
     const kept = results.filter(r => !r._alreadyLive);
     if (!kept.length) return;
-    const CSV_KEYS = Object.keys(kept[0]).filter(k => !k.startsWith('_'));
-    const lines = [CSV_KEYS.join(','), ...kept.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(kept);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_rd.csv'; a.click();
@@ -4196,7 +4247,7 @@ function KudosImporter() {
     return {api:e,fmt};
   }
 
-  function exportShopify() {
+  async function exportShopify() {
     const m=margin/100;
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
     const csvRows=[cols];
@@ -4255,11 +4306,14 @@ function KudosImporter() {
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
-    const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
+    const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
     const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');a.href=url;a.download='shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv';
     document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+    autoRecomputeEntities('Kudos');
   }
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
@@ -4594,6 +4648,7 @@ function DBHImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('DBH');
       setStatus('review');
     } catch(e) {
       setError(e.message);
@@ -4601,9 +4656,15 @@ function DBHImporter() {
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k=>!k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -5459,17 +5520,24 @@ function MotherTongueImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('Mother Tongue');
       setStatus('review');
     } catch (e) {
       setError(e.message); setStatus('idle');
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
-      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+      ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
@@ -5969,17 +6037,24 @@ function RushHourImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
       setResults(processed);
+      autoRecomputeEntities('Rush Hour');
       setStatus('review');
     } catch (e) {
       setError(e.message); setStatus('idle');
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
-      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+      ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
@@ -9441,6 +9516,7 @@ function PreorderImporter() {
       }
 
       setResults(processed);
+      autoRecomputeEntities('Pre-order');
       setStatus('review');
     } catch(e) {
       setError(e.message);
@@ -9461,11 +9537,19 @@ function PreorderImporter() {
     r._release ? `release:${r._release}` : '',
   ].filter(Boolean).join(', ');
 
-  const downloadCSV = () => {
+  const downloadCSV = async () => {
     const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
-    const CSV_KEYS = Object.keys(kept[0]).filter(k=>!k.startsWith('_'));
-    const lines = [CSV_KEYS.join(','), ...kept.map(row=>CSV_KEYS.map(h=>{
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    // Aqui el sello NO sale de los tags: los monta tagsForRow() al escribir,
+    // y el valor bueno esta en _label desde el parseo.
+    const ent = await withEntityColumns(kept, { labelOf: r => r._label });
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = Object.keys(rows[0]).filter(k=>!k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>{
       const val = h==='Tags' ? tagsForRow(row) : row[h];
       return `"${String(val||'').replace(/"/g,'""')}"`;
     }).join(','))];
@@ -10048,6 +10132,609 @@ function PreorderImporter() {
   );
 }
 
+// ── ENTIDADES: ARTISTAS Y SELLOS (fase 2) ──────────────────────
+// docs/entities.md. Tres vistas porque son tres problemas distintos y
+// mezclarlos es lo que convierte 1348 filas en una tarde perdida:
+//   Bulk   — un nombre suelto, nada que decidir. Llegan marcadas y se aprueban
+//            en bloque. Son ~76 % de la cola.
+//   Troceo — un campo con varios artistas dentro. Hay que partirlo.
+//   Merge  — hay otra fila o entidad que se le parece. Puede ser la misma cosa
+//            escrita de dos maneras, un sub-sello, o nada (AXIS / Axis Of
+//            People son sellos distintos). Por eso lo mira una persona.
+//
+// Las entidades ya estan en produccion, asi que esto va al worker del entorno:
+// VITE_WORKER_URL apunta al de staging en el preview de Pages y al de prod en
+// produccion. Antes habia aqui una constante clavada al de staging, que era lo
+// que permitia usar la cola desde un preview mientras la fase 1 no estaba
+// desplegada.
+
+// El recompute automatico al terminar un importer necesita el Bearer, y los
+// importers no lo piden a nadie. Se guarda aqui cuando alguien conecta la
+// pestaña Entidades y se borra al recargar. Si nadie la ha conectado en esta
+// sesion, el recompute NO corre — y la pestaña lo dice, para que no sea una
+// sorpresa silenciosa.
+let entitiesSecret = '';
+
+async function recomputeEntitiesQueue(secretOverride) {
+  const sec = secretOverride || entitiesSecret;
+  if (!sec) return { ran: false, reason: 'no secret: connect the Entities tab' };
+  const out = { ran: true, artist: 0, label: 0, candidates: 0 };
+  for (const kind of ['artist', 'label']) {
+    let cursor = null;
+    for (let i = 0; i < 60; i++) {
+      const r = await fetch(`${WORKER_URL}?action=entity-review-recompute`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${sec}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, limit: 150, cursor }),
+      });
+      if (!r.ok) return { ran: true, error: `${kind}: HTTP ${r.status}` };
+      const d = await r.json();
+      out[kind] += d.updated || 0;
+      out.candidates += d.withCandidates || 0;
+      if (!d.hasMore) break;
+      cursor = d.cursor;
+    }
+  }
+  return out;
+}
+
+// ── EL SLUG DE ENTIDAD EN EL CSV (fase 4) ──────────────────────
+// Las cabeceras y el formato del valor NO se escriben aqui: salen del mismo
+// modulo que usan el script de definiciones y el backfill. Antes esto habria
+// sido un "MUST mirror" con dos literales copiados; Vite resuelve el .ts del
+// worker, asi que no hay espejo que se pueda desincronizar. Y si se
+// desincronizara, Shopify no daria ningun error: importaria el metafield a
+// ningun sitio.
+
+/** Una llamada por cada 100 valores, no una por fila. */
+async function resolveEntityRaws(kind, items, secret) {
+  const out = new Map();
+  for (let i = 0; i < items.length; i += 100) {
+    const r = await fetch(`${WORKER_URL}?action=entity-resolve`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, source: 'importer', items: items.slice(i, i + 100) }),
+    });
+    if (!r.ok) throw new Error(`${kind}: HTTP ${r.status}`);
+    const d = await r.json();
+    // Lo que no resuelve —'review' o 'ignored'— vuelve con slugs vacios y se
+    // queda como celda vacia. El producto sube igual: una importacion NO espera
+    // a la cola de revision.
+    for (const res of d.results || []) out.set(res.raw, res.slugs || []);
+  }
+  return out;
+}
+
+/**
+ * Añade a cada fila del CSV las dos columnas de metafield con el slug canonico.
+ *
+ * `opts.labelOf` existe porque no todos los importers guardan el sello en el
+ * mismo sitio: el de pre-orders lo lleva en `_label` y monta los tags al
+ * escribir el fichero.
+ *
+ * NUNCA lanza. Si no hay Bearer o el worker falla, devuelve las filas tal cual
+ * y el motivo: un importador que deja de funcionar porque falta el token de una
+ * funcion accesoria es peor que un CSV sin metafield.
+ */
+async function withEntityColumns(rows, opts = {}) {
+  const out = { rows, reason: '', resolved: 0, pending: 0 };
+  if (!rows || !rows.length) return out;
+  if (!entitiesSecret) {
+    out.reason = 'the Entities tab is not connected in this session (no Bearer)';
+    return out;
+  }
+
+  const vendorOf = opts.vendorOf || (r => r['Vendor']);
+  const labelOf  = opts.labelOf  || (r => labelFromTags(r['Tags']));
+
+  try {
+    const artists = [], labels = [];
+    const seenA = new Set(), seenL = new Set();
+    for (const r of rows) {
+      const ctx = { handle: r['Handle'] || '', title: r['Title'] || '' };
+      const v = String(vendorOf(r) || '').trim();
+      if (v && !seenA.has(v)) { seenA.add(v); artists.push({ raw: v, context: ctx }); }
+      const l = String(labelOf(r) || '').trim();
+      if (l && !seenL.has(l)) { seenL.add(l); labels.push({ raw: l, context: ctx }); }
+    }
+
+    const aMap = await resolveEntityRaws('artist', artists, entitiesSecret);
+    const lMap = await resolveEntityRaws('label', labels, entitiesSecret);
+
+    out.rows = rows.map(r => {
+      const a = aMap.get(String(vendorOf(r) || '').trim()) || [];
+      const l = lMap.get(String(labelOf(r) || '').trim()) || [];
+      if (a.length) out.resolved++; else out.pending++;
+      return { ...r, ...entityCsvColumns(a, l) };
+    });
+    console.log(`[entidades] CSV: ${out.resolved} filas con slug de artista, ${out.pending} pendientes de la cola`);
+  } catch (e) {
+    out.rows = rows;
+    out.reason = e?.message || String(e);
+  }
+  return out;
+}
+
+/**
+ * Variante para el importer que construye el CSV como array de arrays en vez de
+ * como objetos por fila. Mismo contrato: si algo falla, devuelve lo que habia.
+ */
+async function withEntityColumnsArray(cols, rows) {
+  const vi = cols.indexOf('Vendor'), ti = cols.indexOf('Tags');
+  const asObjects = rows.map(row => ({
+    Handle: row[0], Title: row[1],
+    Vendor: vi >= 0 ? row[vi] : '',
+    Tags:   ti >= 0 ? row[ti] : '',
+  }));
+  const ent = await withEntityColumns(asObjects);
+  const A = csvHeader('artist'), L = csvHeader('label');
+  if (ent.reason || !ent.rows.length || !(A in ent.rows[0])) {
+    return { cols, rows, reason: ent.reason };
+  }
+  return {
+    cols: [...cols, A, L],
+    rows: rows.map((row, i) => [...row, ent.rows[i][A] || '', ent.rows[i][L] || '']),
+    reason: '',
+  };
+}
+
+/** Lo llaman los importers al terminar. Silencioso si no hay secreto. */
+function autoRecomputeEntities(tag) {
+  if (!entitiesSecret) return;
+  recomputeEntitiesQueue()
+    .then(r => console.log(`[entidades] recompute tras ${tag}:`, r))
+    .catch(e => console.log(`[entidades] recompute tras ${tag} fallo:`, e?.message || e));
+}
+
+const WHY_EN = {
+  candidates: 'has candidate',
+  multi: 'multi-artist',
+  truncated: 'truncated',
+  parens: 'parentheses',
+  va: 'various / unknown',
+};
+
+function EntitiesPanel() {
+  const [secret, setSecret]   = useState('');
+  const [authed, setAuthed]   = useState(false);
+  const [view, setView]       = useState('bulk');
+  const [kindTab, setKindTab] = useState('artist');
+  const [rows, setRows]       = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy]       = useState(false);
+  const [error, setError]     = useState('');
+  const [msg, setMsg]         = useState('');
+  const [sel, setSel]         = useState({});
+  const [disp, setDisp]       = useState({});
+  const [parts, setParts]     = useState({});
+  const [choice, setChoice]   = useState({});
+  const [progress, setProgress] = useState(null);   // {done,total} mientras se aprueba
+
+  const rk = r => `${r.kind}:${r.norm}`;
+  const hdrs = sec => ({ 'Authorization': `Bearer ${sec || secret}`, 'Content-Type': 'application/json' });
+
+  async function loadAll(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError(''); setMsg('');
+    try {
+      const all = [];
+      for (const kind of ['artist', 'label']) {
+        let cursor = null;
+        for (let i = 0; i < 60; i++) {
+          const qs = `&kind=${kind}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+          const r = await fetch(`${WORKER_URL}?action=entity-review-list${qs}`, {
+            headers: { 'Authorization': `Bearer ${useSecret}` },
+          });
+          if (r.status === 401) { setError('Unauthorized — check the secret.'); setAuthed(false); setLoading(false); return; }
+          if (!r.ok) { setError(`List failed (HTTP ${r.status})`); setLoading(false); return; }
+          const d = await r.json();
+          for (const rec of (d.records || [])) all.push({ ...rec, kind });
+          if (!d.hasMore || !d.cursor) break;
+          cursor = d.cursor;
+        }
+      }
+      all.sort((a, b) => (b.count || 0) - (a.count || 0));
+      setRows(all);
+      setAuthed(true);
+      entitiesSecret = useSecret;   // arma el recompute automatico de los importers
+      // Precarga: display propuesto y partes propuestas, editables por fila.
+      const d0 = {}, p0 = {}, s0 = {};
+      for (const r of all) {
+        const k = `${r.kind}:${r.norm}`;
+        d0[k] = r.proposal?.parts?.[0]?.display || r.raw;
+        p0[k] = (r.proposal?.parts || []).map(x => x.display);
+        // Las bulk llegan marcadas, PERO no las de display automatico: ese
+        // nombre no sale de ninguna grafia real sino de aplicar Title Case, y
+        // eso destroza los acronimos — 'CV313' se convierte en 'Cv313'. Son
+        // ~193 de 1060, demasiadas para colarlas en el monton de un clic.
+        if (r.bucket === 'bulk' && !r.proposal?.displayAuto) s0[k] = true;
+      }
+      setDisp(d0); setParts(p0); setSel(s0);
+    } catch (e) {
+      setError(`Network error: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  // Cada vista se parte ademas por rol. Artistas y sellos son trabajos
+  // distintos —un sello no se trocea nunca, un artista si— y verlos juntos
+  // obliga a cambiar de cabeza en cada fila. Las listas sin sufijo son el
+  // total, que es lo que cuentan las pestañas; las *K son la sub-pestaña
+  // activa, que es sobre lo que actuan los botones.
+  const ofKind = list => list.filter(r => r.kind === kindTab);
+
+  const bulkAll = rows.filter(r => r.bucket === 'bulk');
+  // Dentro de Bulk hay dos cosas distintas y conviene no mezclarlas: nombres
+  // que vienen tal cual del catalogo, y nombres que nos hemos inventado
+  // aplicando Title Case porque no habia ninguna grafia decente.
+  const bulk   = bulkAll.filter(r => !r.proposal?.displayAuto);
+  const bulkAuto = bulkAll.filter(r => r.proposal?.displayAuto);
+  const split  = rows.filter(r => r.bucketWhy === 'multi');
+  const merge  = rows.filter(r => r.bucketWhy === 'candidates');
+  const otras  = rows.filter(r => r.bucket === 'decide' && !['multi', 'candidates'].includes(r.bucketWhy));
+
+  const bulkAllK = ofKind(bulkAll);
+  const bulkK    = ofKind(bulk);
+  const bulkAutoK= ofKind(bulkAuto);
+  const splitK   = ofKind(split);
+  const mergeK   = ofKind(merge);
+  const otrasK   = ofKind(otras);
+
+  const viewRows = { bulk: bulkAll, split, merge, otras }[view] || [];
+
+  const samples = r => (r.samples || [])
+    .map(x => (typeof x === 'string' ? x : (x.t || x.h)))
+    .filter(Boolean).slice(0, 3);
+
+  // 50 por peticion. Cada fila hace del orden de 7-8 operaciones de KV, asi
+  // que un lote de 518 se acercaba al limite de subrequests de una peticion
+  // del Worker y ademas dejaba la pantalla muerta durante minutos.
+  const APPROVE_CHUNK = 50;
+
+  async function approveBulk() {
+    // Solo lo seleccionado en la sub-pestaña visible: aprobar artistas no debe
+    // arrastrar sellos que quedaron marcados al otro lado.
+    const chosen = bulkAllK.filter(r => sel[rk(r)]);
+    if (!chosen.length) return;
+
+    setBusy(true); setError(''); setMsg('');
+    setProgress({ done: 0, total: chosen.length });
+
+    let ok = 0, already = 0, ko = 0;
+    const failures = [];
+
+    for (let i = 0; i < chosen.length; i += APPROVE_CHUNK) {
+      const chunk = chosen.slice(i, i + APPROVE_CHUNK);
+      try {
+        const r = await fetch(`${WORKER_URL}?action=entity-review-approve-bulk`, {
+          method: 'POST', headers: hdrs(),
+          body: JSON.stringify({ kind: kindTab, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
+        });
+        if (!r.ok) {
+          // Un lote caido no para el resto: se anota y se sigue con el
+          // siguiente. Aprobar es idempotente, asi que reintentar luego los
+          // que fallaron no duplica nada.
+          ko += chunk.length;
+          failures.push(`HTTP ${r.status} × ${chunk.length}`);
+        } else {
+          const d = await r.json();
+          ok += d.approved || 0;
+          already += d.alreadyDone || 0;
+          ko += d.failed || 0;
+          for (const res of (d.results || [])) if (!res.ok) failures.push(`${res.norm}: ${res.error}`);
+        }
+      } catch (e) {
+        ko += chunk.length;
+        failures.push(`${e.message} × ${chunk.length}`);
+      }
+      setProgress({ done: Math.min(i + APPROVE_CHUNK, chosen.length), total: chosen.length });
+    }
+
+    setProgress(null);
+    const parts = [`${ok} approved`];
+    if (already) parts.push(`${already} already done`);
+    if (ko) parts.push(`${ko} failed`);
+    setMsg(parts.join(' · ') + '.');
+    if (failures.length) setError(`Failures: ${failures.slice(0, 5).join(' · ')}${failures.length > 5 ? ` · and ${failures.length - 5} more` : ''}`);
+    await loadAll();
+    setBusy(false);
+  }
+
+  async function approveOne(r, body) {
+    setBusy(true); setError('');
+    try {
+      const res = await fetch(`${WORKER_URL}?action=entity-review-approve`, {
+        method: 'POST', headers: hdrs(),
+        body: JSON.stringify({ kind: r.kind, norm: r.norm, ...body }),
+      });
+      const d = await res.json();
+      if (!res.ok) setError(d.error || `HTTP ${res.status}`);
+      else { setRows(rows.filter(x => rk(x) !== rk(r) && !(body.mergeNorms || []).includes(x.norm))); setMsg(`✓ ${r.raw}`); }
+    } catch (e) { setError(`Error: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function rejectOne(r) {
+    setBusy(true);
+    try {
+      await fetch(`${WORKER_URL}?action=entity-review-reject`, {
+        method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: r.kind, norm: r.norm }),
+      });
+      setRows(rows.filter(x => rk(x) !== rk(r)));
+    } catch (e) { setError(`Error: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function manualRecompute() {
+    setBusy(true); setMsg('Recomputing candidates…');
+    const res = await recomputeEntitiesQueue(secret);
+    setMsg(res.error ? `Recompute failed: ${res.error}` : `Recomputed ${res.artist + res.label} rows.`);
+    await loadAll();
+    setBusy(false);
+  }
+
+  if (!authed) {
+    return (
+      <div style={{maxWidth:420}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Entities · Admin Secret</div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+          Worker BOOTSTRAP_AUTH_SECRET for <strong>staging</strong>. Held in memory only — gone on refresh.
+        </div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&loadAll()} placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>loadAll()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  const viewBtn = (k, label, n) => (
+    <button onClick={()=>setView(k)} style={{background:view===k?S.accent:S.border,color:view===k?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:view===k?700:400,letterSpacing:1.2,textTransform:'uppercase',padding:'6px 12px'}}>{label} · {n}</button>
+  );
+
+  const kindBtn = (k, label) => {
+    const n = viewRows.filter(r => r.kind === k).length;
+    return (
+      <button onClick={()=>setKindTab(k)} style={{background:'none',border:'none',borderBottom:`2px solid ${kindTab===k?S.accent:'transparent'}`,color:kindTab===k?S.text:S.muted,cursor:'pointer',fontSize:10,fontWeight:kindTab===k?700:400,letterSpacing:1,textTransform:'uppercase',padding:'5px 2px',marginRight:18}}>{label} · {n}</button>
+    );
+  };
+
+  // Una sub-pestaña puede estar vacia de forma perfectamente normal: los
+  // sellos NUNCA se trocean, asi que Split/Labels siempre sale a cero. Sin
+  // este aviso parece que algo no ha cargado.
+  const emptyNote = (list, what) => list.length === 0 && (
+    <div style={{fontSize:11,color:S.muted,padding:'20px 0',textAlign:'center'}}>
+      No {kindTab === 'artist' ? 'artists' : 'labels'} in {what}.
+      {view === 'split' && kindTab === 'label' && ' Labels are never split — "Vibes & Pepper Records" is one label.'}
+    </div>
+  );
+
+  const meta = r => (
+    <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+      {r.kind === 'artist' ? 'artist' : 'label'} · {r.count} product{r.count===1?'':'s'}
+      {samples(r).length ? ` · ${samples(r).join(' · ')}` : ''}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <div style={{fontSize:10,color:S.muted}}>{rows.length} rows in queue · staging worker</div>
+        <div style={{display:'flex',gap:6}}>
+          <Btn ch={busy?'…':'↻ Recompute candidates'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
+          <Btn ch={loading?'…':'↻ Reload'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
+        </div>
+      </div>
+      <div style={{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+        {viewBtn('bulk','Bulk',bulkAll.length)}
+        {viewBtn('split','Split',split.length)}
+        {viewBtn('merge','Merge',merge.length)}
+        {/* Other se pinta SIEMPRE, aunque este a cero. Escondiendolo al
+            vaciarse desaparecia el boton mientras su vista seguia
+            seleccionada: parecia que se habian perdido filas. */}
+        {viewBtn('otras','Other',otras.length)}
+      </div>
+      <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
+        {kindBtn('artist','Artists')}
+        {kindBtn('label','Labels')}
+      </div>
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
+      {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
+      {progress && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,marginBottom:4}}>
+            Approving {progress.done} of {progress.total}…
+          </div>
+          <div style={{height:4,background:S.border,borderRadius:2,overflow:'hidden'}}>
+            <div style={{height:'100%',width:`${Math.round(100*progress.done/(progress.total||1))}%`,background:S.accent,transition:'width .2s'}} />
+          </div>
+        </div>
+      )}
+
+      {view==='bulk' && (
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,gap:8,flexWrap:'wrap'}}>
+            <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={bulkK.length>0&&bulkK.every(r=>sel[rk(r)])}
+                onChange={e=>{const n={...sel};bulkK.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+              Select all verbatim
+            </label>
+            <Btn ch={busy?'Approving…':`Approve selected (${bulkAllK.filter(r=>sel[rk(r)]).length})`}
+              onClick={approveBulk} disabled={busy||!bulkAllK.some(r=>sel[rk(r)])} />
+          </div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            A single name, no candidates, no separators — the display comes straight from the
+            catalogue. Pre-selected.
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
+            {emptyNote(bulkK, 'Bulk')}
+            {bulkK.map(r=>{const k=rk(r);return(
+              <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+                <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                      style={{flex:1,background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                    {r.proposal?.displayAuto &&
+                      <span title={`Auto Title Case from "${r.raw}" — check acronyms`}
+                        style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:'#ffd24a',padding:'2px 5px',borderRadius:2,whiteSpace:'nowrap'}}>auto</span>}
+                  </div>
+                  {meta(r)}
+                </div>
+              </div>
+            );})}
+          </div>
+
+          {bulkAutoK.length>0 && (
+            <div style={{marginTop:22,paddingTop:18,borderTop:`1px solid ${S.border}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
+                <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
+                  Auto-proposed name · {bulkAutoK.length}
+                </div>
+                <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                  <input type="checkbox" checked={bulkAutoK.length>0&&bulkAutoK.every(r=>sel[rk(r)])}
+                    onChange={e=>{const n={...sel};bulkAutoK.forEach(r=>{n[rk(r)]=e.target.checked;});setSel(n);}} />
+                  Select all auto
+                </label>
+              </div>
+              <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+                No usable spelling existed in the catalogue, so the name below was produced by
+                Title Case — <code>deep-jungle</code> → <code>Deep Jungle</code>. Read them before
+                approving. Not pre-selected on purpose.
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:380,overflowY:'auto'}}>
+                {bulkAutoK.map(r=>{const k=rk(r);return(
+                  <div key={k} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
+                    <input type="checkbox" checked={!!sel[k]} onChange={e=>setSel({...sel,[k]:e.target.checked})} />
+                    <div style={{flex:1,minWidth:0}}>
+                      <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                        style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.border}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                      <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+                        {r.kind === 'artist' ? 'artist' : 'label'} · from <span style={{fontFamily:'monospace'}}>{r.raw}</span> · {r.count} product{r.count===1?'':'s'}
+                      </div>
+                    </div>
+                  </div>
+                );})}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {view==='split' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Several artists in one field. The split is a <strong>proposal</strong> — check it before approving.
+            A name that shouldn't be split is fixed with "keep as one".
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
+            {emptyNote(splitK, 'Split')}
+            {splitK.map(r=>{const k=rk(r);const ps=parts[k]||[];return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
+                {meta(r)}
+                <div style={{display:'flex',flexDirection:'column',gap:5,margin:'10px 0'}}>
+                  {ps.map((p,i)=>(
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:10,color:S.muted,width:14}}>{i+1}</span>
+                      <input value={p} onChange={e=>{const n=[...ps];n[i]=e.target.value;setParts({...parts,[k]:n});}}
+                        style={{flex:1,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                      {r.proposal?.parts?.[i]?.existingSlug &&
+                        <span style={{fontSize:9,color:S.accent,whiteSpace:'nowrap'}}>already exists</span>}
+                      <button onClick={()=>setParts({...parts,[k]:ps.filter((_,j)=>j!==i)})}
+                        style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:12}}>×</button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                  <Btn ch="Split" onClick={()=>approveOne(r,{action:'split',parts:ps.filter(Boolean).map(d=>({display:d}))})} disabled={busy||ps.filter(Boolean).length<2} />
+                  <Btn ch="Keep as one" variant="ghost" onClick={()=>approveOne(r,{action:'create',parts:[{display:r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignore" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {view==='merge' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Something looks similar. It may be the same thing spelled two ways, a sub-label, or
+            <strong> nothing</strong>: AXIS and Axis Of People are different labels. Nothing is merged by default.
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:560,overflowY:'auto'}}>
+            {emptyNote(mergeK, 'Merge')}
+            {mergeK.map(r=>{const k=rk(r);const ch=choice[k]||'';return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:12,fontWeight:700}}>{r.raw}</div>
+                {meta(r)}
+                <div style={{margin:'10px 0',display:'flex',flexDirection:'column',gap:4}}>
+                  {(r.candidates||[]).map(c=>{
+                    const isRow = String(c.slug).startsWith('review:');
+                    const val = `${isRow?'row':'ent'}:${c.slug}`;
+                    return (
+                      <label key={c.slug} style={{fontSize:11,color:S.text,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
+                        <input type="radio" name={`m-${k}`} checked={ch===val} onChange={()=>setChoice({...choice,[k]:val})} />
+                        <span>{c.display}</span>
+                        <span style={{fontSize:9,color:S.muted}}>{isRow?'· another queue row':'· existing entity'}</span>
+                      </label>
+                    );
+                  })}
+                  <label style={{fontSize:11,color:S.muted,display:'flex',alignItems:'center',gap:7,cursor:'pointer'}}>
+                    <input type="radio" name={`m-${k}`} checked={ch===''} onChange={()=>setChoice({...choice,[k]:''})} />
+                    None — create as its own entity
+                  </label>
+                </div>
+                <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                    style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                  <Btn ch={ch.startsWith('row:')?'Merge rows':ch.startsWith('ent:')?'Merge into entity':'Create separately'}
+                    disabled={busy}
+                    onClick={()=>{
+                      if (ch.startsWith('row:')) {
+                        const otherNorm = ch.slice('row:review:'.length);
+                        approveOne(r,{action:'merge-rows',mergeNorms:[otherNorm],display:disp[k]??r.raw});
+                      } else if (ch.startsWith('ent:')) {
+                        approveOne(r,{action:'merge',targetSlug:ch.slice('ent:'.length)});
+                      } else {
+                        approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]});
+                      }
+                    }} />
+                  <Btn ch="Sub-label of…" variant="ghost" disabled={busy||!ch.startsWith('ent:')}
+                    onClick={()=>approveOne(r,{action:'child',parentSlug:ch.slice('ent:'.length),parts:[{display:disp[k]??r.raw}]})} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {view==='otras' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12}}>Truncated and parenthesised: the proposed display is already cleaned up, but worth a look.</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8,maxHeight:520,overflowY:'auto'}}>
+            {emptyNote(otrasK, 'Other')}
+            {otrasK.map(r=>{const k=rk(r);return(
+              <div key={k} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12}}>
+                <div style={{fontSize:11,color:S.muted}}>{WHY_EN[r.bucketWhy]||r.bucketWhy} · raw: <span style={{color:S.text}}>{r.raw}</span></div>
+                {meta(r)}
+                <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
+                  <input value={disp[k]??r.raw} onChange={e=>setDisp({...disp,[k]:e.target.value})}
+                    style={{flex:1,minWidth:160,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+                  <Btn ch="Create" onClick={()=>approveOne(r,{action:'create',parts:[{display:disp[k]??r.raw}]})} disabled={busy} />
+                  <Btn ch="Ignore" variant="ghost" onClick={()=>rejectOne(r)} disabled={busy} />
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, hasMore, loadingMore }) {
   const [tab,setTab]=useState('zip');
   const [editing,setEditing]=useState(null);
@@ -10078,6 +10765,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
+          {tabBtn('entities','🏷️ Entities')}
           {tabBtn('newsletter','✉️ Newsletter')}
         </div>
         {tab==='zip'   && <ZipImporter />}
@@ -10089,6 +10777,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='rd'    && <RubadubImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
+        {tab==='entities'&& <EntitiesPanel />}
         {tab==='newsletter'&& <NewsletterPanel />}
       </div>
       <div style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:22,marginBottom:28}}>
@@ -10246,6 +10935,565 @@ function Nav({ onLogo, children }) {
   );
 }
 
+// ── PORTAL DE CLIENTE: FOLLOWS Y FICHAS DE ENTIDAD (fase 5b) ────
+// docs/entities.md. Tres pantallas nuevas y un enlace: /account con una
+// estanteria por entidad seguida, /artist/{slug} y /label/{slug} publicas, y el
+// artista y el sello de cada ficha de producto apuntando a ellas.
+//
+// El portal habla con el worker del entorno, como todo lo demas.
+const PORTAL_WORKER_URL = WORKER_URL;
+
+async function portalGet(action, params = {}) {
+  const qs = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  const r = await fetch(`${PORTAL_WORKER_URL}?action=${action}${qs ? '&' + qs : ''}`);
+  if (!r.ok) throw new Error(`${action}: HTTP ${r.status}`);
+  return r.json();
+}
+
+async function portalSend(action, method, body) {
+  const r = await fetch(`${PORTAL_WORKER_URL}?action=${action}`, {
+    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d?.error || `${action}: HTTP ${r.status}`);
+  return d;
+}
+
+const fetchAccountHome  = session        => portalGet('account-home', { session });
+const fetchEntityPublic = (slug, limit)  => portalGet('entity-public', { slug, limit });
+const lookupEntity      = (kind, raw)    => portalGet('entity-lookup', { kind, raw });
+const followAdd         = (session, slug) => portalSend('follows', 'POST', { session, slug });
+const followRemove      = (session, slug) => portalSend('follows', 'DELETE', { session, slug });
+
+// La ficha de producto pregunta por el mismo artista muchas veces en una sesion.
+const lookupCache = new Map();
+
+// Seguir desde la ficha sin sesion manda a entrar. El slug se guarda aqui para
+// aplicarlo al volver: el cliente pulso Follow, y volver con el boton todavia
+// en Follow es no haberle hecho caso.
+const PENDING_FOLLOW_KEY = 'ho_pending_follow';
+function savePendingFollow(slug) {
+  try { localStorage.setItem(PENDING_FOLLOW_KEY, slug); } catch { /* modo privado */ }
+}
+function takePendingFollow() {
+  try {
+    const v = localStorage.getItem(PENDING_FOLLOW_KEY);
+    if (v) localStorage.removeItem(PENDING_FOLLOW_KEY);
+    return v || '';
+  } catch { return ''; }
+}
+async function lookupEntityCached(kind, raw) {
+  const key = `${kind}:${raw}`;
+  if (lookupCache.has(key)) return lookupCache.get(key);
+  const p = lookupEntity(kind, raw).then(d => d.entities || []).catch(() => []);
+  lookupCache.set(key, p);
+  return p;
+}
+
+const entityPath = e => `/${(e.roles || []).includes('label') && !(e.roles || []).includes('artist') ? 'label' : 'artist'}/${e.slug}/`;
+const roleLabel  = e => ((e.roles || []).includes('artist') && (e.roles || []).includes('label'))
+  ? 'Artist & Label' : ((e.roles || []).includes('label') ? 'Label' : 'Artist');
+
+/** Enlace interno que no recarga la pagina. */
+function ILink({ to, onNavigate, children, style }) {
+  return (
+    <a href={to} style={{ color:'inherit', textDecoration:'none', ...style }}
+       onClick={e => { if (e.metaKey||e.ctrlKey||e.shiftKey||e.button) return; e.preventDefault(); onNavigate(to); }}>
+      {children}
+    </a>
+  );
+}
+
+/** Boton de seguir. Sin sesion manda a entrar y vuelve a esta misma pagina. */
+/**
+ * `tone`: 'primary' solo en la ficha de entidad, donde seguir ES la accion de la
+ * pagina. En la ficha de producto y en el portal va en secundario: el unico
+ * bloque amarillo de una ficha tiene que ser Add to Cart, o compiten dos
+ * llamadas a la accion y gana la que no vende.
+ */
+function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md', tone = 'secondary' }) {
+  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState(following);
+  useEffect(() => { setState(following); }, [following]);
+
+  const click = async () => {
+    if (!auth?.session) { savePendingFollow(slug); onSignIn(); return; }
+    setBusy(true);
+    try {
+      const next = !state;
+      // Optimista: el boton responde al dedo, no a la red. Si falla, vuelve.
+      setState(next);
+      if (next) await followAdd(auth.session, slug); else await followRemove(auth.session, slug);
+      onChange?.(slug, next);
+      // Primer follow: preguntar por los avisos. El gancho decide si toca.
+      if (next) askAlertsHook?.(slug);
+    } catch {
+      setState(s => !s);
+    } finally { setBusy(false); }
+  };
+
+  const pad = size === 'sm' ? '4px 9px' : '9px 16px';
+  const solido = tone === 'primary' && !state;
+  return (
+    <button onClick={click} disabled={busy} style={{
+      background: solido ? S.accent : 'transparent',
+      color: solido ? S.bg : (state ? S.accent : S.text),
+      border: `1px solid ${solido ? S.accent : (state ? S.accent : S.border)}`,
+      borderRadius:2, cursor: busy ? 'wait' : 'pointer',
+      fontFamily:'inherit', fontWeight:700, fontSize: size === 'sm' ? 9 : 10, letterSpacing:1.5,
+      textTransform:'uppercase', padding:pad, whiteSpace:'nowrap', opacity: busy ? 0.6 : 1,
+      verticalAlign:'middle', lineHeight:1.6,
+    }}>{state ? '✓ Following' : '+ Follow'}</button>
+  );
+}
+
+/** Marca de "ya lo tienes" sobre la portada. */
+function OwnedBadge() {
+  return (
+    <div style={{ position:'absolute', left:6, top:6, background:S.accent, color:S.bg, fontSize:8,
+      fontWeight:700, letterSpacing:1.2, textTransform:'uppercase', padding:'3px 6px', borderRadius:2 }}>
+      You have it
+    </div>
+  );
+}
+
+/** Una tarjeta de disco. El enlace es de verdad: navegar recarga la ficha. */
+function ReleaseCard({ p, width = 150 }) {
+  return (
+    <a href={`/products/${p.slug}/`} style={{ display:'block', width, flex:`0 0 ${width}px`, scrollSnapAlign:'start', color:'inherit', textDecoration:'none' }}>
+      <div style={{ position:'relative', width, height:width, background:S.surf, borderRadius:2, overflow:'hidden' }}>
+        {p.imageUrl
+          ? <img src={`${p.imageUrl.split('?')[0]}?width=${width * 2}`} alt="" loading="lazy" style={{ width:'100%', height:'100%', objectFit:'cover', opacity: p.owned ? 0.55 : 1 }} />
+          : null}
+        {p.owned && <OwnedBadge />}
+      </div>
+      <div style={{ fontSize:12, fontWeight:600, marginTop:8, lineHeight:1.35, minHeight:'2.7em', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{p.title}</div>
+      <div style={{ fontSize:11, color:S.muted, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{p.vendor}</div>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6, marginTop:6 }}>
+        <span style={{ fontSize:12, fontWeight:600 }}>{p.price ? `€${Number(p.price).toFixed(2)}` : ''}</span>
+        {p.forthcoming
+          ? <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.bg, background:S.accent, fontWeight:700, padding:'2px 5px', borderRadius:2 }}>Pre-order</span>
+          : p.stock > 0
+            ? <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.muted }}>{p.stock} left</span>
+            : <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.muted }}>Sold out</span>}
+      </div>
+    </a>
+  );
+}
+
+/**
+ * Una estanteria por entidad. Se desliza con el pulgar: `overflow-x:auto` con
+ * scroll-snap y sin barra visible en movil, que es donde se usa esto.
+ */
+function EntityShelf({ shelf, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  const w = isMobile ? 136 : 156;
+  const to = entityPath(shelf);
+  return (
+    <section style={{ marginTop:34 }}>
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, marginBottom:12 }}>
+        <div style={{ minWidth:0 }}>
+          <ILink to={to} onNavigate={onNavigate} style={{ fontSize:isMobile?16:19, fontWeight:800, letterSpacing:'-0.3px' }}>{shelf.display}</ILink>
+          <span style={{ fontSize:9, letterSpacing:2, textTransform:'uppercase', color:S.muted, marginLeft:9 }}>
+            {roleLabel(shelf)}{shelf.owned > 0 ? ` · you have ${shelf.owned} of ${shelf.total}` : ` · ${shelf.total} records`}
+          </span>
+        </div>
+        <ILink to={to} onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.accent, border:`1px solid ${S.border}`, borderRadius:2, padding:'5px 10px', whiteSpace:'nowrap' }}>
+          All {shelf.total} →
+        </ILink>
+      </div>
+      <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:12, scrollSnapType:'x mandatory', WebkitOverflowScrolling:'touch' }}>
+        {shelf.items.map(p => <ReleaseCard key={p.handle} p={p} width={w} />)}
+      </div>
+    </section>
+  );
+}
+
+/** Estado vacio: lo que ya ha mirado o comprado, a un clic de seguirlo. */
+function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
+  const wl = suggestions.filter(s => s.from === 'wishlist');
+  const or = suggestions.filter(s => s.from === 'orders');
+
+  // Cada sugerencia lleva la portada del disco que la justifica: sin ella la
+  // lista es una tabla de nombres y nadie recuerda por que sale Frank Music.
+  const tarjeta = s => (
+    <div key={s.slug} style={{ display:'flex', alignItems:'center', gap:11, border:`1px solid ${S.border}`, background:S.bg, borderRadius:2, padding:8 }}>
+      <div style={{ width:44, height:44, flex:'0 0 44px', background:S.surf, borderRadius:2, overflow:'hidden' }}>
+        {s.coverUrl ? <img src={`${s.coverUrl.split('?')[0]}?width=88`} alt={s.coverTitle || ''} loading="lazy" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : null}
+      </div>
+      <div style={{ minWidth:0, flex:1, textAlign:'left' }}>
+        <div style={{ fontSize:13, fontWeight:600, lineHeight:1.3, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{s.display}</div>
+        <div style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:S.muted, marginTop:2 }}>{roleLabel(s)} · {s.total}</div>
+      </div>
+      <FollowButton slug={s.slug} following={false} auth={auth} onSignIn={onSignIn} onChange={onChange} size="sm" />
+    </div>
+  );
+
+  const grupo = (titulo, lista) => lista.length ? (
+    <>
+      <div style={{ fontSize:9, letterSpacing:2, textTransform:'uppercase', color:S.muted, margin:'24px 0 12px' }}>{titulo} · {lista.length}</div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(268px,1fr))', gap:8 }}>{lista.map(tarjeta)}</div>
+    </>
+  ) : null;
+
+  return (
+    <div style={{ border:`1px solid ${S.border}`, background:S.surf, borderRadius:3, padding:'34px 22px', marginTop:20 }}>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ fontSize:20, fontWeight:800, marginBottom:10, color:S.text }}>Your shelves are empty</div>
+        <p style={{ color:S.muted, fontSize:13, lineHeight:1.7, margin:'0 auto', maxWidth:460 }}>
+          Your wishlist saves records. Following saves who makes them — every new release lands here.
+        </p>
+      </div>
+      {grupo('From your wishlist', wl)}
+      {grupo('From what you have bought', or)}
+      {!wl.length && !or.length && (
+        <p style={{ color:S.muted, fontSize:12, marginTop:22, textAlign:'center' }}>Open a release and follow its artist or label to start.</p>
+      )}
+    </div>
+  );
+}
+
+// ── AVISOS DE NOVEDADES (fase 6) ───────────────────────────────
+// Se pregunta UNA vez, en el primer follow. Una pregunta que se repite deja de
+// leerse y se contesta que no por reflejo.
+//
+// El gancho es de modulo porque el boton de seguir vive en cinco sitios —ficha
+// de producto, ficha de entidad, sugerencias, portal— y todos tienen que poder
+// disparar el mismo prompt sin pasarse props por media aplicacion.
+let askAlertsHook = null;
+function registerAlertsHook(fn) { askAlertsHook = fn; }
+
+const fetchAlertsState = session => portalGet('follow-alerts', { session });
+const setAlertsPref = (session, enabled) => portalSend('follow-alerts', 'POST', { session, enabled });
+
+/** El doble opt-in que ya existe. Seguir a alguien NO suscribe a nada. */
+async function joinNewsletter(email) {
+  await fetch(`${WORKER_URL}?action=newsletter-subscribe`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, source: 'follow-alerts' }),
+  });
+}
+
+/** El prompt de un toque. Sale una sola vez por cliente. */
+function AlertsPrompt({ display, email, session, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [newsletter, setNewsletter] = useState(false);   // desmarcada a proposito
+
+  const responder = async (enabled) => {
+    setBusy(true);
+    try {
+      await setAlertsPref(session, enabled);
+      // El newsletter es una decision aparte y va por su propio doble opt-in:
+      // nunca se suscribe a nadie por seguir a un artista.
+      if (enabled && newsletter && email) await joinNewsletter(email);
+    } catch { /* si falla, se le vuelve a preguntar la proxima vez */ }
+    finally { setBusy(false); onDone(enabled); }
+  };
+
+  return (
+    <div onClick={()=>onDone(null)} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:6, padding:'26px 24px', maxWidth:360, width:'100%', textAlign:'left' }}>
+        <div style={{ fontSize:10, color:S.accent, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:10 }}>
+          Following {display}
+        </div>
+        <div style={{ fontSize:15, color:S.text, lineHeight:1.5, marginBottom:18 }}>
+          We&apos;ll tell you when they release something new.
+        </div>
+
+        <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+          <Btn ch={busy ? '…' : 'Yes, email me'} onClick={()=>responder(true)} disabled={busy} />
+          <Btn ch="Not now" variant="ghost" onClick={()=>responder(false)} disabled={busy} />
+        </div>
+
+        <label style={{ display:'flex', alignItems:'center', gap:9, cursor:'pointer', fontSize:12, color:S.muted }}>
+          <input type="checkbox" checked={newsletter} onChange={e=>setNewsletter(e.target.checked)}
+            style={{ accentColor:S.accent, width:14, height:14 }} />
+          Also join the newsletter
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/** El interruptor del portal, para quien dijo "not now" y luego cambia de idea. */
+function AlertsToggle({ state, session, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const on = state?.emailAlerts === true;
+
+  const cambiar = async () => {
+    setBusy(true);
+    try { await setAlertsPref(session, !on); onChange?.(!on); }
+    catch { /* se queda como estaba */ }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap',
+      border:`1px solid ${S.border}`, background:S.surf, borderRadius:2, padding:'12px 14px', marginTop:14 }}>
+      <div style={{ minWidth:0 }}>
+        <div style={{ fontSize:13, color:S.text, fontWeight:600 }}>Email alerts</div>
+        <div style={{ fontSize:12, color:S.muted, marginTop:3 }}>We&apos;ll tell you when they release something new.</div>
+      </div>
+      <button onClick={cambiar} disabled={busy} style={{
+        background:'transparent', color: on ? S.accent : S.text,
+        border:`1px solid ${on ? S.accent : S.border}`, borderRadius:2, cursor: busy ? 'wait' : 'pointer',
+        fontFamily:'inherit', fontWeight:700, fontSize:9, letterSpacing:1.5, textTransform:'uppercase',
+        padding:'7px 12px', whiteSpace:'nowrap', opacity: busy ? 0.6 : 1 }}>
+        {on ? '✓ On' : 'Turn on'}
+      </button>
+    </div>
+  );
+}
+
+/** /account — la home del portal. Solo con sesion. */
+function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt, onLogout, alertsState, onAlertsChange }) {
+  const isMobile = useIsMobile(720);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  // Los pedidos se ven aqui dentro, no en un cajon lateral. El cajon tiene
+  // sentido mientras navegas discos —no te saca de donde estabas—, pero en el
+  // propio portal ese razonamiento se da la vuelta: aqui ya estas en tu cuenta.
+  // shelves | artists | labels | orders. Separar artistas de sellos es gratis
+  // —es la misma lista filtrada por rol— y es como la gente piensa en lo que
+  // sigue: "mis artistas" y "mis sellos", no "mis entidades".
+  const [view, setView] = useState('shelves');
+  const [orders, setOrders] = useState(null);
+  const [ordersErr, setOrdersErr] = useState('');
+  // `loading` se deduce, no se guarda: un setState al entrar en el efecto
+  // dispara un render de mas por cada carga.
+  const loading = !data && !err;
+
+  useEffect(() => {
+    if (!auth?.session) return;
+    let vivo = true;
+    fetchAccountHome(auth.session)
+      .then(d => { if (vivo) setData(d); })
+      .catch(() => { if (vivo) setErr('Could not load your shelves.'); });
+    return () => { vivo = false; };
+    // `wishSyncedAt` no es decorativo: al entrar, la wishlist de invitado se
+    // funde con la de la cuenta DESPUES de que esta pantalla haya pedido sus
+    // datos, y sin volver a pedirlos las sugerencias salen de una wishlist
+    // vieja — que es justo lo que paso en la primera prueba: 7 discos
+    // guardados y solo 2 sugerencias.
+  }, [auth?.session, wishSyncedAt]);
+
+  // Al seguir o dejar de seguir se recarga: las estanterias cambian de orden y
+  // de contenido, y reconstruirlas a mano aqui seria repetir al worker.
+  const recargar = () => {
+    if (!auth?.session) return;
+    fetchAccountHome(auth.session).then(setData).catch(() => {});
+  };
+
+  const verPedidos = () => {
+    setView('orders');
+    if (orders === null && auth?.session) {
+      customerOrders(auth.session)
+        .then(setOrders)
+        .catch(() => setOrdersErr('Could not load your orders.'));
+    }
+  };
+
+  if (!auth?.session) {
+    return (
+      <div style={{ maxWidth:520, margin:'0 auto', padding:'64px 20px', textAlign:'center' }}>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:10 }}>Your records, in one place</div>
+        <p style={{ color:S.muted, fontSize:13, lineHeight:1.7, marginBottom:26 }}>
+          Sign in to follow artists and labels and see every new release of theirs the day it lands.
+        </p>
+        <Btn ch="Sign In" onClick={onSignIn} />
+      </div>
+    );
+  }
+
+  const todas = data?.shelves || [];
+  const shelves = view === 'artists' ? todas.filter(s => (s.roles||[]).includes('artist'))
+    : view === 'labels' ? todas.filter(s => (s.roles||[]).includes('label'))
+    : todas;
+  return (
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
+      {/* color explicito: index.css pinta los h1 con --text-h, que sobre el
+          fondo negro de la tienda se lee como azul oscuro sobre negro. */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:12, minWidth:0 }}>
+          {/* El logo tambien vuelve, pero sin un camino escrito nadie lo prueba. */}
+          <ILink to="/" onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.muted, border:`1px solid ${S.border}`, borderRadius:2, padding:'6px 11px', whiteSpace:'nowrap' }}>← Shop</ILink>
+          <h1 style={{ fontSize:isMobile?21:26, fontWeight:800, letterSpacing:'-0.4px', margin:0, color:S.text }}>
+            {view === 'orders' ? 'Your orders' : view === 'artists' ? 'Your artists' : view === 'labels' ? 'Your labels' : 'Your shelves'}
+          </h1>
+        </div>
+        {/* Lo demas de la cuenta vive en el cajon: aqui solo se enlaza, no se
+            repite. Van en la fila del titulo, con el mismo peso que el resto de
+            controles secundarios de la tienda. */}
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+          <Btn ch="Wishlist" variant="ghost" onClick={onOpenWishlist} />
+          <Btn ch="Sign Out" variant="ghost" onClick={onLogout} />
+        </div>
+      </div>
+      {/* Las secciones del portal. La wishlist sigue en su cajon a proposito:
+          ahi se añade al carrito y se quita, y duplicarla aqui seria tener dos
+          sitios donde hacer lo mismo. */}
+      <div style={{ display:'flex', gap:6, flexWrap:'wrap', margin:'16px 0 2px' }}>
+        {[['shelves','Shelves',todas.length],
+          ['artists','Artists',todas.filter(x=>(x.roles||[]).includes('artist')).length],
+          ['labels','Labels',todas.filter(x=>(x.roles||[]).includes('label')).length],
+          ['orders','Orders',null]].map(([k,label,n])=>(
+          <button key={k} onClick={()=>{ if (k==='orders') verPedidos(); else setView(k); }}
+            style={{ background:view===k?S.accent:'transparent', color:view===k?S.bg:S.muted,
+              border:`1px solid ${view===k?S.accent:S.border}`, borderRadius:2, cursor:'pointer',
+              fontFamily:'inherit', fontWeight:700, fontSize:9, letterSpacing:1.5, textTransform:'uppercase',
+              padding:'7px 12px', whiteSpace:'nowrap' }}>
+            {label}{n != null && n > 0 ? ` · ${n}` : ''}
+          </button>
+        ))}
+      </div>
+
+      <p style={{ color:S.muted, fontSize:13, margin:'8px 0 4px' }}>
+        {view === 'orders'
+          ? 'Everything you have bought, most recent first'
+          : loading && !data ? 'Loading…'
+          : view === 'artists' ? `${shelves.length} ${shelves.length === 1 ? 'artist' : 'artists'} you follow`
+          : view === 'labels' ? `${shelves.length} ${shelves.length === 1 ? 'label' : 'labels'} you follow`
+          : `${todas.length} ${todas.length === 1 ? 'artist or label' : 'artists and labels'} you follow`}
+      </p>
+
+      {view === 'orders' && (
+        <div style={{ marginTop:22 }}>
+          {/* El mismo OrdersView del cajon: una sola lista de pedidos en toda la
+              tienda, pintada donde toque. */}
+          <OrdersView orders={orders} loading={orders === null && !ordersErr} err={ordersErr}
+            onRefresh={()=>{ setOrders(null); setOrdersErr(''); verPedidos(); }} />
+        </div>
+      )}
+
+      {view !== 'orders' && err && <div style={{ color:S.danger, fontSize:12, marginTop:18 }}>{err}</div>}
+
+      {view !== 'orders' && shelves.map(s => <EntityShelf key={s.slug} shelf={s} onNavigate={onNavigate} />)}
+      {view !== 'orders' && view !== 'shelves' && data && !shelves.length && (
+        <div style={{ color:S.muted, fontSize:13, marginTop:26 }}>
+          You don&apos;t follow any {view === 'artists' ? 'artists' : 'labels'} yet.
+        </div>
+      )}
+
+      {view === 'shelves' && data && !shelves.length && (
+        <PortalEmpty suggestions={data.suggestions || []} auth={auth} onSignIn={onSignIn} onChange={recargar} />
+      )}
+
+      {view === 'shelves' && data && !!(data.following || []).length && (
+        <section style={{ marginTop:44 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:12 }}>Following · {data.following.length}</div>
+          {/* Aqui es donde alguien viene a buscarlo despues de haber dicho "not now". */}
+          <AlertsToggle state={alertsState || data.alerts} session={auth.session} onChange={onAlertsChange} />
+          <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+            {data.following.map(f => (
+              <div key={f.slug} style={{ display:'flex', alignItems:'center', gap:10, border:`1px solid ${S.border}`, background:S.surf, borderRadius:2, padding:'9px 13px' }}>
+                <ILink to={entityPath(f)} onNavigate={onNavigate} style={{ fontSize:13, fontWeight:600 }}>{f.display}</ILink>
+                <span style={{ fontSize:10, color:S.muted, letterSpacing:1, textTransform:'uppercase' }}>{roleLabel(f)} · {f.total}</span>
+                <FollowButton slug={f.slug} following auth={auth} onSignIn={onSignIn} onChange={recargar} size="sm" />
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** /artist/{slug} y /label/{slug} — publicas, sin sesion. */
+function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+
+  // El reseteo al cambiar de entidad lo hace el `key` del sitio de uso, no un
+  // setState dentro del efecto.
+  useEffect(() => {
+    let vivo = true;
+    fetchEntityPublic(slug, 100)
+      .then(d => { if (vivo) setData(d); })
+      .catch(() => { if (vivo) setErr('not-found'); });
+    return () => { vivo = false; };
+  }, [slug]);
+
+  if (err) {
+    return (
+      <div style={{ maxWidth:520, margin:'0 auto', padding:'72px 20px', textAlign:'center' }}>
+        <div style={{ fontSize:20, fontWeight:800, marginBottom:10 }}>Not found</div>
+        <p style={{ color:S.muted, fontSize:13 }}>We don&apos;t have an artist or label under that name.</p>
+      </div>
+    );
+  }
+  if (!data) return <div style={{ maxWidth:1100, margin:'0 auto', padding:'40px 20px', color:S.muted, fontSize:12 }}>Loading…</div>;
+
+  return (
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
+        <div style={{ minWidth:0 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+            <ILink to="/" onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.muted, border:`1px solid ${S.border}`, borderRadius:2, padding:'5px 10px', whiteSpace:'nowrap' }}>← Shop</ILink>
+            <span style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted }}>{roleLabel(data)}</span>
+          </div>
+          <h1 style={{ fontSize:isMobile?24:32, fontWeight:800, letterSpacing:'-0.6px', margin:0, color:S.text }}>{data.display}</h1>
+          <div style={{ fontSize:12, color:S.muted, marginTop:8 }}>
+            {data.total} {data.total === 1 ? 'record' : 'records'} in the shop
+            {data.parent ? ' · sub-label' : ''}
+          </div>
+        </div>
+        <FollowButton slug={data.slug} following={following} auth={auth} onSignIn={onSignIn} onChange={onFollowChange} tone="primary" />
+      </div>
+
+      {!!(data.aliases || []).length && (
+        <div style={{ fontSize:10, color:S.muted, marginTop:14, letterSpacing:0.4, textAlign:'left' }}>
+          Also written as: {data.aliases.join(' · ')}
+        </div>
+      )}
+
+      <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?136:156}px,1fr))`, gap:isMobile?14:18, marginTop:28 }}>
+        {(data.products || []).map(p => <ReleaseCard key={p.handle} p={p} width={isMobile?136:156} />)}
+      </div>
+
+      {!data.products?.length && (
+        <div style={{ color:S.muted, fontSize:13, marginTop:28 }}>Nothing in stock right now.</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * El artista y el sello de una ficha de producto, como enlaces a su entidad.
+ * Resuelve por el metafield que escribio la fase 4 y, si el producto aun no lo
+ * tiene, cae al indice de alias. Si no resuelve, se pinta el texto de siempre:
+ * un enlace roto es peor que un nombre sin enlazar.
+ */
+function EntityLink({ kind, raw, onNavigate, style, auth, onSignIn, followSlugs, onFollowChange }) {
+  const [ents, setEnts] = useState(null);
+  useEffect(() => {
+    if (!raw) return;
+    let vivo = true;
+    lookupEntityCached(kind, raw).then(e => { if (vivo) setEnts(e); });
+    return () => { vivo = false; };
+  }, [kind, raw]);
+
+  if (!ents?.length) return <span style={style}>{raw}</span>;
+  // Cada nombre con SU control al lado. Con un split de dos artistas, los
+  // botones agrupados al final no dicen cual es cual.
+  // El nombre puede romper linea sin arrastrar al boton: el par va en un
+  // inline-flex propio que no se parte por dentro.
+  return (
+    <span style={{ display:'inline', ...style }}>
+      {ents.map((e, i) => (
+        <span key={e.slug} style={{ display:'inline-flex', alignItems:'center', gap:7, marginRight:8, maxWidth:'100%' }}>
+          {i > 0 ? <span style={{ marginRight:4 }}>&amp;</span> : null}
+          <ILink to={entityPath(e)} onNavigate={onNavigate} style={{ borderBottom:`1px solid ${S.border}`, overflowWrap:'anywhere' }}>{e.display}</ILink>
+          <FollowButton slug={e.slug} following={(followSlugs || []).includes(e.slug)}
+            auth={auth} onSignIn={onSignIn} onChange={onFollowChange} size="sm" />
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
   const [records,setRecords]             = useState([]);
@@ -10275,6 +11523,11 @@ export default function App() {
   // Resets to 'list' every time the user enters the Forthcoming section.
   const [forthcomingView,setForthcomingView] = useState('list');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
+  // Que entidades sigue, para que el boton de la ficha sepa como pintarse.
+  const [followSlugs,setFollowSlugs]     = useState([]);
+  const [wishSyncedAt,setWishSyncedAt]   = useState(0);      // cuando acabo el merge invitado→cuenta
+  const [alertsState,setAlertsState]     = useState(null);   // {emailAlerts, asked, email}
+  const [alertsPrompt,setAlertsPrompt]   = useState(null);   // {slug, display} mientras se pregunta
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
   // On first mount, prefer a session arriving in the URL fragment (just
@@ -10339,6 +11592,9 @@ export default function App() {
       if (cancelled) return;
       if (Array.isArray(serverItems)) {
         setWishItems(serverItems);
+        // El portal escucha esto: sus sugerencias salen de la wishlist y hasta
+        // aqui la del servidor podia estar sin fundir con la del invitado.
+        setWishSyncedAt(Date.now());
       }
     })();
     return () => { cancelled = true; };
@@ -10442,6 +11698,23 @@ export default function App() {
     }
   };
 
+  // La lista de seguidos se carga una vez por sesion: la ficha de entidad la
+  // necesita para saber si el boton dice Follow o Following.
+  useEffect(()=>{
+    if (!auth?.session) { setFollowSlugs([]); return; }
+    let vivo = true;
+    // Si se pulso Follow sin sesion, se aplica ANTES de leer la lista: al volver
+    // del login el boton tiene que estar ya en Following.
+    // Estado de los avisos: dice si al cliente ya se le pregunto.
+    fetchAlertsState(auth.session).then(st => { if (vivo) setAlertsState(st); }).catch(()=>{});
+    const pendiente = takePendingFollow();
+    (pendiente ? followAdd(auth.session, pendiente).catch(()=>{}) : Promise.resolve())
+      .then(()=> portalGet('follows', { session: auth.session }))
+      .then(d => { if (vivo) setFollowSlugs((d.entities||[]).map(e=>e.slug)); })
+      .catch(()=>{ /* sin follows se pinta Follow, que es lo correcto */ });
+    return ()=>{ vivo = false; };
+  },[auth?.session]);
+
   // Keep `path` in sync with browser back/forward
   useEffect(()=>{
     const onPop = () => setPath(window.location.pathname);
@@ -10504,6 +11777,26 @@ export default function App() {
       })
       .catch(()=>{ /* network error — leave on home rather than crash */ });
   },[path, records]);
+
+  // El boton de seguir avisa por aqui tras un alta. Se pregunta UNA vez: si ya
+  // hay respuesta guardada —si o no— no se vuelve a molestar.
+  useEffect(()=>{
+    registerAlertsHook((slug)=>{
+      if (!auth?.session) return;
+      if (!alertsState || alertsState.asked) return;
+      fetchEntityPublic(slug, 1)
+        .then(d => setAlertsPrompt({ slug, display: d?.display || slug }))
+        .catch(() => setAlertsPrompt({ slug, display: slug }));
+    });
+    return ()=>registerAlertsHook(null);
+  },[auth?.session, alertsState]);
+
+  // Rutas del portal (fase 5b). /account pide sesion; las fichas de entidad no.
+  const portalRoute = useMemo(()=>{
+    if (/^\/account\/?$/.test(path)) return { kind:'account' };
+    const m = path.match(/^\/(artist|label)\/([^/]+)\/?$/);
+    return m ? { kind:m[1], slug:m[2] } : null;
+  },[path]);
 
   // Navigation helpers — push URL + update state in one call
   const navigate = (newPath) => {
@@ -10710,10 +12003,10 @@ export default function App() {
   return (
     <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>{setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
+      <Nav onLogo={()=>{navigate('/');setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
-          <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+          <button onClick={()=>{ if (auth) navigate('/account'); else setAccountOpen(true); }} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </button>
           <button onClick={()=>setWishOpen(true)} title="Wishlist" aria-label="Wishlist" style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,gap:5,color:wishItems.length>0?S.accent:S.muted}}>
@@ -10732,6 +12025,30 @@ export default function App() {
         </div>
       </Nav>
 
+      {portalRoute ? (
+        portalRoute.kind === 'account'
+          ? <AccountPage
+              key={auth?.session || 'anon'}
+              auth={auth}
+              onSignIn={handleSignIn}
+              onOpenWishlist={()=>setWishOpen(true)}
+              onLogout={handleLogout}
+              onNavigate={navigate}
+              alertsState={alertsState}
+              onAlertsChange={(on)=>setAlertsState(st=>({ ...(st||{}), asked:true, emailAlerts:on }))}
+              wishSyncedAt={wishSyncedAt}
+            />
+          : <EntityPage
+              key={portalRoute.slug}
+              slug={portalRoute.slug}
+              auth={auth}
+              onSignIn={handleSignIn}
+              onNavigate={navigate}
+              following={followSlugs.includes(portalRoute.slug)}
+              onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
+            />
+      ) : (
+      <>
       <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto',textAlign:'left'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
         {filters.forthcoming
@@ -10778,6 +12095,9 @@ export default function App() {
         )}
       </div>
 
+      </>
+      )}
+
       <NewsletterSignup variant="footer" source="footer" />
 
       <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
@@ -10791,7 +12111,9 @@ export default function App() {
 
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
-      <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
+      <Modal onNavigate={navigate} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
+        onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
+        r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
       <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
@@ -10805,6 +12127,18 @@ export default function App() {
             <button onClick={()=>setAudioGateOpen(false)} style={{background:'transparent',border:'none',color:S.muted,cursor:'pointer',fontSize:11,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit'}}>Not now</button>
           </div>
         </div>
+      )}
+      {alertsPrompt && auth?.session && (
+        <AlertsPrompt
+          display={alertsPrompt.display}
+          email={profile?.email || alertsState?.email || ''}
+          session={auth.session}
+          onDone={(respuesta)=>{
+            setAlertsPrompt(null);
+            // Cerrar sin responder (clic fuera) NO cuenta: se vuelve a preguntar.
+            if (respuesta !== null) setAlertsState(st => ({ ...(st||{}), asked:true, emailAlerts: respuesta === true }));
+          }}
+        />
       )}
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>

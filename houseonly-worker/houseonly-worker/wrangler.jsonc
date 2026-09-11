@@ -32,13 +32,25 @@
     {
       "binding": "EMAILS",
       "id": "e4966f4a96e84c578bfd96b1d12bdf63"
+    },
+    // ENTITIES: artistas y sellos canonicos (docs/entities.md). Separado de
+    // WISHLIST a proposito: aqui se hace list({prefix}) a menudo, que recorre
+    // el namespace entero, y WISHLIST ya mezcla wl:, sess:, authstate: y mas.
+    // Staging tiene el suyo: su cola es un banco de pruebas y no debe ensuciar
+    // las entidades reales.
+    {
+      "binding": "ENTITIES",
+      "id": "e1148360f4af4c72ad608e60c03e9813"
     }
   ],
   // Cron triggers. Production cron activated May 19 2026 when Fase 3 was migrated
   // to prod. Polls Discogs marketplace every 15 min to detect sales (Fase 3E).
   // Staging cron continues to run independently (see env.staging.triggers below).
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    // */15 — Discogs + graduacion, lo de siempre.
+    // 0 6  — avisos de novedades (fase 6). scheduled() bifurca por event.cron;
+    //        la expresion tiene que coincidir con DAILY_CRON en src/index.ts.
+    "crons": ["*/15 * * * *", "0 6 * * *"]
   },
   "env": {
     "staging": {
@@ -64,12 +76,30 @@
         {
           "binding": "EMAILS",
           "id": "e4966f4a96e84c578bfd96b1d12bdf63"
+        },
+        {
+          "binding": "ENTITIES",
+          "id": "bf137c15dc6d4c4f8f21a9987108f2f2"
         }
       ],
-      // Fase 3E cron: poll Discogs every 15 min. Worker reads meta:sync_3e_mode
-      // from KV to decide between dry (default, log only) and live (adjust stock).
+      // NO cron on staging (2026-09-02). It polled Discogs every 15 min in dry
+      // mode — creating nothing — while spending requests from the SAME 60/min
+      // Discogs budget prod needs, at the same instant prod polls. With an
+      // external consumer already saturating that budget, staging was pure
+      // competition for it.
+      //
+      // MUST be an explicit empty list, not a deleted block: `triggers` is an
+      // inheritable key, so omitting it makes staging inherit the top-level
+      // */15 rather than have no cron.
+      //
+      // Nothing depended on it. The staging worker itself stays — six scripts
+      // POST to its fetch endpoints (webhook registration/tests, backfills) —
+      // and graduation can still be driven by hand via ?action=graduation-run.
+      // Staging corre SOLO la tanda de avisos. El poll de Discogs sigue fuera
+      // por lo que explica el comentario de arriba: competia por el mismo cupo
+      // de 60/min que necesita produccion, y en dry no creaba nada.
       "triggers": {
-        "crons": ["*/15 * * * *"]
+        "crons": ["0 6 * * *"]
       }
     }
   }

@@ -1,0 +1,225 @@
+/**
+ * Metafields de entidad en el producto de Shopify — fase 4 de docs/entities.md.
+ *
+ * El slug canonico tiene que llegar al producto: sin eso, cualquier pantalla que
+ * pinte o filtre por entidad vuelve a resolver texto libre en cada carga.
+ *
+ * Este modulo es la UNICA definicion de como se llaman esos metafields y de como
+ * se guarda su valor. Lo importan tres sitios que tienen que coincidir o el dato
+ * se parte en dos: el script que crea las definiciones, el webhook de
+ * products/create y el backfill. Node 24 quita los tipos al vuelo, asi que los
+ * scripts .mjs pueden importar este .ts tal cual.
+ */
+
+export const ENTITY_MF_NAMESPACE = 'houseonly';
+
+export const ENTITY_MF_KEYS = {
+  artist: 'artist_slugs',
+  label: 'label_slugs',
+} as const;
+
+export type EntityMetafieldKind = keyof typeof ENTITY_MF_KEYS;
+
+/**
+ * PLURAL los dos, aunque hoy el sello sea siempre uno. Un split o una licencia
+ * compartida caben sin migrar nada, y el parser es el mismo para ambos.
+ */
+export interface MetafieldDefinitionSpec {
+  name: string;
+  namespace: string;
+  key: string;
+  type: string;
+  ownerType: 'PRODUCT';
+  description: string;
+  pin: boolean;
+  /**
+   * SOLO `storefront`. `houseonly` es un namespace del comerciante, no del app,
+   * y ahi Shopify fija el acceso de admin el mismo en `public_read_write`: el
+   * comerciante manda siempre sobre sus propios metafields. Mandar
+   * `access.admin` —aunque `MetafieldAdminAccessInput` lo acepte como tipo— lo
+   * rechaza con INVALID: "must be one of [public_read_write]". Comprobado
+   * contra la tienda el 2026-09-11.
+   */
+  access: { storefront: 'PUBLIC_READ' };
+  capabilities: { adminFilterable: { enabled: boolean } };
+}
+
+/**
+ * `single_line_text_field` con los slugs separados por COMA, no `list.*`:
+ * Shopify no importa tipos list de texto por CSV, y la coma es ya la convencion
+ * de `alias:{k}:{norm}`, que guarda varios slugs igual. Una regla, un parser.
+ *
+ * Dos ajustes que no son adorno:
+ *  - `storefront: PUBLIC_READ` — sin esto la tienda no puede leer el metafield
+ *    por Storefront API y el feed de la fase 5 se queda ciego.
+ *  - `adminFilterable` — es lo que permite filtrar por entidad dentro del admin
+ *    de Shopify sin escribir una linea de codigo.
+ */
+export const ENTITY_MF_DEFINITIONS: MetafieldDefinitionSpec[] = [
+  {
+    name: 'Artist entities',
+    namespace: ENTITY_MF_NAMESPACE,
+    key: ENTITY_MF_KEYS.artist,
+    type: 'single_line_text_field',
+    ownerType: 'PRODUCT',
+    description: 'Slugs canonicos de artista, separados por coma. Ver docs/entities.md.',
+    pin: true,
+    access: { storefront: 'PUBLIC_READ' },
+    capabilities: { adminFilterable: { enabled: true } },
+  },
+  {
+    name: 'Label entities',
+    namespace: ENTITY_MF_NAMESPACE,
+    key: ENTITY_MF_KEYS.label,
+    type: 'single_line_text_field',
+    ownerType: 'PRODUCT',
+    description: 'Slugs canonicos de sello, separados por coma. Ver docs/entities.md.',
+    pin: true,
+    access: { storefront: 'PUBLIC_READ' },
+    capabilities: { adminFilterable: { enabled: true } },
+  },
+];
+
+export function definitionFor(kind: EntityMetafieldKind): MetafieldDefinitionSpec {
+  const key = ENTITY_MF_KEYS[kind];
+  const def = ENTITY_MF_DEFINITIONS.find(d => d.key === key);
+  if (!def) throw new Error(`sin definicion para ${kind}`);
+  return def;
+}
+
+/**
+ * Valor del metafield a partir de los slugs. Quita vacios y repetidos y respeta
+ * el orden de entrada: en un split, el primero es el artista principal y eso se
+ * ve en la tienda.
+ */
+export function joinSlugs(slugs: Array<string | null | undefined>): string {
+  const out: string[] = [];
+  for (const s of slugs || []) {
+    const v = String(s || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out.join(',');
+}
+
+/** Lo contrario. Tolera espacios alrededor de la coma y valores vacios. */
+export function parseSlugs(value: string | null | undefined): string[] {
+  return String(value || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Cabecera de la columna del CSV de importacion de Shopify. El formato es
+ * `Nombre (product.metafields.{namespace}.{key})`; lo que Shopify mira es el
+ * parentesis, pero el nombre se mantiene igual que el de la definicion para que
+ * el CSV y el admin no parezcan dos cosas distintas.
+ */
+export function csvHeader(kind: EntityMetafieldKind): string {
+  const def = definitionFor(kind);
+  return `${def.name} (product.metafields.${def.namespace}.${def.key})`;
+}
+
+/**
+ * Saca el valor del sello de los tags de Shopify. En el catalogo conviven TRES
+ * grafias del prefijo —`label:X`, `Label: X` y `label: X`— y las tres son el
+ * mismo campo. Acepta la lista de tags o la cadena separada por comas del CSV,
+ * porque segun desde donde se mire llega de una forma o de la otra.
+ */
+export function labelFromTags(tags: string | string[] | null | undefined): string {
+  const list = Array.isArray(tags) ? tags : String(tags || '').split(',');
+  for (const t of list) {
+    const m = String(t).match(/^\s*label\s*:\s*(.+)$/i);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return '';
+}
+
+/**
+ * Las dos celdas de metafield de una fila del CSV de importacion. Devolver un
+ * objeto y no dos valores sueltos es a proposito: asi el importer hace
+ * `{ ...fila, ...entityCsvColumns(a, l) }` y no puede equivocarse de cabecera.
+ *
+ * Una entidad en revision llega aqui como lista vacia y sale como celda vacia:
+ * el producto se sube igual y el hueco se rellena despues. La importacion NO
+ * espera a la cola.
+ */
+export function entityCsvColumns(
+  artistSlugs: Array<string | null | undefined>,
+  labelSlugs: Array<string | null | undefined>,
+): Record<string, string> {
+  return {
+    [csvHeader('artist')]: joinSlugs(artistSlugs),
+    [csvHeader('label')]: joinSlugs(labelSlugs),
+  };
+}
+
+/** Compara lo que hay con lo que habria que escribir. El backfill no reescribe. */
+export function sameSlugs(a: Array<string | null | undefined>, b: Array<string | null | undefined>): boolean {
+  return joinSlugs(a) === joinSlugs(b);
+}
+
+/**
+ * Tope de Shopify para `metafieldsSet`: 25 metafields por llamada, y la llamada
+ * es atomica —si uno falla no se escribe ninguno—. Con dos metafields por
+ * producto salen 12 productos por lote y sobra sitio.
+ */
+export const METAFIELDS_SET_MAX = 25;
+
+export type MetafieldPlanStatus = 'write' | 'same' | 'keep' | 'empty';
+
+export interface MetafieldPlan {
+  key: string;
+  desired: string;
+  existing: string;
+  status: MetafieldPlanStatus;
+  why: string;
+}
+
+/**
+ * Decide que hacer con UN metafield de UN producto. Es el corazon del backfill y
+ * esta aparte para poder probarlo sin tienda delante.
+ *
+ * La regla que mas importa es la tercera: **el backfill no borra nunca**. Si no
+ * sabemos resolver el valor pero el producto ya tiene algo escrito, se deja como
+ * esta. Lo que hay pudo ponerlo una persona o un importer con mejor informacion
+ * que la que tiene un barrido, y un backfill que vacia celdas destruye trabajo
+ * sin preguntar.
+ *
+ * @param why  Por que `desired` viene vacio: 'review', 'ignored' o 'sin valor'.
+ */
+export function planMetafield(
+  kind: EntityMetafieldKind,
+  desiredSlugs: Array<string | null | undefined>,
+  existingValue: string | null | undefined,
+  why = '',
+): MetafieldPlan {
+  const key = ENTITY_MF_KEYS[kind];
+  const desired = joinSlugs(desiredSlugs);
+  const existing = String(existingValue || '').trim();
+
+  if (desired && desired === existing) return { key, desired, existing, status: 'same', why: '' };
+  if (desired) return { key, desired, existing, status: 'write', why: existing ? 'cambia' : 'estaba vacio' };
+  if (existing) return { key, desired, existing, status: 'keep', why: why || 'no resuelve, pero ya tiene valor' };
+  return { key, desired, existing, status: 'empty', why: why || 'sin valor' };
+}
+
+/** Trocea las escrituras al tope de metafieldsSet. */
+export function chunkMetafieldWrites<T>(entries: T[], max = METAFIELDS_SET_MAX): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < entries.length; i += max) out.push(entries.slice(i, i + max));
+  return out;
+}
+
+/**
+ * Una definicion que ya existe NO es un fallo: el script se ejecuta cada vez que
+ * alguien monta el entorno. Shopify lo dice con el codigo TAKEN.
+ */
+export function isDefinitionTaken(userErrors: Array<{ code?: string | null; message?: string | null }> | null | undefined): boolean {
+  const errs = userErrors || [];
+  if (!errs.length) return false;
+  return errs.every(e =>
+    String(e?.code || '').toUpperCase() === 'TAKEN' ||
+    /already (exists|in use)|has already been taken/i.test(String(e?.message || '')),
+  );
+}
