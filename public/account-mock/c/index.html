@@ -29,7 +29,7 @@ nav.site{position:sticky;top:0;z-index:200;background:rgba(10,10,10,0.96);backdr
 .navr{display:flex;gap:8px;align-items:center}
 
 h1.page{font-size:26px;font-weight:800;letter-spacing:-0.4px;margin:34px 0 4px}
-p.sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+p.sub{color:var(--muted);font-size:13px;margin:6px 0 26px}
 h2.sec{font-size:10px;letter-spacing:2.4px;text-transform:uppercase;color:var(--muted);margin:38px 0 14px;font-weight:600}
 
 /* siguiendo */
@@ -93,10 +93,10 @@ footer.site .links a:hover{color:var(--acid)}
   <div class="navr"><button class="pill">← Shop</button><button class="pill on">Account</button></div>
 </nav>
 <div class="wrap">
-<h1 class="page">Your feed</h1><p class="sub">103 records from the artists and labels you follow · last 90 days</p>
+<h1 class="page">Your feed</h1>
 <input class="sw" type="radio" name="st" id="feed" checked><input class="sw" type="radio" name="st" id="vacio">
 <div class="swbar"><label for="feed">Feed</label><label for="vacio">Empty state</label></div>
-<div class="pane-feed">
+<div class="pane-feed"><p class="sub">103 records from the artists and labels you follow · last 90 days</p>
 <h2 class="sec">Following · 2</h2>
 <div class="follows">
   <div class="fchip"><span class="nm">Omar S</span><span class="ct">Artist · 11 records</span><span class="x">Unfollow</span></div><div class="fchip"><span class="nm">Deep Jungle</span><span class="ct">Label · 94 records</span><span class="x">Unfollow</span></div>
@@ -726,7 +726,7 @@ footer.site .links a:hover{color:var(--acid)}
     <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
   </div>
 </div></div>
-<div class="pane-vacio">
+<div class="pane-vacio"><p class="sub">Follow artists and labels and their new records land here.</p>
 <h2 class="sec">Following · 0</h2>
 <div class="follows">
   <div class="fchip" style="border-style:dashed"><span class="nm" style="color:var(--muted)">+ Follow an artist or label</span></div>
