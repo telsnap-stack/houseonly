@@ -7006,6 +7006,18 @@ function StoriesGenerator() {
   const [results, setResults]   = useState([]);
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState('');
+  // Seed list = newest-first catalogue read straight off the Storefront
+  // `products` connection. Deliberately NOT the `search` endpoint: Shopify's
+  // search index is eventually consistent and lags hours behind a fresh import
+  // (verificado 2026-09-10: 15 de las 18 altas del dia no estaban indexadas, y
+  // la misma consulta devolvia resultado o nada segun la replica). Con el
+  // buscador como unica via, un disco recien importado era imposible de elegir
+  // aqui. `products` lo trae en el momento.
+  const [seed, setSeed]               = useState([]);
+  const [seedCursor, setSeedCursor]   = useState(null);
+  const [seedMore, setSeedMore]       = useState(false);
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [seedErr, setSeedErr]         = useState('');
   const [selected, setSelected] = useState(null);   // the picked release (parseProduct shape)
   // Shot 2 = AI-generated "knowledge line": genuine musical context, not
   // marketing bluff. We fetch 3 options from the worker's story-context
@@ -7050,6 +7062,29 @@ function StoriesGenerator() {
       }
     }, 300);
   };
+
+  // Newest-first seed, paginated. fetchShopifyProducts con sus valores por
+  // defecto (forthcoming:false, dnb:false) aplica EXACTAMENTE las mismas
+  // exclusiones que runSearch anade a mano —`-tag:'forthcoming'` y todos los
+  // DNB_TAGS— asi que las dos vias nunca discrepan sobre lo que el picker
+  // puede ensenar.
+  const loadSeed = useCallback(async (cursor = null) => {
+    setSeedLoading(true); setSeedErr('');
+    try {
+      const { products, hasNextPage, endCursor } = await fetchShopifyProducts({
+        cursor, sortKey: 'CREATED_AT', reverse: true,
+      });
+      setSeed(prev => (cursor ? [...prev, ...products] : products));
+      setSeedCursor(endCursor);
+      setSeedMore(hasNextPage);
+    } catch (e) {
+      setSeedErr('Could not load the newest releases: ' + (e?.message || 'unknown error'));
+    } finally {
+      setSeedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadSeed(null); }, [loadSeed]);
 
   // When a release is picked: load it and clear any previous knowledge line.
   // No artist photo, no hunting — Shot 2 is the AI-generated knowledge line.
@@ -7118,6 +7153,10 @@ function StoriesGenerator() {
 
   const lbl = { fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 };
   const audioTracks = (selected?.tracks || []).filter(t => t && t.url);
+  // Caja vacia -> seed (lo mas nuevo primero); escribiendo -> resultados de
+  // busqueda. Al borrar la caja se vuelve al seed, no a una lista vacia.
+  const searchMode = query.trim().length > 0;
+  const shown = searchMode ? results : seed;
 
   return (
     <div>
@@ -7131,11 +7170,16 @@ function StoriesGenerator() {
       />
       {searching && <div style={{ fontSize:10, color:S.muted, marginTop:8 }}>Searching…</div>}
       {searchErr && <div style={{ fontSize:10, color:S.danger, marginTop:8 }}>{searchErr}</div>}
+      {!searchMode && seedLoading && seed.length === 0 && <div style={{ fontSize:10, color:S.muted, marginTop:8 }}>Loading newest releases…</div>}
+      {!searchMode && seedErr && <div style={{ fontSize:10, color:S.danger, marginTop:8 }}>{seedErr}</div>}
+      {!searchMode && !selected && seed.length > 0 && (
+        <div style={{ fontSize:9, color:S.muted, marginTop:8, letterSpacing:1.5, textTransform:'uppercase' }}>Newest first · {seed.length} loaded</div>
+      )}
 
       {/* Results list */}
-      {results.length > 0 && !selected && (
+      {shown.length > 0 && !selected && (
         <div style={{ marginTop:12, display:'flex', flexDirection:'column', gap:1, maxHeight:320, overflowY:'auto' }}>
-          {results.map(r => (
+          {shown.map(r => (
             <div key={r.id} onClick={() => pickRelease(r)} style={{ display:'flex', alignItems:'center', gap:12, background:S.surf, padding:'8px 12px', borderRadius:2, cursor:'pointer' }}>
               <div style={{ width:40, height:40, borderRadius:2, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', flexShrink:0 }} />
               <div style={{ flex:1, minWidth:0 }}>
@@ -7148,6 +7192,18 @@ function StoriesGenerator() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* Load-more: solo en el seed. Los resultados de busqueda se quedan con
+          su unica pagina de relevancia — runSearch no se toca. */}
+      {!searchMode && !selected && seedMore && (
+        <button
+          onClick={() => loadSeed(seedCursor)}
+          disabled={seedLoading}
+          style={{ marginTop:8, width:'100%', background:'none', border:`1px solid ${S.border}`, color:seedLoading?S.muted:S.text, cursor:seedLoading?'wait':'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', padding:'8px 12px', borderRadius:2, fontFamily:'inherit' }}
+        >
+          {seedLoading ? 'Loading…' : '↓ Load more'}
+        </button>
       )}
 
       {/* Selected release — raw materials preview (Phase 1 endpoint) */}
