@@ -380,11 +380,24 @@ se hizo el barrido inicial. Es la cola de régimen, y es la prueba de lo que dic
 el apartado anterior: mientras los importers no resuelvan (fase 4), cada
 importación deja su rastro aquí.
 
-Despachadas el mismo día. El estado con el que se cierra la jornada:
-**1481 entidades** (984 artista, 484 sello, 13 con los dos roles), 2769 alias,
-19 `ignore:`, 0 filas en cola, y **cobertura completa**: no queda ni un `vendor`
-ni un tag `label:` del catálogo publicado sin resolver contra una entidad o un
-`ignore:`.
+Despachadas el mismo día, y tres de ellas corregidas después de mirarlas con
+calma, porque el slug se congela al aprobar y salía más barato hacerlo con un
+producto por entidad que dentro de un año:
+
+- `C.A.R. (Javonntte, Ben Green, Dez Andres)` → **`C.A.R.`** (`c-a-r`). El
+  paréntesis eran los músicos del disco, no parte del nombre; la cadena entera
+  se queda como alias.
+- `Norma Jean Bell (AKA Moodymann)` → **`Norma Jean Bell`** (`norma-jean-bell`).
+  Son dos personas distintas —ella grabó y publicó con él, de ahí el crédito—, y
+  el display conflaciaba a las dos. La cadena queda como alias, sin ninguna
+  relación con Moodymann.
+- `White` → **`ignore:l:white`**. Un *white label* no es un sello: seguirlo
+  habría agrupado discos sin ninguna relación entre sí.
+
+El estado con el que se cierra la jornada: **1480 entidades** (984 artista, 483
+sello, 13 con los dos roles), 2769 alias, 20 `ignore:`, 0 filas en cola, y
+**cobertura completa**: no queda ni un `vendor` ni un tag `label:` del catálogo
+publicado sin resolver contra una entidad o un `ignore:`.
 
 ## Fases
 
@@ -414,59 +427,92 @@ Los endpoints de fase 1 son aditivos y están detrás de Bearer: desplegar el
 worker de producción con ellos no cambia nada de lo que hay hoy. Aun así no se
 sube a producción hasta que la fase 2 pueda usarlos.
 
-## Fase 4 y 5: diseño
+## Fase 4 y 5: diseño detallado
 
 Escrito antes de implementar nada. Tres piezas: el slug llega al producto (4),
 el cliente sigue entidades (5a) y el cliente ve lo suyo (5b).
 
+**Decisiones de Eduardo, 2026-09-10:**
+
+| Decisión | Elegido | Descartado |
+|---|---|---|
+| Alcance del feed | **Ventana de 90 días**, filtrada en memoria | Índice `byslug:{slug}:…` en KV |
+| Definiciones de metafield | **Script versionado** con `metafieldDefinitionCreate` | Crearlas a mano en el admin |
+| Promoción del frontend | **File-drop preparado**, no ejecutado | Ejecutarlo ya |
+
 ### (a) Los importers resuelven al generar el CSV
 
 Hoy los 8 importers escriben `Vendor` y un tag `label:` con el texto del
-distribuidor, y ahí se acaba la historia: el slug canónico no llega nunca al
-producto. Sin eso, cualquier pantalla que pinte o filtre por entidad tiene que
-resolver de nuevo en cada carga.
+distribuidor y ahí acaba la historia: el slug canónico no llega nunca al
+producto, así que cualquier pantalla que pinte o filtre por entidad tiene que
+resolver otra vez en cada carga.
 
-**Dos llamadas por importación, no una por fila.** Al pulsar "generar CSV", el
-importer junta todos los vendors y todos los valores de `label:` de la tanda y
-hace dos `POST ?action=entity-resolve` (`kind: 'artist'` y `kind: 'label'`) con
-`context.handle` para que la cola tenga muestras. `resolveBatch` ya está hecho
-para esto.
+**Dónde engancha.** Los ocho ya tienen el punto exacto: la línea
+`autoRecomputeEntities('W&S')` y sus siete hermanas, que hoy corren al terminar
+una importación. La resolución va justo antes de construir el CSV.
 
-**Columna nueva en el CSV.** Shopify importa metafields con la cabecera
-`Nombre (product.metafields.{namespace}.{key})`, y **no admite tipos `list.*`
-de texto por CSV** (comprobado en la doc de Shopify, no supuesto). Así que:
+**Dos llamadas por importación, no una por fila.** Se juntan todos los vendors y
+todos los valores de `label:` de la tanda y se hacen dos
+`POST ?action=entity-resolve` (`kind: 'artist'` y `kind: 'label'`), con
+`context.handle` y `context.title` para que la cola tenga muestras.
+`resolveBatch` ya está escrito para esto y el barrido lo usa en lotes de 100.
+
+**Columnas nuevas en el CSV.** Shopify importa metafields con la cabecera
+`Nombre (product.metafields.{namespace}.{key})` y **no admite tipos `list.*` de
+texto por CSV** (comprobado en su documentación):
 
 ```
 Artist entities (product.metafields.houseonly.artist_slugs)   → "delano-smith,brian-kage"
-Label entity   (product.metafields.houseonly.label_slug)      → "freerange-records"
+Label entity (product.metafields.houseonly.label_slug)        → "freerange-records"
 ```
 
 `single_line_text_field` con los slugs **separados por coma**, que es exactamente
-como `alias:{k}:{norm}` guarda ya varios slugs. Misma convención en los dos
-sitios, un solo parser. Las definiciones de metafield (namespace `houseonly`) se
-crean una vez a mano en el admin de Shopify; sin definición, la columna se
-importa igual pero no se puede filtrar por ella.
+como `alias:{k}:{norm}` guarda ya varios slugs: una convención, un solo parser.
 
-**Lo que va en review no bloquea nada.** Si un valor vuelve con
-`status: 'review'`, la celda va **vacía** y el producto se sube igual. Es la
-misma regla que ya rige con Discogs: el catálogo no espera a la cola. El hueco se
-rellena después, y hay dos caminos que conviene no confundir:
+**Las definiciones, por script versionado.** `scripts/entities-metafield-defs.mjs`,
+convención de la casa: dry-run por defecto, `--create` para aplicar. Una
+definición por metafield, con el input ya verificado contra el esquema de la
+Admin API:
 
-- **Productos nuevos**: el webhook `products/create` —que ya corre el matcher de
-  Discogs— llama a `entity-resolve` y, si resuelve, escribe el metafield por
-  Admin API (`metafieldsSet`). Así el slug llega aunque el producto no venga de
-  un importer.
-- **Lo ya subido con la celda vacía**: un script de operación
-  (`entities-backfill-metafields.mjs`, dry-run por defecto) que repasa el
-  catálogo, resuelve y escribe solo donde falte. Es el mismo patrón que
-  `backfill-*.mjs`.
+```jsonc
+// mutation metafieldDefinitionCreate($definition: MetafieldDefinitionInput!)
+{
+  "name": "Artist entities",
+  "namespace": "houseonly",          // 3-255 chars, alfanumérico/guion/subrayado
+  "key": "artist_slugs",             // 2-64 chars
+  "type": "single_line_text_field",
+  "ownerType": "PRODUCT",
+  "description": "Slugs canónicos de artista, separados por coma. docs/entities.md",
+  "pin": true,
+  "access": { "admin": "MERCHANT_READ_WRITE", "storefront": "PUBLIC_READ" },
+  "capabilities": { "adminFilterable": { "enabled": true } }
+}
+```
 
-El Bearer: la pestaña Entidades ya guarda el secreto en memoria al conectarse.
-Si no está, **el importer no se para**: genera el CSV sin la columna y lo dice.
-Un importador que deja de funcionar porque falta un token de una función
-accesoria es peor que un CSV sin metafield.
+Dos cosas que no son adorno: **`storefront: PUBLIC_READ`**, sin lo cual la tienda
+no puede leer el metafield por Storefront API y el feed se queda ciego; y
+**`adminFilterable`**, que es lo que permite filtrar por entidad en el admin de
+Shopify sin escribir código. El script es idempotente: si la definición ya
+existe, `userErrors` trae el código de "tomada" y se ignora en vez de fallar.
 
-### (b) Follows: esquema y endpoints
+**Lo que va a review no bloquea nada.** Si un valor vuelve con
+`status: 'review'`, la celda va **vacía** y el producto se sube igual. Misma
+regla que ya rige con Discogs: el catálogo no espera a la cola. El hueco se
+rellena después por dos caminos distintos que conviene no confundir:
+
+- **Productos nuevos** — el webhook `products/create`, que ya corre el matcher de
+  Discogs, llama a `entity-resolve` y escribe el metafield con `metafieldsSet` si
+  resuelve. Así el slug llega aunque el producto no venga de un importer.
+- **Lo ya subido con la celda vacía** — `entities-backfill-metafields.mjs`,
+  dry-run por defecto, que repasa el catálogo y escribe solo donde falte. Mismo
+  patrón que los `backfill-*.mjs`.
+
+**Sin Bearer, el importer no se para.** El secreto vive en memoria desde que
+alguien conecta la pestaña Entidades. Si no está, se genera el CSV sin las dos
+columnas y se avisa en pantalla. Un importador que deja de funcionar porque falta
+el token de una función accesoria es peor que un CSV sin metafield.
+
+### (b) Follows: esquema y endpoints (fase 5a)
 
 Calco literal de `wl:`, porque ya resolvió estos problemas.
 
@@ -479,37 +525,40 @@ fanout:{slug}:{customerId} → "1"
 `label` como texto y por eso hoy no se puede seguir a nadie desde la wishlist;
 ese error no se repite.
 
-| Endpoint | Método | Qué |
-|---|---|---|
-| `?action=follows` | GET | Lista del cliente, ya hidratada: `slug`, `display`, `roles`, y `parent` si lo tiene |
-| `?action=follows` | POST | `{ slug }` → alta. Escribe el blob **y** `fanout:{slug}:{cid}` |
-| `?action=follows` | DELETE | `{ slug }` → baja. Borra las dos cosas |
-| `?action=follows-merge` | POST | `{ entities: string[] }` → funde la lista de invitado al entrar en la cuenta |
+| Endpoint | Método | Cuerpo | Qué |
+|---|---|---|---|
+| `?action=follows` | GET | — (`?session=`/`?token=`) | Lista hidratada: `slug`, `display`, `roles`, `parent` |
+| `?action=follows` | POST | `{ slug, session? , token? }` | Alta |
+| `?action=follows` | DELETE | `{ slug, … }` | Baja |
+| `?action=follows-merge` | POST | `{ entities: string[], … }` | Funde la lista de invitado al entrar |
 
 Autenticación **idéntica** a wishlist: `resolveCustomerId(env, { session, token })`
-—sesión CAAPI primero, token legacy como degradación— y `401 {"error":"auth"}` si
-no hay cliente. El invitado guarda su lista en `localStorage` y `follows-merge`
-la funde al entrar, igual que `wishlist-merge`.
+—sesión CAAPI primero, token legacy como degradación— y `401 {"error":"auth"}`
+si no hay cliente. El invitado guarda su lista en `localStorage` y
+`follows-merge` la funde al entrar, igual que `wishlist-merge`.
 
 Detalles que no son caprichos:
 
 - **Alta: el blob primero, el fanout después.** Si falla lo segundo, el cliente ve
-  el follow (que es lo que él nota) y el fanout se reconstruye desde los blobs.
-  Al revés, se notificaría a alguien que no ve el follow en su lista.
+  su follow —que es lo que él nota— y el fanout se puede reconstruir desde los
+  blobs. Al revés se notificaría a alguien que no ve el follow en su lista.
 - **Baja: el fanout primero.** Lo grave al darse de baja es seguir recibiendo
   avisos.
 - **Tope de 500** entidades por cliente, como los 500 items de la wishlist.
-- **El blob tiene carrera** (dos pestañas del mismo cliente). Es la que ya tiene
-  `wl:` y se acepta. El fanout **no**, por eso es una clave por par.
-- **Entidad `merged`**: al leer se sigue `mergedInto` y se devuelve la viva; el
+- **El blob tiene carrera** (dos pestañas del mismo cliente): es la misma que ya
+  tiene `wl:` y se acepta. El fanout **no**, y por eso es una clave por par.
+- **Slug inexistente → 400.** Un follow a un slug que no resuelve es un follow
+  muerto que nadie volverá a mirar.
+- **Entidad `merged`**: al leer se sigue `mergedInto`, se devuelve la viva y el
   blob se reescribe con el slug bueno la primera vez que se lee.
 
-### (c) Feed: lo nuevo de lo que sigo
+### (c) Feed: ventana de 90 días (fase 5b)
 
 ```
 GET ?action=feed&session=…&limit=24&cursor=…
-→ { items: [{ handle, title, artist, label, slugs, imageUrl, price, currency,
-              createdAt, forthcoming, releaseDate, stock, via }], cursor }
+→ { items: [{ handle, title, artist, label, imageUrl, price, currency,
+              createdAt, forthcoming, releaseDate, stock, via }],
+    cursor, window: { days: 90, from: "2026-06-12" } }
 ```
 
 `via` dice **por qué** aparece cada disco (`"dj-koze"`, `"freerange-records"`):
@@ -517,29 +566,37 @@ sin eso, una lista de novedades es indistinguible de la portada.
 
 **De dónde salen los productos.** El worker ya tiene la pieza:
 `nlFetchRecentProducts(env, days)` pagina por Storefront con `sortKey
-CREATED_AT` y hace dos pasadas, `forthcoming` y no-`forthcoming`, que es
-justo el corte que pide el feed. El feed **reutiliza esa función**, cachea la
-ventana en KV unos minutos —todos los seguidores miran la misma— y la filtra en
-memoria contra los slugs del cliente.
+CREATED_AT` y hace dos pasadas, `forthcoming` y no-`forthcoming`, que es justo el
+corte que pide el feed. El feed la llama con **90 días**, cachea el resultado en
+KV (`feed:window:v1`, TTL de minutos) y lo filtra en memoria contra los slugs del
+cliente. Todos los seguidores miran la misma ventana: **una construcción, no una
+por cliente**.
 
-**Ventana, no historia.** Filtrar en memoria significa que el feed responde
-"qué ha salido de lo tuyo", no "todo lo de DJ Koze". Para lo segundo haría falta
-o un índice propio (`byslug:{slug}:{createdAt}:{handle}` en KV, escrito por el
-mismo sitio que escribe el metafield) o consultas por metafield en Admin API. **Es
-la decisión abierta de esta fase** y conviene tomarla antes de escribir el
-endpoint, porque cambia si hace falta índice o no.
+**Cómo se empareja cada producto con sus slugs.** Al construir la ventana, y solo
+entonces, cada producto se anota con sus slugs: primero el metafield de la fase 4
+si está, y si no, resolviendo `vendor` y `label:` contra `alias:{k}:{norm}`. Así
+el feed funciona **desde el primer día**, sin esperar a que la fase 4 haya pasado
+por todo el catálogo, y se vuelve más barato según se llenan los metafields.
 
-- Orden `createdAt` descendente, con los `forthcoming` marcados pero **en la
-  misma lista**: un pre-order de un sello que sigues es la noticia, no una
-  sección aparte.
-- `cursor` opaco: `createdAt|handle` del último devuelto, que es estable aunque
-  entren productos nuevos mientras se pagina.
+- Orden `createdAt` descendente, con los `forthcoming` marcados pero **en la misma
+  lista**: un pre-order de un sello que sigues es la noticia, no una sección
+  aparte.
+- `cursor` opaco, `createdAt|handle` del último devuelto: estable aunque entren
+  productos nuevos mientras se pagina.
 - **Expansión hacia abajo**: seguir a `chiwax` incluye `chiwax classic edition`.
-  Se lee `children:{slug}:*` al montar el conjunto de slugs del cliente. Es el
-  espejo de la expansión hacia arriba que usan las notificaciones, y el motivo de
-  que el índice `children:` exista.
+  Se leen `children:{slug}:*` al montar el conjunto de slugs del cliente. Es el
+  espejo de la expansión hacia arriba que usarán las notificaciones, y el motivo
+  de que el índice `children:` exista.
 - Sin entidades seguidas → `items: []` y un cuerpo vacío honesto, no la portada
   disfrazada de feed.
+
+**El límite, dicho en voz alta: un disco de hace cuatro meses no sale en el
+feed.** Es una decisión, no un descuido. "Todo lo de DJ Koze" necesitaría un
+índice `byslug:{slug}:{createdAt}:{handle}` escrito por el mismo sitio que
+escribe el metafield, y hoy se descarta: dobla el coste de escritura de la fase 4
+para una pantalla que aún no existe. Si el portal acaba pidiendo historia, el
+camino está apuntado aquí y el índice se puede construir en cualquier momento a
+partir de los metafields.
 
 ## Promoción a producción: aplazada hasta la fase 4/5
 
@@ -571,19 +628,54 @@ fueron humanas: se copian, no se repiten); (3) `entities-sweep.mjs --send --prod
 como verificación —si la copia está bien, la cola de prod sale casi vacía—; y
 (4) el frontend, que es lo que manda el calendario.
 
-### Deuda: `src/App.jsx` diverge entre `staging` y `main`
+### El file-drop de `src/App.jsx`: preparado, no ejecutado
 
-**66 commits de `App.jsx` en `staging` que no están en `main`**, de los que solo
-6 son de entidades. La pestaña Entidades además tiene `ENTITIES_WORKER_URL`
-clavado al worker de staging.
+Medido, no estimado. `git diff main origin/staging -- src/App.jsx`:
 
-Un `git merge staging` a ciegas metería en producción mucho más que la capa de
-entidades, y el cherry-pick uno a uno no vale: los commits vienen entrelazados
-con cambios del worker. **Se resuelve por file-drop** —tomar el `App.jsx` de
-`staging` entero, revisarlo contra el de producción y subirlo como un solo
-cambio consciente— **antes de que salga el portal de cliente**, no el día del
-portal. Mientras no se haga, cada arreglo que toque `App.jsx` en las dos ramas
-se paga dos veces.
+```
+1 file changed, 511 insertions(+)
+main 10813 líneas → staging 11324
+```
+
+**511 líneas añadidas y ni una sola borrada o modificada.** Los 11 hunks son:
+
+| Hunk | Qué |
+|---|---|
+| 8 × 1 línea | `autoRecomputeEntities('W&S' \| 'Triple Vision' \| 'Rubadub' \| 'Kudos' \| 'DBH' \| 'Mother Tongue' \| 'Rush Hour' \| 'Pre-order')` al final de cada importer |
+| 507 líneas | `EntitiesPanel` y sus ayudas, en bloque |
+| 2 × 1 línea | El botón `🏷️ Entities` y su `{tab==='entities' && <EntitiesPanel />}` |
+
+O sea: **el file-drop es la pestaña de entidades y nada más**. Los "66 commits de
+divergencia" eran ruido de recuento —el resto ya está en `main` por otras vías—;
+el contenido del fichero ya coincide en todo lo demás.
+
+**Impacto en producción si se aplicara hoy: ninguno visible.** No se toca una
+línea de lo que ya corre. Las ocho llamadas nuevas salen por la primera línea
+(`if (!entitiesSecret) return;`) mientras nadie conecte la pestaña y escriba el
+secreto, y el secreto no se persiste entre recargas. La tienda de cara al cliente
+no cambia en absoluto: todo lo añadido vive dentro del admin.
+
+**Lo que falta antes de ejecutarlo**, y es lo que lo mantiene aplazado:
+
+1. El worker de **producción** no tiene los endpoints `entity-*` (promoción
+   aplazada, ver abajo). Sin eso la pestaña se conecta a un worker que no
+   responde.
+2. `ENTITIES_WORKER_URL` está clavado al worker de staging. Al ejecutar el
+   file-drop hay que cambiarlo por `REVIEW_WORKER_URL`, como dice el comentario
+   que lo acompaña.
+
+**Plan de verificación, en este orden:**
+
+1. `wrangler deploy` del worker de prod y copia del namespace (ver abajo).
+   Comprobar `?action=entity-review-list` en prod: 401, no el fallback.
+2. Aplicar el diff sobre `main` y cambiar la constante. `npm run build` —que
+   incluye el prerender— tiene que pasar sin tocar nada más.
+3. En el preview de Pages: abrir el admin, comprobar que **los 8 importers siguen
+   generando su CSV** con la pestaña Entidades sin conectar (el caso de verdad
+   frecuente), y que la consola no escupe nada nuevo.
+4. Conectar la pestaña con el Bearer de prod, ver la cola vacía —será vacía si la
+   copia del namespace fue bien— y aprobar una fila de prueba.
+5. Solo entonces, merge a `main`.
 
 ## Lo que este diseño no hace
 
