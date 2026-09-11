@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	getAlertsState, setEmailAlerts, refreshStoredEmail, unsubscribeByToken,
-	buildDigests, renderAlertEmail, alertSubject, runFollowAlerts, MAX_PER_EMAIL,
+	buildDigests, renderAlertEmail, alertSubject, runFollowAlerts, MAX_PER_EMAIL, ctaFor,
 } from "../src/lib/alerts";
 import { addFollow } from "../src/lib/follows";
 
@@ -158,7 +158,8 @@ describe("el correo", () => {
 	it("corta en el tope y resume el resto", () => {
 		const html = renderAlertEmail(digest(MAX_PER_EMAIL + 7), "https://w/x");
 		expect((html.match(/<table role="presentation"/g) || []).length).toBe(MAX_PER_EMAIL);
-		expect(html).toContain("Y 7 más");
+		// El correo va en ingles, como toda la tienda de cara al cliente.
+		expect(html).toContain("And 7 more");
 	});
 
 	it("el asunto dice lo que hay, sin prometer de mas", () => {
@@ -259,5 +260,94 @@ describe("la preferencia de avisos sobrevive a lo demas", () => {
 		const { removeFollow } = await import("../src/lib/follows");
 		await removeFollow(env as any, CID, "rawax");
 		expect(await getAlertsState(env as any, CID)).toMatchObject({ emailAlerts: true, email: "e@example.com" });
+	});
+});
+
+describe("el boton de cada disco", () => {
+	const base: any = { stock: 0, forthcoming: false, year: 0 };
+	const ahora = Date.parse("2026-09-11T12:00:00Z");
+
+	it("con stock, lleva a la ficha a comprar", () => {
+		expect(ctaFor({ ...base, stock: 3 }, ahora)).toEqual({ label: "View record", backorder: false });
+	});
+
+	it("agotado y reciente: se puede pedir", () => {
+		expect(ctaFor({ ...base, year: 2026 }, ahora).label).toBe("Request a copy");
+		expect(ctaFor({ ...base, year: 2025 }, ahora).label).toBe("Request a copy");
+	});
+
+	it("agotado y viejo: NO promete lo que la ficha no ofrece", () => {
+		// isBackorderEligible() de la tienda corta en el año anterior. Si el
+		// correo dijera "Request a copy", al llegar no habria formulario.
+		expect(ctaFor({ ...base, year: 2024 }, ahora).label).toBe("View record");
+		expect(ctaFor({ ...base, year: 0 }, ahora).label).toBe("View record");
+	});
+
+	it("un pre-order lleva a la ficha, que es donde se reserva", () => {
+		expect(ctaFor({ ...base, forthcoming: true, stock: 0, year: 2026 }, ahora).label).toBe("View record");
+	});
+});
+
+describe("salida al portal y baja", () => {
+	const d: any = { cid: "1", email: "e@x", token: "t",
+		groups: [{ slug: "omar-s", display: "Omar S", items: [prod("p", 1, ["omar-s"])] }], total: 1 };
+
+	it("siempre hay enlace al portal, no solo cuando el correo se corta", () => {
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("See all in your account");
+		expect(html).toContain("houseonly.store/account");
+	});
+
+	it("la cabecera lleva el logo, y su alt dice la marca por si se bloquean las imagenes", () => {
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("brand/houseonly-logo.png");
+		expect(html).toContain('alt="HOUSE ONLY"');
+	});
+
+	it("la baja va en su propia linea y se lee", () => {
+		const html = renderAlertEmail(d, "https://w/unsub?t=tok");
+		expect(html).toContain("Stop these alerts");
+		expect(html).toContain("text-decoration:underline");
+	});
+});
+
+describe("pie del correo", () => {
+	it("dice que no se conteste y a donde ir si esta agotado", () => {
+		const d: any = { cid: "1", email: "e@x", token: "t",
+			groups: [{ slug: "omar-s", display: "Omar S", items: [prod("p", 1, ["omar-s"])] }], total: 1 };
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("Don't reply to this email.");
+		expect(html).toContain("Request a copy from the record page.");
+	});
+});
+
+describe("cabeceras de baja en un clic", () => {
+	let fetchOriginal: typeof fetch;
+	let peticiones: any[];
+
+	beforeEach(async () => {
+		await wipe();
+		await entidad("omar-s", "Omar S");
+		await indice([prod("nuevo", 2, ["omar-s"])]);
+		await addFollow(env as any, CID, "omar-s");
+		await setEmailAlerts(env as any, CID, true, "cliente@example.com");
+		peticiones = [];
+		fetchOriginal = globalThis.fetch;
+		globalThis.fetch = (async (url: any, init: any) => {
+			if (String(url).includes('api.resend.com')) { peticiones.push(JSON.parse(init.body)); return new Response('{"id":"x"}', { status: 200 }); }
+			return fetchOriginal(url, init);
+		}) as any;
+		(env as any).RESEND_API_KEY = 'test';
+	});
+	afterEach(() => { globalThis.fetch = fetchOriginal; });
+
+	it("van las dos, y la URL es la misma que la del pie", async () => {
+		await runFollowAlerts(env as any, { mode: 'test', testTo: 'e@x', workerUrl: 'https://w' });
+		const h = peticiones[0].headers;
+		expect(h['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
+		expect(h['List-Unsubscribe']).toMatch(/^<https:\/\/w\/\?action=follow-alerts-unsubscribe&t=.+>$/);
+		// El cliente de correo y el humano acaban en el mismo sitio.
+		const url = h['List-Unsubscribe'].slice(1, -1);
+		expect(peticiones[0].html).toContain(url.replace(/&/g, '&amp;'));
 	});
 });

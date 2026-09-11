@@ -16,13 +16,19 @@ export interface AlertsEnv extends FollowsEnv {
 }
 
 /**
- * De donde salen los avisos. Comparte dominio con el newsletter porque es el
- * que esta verificado en Resend; la decision de darle su propia direccion
- * —para que una queja de spam no arrastre a la otra lista— esta abierta en
- * docs/entities.md.
+ * Direccion propia, no la del newsletter: si alguien marca un aviso como spam,
+ * no arrastra la reputacion de la otra lista. El dominio ya esta verificado en
+ * Resend, asi que basta con el buzon.
+ *
+ * El reply-to es un buzon que no se lee, y el pie lo dice: contestar a un aviso
+ * automatico no llega a ninguna parte, y lo que la gente quiere preguntar —"se
+ * agoto, me lo consigues?"— tiene su propio sitio en la ficha del disco.
  */
-const ALERTS_FROM = 'House Only <newsletter@houseonly.store>';
+const ALERTS_FROM = 'House Only <alerts@houseonly.store>';
+const ALERTS_REPLY_TO = 'no-reply@houseonly.store';
 const SITE = 'https://houseonly.store';
+/** El logo del sitio, rasterizado a 3x. SVG no vale: Gmail lo descarta. */
+const LOGO_URL = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev/brand/houseonly-logo.png';
 
 /** Tope de discos por correo. Lo que pase de ahi se resume en un "y N mas". */
 export const MAX_PER_EMAIL = 20;
@@ -150,13 +156,19 @@ export interface Digest {
  * Los pre-orders cuentan como novedad: son justo lo que alguien quiere saber
  * antes que nadie.
  */
+const cuandoOrden = (p: IndexedProduct) => Date.parse(p.publishedAt || p.createdAt);
+
 export async function buildDigests(
   env: AlertsEnv, opts: { sinceMs: number; now?: number } = { sinceMs: 24 * 60 * 60 * 1000 },
 ): Promise<Digest[]> {
   const now = opts.now ?? Date.now();
   const desde = now - opts.sinceMs;
   const idx = await getCatalogIndex(env, now);
-  const nuevos = idx.items.filter(p => Date.parse(p.createdAt) >= desde);
+  // Novedad = cuando se PUBLICO. Un disco creado como borrador y publicado una
+  // semana despues es novedad el dia que el cliente puede verlo. Si Shopify no
+  // da publishedAt —producto viejo, o sin publicar— manda createdAt.
+  const cuando = (p: IndexedProduct) => Date.parse(p.publishedAt || p.createdAt);
+  const nuevos = idx.items.filter(p => cuando(p) >= desde);
   if (!nuevos.length) return [];
 
   // slug efectivo → { display, productos }
@@ -203,7 +215,7 @@ export async function buildDigests(
     for (const [slug, items] of porEntidad) {
       const e = await getEntity(env as any, slug);
       if (!e) continue;
-      items.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+      items.sort((a, b) => cuandoOrden(b) - cuandoOrden(a));
       groups.push({ slug, display: e.display, items });
     }
     if (!groups.length) continue;
@@ -222,6 +234,18 @@ const esc = (s: string) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const precio = (p: IndexedProduct) => p.price ? `€${Number(p.price).toFixed(2)}` : '';
+
+/**
+ * Mismo criterio que la tienda para decidir el boton: con stock se compra, y un
+ * agotado solo admite peticion si es reciente —el año del disco es lo que lo
+ * decide, igual que en isBackorderEligible() de App.jsx—. Un agotado viejo no
+ * puede decir "Request a copy", porque al llegar a la ficha no habria formulario.
+ */
+export function ctaFor(p: IndexedProduct, now = Date.now()): { label: string; backorder: boolean } {
+  if (p.stock > 0 || p.forthcoming) return { label: 'View record', backorder: false };
+  const elegible = p.year > 0 && p.year >= new Date(now).getFullYear() - 1;
+  return elegible ? { label: 'Request a copy', backorder: true } : { label: 'View record', backorder: false };
+}
 
 export function renderAlertEmail(d: Digest, unsubUrl: string): string {
   let restantes = MAX_PER_EMAIL;
@@ -243,26 +267,43 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
             <a href="${SITE}/products/${esc(p.slug)}/" style="color:#efefef;text-decoration:none;font-size:15px;font-weight:700;">${esc(p.title)}</a>
             <div style="color:#585858;font-size:13px;padding-top:3px;">${esc(p.vendor)}</div>
             <div style="padding-top:6px;font-size:13px;color:#efefef;">${precio(p)}${p.forthcoming ? ' · <span style="color:#c8ff00;font-weight:700;">PRE-ORDER</span>' : ''}</div>
+            <div style="padding-top:9px;">
+              <a href="${SITE}/products/${esc(p.slug)}/" style="display:inline-block;border:1px solid ${ctaFor(p).backorder ? '#c8ff00' : '#1e1e1e'};color:${ctaFor(p).backorder ? '#c8ff00' : '#efefef'};text-decoration:none;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:6px 11px;border-radius:2px;">${ctaFor(p).label}</a>
+            </div>
           </td>
         </tr>
       </table>`).join('')}`);
   }
 
   const sobran = d.total - Math.min(d.total, MAX_PER_EMAIL);
-  const cola = sobran > 0
-    ? `<p style="color:#585858;font-size:13px;margin:20px 0 0;">Y ${sobran} más — <a href="${SITE}/account" style="color:#c8ff00;">míralo en tus estanterías</a>.</p>`
-    : '';
+  // Siempre hay salida al portal, no solo cuando el correo se corta: desde ahi
+  // se ve todo lo de cada entidad, no solo lo de hoy.
+  const cola = `
+    <p style="margin:26px 0 0;">
+      <a href="${SITE}/account" style="display:inline-block;border:1px solid #1e1e1e;color:#efefef;text-decoration:none;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:9px 14px;border-radius:2px;">See all in your account</a>
+    </p>
+    ${sobran > 0 ? `<p style="color:#585858;font-size:12px;margin:12px 0 0;">And ${sobran} more not shown here.</p>` : ''}`;
 
   return `<!doctype html><html><body style="margin:0;background:#080808;font-family:Inter,system-ui,sans-serif;">
   <div style="max-width:560px;margin:0 auto;padding:32px 20px;">
-    <p style="font-size:22px;font-weight:900;letter-spacing:-1px;color:#efefef;margin:0 0 4px;">HOUSE<span style="color:#c8ff00;">ONLY</span></p>
+    <!-- El logo de la tienda, el mismo SVG del sitio rasterizado a 3x y servido
+         desde R2. El alt NO es decorativo: muchos clientes de correo bloquean
+         imagenes por defecto, y con el bloqueo puesto lo que se lee es esto. -->
+    <p style="margin:0 0 6px;">
+      <img src="${LOGO_URL}" width="160" height="52" alt="HOUSE ONLY"
+        style="display:block;border:0;outline:none;text-decoration:none;width:160px;height:auto;">
+    </p>
     <p style="color:#585858;font-size:11px;letter-spacing:2px;text-transform:uppercase;margin:0 0 20px;">New from who you follow</p>
     ${bloques.join('')}
     ${cola}
     <p style="border-top:1px solid #1e1e1e;margin:34px 0 0;padding-top:18px;color:#585858;font-size:11px;line-height:1.7;">
-      Te llega esto porque sigues a estos artistas o sellos en House Only.
-      <a href="${esc(unsubUrl)}" style="color:#585858;">Dejar de recibir avisos</a>.
-      No afecta a tu suscripción al newsletter.
+      Don't reply to this email. Sold out? Request a copy from the record page.
+      <br><br>
+      You're getting this because you follow these artists or labels at House Only.
+      Your newsletter subscription isn't affected.
+    </p>
+    <p style="margin:12px 0 0;">
+      <a href="${esc(unsubUrl)}" style="color:#efefef;font-size:11px;text-decoration:underline;">Stop these alerts</a>
     </p>
   </div></body></html>`;
 }
@@ -290,11 +331,21 @@ export interface RunSummary {
   errors: string[];
 }
 
-async function enviar(env: AlertsEnv, to: string, subject: string, html: string): Promise<void> {
+async function enviar(env: AlertsEnv, to: string, subject: string, html: string, unsubUrl: string): Promise<void> {
   const r = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.RESEND_API_KEY}` },
-    body: JSON.stringify({ from: ALERTS_FROM, to, subject, html }),
+    body: JSON.stringify({
+      from: ALERTS_FROM, to, subject, html, reply_to: ALERTS_REPLY_TO,
+      // Baja de un clic desde el propio cliente de correo. Gmail y Outlook la
+      // pintan junto al remitente, y tenerla reduce las marcas de spam: quien
+      // quiere irse se va por la puerta en vez de reportar.
+      // Exige que la URL acepte POST, y la acepta.
+      headers: {
+        'List-Unsubscribe': `<${unsubUrl}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      },
+    }),
   });
   if (!r.ok) throw new Error(`resend ${r.status}: ${(await r.text()).slice(0, 160)}`);
 }
@@ -339,7 +390,7 @@ export async function runFollowAlerts(
 
     const unsub = `${base}/?action=follow-alerts-unsubscribe&t=${encodeURIComponent(d.token)}`;
     try {
-      await enviar(env, destino, alertSubject(d), renderAlertEmail(d, unsub));
+      await enviar(env, destino, alertSubject(d), renderAlertEmail(d, unsub), unsub);
       res.sent++;
       res.recipients.push(mode === 'test' ? `${destino} (por ${d.cid})` : d.cid);
     } catch (e: any) {
