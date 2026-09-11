@@ -160,6 +160,58 @@ export function sameSlugs(a: Array<string | null | undefined>, b: Array<string |
 }
 
 /**
+ * Tope de Shopify para `metafieldsSet`: 25 metafields por llamada, y la llamada
+ * es atomica —si uno falla no se escribe ninguno—. Con dos metafields por
+ * producto salen 12 productos por lote y sobra sitio.
+ */
+export const METAFIELDS_SET_MAX = 25;
+
+export type MetafieldPlanStatus = 'write' | 'same' | 'keep' | 'empty';
+
+export interface MetafieldPlan {
+  key: string;
+  desired: string;
+  existing: string;
+  status: MetafieldPlanStatus;
+  why: string;
+}
+
+/**
+ * Decide que hacer con UN metafield de UN producto. Es el corazon del backfill y
+ * esta aparte para poder probarlo sin tienda delante.
+ *
+ * La regla que mas importa es la tercera: **el backfill no borra nunca**. Si no
+ * sabemos resolver el valor pero el producto ya tiene algo escrito, se deja como
+ * esta. Lo que hay pudo ponerlo una persona o un importer con mejor informacion
+ * que la que tiene un barrido, y un backfill que vacia celdas destruye trabajo
+ * sin preguntar.
+ *
+ * @param why  Por que `desired` viene vacio: 'review', 'ignored' o 'sin valor'.
+ */
+export function planMetafield(
+  kind: EntityMetafieldKind,
+  desiredSlugs: Array<string | null | undefined>,
+  existingValue: string | null | undefined,
+  why = '',
+): MetafieldPlan {
+  const key = ENTITY_MF_KEYS[kind];
+  const desired = joinSlugs(desiredSlugs);
+  const existing = String(existingValue || '').trim();
+
+  if (desired && desired === existing) return { key, desired, existing, status: 'same', why: '' };
+  if (desired) return { key, desired, existing, status: 'write', why: existing ? 'cambia' : 'estaba vacio' };
+  if (existing) return { key, desired, existing, status: 'keep', why: why || 'no resuelve, pero ya tiene valor' };
+  return { key, desired, existing, status: 'empty', why: why || 'sin valor' };
+}
+
+/** Trocea las escrituras al tope de metafieldsSet. */
+export function chunkMetafieldWrites<T>(entries: T[], max = METAFIELDS_SET_MAX): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < entries.length; i += max) out.push(entries.slice(i, i + max));
+  return out;
+}
+
+/**
  * Una definicion que ya existe NO es un fallo: el script se ejecuta cada vez que
  * alguien monta el entorno. Shopify lo dice con el codigo TAKEN.
  */
