@@ -11,6 +11,9 @@ import {
 	isDefinitionTaken,
 	labelFromTags,
 	entityCsvColumns,
+	planMetafield,
+	chunkMetafieldWrites,
+	METAFIELDS_SET_MAX,
 } from "../src/lib/entity-metafields";
 
 describe("nombres de los metafields", () => {
@@ -171,5 +174,65 @@ describe("entityCsvColumns", () => {
 		const out = { ...fila, ...entityCsvColumns(["dj-koze"], []) };
 		expect(out.Handle).toBe("pampa045");
 		expect(out["Artist entities (product.metafields.houseonly.artist_slugs)"]).toBe("dj-koze");
+	});
+});
+
+describe("planMetafield — el plan del backfill", () => {
+	it("escribe cuando hay slug y la celda esta vacia", () => {
+		const p = planMetafield("artist", ["dj-koze"], "");
+		expect(p).toMatchObject({ key: "artist_slugs", status: "write", desired: "dj-koze" });
+	});
+
+	it("no toca lo que ya coincide", () => {
+		expect(planMetafield("label", ["freerange-records"], "freerange-records").status).toBe("same");
+		// Espacios de mas en lo guardado no cuentan como diferencia.
+		expect(planMetafield("label", ["freerange-records"], " freerange-records ").status).toBe("same");
+	});
+
+	it("reescribe cuando cambia, y dice que cambia", () => {
+		const p = planMetafield("artist", ["omar-s"], "omar-s-old");
+		expect(p.status).toBe("write");
+		expect(p.why).toBe("cambia");
+	});
+
+	it("NO BORRA: si no resuelve pero hay valor, lo conserva", () => {
+		// La regla mas importante del backfill. Lo que hay pudo ponerlo una
+		// persona con mejor informacion que la de un barrido.
+		const p = planMetafield("artist", [], "alguien-lo-puso-a-mano", "en la cola de revision");
+		expect(p.status).toBe("keep");
+		expect(p.desired).toBe("");
+		expect(p.why).toBe("en la cola de revision");
+	});
+
+	it("vacio y sin nada que conservar: cuenta el motivo", () => {
+		const p = planMetafield("label", [], "", "a proposito (V.A., white label…)");
+		expect(p.status).toBe("empty");
+		expect(p.why).toBe("a proposito (V.A., white label…)");
+	});
+
+	it("varios slugs se guardan separados por coma, en orden", () => {
+		expect(planMetafield("artist", ["delano-smith", "brian-kage"], "").desired)
+			.toBe("delano-smith,brian-kage");
+	});
+});
+
+describe("chunkMetafieldWrites", () => {
+	it("respeta el tope de 25 de metafieldsSet", () => {
+		expect(METAFIELDS_SET_MAX).toBe(25);
+		const lotes = chunkMetafieldWrites(Array.from({ length: 26 }, (_, i) => i));
+		expect(lotes).toHaveLength(2);
+		expect(lotes[0]).toHaveLength(25);
+		expect(lotes[1]).toHaveLength(1);
+	});
+
+	it("sin escrituras, ningun lote — y por tanto ninguna llamada", () => {
+		expect(chunkMetafieldWrites([])).toEqual([]);
+	});
+
+	it("no pierde ni duplica entradas", () => {
+		const n = 137;
+		const lotes = chunkMetafieldWrites(Array.from({ length: n }, (_, i) => i));
+		expect(lotes.flat()).toHaveLength(n);
+		expect(new Set(lotes.flat()).size).toBe(n);
 	});
 });
