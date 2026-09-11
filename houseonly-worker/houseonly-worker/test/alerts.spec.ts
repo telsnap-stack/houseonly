@@ -133,6 +133,60 @@ describe("a quien le toca que", () => {
 		expect(d[0].groups[0].items[0].handle).toBe("delhijo");
 	});
 
+	it("un disco que traen dos seguidos sale UNA vez, y se lo queda el artista", async () => {
+		await entidad("dj-koze", "DJ Koze");
+		await entidad("pampa", "Pampa", ["label"]);
+		await indice([prod("xtc", 2, ["dj-koze"], ["pampa"])]);
+		await addFollow(env as any, CID, "dj-koze");
+		await addFollow(env as any, CID, "pampa");
+		await setEmailAlerts(env as any, CID, true, "si@example.com");
+		const d = await buildDigests(env as any, { sinceMs: 24 * 3600000 });
+		expect(d[0].groups.map(g => [g.slug, g.items.length])).toEqual([["dj-koze", 1]]);
+		expect(d[0].groups[0].items[0].alsoFrom).toEqual(["Pampa"]);
+		// El asunto cuenta discos, no apariciones.
+		expect(d[0].total).toBe(1);
+		expect(alertSubject(d[0])).toBe("DJ Koze: XTC");
+	});
+
+	it("dos artistas seguidos del mismo disco: manda el primero de la ficha", async () => {
+		await entidad("massive-attack", "Massive Attack");
+		await entidad("mad-professor", "Mad Professor");
+		await indice([prod("boots", 2, ["massive-attack", "mad-professor"], ["play-it-again-sam"])]);
+		await addFollow(env as any, CID, "mad-professor");
+		await addFollow(env as any, CID, "massive-attack");
+		await setEmailAlerts(env as any, CID, true, "si@example.com");
+		const d = await buildDigests(env as any, { sinceMs: 24 * 3600000 });
+		expect(d[0].groups.map(g => g.slug)).toEqual(["massive-attack"]);
+		expect(d[0].groups[0].items[0].alsoFrom).toEqual(["Mad Professor"]);
+		expect(d[0].total).toBe(1);
+	});
+
+	it("sin artista seguido detras, el disco se queda en el sello", async () => {
+		await entidad("pampa", "Pampa", ["label"]);
+		await indice([prod("solo-sello", 2, ["nadie"], ["pampa"])]);
+		await addFollow(env as any, CID, "pampa");
+		await setEmailAlerts(env as any, CID, true, "si@example.com");
+		const d = await buildDigests(env as any, { sinceMs: 24 * 3600000 });
+		expect(d[0].groups.map(g => g.slug)).toEqual(["pampa"]);
+		expect(d[0].groups[0].items[0].alsoFrom).toBeUndefined();
+	});
+
+	it("el tope y el \"and N more\" cuentan discos unicos, no apariciones", async () => {
+		await entidad("dj-koze", "DJ Koze");
+		await entidad("pampa", "Pampa", ["label"]);
+		// 2 discos, cada uno bajo artista Y sello: sin deduplicar serian 4.
+		await indice([prod("x1", 2, ["dj-koze"], ["pampa"]), prod("x2", 3, ["dj-koze"], ["pampa"])]);
+		await addFollow(env as any, CID, "dj-koze");
+		await addFollow(env as any, CID, "pampa");
+		await setEmailAlerts(env as any, CID, true, "si@example.com");
+		const d = await buildDigests(env as any, { sinceMs: 24 * 3600000 });
+		expect(d[0].total).toBe(2);
+		const html = renderAlertEmail(d[0], "https://w/x");
+		expect((html.match(/<table role="presentation"/g) || []).length).toBe(2);
+		expect(html).toContain("also from Pampa");
+		expect(html).not.toContain("And ");
+	});
+
 	it("sin novedades, nadie recibe nada", async () => {
 		await indice([prod("nada-suyo", 1, ["otro"])]);
 		await addFollow(env as any, CID, "omar-s");
@@ -160,6 +214,13 @@ describe("el correo", () => {
 		expect((html.match(/<table role="presentation"/g) || []).length).toBe(MAX_PER_EMAIL);
 		// El correo va en ingles, como toda la tienda de cara al cliente.
 		expect(html).toContain("And 7 more");
+	});
+
+	it("cuando lo traen varios seguidos, el disco los nombra en una linea", () => {
+		const d = digest(1);
+		d.groups[0].items[0].alsoFrom = ["Pampa", "Soul Intent", "Mooncraft"];
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("also from Pampa, Soul Intent and Mooncraft");
 	});
 
 	it("el asunto dice lo que hay, sin prometer de mas", () => {

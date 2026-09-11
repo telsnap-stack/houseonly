@@ -134,10 +134,19 @@ export async function unsubscribeByToken(env: AlertsEnv, token: string): Promise
 
 // ── QUE MANDAR ──────────────────────────────────────────────────────
 
+/**
+ * Un disco dentro del correo. `alsoFrom` lleva las demas entidades seguidas
+ * que tambien lo traen: el disco sale una sola vez, y debajo se dice quien mas
+ * lo trae en vez de repetirlo bajo cada una.
+ */
+export interface DigestItem extends IndexedProduct {
+  alsoFrom?: string[];
+}
+
 export interface DigestGroup {
   slug: string;
   display: string;
-  items: IndexedProduct[];
+  items: DigestItem[];
 }
 
 export interface Digest {
@@ -157,6 +166,30 @@ export interface Digest {
  * antes que nadie.
  */
 const cuandoOrden = (p: IndexedProduct) => Date.parse(p.publishedAt || p.createdAt);
+
+/**
+ * Un disco con dos seguidos detras —el artista y su sello, o dos artistas del
+ * mismo disco— se cuenta UNA vez. Quien se lo queda: el artista seguido, que es
+ * a quien se sigue de verdad; el sello recoge lo que no trae artista seguido.
+ * A igualdad manda el orden del propio disco, asi que el primer artista de la
+ * ficha va antes que el segundo.
+ *
+ * El rango 1 es para el seguido que no aparece en las columnas del disco: pasa
+ * con el sello padre, que recibe lo del sub-sello sin figurar en el.
+ */
+function rangoDueno(slug: string, p: IndexedProduct, ents: Map<string, any>): [number, number, string] {
+  const display = String(ents.get(slug)?.display || slug);
+  const ia = p.artistSlugs.indexOf(slug);
+  if (ia >= 0) return [0, ia, display];
+  if ((ents.get(slug)?.roles || []).includes('artist')) return [1, 0, display];
+  const il = p.labelSlugs.indexOf(slug);
+  if (il >= 0) return [2, il, display];
+  return [3, 0, display];
+}
+
+function antes(a: [number, number, string], b: [number, number, string]): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]);
+}
 
 export async function buildDigests(
   env: AlertsEnv, opts: { sinceMs: number; now?: number } = { sinceMs: 24 * 60 * 60 * 1000 },
@@ -211,15 +244,46 @@ export async function buildDigests(
     try { f = JSON.parse(raw); } catch { continue; }
     if (f.emailAlerts !== true || !f.email) continue;
 
+    // La entidad de cada seguido, una sola lectura por slug.
+    const ents = new Map<string, any>();
+    for (const slug of porEntidad.keys()) {
+      const e = await getEntity(env as any, slug);
+      if (e) ents.set(slug, e);
+    }
+
+    // handle -> seguidos que lo traen, el dueno primero.
+    const traenPor = new Map<string, string[]>();
+    for (const [slug, items] of porEntidad) {
+      if (!ents.has(slug)) continue;
+      for (const p of items) {
+        const l = traenPor.get(p.handle) || [];
+        l.push(slug);
+        traenPor.set(p.handle, l);
+      }
+    }
+    for (const [handle, slugs] of traenPor) {
+      const p = porEntidad.get(slugs[0])!.find(x => x.handle === handle)!;
+      slugs.sort((a, b) => antes(rangoDueno(a, p, ents), rangoDueno(b, p, ents)));
+    }
+
     const groups: DigestGroup[] = [];
     for (const [slug, items] of porEntidad) {
-      const e = await getEntity(env as any, slug);
+      const e = ents.get(slug);
       if (!e) continue;
-      items.sort((a, b) => cuandoOrden(b) - cuandoOrden(a));
-      groups.push({ slug, display: e.display, items });
+      const mios: DigestItem[] = items
+        .filter(p => traenPor.get(p.handle)![0] === slug)
+        .map(p => {
+          const otras = traenPor.get(p.handle)!.slice(1)
+            .map(s => String(ents.get(s)?.display || s));
+          return otras.length ? { ...p, alsoFrom: otras } : p;
+        });
+      if (!mios.length) continue;
+      mios.sort((a, b) => cuandoOrden(b) - cuandoOrden(a));
+      groups.push({ slug, display: e.display, items: mios });
     }
     if (!groups.length) continue;
     groups.sort((a, b) => b.items.length - a.items.length || a.display.localeCompare(b.display));
+    // El total cuenta discos, no apariciones: es lo que promete el asunto.
     out.push({
       cid, email: f.email, token: String(f.alertToken || ''),
       groups, total: groups.reduce((n, g) => n + g.items.length, 0),
@@ -234,6 +298,12 @@ const esc = (s: string) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const precio = (p: IndexedProduct) => p.price ? `€${Number(p.price).toFixed(2)}` : '';
+
+/** "A", "A and B", "A, B and C" — se lee como lo diria una persona. */
+export function listaEn(xs: string[]): string {
+  if (xs.length <= 1) return xs[0] || '';
+  return `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+}
 
 /**
  * Mismo criterio que la tienda para decidir el boton: con stock se compra, y un
@@ -266,6 +336,7 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
           <td valign="top" style="padding-left:14px;">
             <a href="${SITE}/products/${esc(p.slug)}/" style="color:#efefef;text-decoration:none;font-size:15px;font-weight:700;">${esc(p.title)}</a>
             <div style="color:#585858;font-size:13px;padding-top:3px;">${esc(p.vendor)}</div>
+            ${p.alsoFrom?.length ? `<div style="color:#585858;font-size:12px;padding-top:2px;">also from ${esc(listaEn(p.alsoFrom))}</div>` : ''}
             <div style="padding-top:6px;font-size:13px;color:#efefef;">${precio(p)}${p.forthcoming ? ' · <span style="color:#c8ff00;font-weight:700;">PRE-ORDER</span>' : ''}</div>
             <div style="padding-top:9px;">
               <a href="${SITE}/products/${esc(p.slug)}/" style="display:inline-block;border:1px solid ${ctaFor(p).backorder ? '#c8ff00' : '#1e1e1e'};color:${ctaFor(p).backorder ? '#c8ff00' : '#efefef'};text-decoration:none;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:6px 11px;border-radius:2px;">${ctaFor(p).label}</a>
