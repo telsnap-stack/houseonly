@@ -630,6 +630,139 @@ para una pantalla que aún no existe. Si el portal acaba pidiendo historia, el
 camino está apuntado aquí y el índice se puede construir en cualquier momento a
 partir de los metafields.
 
+## Fase 6: avisos de novedades
+
+Seguir a alguien sin que te avise es una lista de deseos con otro nombre. Esto es
+lo que convierte el follow en algo que devuelve valor solo.
+
+### Qué se guarda, y dónde
+
+El interruptor vive **dentro del blob de follows**, no en una clave aparte: es un
+ajuste del mismo objeto y así no hay dos sitios que puedan contradecirse.
+
+```ts
+follow:{customerId} → {
+  entities: string[],
+  updatedAt: number,
+  emailAlerts?: boolean,     // sin definir = nunca se le ha preguntado
+  emailAlertsAt?: number,    // cuándo lo decidió, para poder auditar un alta
+  email?: string,            // su correo, capturado al decir que sí
+}
+```
+
+**El correo hay que guardarlo, y no es por comodidad.** El envío lo hace un cron
+sin sesión de nadie, y ahí el worker **no puede averiguar el correo de un
+cliente**: la Customer Account API lo da solo con la sesión del propio cliente, y
+la Admin API nos lo niega porque la Custom App no tiene el scope
+`read_customers`. Así que se captura en el momento del sí —que es cuando hay
+sesión— y se guarda junto a la decisión.
+
+Si el cliente cambia su correo en Shopify, el guardado se queda viejo. Se
+refresca en cada visita al portal, que es gratis: allí sí hay sesión.
+
+### Cuándo se pregunta
+
+**En el primer follow de un cliente, una sola vez.** No en cada follow: una
+pregunta que se repite deja de leerse y se contesta que no por reflejo.
+
+```
+  Following Omar S.
+  We'll tell you when they release something new.
+  [ Yes, email me ]   [ Not now ]
+  ☐ Also join the newsletter
+```
+
+- `emailAlerts` sin definir es lo que dispara el prompt. Contestar —cualquiera de
+  las dos— lo fija y no se vuelve a preguntar.
+- **"Not now" no es "no nunca"**: se puede encender después desde la sección
+  Following del portal, que es donde alguien va a buscarlo.
+- La casilla del newsletter va **desmarcada y aparte**, y dispara el doble
+  opt-in que ya existe. **Seguir a alguien no suscribe a nada**: son dos cosas
+  distintas y mezclarlas es como se pierde la confianza de una lista.
+
+### El envío
+
+Un job diario en el cron del worker:
+
+1. Recorre `follow:*` y se queda con los que tienen `emailAlerts: true` y correo.
+2. Calcula, del índice del catálogo, los productos **creados en las últimas 24 h**.
+   Los pre-orders cuentan: son justo la novedad que alguien quiere saber antes.
+3. Para cada producto nuevo, sus entidades; para cada entidad, sus seguidores por
+   `fanout:{slug}:*`. El índice inverso existe para esto.
+4. Un solo correo por cliente, **agrupado por entidad**, con portada, título,
+   precio y enlace. Si un cliente no tiene novedades, **no recibe nada**: un
+   correo que dice "no hay nada" es el que hace que se den de baja.
+
+```
+alertsent:{customerId}:{YYYY-MM-DD} → "1"   (TTL 60 días)
+```
+
+Se escribe **antes** de enviar, no después. Si el envío falla, ese cliente se
+queda sin aviso ese día; si se escribiera después, un fallo a mitad de tanda
+podría mandarle el mismo correo dos veces al reintentar. De los dos errores
+posibles, no avisar es el barato.
+
+### La baja
+
+Cada correo lleva **su propio enlace de baja**, que apaga `emailAlerts` y nada
+más. **No toca el newsletter**, y el enlace de baja del newsletter no toca esto.
+Son dos consentimientos distintos y se revocan por separado.
+
+```
+alerttoken:{token} → customerId     (token opaco, creado al decir que sí)
+```
+
+Un token opaco y no el `customerId` firmado: si algún día se filtra un enlace,
+lo que revela es un token que solo sirve para darse de baja.
+
+### El cron
+
+El worker de producción ya corre cada 15 minutos (Discogs + graduación) y el de
+staging **no corre nada a propósito** —se le quitó para no competir por el cupo
+de Discogs—. Así que:
+
+- Se añade una segunda expresión, diaria, y `scheduled()` **bifurca por
+  `event.cron`**: la de 15 minutos sigue haciendo lo de siempre y la diaria hace
+  solo los avisos. Sin bifurcar, activar el cron en staging devolvería el poll de
+  Discogs que se quitó.
+- En staging se activa **solo la diaria**.
+
+### Modo de prueba
+
+`meta:follow_alerts_mode` en KV: `off` (por defecto) · `test` · `live`.
+
+En `test` el job hace todo el cálculo de verdad —a quién le tocaría, qué discos,
+cómo queda el correo— pero **manda todo a una sola dirección** y no escribe el
+registro de envíos, así que se puede repetir. Es la única forma de ver el correo
+real sin usar a los clientes de cobaya.
+
+Y un `?action=follow-alerts-run` con Bearer para dispararlo a mano, porque
+esperar a un cron diario para probar un cambio no es forma de trabajar.
+
+### Decisiones abiertas
+
+1. **A qué hora.** Propongo **08:00 Europe/Madrid** (06:00 UTC en verano, 07:00
+   en invierno; el cron es UTC, así que hay que elegir una y aceptar que se
+   mueva una hora con el cambio horario). Alternativa: mandar a media tarde,
+   cuando la tienda ve más tráfico.
+2. **Diario o semanal.** El diseño es diario. Con el ritmo actual —de 0 a 20
+   discos nuevos al día— un cliente que siga a un sello grande como Deep Jungle
+   podría recibir correo casi a diario. Un resumen semanal se lee más y molesta
+   menos; un aviso diario llega antes a un pre-order que vuela. **Se puede tener
+   las dos** con un campo más en el blob, pero eso es otra pregunta que hacerle
+   al cliente.
+3. **Tope por correo.** Si alguien sigue a 30 entidades y hay 40 discos nuevos,
+   ¿se manda todo? Propongo **20 discos y un "y N más" al final**, con enlace al
+   portal.
+4. **De qué dirección sale.** Reusar `newsletter@houseonly.store` es lo simple,
+   pero mezcla reputación de envío: si alguien marca un aviso como spam, arrastra
+   al newsletter. Lo limpio es `alerts@houseonly.store`, que hay que dar de alta
+   en Resend.
+5. **Qué cuenta como "nuevo".** Ahora mismo, `createdAt` del producto en las
+   últimas 24 h. Un producto que se crea como borrador y se publica una semana
+   después no avisaría a nadie. La alternativa —marcar la primera vez que el
+   índice lo ve publicado— es más fiel pero necesita guardar ese momento.
+
 ### Eventos de artista y sello: v2, no ahora
 
 Un follow sabe *que* sacas discos, no *cuando* tocas. Lo natural cuando el
