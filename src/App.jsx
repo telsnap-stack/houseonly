@@ -11269,6 +11269,7 @@ function registerAlertsHook(fn) { askAlertsHook = fn; }
 
 const fetchAlertsState = session => portalGet('follow-alerts', { session });
 const setAlertsPref = (session, enabled) => portalSend('follow-alerts', 'POST', { session, enabled });
+const snoozeAlertsPrompt = session => portalSend('follow-alerts', 'POST', { session, snooze: true });
 
 /** El doble opt-in que ya existe. Seguir a alguien NO suscribe a nada. */
 async function joinNewsletter(email) {
@@ -11279,7 +11280,7 @@ async function joinNewsletter(email) {
 }
 
 /** El prompt de un toque. Sale una sola vez por cliente. */
-function AlertsPrompt({ display, email, session, onDone }) {
+function AlertsPrompt({ display, email, session, onDone, asked }) {
   const [busy, setBusy] = useState(false);
   const [newsletter, setNewsletter] = useState(false);   // desmarcada a proposito
 
@@ -11301,7 +11302,9 @@ function AlertsPrompt({ display, email, session, onDone }) {
           Following {display}
         </div>
         <div style={{ fontSize:15, color:S.text, lineHeight:1.5, marginBottom:18 }}>
-          We&apos;ll tell you when they release something new.
+          {asked
+            ? <>Your email alerts are off. Turn them on and we&apos;ll tell you when they release something new.</>
+            : <>We&apos;ll tell you when they release something new.</>}
         </div>
 
         <div style={{ display:'flex', gap:8, marginBottom:16 }}>
@@ -11880,12 +11883,14 @@ export default function App() {
       .catch(()=>{ /* network error — leave on home rather than crash */ });
   },[path, records]);
 
-  // El boton de seguir avisa por aqui tras un alta. Se pregunta UNA vez: si ya
-  // hay respuesta guardada —si o no— no se vuelve a molestar.
+  // El boton de seguir avisa por aqui tras un alta. Quien ya los tiene
+  // encendidos no ve nada; a quien los tiene apagados se le recuerda al seguir
+  // —es cuando tiene sentido— pero con un mes de descanso entre recordatorios.
+  // Quien manda es el servidor: `prompt` ya viene decidido en el estado.
   useEffect(()=>{
     registerAlertsHook((slug)=>{
       if (!auth?.session) return;
-      if (!alertsState || alertsState.asked) return;
+      if (!alertsState || !alertsState.prompt) return;
       fetchEntityPublic(slug, 1)
         .then(d => setAlertsPrompt({ slug, display: d?.display || slug }))
         .catch(() => setAlertsPrompt({ slug, display: slug }));
@@ -12137,7 +12142,7 @@ export default function App() {
               onLogout={handleLogout}
               onNavigate={navigate}
               alertsState={alertsState}
-              onAlertsChange={(on)=>setAlertsState(st=>({ ...(st||{}), asked:true, emailAlerts:on }))}
+              onAlertsChange={(on)=>setAlertsState(st=>({ ...(st||{}), asked:true, emailAlerts:on, prompt:false }))}
               wishSyncedAt={wishSyncedAt}
             />
           : <EntityPage
@@ -12232,13 +12237,20 @@ export default function App() {
       )}
       {alertsPrompt && auth?.session && (
         <AlertsPrompt
+          asked={alertsState?.asked === true}
           display={alertsPrompt.display}
           email={profile?.email || alertsState?.email || ''}
           session={auth.session}
           onDone={(respuesta)=>{
             setAlertsPrompt(null);
+            // Cerrarlo sin contestar no es un "no": se aparta y vuelve pasado
+            // el descanso. Sin esto reaparecia en el siguiente follow.
+            if (respuesta === null) {
+              snoozeAlertsPrompt(auth.session).catch(()=>{});
+              setAlertsState(st => ({ ...(st||{}), prompt:false }));
+            }
             // Cerrar sin responder (clic fuera) NO cuenta: se vuelve a preguntar.
-            if (respuesta !== null) setAlertsState(st => ({ ...(st||{}), asked:true, emailAlerts: respuesta === true }));
+            if (respuesta !== null) setAlertsState(st => ({ ...(st||{}), asked:true, emailAlerts: respuesta === true, prompt:false }));
           }}
         />
       )}

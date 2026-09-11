@@ -65,23 +65,53 @@ function tokenNuevo(): string {
 
 export interface AlertsState {
   emailAlerts: boolean;
-  asked: boolean;        // false = nunca se le ha preguntado; dispara el prompt
+  asked: boolean;        // false = nunca se le ha preguntado
   email: string;
+  /** true = toca ofrecerselo al seguir a alguien. Lo decide el servidor. */
+  prompt: boolean;
 }
 
-export async function getAlertsState(env: AlertsEnv, cid: string): Promise<AlertsState> {
+/**
+ * Descanso entre recordatorios. Seguir a alguien con los avisos apagados es
+ * justo el momento de ofrecerlos —acaba de decir que le importa ese artista—,
+ * pero preguntarlo en cada alta es un fastidio y acaba en "no" permanente.
+ * Un mes: suficiente para que se note el hueco, poco para que se olvide.
+ */
+export const PROMPT_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
+
+export async function getAlertsState(env: AlertsEnv, cid: string, now = Date.now()): Promise<AlertsState> {
   const raw = await env.ENTITIES.get(K.follow(cid));
-  if (!raw) return { emailAlerts: false, asked: false, email: '' };
+  if (!raw) return { emailAlerts: false, asked: false, email: '', prompt: true };
   try {
     const f = JSON.parse(raw);
+    const on = f.emailAlerts === true;
+    // El ultimo contacto sobre esto: la respuesta que dio, o el recordatorio
+    // que aparto sin contestar.
+    const ultimo = Math.max(Number(f.emailAlertsAt || 0), Number(f.alertsPromptAt || 0));
     return {
-      emailAlerts: f.emailAlerts === true,
+      emailAlerts: on,
       asked: typeof f.emailAlerts === 'boolean',
       email: String(f.email || ''),
+      prompt: !on && (!ultimo || now - ultimo >= PROMPT_COOLDOWN_MS),
     };
   } catch {
-    return { emailAlerts: false, asked: false, email: '' };
+    return { emailAlerts: false, asked: false, email: '', prompt: true };
   }
+}
+
+/**
+ * "Ahora no" sin contestar: aparta el recordatorio sin tocar la preferencia.
+ * Sin esto, cerrar el aviso lo devolvia en el siguiente follow de la misma
+ * sesion, que es exactamente el fastidio que se quiere evitar.
+ */
+export async function snoozeAlertsPrompt(env: AlertsEnv, cid: string, now = Date.now()): Promise<{ ok: true }> {
+  const raw = await env.ENTITIES.get(K.follow(cid));
+  if (!raw) return { ok: true };
+  let f: any;
+  try { f = JSON.parse(raw); } catch { return { ok: true }; }
+  f.alertsPromptAt = now;
+  await env.ENTITIES.put(K.follow(cid), JSON.stringify(f));
+  return { ok: true };
 }
 
 /**

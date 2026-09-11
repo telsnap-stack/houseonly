@@ -868,6 +868,7 @@ import {
 } from './lib/follows';
 import {
   getAlertsState,
+  snoozeAlertsPrompt,
   setEmailAlerts,
   refreshStoredEmail,
   unsubscribeByToken,
@@ -2759,6 +2760,10 @@ export default {
 
       if (isGet) return jsonRes(await getAlertsState(env, cid));
       if (request.method !== 'POST') return jsonRes({ error: 'method not allowed' }, 405);
+
+      // Cerrar el recordatorio no es contestar: se aparta y se vuelve a ofrecer
+      // pasado el descanso, sin tocar la preferencia.
+      if (body.snooze === true) return jsonRes(await snoozeAlertsPrompt(env, cid));
 
       // El correo sale de la Customer Account API, que es la unica que lo sabe,
       // y solo mientras haya sesion. Por eso se guarda al decir que si.

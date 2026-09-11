@@ -672,10 +672,29 @@ pregunta que se repite deja de leerse y se contesta que no por reflejo.
   ☐ Also join the newsletter
 ```
 
-- `emailAlerts` sin definir es lo que dispara el prompt. Contestar —cualquiera de
-  las dos— lo fija y no se vuelve a preguntar.
+- `emailAlerts` sin definir es lo que dispara el prompt la primera vez.
 - **"Not now" no es "no nunca"**: se puede encender después desde la sección
   Following del portal, que es donde alguien va a buscarlo.
+
+**Y se recuerda al seguir a alguien más, con un mes de descanso.** Alguien que
+dijo "not now" en su primer follow y hoy sigue a ocho artistas ya no está en la
+misma situación: seguir a alguien es justo el momento en que los avisos tienen
+sentido, porque acaba de decir que ese artista le importa. Pero preguntarlo en
+cada alta es un fastidio y acaba en un "no" por reflejo, así que:
+
+- quien los tiene **encendidos** no ve nada, nunca;
+- quien los tiene **apagados** vuelve a verlo al seguir a alguien, como mucho una
+  vez cada **30 días** (`PROMPT_COOLDOWN_MS`), con el texto cambiado a
+  recordatorio: *"Your email alerts are off. Turn them on and we'll tell you
+  when they release something new."*;
+- **cerrarlo sin contestar no es un "no"**: guarda `alertsPromptAt` y lo aparta
+  el mismo mes, sin tocar `emailAlerts`. Sin eso reaparecía en el siguiente
+  follow de la misma sesión, que es exactamente lo que se quiere evitar.
+
+El descanso cuenta desde el último contacto sobre el tema —la respuesta
+(`emailAlertsAt`) o el recordatorio apartado (`alertsPromptAt`), el más
+reciente—, así que apagarlos desde el portal también compra un mes de silencio.
+Quien decide es el servidor: `GET ?action=follow-alerts` devuelve `prompt`.
 - La casilla del newsletter va **desmarcada y aparte**, y dispara el doble
   opt-in que ya existe. **Seguir a alguien no suscribe a nada**: son dos cosas
   distintas y mezclarlas es como se pierde la confianza de una lista.
