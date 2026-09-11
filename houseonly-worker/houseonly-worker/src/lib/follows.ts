@@ -68,10 +68,22 @@ export async function loadFollows(env: FollowsEnv, cid: string): Promise<FollowR
   }
 }
 
+/**
+ * Guarda la lista CONSERVANDO lo demas del blob.
+ *
+ * Aqui no viven solo los slugs: la fase 6 mete en el mismo objeto la
+ * preferencia de avisos, el correo y el token de baja. Escribir `{entities,
+ * updatedAt}` a secas los borraba, asi que seguir a alguien nuevo apagaba tus
+ * avisos sin decirte nada. Paso de verdad, y no lo vio ningun test porque los
+ * tests de follows no sabian que existia la fase 6.
+ */
 async function saveFollows(env: FollowsEnv, cid: string, entities: string[]): Promise<FollowRecord> {
-  const rec: FollowRecord = { entities, updatedAt: Date.now() };
+  let previo: any = {};
+  const raw = await env.ENTITIES.get(K.follow(cid));
+  if (raw) { try { previo = JSON.parse(raw) || {}; } catch { previo = {}; } }
+  const rec = { ...previo, entities, updatedAt: Date.now() };
   await env.ENTITIES.put(K.follow(cid), JSON.stringify(rec));
-  return rec;
+  return { entities, updatedAt: rec.updatedAt };
 }
 
 /**
