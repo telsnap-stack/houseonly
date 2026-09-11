@@ -158,7 +158,8 @@ describe("el correo", () => {
 	it("corta en el tope y resume el resto", () => {
 		const html = renderAlertEmail(digest(MAX_PER_EMAIL + 7), "https://w/x");
 		expect((html.match(/<table role="presentation"/g) || []).length).toBe(MAX_PER_EMAIL);
-		expect(html).toContain("Y 7 más");
+		// El correo va en ingles, como toda la tienda de cara al cliente.
+		expect(html).toContain("And 7 more");
 	});
 
 	it("el asunto dice lo que hay, sin prometer de mas", () => {

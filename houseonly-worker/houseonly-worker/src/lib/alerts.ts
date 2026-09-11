@@ -16,12 +16,15 @@ export interface AlertsEnv extends FollowsEnv {
 }
 
 /**
- * De donde salen los avisos. Comparte dominio con el newsletter porque es el
- * que esta verificado en Resend; la decision de darle su propia direccion
- * —para que una queja de spam no arrastre a la otra lista— esta abierta en
- * docs/entities.md.
+ * Direccion propia, no la del newsletter: si alguien marca un aviso como spam,
+ * no arrastra la reputacion de la otra lista. El dominio ya esta verificado en
+ * Resend, asi que basta con el buzon.
+ *
+ * El reply-to es el de atencion de la tienda: quien conteste a un aviso espera
+ * que le lea una persona, no un buzon de envios.
  */
-const ALERTS_FROM = 'House Only <newsletter@houseonly.store>';
+const ALERTS_FROM = 'House Only <alerts@houseonly.store>';
+const ALERTS_REPLY_TO = 'info@houseonly.store';
 const SITE = 'https://houseonly.store';
 
 /** Tope de discos por correo. Lo que pase de ahi se resume en un "y N mas". */
@@ -150,13 +153,19 @@ export interface Digest {
  * Los pre-orders cuentan como novedad: son justo lo que alguien quiere saber
  * antes que nadie.
  */
+const cuandoOrden = (p: IndexedProduct) => Date.parse(p.publishedAt || p.createdAt);
+
 export async function buildDigests(
   env: AlertsEnv, opts: { sinceMs: number; now?: number } = { sinceMs: 24 * 60 * 60 * 1000 },
 ): Promise<Digest[]> {
   const now = opts.now ?? Date.now();
   const desde = now - opts.sinceMs;
   const idx = await getCatalogIndex(env, now);
-  const nuevos = idx.items.filter(p => Date.parse(p.createdAt) >= desde);
+  // Novedad = cuando se PUBLICO. Un disco creado como borrador y publicado una
+  // semana despues es novedad el dia que el cliente puede verlo. Si Shopify no
+  // da publishedAt —producto viejo, o sin publicar— manda createdAt.
+  const cuando = (p: IndexedProduct) => Date.parse(p.publishedAt || p.createdAt);
+  const nuevos = idx.items.filter(p => cuando(p) >= desde);
   if (!nuevos.length) return [];
 
   // slug efectivo → { display, productos }
@@ -203,7 +212,7 @@ export async function buildDigests(
     for (const [slug, items] of porEntidad) {
       const e = await getEntity(env as any, slug);
       if (!e) continue;
-      items.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+      items.sort((a, b) => cuandoOrden(b) - cuandoOrden(a));
       groups.push({ slug, display: e.display, items });
     }
     if (!groups.length) continue;
@@ -250,7 +259,7 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
 
   const sobran = d.total - Math.min(d.total, MAX_PER_EMAIL);
   const cola = sobran > 0
-    ? `<p style="color:#585858;font-size:13px;margin:20px 0 0;">Y ${sobran} más — <a href="${SITE}/account" style="color:#c8ff00;">míralo en tus estanterías</a>.</p>`
+    ? `<p style="color:#585858;font-size:13px;margin:20px 0 0;">And ${sobran} more — <a href="${SITE}/account" style="color:#c8ff00;">see them on your shelves</a>.</p>`
     : '';
 
   return `<!doctype html><html><body style="margin:0;background:#080808;font-family:Inter,system-ui,sans-serif;">
@@ -260,9 +269,9 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
     ${bloques.join('')}
     ${cola}
     <p style="border-top:1px solid #1e1e1e;margin:34px 0 0;padding-top:18px;color:#585858;font-size:11px;line-height:1.7;">
-      Te llega esto porque sigues a estos artistas o sellos en House Only.
-      <a href="${esc(unsubUrl)}" style="color:#585858;">Dejar de recibir avisos</a>.
-      No afecta a tu suscripción al newsletter.
+      You're getting this because you follow these artists or labels at House Only.
+      <a href="${esc(unsubUrl)}" style="color:#585858;">Stop these alerts</a>.
+      Your newsletter subscription isn't affected.
     </p>
   </div></body></html>`;
 }
@@ -294,7 +303,7 @@ async function enviar(env: AlertsEnv, to: string, subject: string, html: string)
   const r = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.RESEND_API_KEY}` },
-    body: JSON.stringify({ from: ALERTS_FROM, to, subject, html }),
+    body: JSON.stringify({ from: ALERTS_FROM, to, subject, html, reply_to: ALERTS_REPLY_TO }),
   });
   if (!r.ok) throw new Error(`resend ${r.status}: ${(await r.text()).slice(0, 160)}`);
 }

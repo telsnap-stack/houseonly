@@ -2777,9 +2777,9 @@ export default {
         `<!doctype html><meta charset="utf-8"><title>House Only</title>
          <body style="margin:0;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
          <div><p style="font-size:22px;font-weight:900;letter-spacing:-1px">HOUSE<span style="color:#c8ff00">ONLY</span></p>
-         <p style="font-size:15px">${ok ? 'Listo: no volveremos a avisarte de novedades.' : 'Ese enlace ya no vale.'}</p>
-         <p style="color:#585858;font-size:12px">Tu suscripción al newsletter no ha cambiado.</p>
-         <p style="margin-top:22px"><a href="https://houseonly.store/account" style="color:#c8ff00;font-size:12px">Volver a tus estanterías</a></p>
+         <p style="font-size:15px">${ok ? "Done — we won't email you about new releases." : "That link is no longer valid."}</p>
+         <p style="color:#585858;font-size:12px">Your newsletter subscription hasn't changed.</p>
+         <p style="margin-top:22px"><a href="https://houseonly.store/account" style="color:#c8ff00;font-size:12px">Back to your shelves</a></p>
          </div></body>`,
         { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
       );

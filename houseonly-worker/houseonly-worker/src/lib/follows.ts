@@ -230,6 +230,13 @@ export interface IndexedProduct {
   title: string;
   vendor: string;
   createdAt: string;
+  /**
+   * Cuando se publico, que es cuando el cliente puede verlo. Un disco creado
+   * como borrador y publicado una semana despues es novedad EL DIA QUE SE
+   * PUBLICA, no el dia que alguien lo tecleo. Puede venir vacio; entonces manda
+   * createdAt.
+   */
+  publishedAt: string;
   forthcoming: boolean;
   releaseDate: string;
   imageUrl: string;
@@ -250,7 +257,7 @@ const INDEX_QUERY = `
     products(first: 250, after: $cursor, sortKey: CREATED_AT, reverse: true) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id handle title vendor createdAt tags
+        id handle title vendor createdAt publishedAt tags
         featuredImage { url }
         artist: metafield(namespace: "houseonly", key: "artist_slugs") { value }
         label: metafield(namespace: "houseonly", key: "label_slugs") { value }
@@ -332,6 +339,7 @@ export async function annotate(env: FollowsEnv, nodes: any[]): Promise<IndexedPr
       title: n.title,
       vendor,
       createdAt: n.createdAt,
+      publishedAt: n.publishedAt || '',
       forthcoming: tags.some(t => String(t).toLowerCase() === 'forthcoming'),
       releaseDate: tagValue(tags, /^\s*release\s*:\s*(.+)$/i),
       imageUrl: n.featuredImage?.url || '',
