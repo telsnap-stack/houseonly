@@ -23,10 +23,23 @@ const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 const SHOPIFY_TOKEN  = process.env.VITE_SHOPIFY_TOKEN || '3edf470af24f9bd4b81bca274121eec4';
 const SHOPIFY_API    = '2024-01';
 const DIST_DIR = 'dist';
-// Fase 5b: de donde salen las entidades para prerenderizar sus fichas. Apunta
-// al worker de staging mientras la fase 5a no este en produccion; cuando suba,
-// el valor por defecto pasa a ser el worker de prod.
-const ENTITY_WORKER = process.env.VITE_WORKER_URL || 'https://houseonly-worker-staging.emontagut.workers.dev';
+// De donde salen las entidades para prerenderizar sus fichas. Pages define
+// VITE_WORKER_URL en los dos entornos —staging en el preview, prod en
+// produccion—; el valor por defecto es el de prod, que es lo correcto para
+// cualquier build que no sea el del preview.
+const ENTITY_WORKER = process.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
+
+/**
+ * Una ficha con uno o dos discos no merece estar en el indice de Google: son
+ * 1311 de 1475, y mil trescientas paginas casi vacias es justo lo que se
+ * penaliza como relleno, arrastrando al dominio entero. Se generan igual —para
+ * navegar y para compartir— pero piden no ser indexadas.
+ *
+ * `follow` y no `nofollow`: que los rastreadores sigan los enlaces a los
+ * productos, que esos si valen.
+ */
+const MIN_DISCOS_INDEXABLE = 3;
+const esIndexable = e => (e.total || 0) >= MIN_DISCOS_INDEXABLE;
 
 // ── Slug helpers (mirror App.jsx exactly) ───────────────────────
 function slugify(str) {
@@ -309,7 +322,8 @@ function renderEntityHtml(template, e) {
   // canonical de la plantilla y se inyecta el bloque entero. La plantilla no
   // trae <meta name="description">, asi que sustituirla no valdria de nada.
   const seoHead = `  <title>${escapeHtml(title)}</title>
-  <meta name="description" content="${escapeHtml(desc)}" />
+  <meta name="description" content="${escapeHtml(desc)}" />${esIndexable(e) ? '' : `
+  <meta name="robots" content="noindex,follow" />`}
   <link rel="canonical" href="${url}" />
   <meta property="og:type" content="profile" />
   <meta property="og:title" content="${escapeHtml(title)}" />
@@ -336,7 +350,9 @@ function renderSitemap(products, entities = []) {
     ...products.map(p =>
       `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
     ),
-    ...entities.map(e =>
+    // Solo las indexables: pedir que no se indexe y a la vez listarla en el
+    // sitemap son dos ordenes contradictorias.
+    ...entities.filter(esIndexable).map(e =>
       `<url><loc>${SITE_URL}/${entityDir(e)}/${e.slug}/</loc><lastmod>${today}</lastmod><priority>0.6</priority></url>`
     ),
   ];
@@ -389,7 +405,8 @@ async function main() {
       writeFileSync(out, renderEntityHtml(template, ent));
       e++;
     }
-    console.log(`[prerender] Wrote ${e} entity pages`);
+    const indexables = entities.filter(esIndexable).length;
+    console.log(`[prerender] Wrote ${e} entity pages (${indexables} indexable, ${e - indexables} noindex)`);
   } catch (err) {
     console.warn(`[prerender] ⚠ entity pages skipped: ${err.message}`);
   }
