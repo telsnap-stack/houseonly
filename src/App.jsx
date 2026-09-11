@@ -3,6 +3,8 @@ import { useState, useRef, useEffect, useMemo, createContext, useContext, useCal
 // Es el MISMO modulo que usan el script de definiciones y el backfill, no una
 // copia: Vite resuelve el .ts del worker y lo mete en el bundle.
 import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
+// Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
+import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -2015,11 +2017,14 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
             {/* Fase 5b: el sello y el artista llevan a su ficha de entidad. Si el
                 nombre no resuelve, EntityLink pinta el texto de siempre. */}
-            <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>
-              <EntityLink kind="label" raw={r.label} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} /> · {r.catalog}
+            {/* El sello con su control; el catno baja a su propia linea para que
+                el control no lo empuje fuera de la vista en movil. */}
+            <div style={{ fontSize:11, color:S.muted, letterSpacing:1, marginBottom:6, lineHeight:2 }}>
+              <EntityLink kind="label" raw={r.label} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} />
             </div>
+            {r.catalog && <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>{r.catalog}</div>}
             <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
-            <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>
+            <div style={{ fontSize:12, color:S.muted, marginBottom:12, lineHeight:2 }}>
               <EntityLink kind="artist" raw={r.artist} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} />
             </div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
@@ -2740,7 +2745,13 @@ function cleanSourceNotes(text) {
     s = keep.join('\n');
   }
 
-  // 6) Safe ligature fixes — only apply where the join is unambiguous:
+  // 6a) Ligaduras tipograficas de verdad, las que el PDF trae como UN caracter
+  // (U+FB00–U+FB06). Esto no adivina nada: son equivalencias exactas. Si no se
+  // deshacen aqui, el caracter viaja hasta Shopify y cualquier paso que no sea
+  // UTF-8 limpio lo convierte en "?" — que es como aparecio "Ancient In?nity".
+  s = normalizeLigatures(s);
+
+  // 6b) Safe ligature fixes — only apply where the join is unambiguous:
   // a letter, then space, then a ligature pair, then space, then a lowercase letter.
   // Catches "Pfei ff er" → "Pfeiffer" but doesn't touch "She fi nished"
   // (which would need a dictionary to resolve correctly).
@@ -2819,6 +2830,10 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
 
   // Source notes — included only if they pass quality checks
   const cleaned = cleanSourceNotes(sourceNotes);
+  const sospechosas = suspectLigatureDamage(cleaned);
+  if (sospechosas.length) {
+    console.warn(`[ligaduras] "${String(title || '').slice(0, 40)}": ${sospechosas.join(', ')} — revisar antes de subir`);
+  }
   if (notesPassQualityCheck(sourceNotes, cleaned)) {
     const paragraphs = cleaned.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
     parts.push(...paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`));
@@ -10989,7 +11004,13 @@ function ILink({ to, onNavigate, children, style }) {
 }
 
 /** Boton de seguir. Sin sesion manda a entrar y vuelve a esta misma pagina. */
-function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md' }) {
+/**
+ * `tone`: 'primary' solo en la ficha de entidad, donde seguir ES la accion de la
+ * pagina. En la ficha de producto y en el portal va en secundario: el unico
+ * bloque amarillo de una ficha tiene que ser Add to Cart, o compiten dos
+ * llamadas a la accion y gana la que no vende.
+ */
+function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md', tone = 'secondary' }) {
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState(following);
   useEffect(() => { setState(following); }, [following]);
@@ -11008,14 +11029,18 @@ function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md' }
     } finally { setBusy(false); }
   };
 
-  const pad = size === 'sm' ? '5px 10px' : '9px 16px';
+  const pad = size === 'sm' ? '4px 9px' : '9px 16px';
+  const solido = tone === 'primary' && !state;
   return (
     <button onClick={click} disabled={busy} style={{
-      background: state ? 'transparent' : S.accent, color: state ? S.accent : S.bg,
-      border: `1px solid ${state ? S.border : S.accent}`, borderRadius:2, cursor: busy ? 'wait' : 'pointer',
+      background: solido ? S.accent : 'transparent',
+      color: solido ? S.bg : (state ? S.accent : S.text),
+      border: `1px solid ${solido ? S.accent : (state ? S.accent : S.border)}`,
+      borderRadius:2, cursor: busy ? 'wait' : 'pointer',
       fontFamily:'inherit', fontWeight:700, fontSize: size === 'sm' ? 9 : 10, letterSpacing:1.5,
       textTransform:'uppercase', padding:pad, whiteSpace:'nowrap', opacity: busy ? 0.6 : 1,
-    }}>{state ? 'Following' : 'Follow'}</button>
+      verticalAlign:'middle', lineHeight:1.6,
+    }}>{state ? '✓ Following' : '+ Follow'}</button>
   );
 }
 
@@ -11316,7 +11341,7 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigat
             {data.parent ? ' · sub-label' : ''}
           </div>
         </div>
-        <FollowButton slug={data.slug} following={following} auth={auth} onSignIn={onSignIn} onChange={onFollowChange} />
+        <FollowButton slug={data.slug} following={following} auth={auth} onSignIn={onSignIn} onChange={onFollowChange} tone="primary" />
       </div>
 
       {!!(data.aliases || []).length && (
@@ -11352,21 +11377,19 @@ function EntityLink({ kind, raw, onNavigate, style, auth, onSignIn, followSlugs,
   }, [kind, raw]);
 
   if (!ents?.length) return <span style={style}>{raw}</span>;
+  // Cada nombre con SU control al lado. Con un split de dos artistas, los
+  // botones agrupados al final no dicen cual es cual.
+  // El nombre puede romper linea sin arrastrar al boton: el par va en un
+  // inline-flex propio que no se parte por dentro.
   return (
-    <span style={{ display:'inline-flex', alignItems:'center', gap:8, flexWrap:'wrap', ...style }}>
-      <span>
-        {ents.map((e, i) => (
-          <span key={e.slug}>
-            {i > 0 ? ' & ' : ''}
-            <ILink to={entityPath(e)} onNavigate={onNavigate} style={{ borderBottom:`1px solid ${S.border}` }}>{e.display}</ILink>
-          </span>
-        ))}
-      </span>
-      {/* Seguir sin salir de la ficha: el enlace sigue llevando a la entidad,
-          pero para seguir no hace falta ir hasta alli. */}
-      {ents.map(e => (
-        <FollowButton key={`f-${e.slug}`} slug={e.slug} following={(followSlugs || []).includes(e.slug)}
-          auth={auth} onSignIn={onSignIn} onChange={onFollowChange} size="sm" />
+    <span style={{ display:'inline', ...style }}>
+      {ents.map((e, i) => (
+        <span key={e.slug} style={{ display:'inline-flex', alignItems:'center', gap:7, marginRight:8, maxWidth:'100%' }}>
+          {i > 0 ? <span style={{ marginRight:4 }}>&amp;</span> : null}
+          <ILink to={entityPath(e)} onNavigate={onNavigate} style={{ borderBottom:`1px solid ${S.border}`, overflowWrap:'anywhere' }}>{e.display}</ILink>
+          <FollowButton slug={e.slug} following={(followSlugs || []).includes(e.slug)}
+            auth={auth} onSignIn={onSignIn} onChange={onFollowChange} size="sm" />
+        </span>
       ))}
     </span>
   );
