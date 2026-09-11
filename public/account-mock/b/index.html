@@ -1,0 +1,1058 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Account — Editorial radar · HOUSE ONLY (mockup)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+:root{
+  --bg:#0A0A0A; --surf:#111; --border:#1e1e1e; --text:#efefef; --muted:#585858; --acid:#D4FF00;
+}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+/* barra de la maqueta, no forma parte del diseño */
+.mockbar{background:#161600;border-bottom:1px solid #2a2a00;padding:7px 20px;font-size:10px;letter-spacing:1.5;text-transform:uppercase;color:#8a8a4a;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.mockbar b{color:var(--acid);font-weight:700}
+.mockbar a{border:1px solid #2a2a00;padding:3px 9px;border-radius:2px}
+.mockbar a:hover{border-color:var(--acid);color:var(--acid)}
+
+nav.site{position:sticky;top:0;z-index:200;background:rgba(10,10,10,0.96);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px}
+.logo{font-weight:900;letter-spacing:-1;line-height:0.86;font-size:23px}
+.logo span{color:var(--acid);display:block}
+.pill{background:none;border:1px solid var(--border);color:var(--muted);font:inherit;font-size:9px;letter-spacing:1.5;text-transform:uppercase;padding:6px 12px;border-radius:2px;cursor:pointer}
+.pill.on{border-color:var(--acid);color:var(--acid)}
+.navr{display:flex;gap:8px;align-items:center}
+
+h1.page{font-size:26px;font-weight:800;letter-spacing:-0.4px;margin:34px 0 4px}
+p.sub{color:var(--muted);font-size:13px;margin:0 0 26px}
+h2.sec{font-size:10px;letter-spacing:2.4px;text-transform:uppercase;color:var(--muted);margin:38px 0 14px;font-weight:600}
+
+/* siguiendo */
+.follows{display:flex;gap:10px;flex-wrap:wrap}
+.fchip{display:flex;align-items:center;gap:10px;border:1px solid var(--border);background:var(--surf);border-radius:2px;padding:9px 13px}
+.fchip .nm{font-size:13px;font-weight:600}
+.fchip .ct{font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase}
+.fchip .x{color:var(--muted);font-size:11px;border:1px solid var(--border);border-radius:2px;padding:2px 7px;margin-left:4px}
+
+.tag{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;padding:2px 6px;border-radius:2px;white-space:nowrap}
+.tag.in{color:#7d9e00;border:1px solid #2a3300}
+.tag.out{color:var(--muted);border:1px solid var(--border)}
+.tag.pre{color:#0A0A0A;background:var(--acid);font-weight:700}
+.via{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--acid);border:1px solid #2a3300;border-radius:2px;padding:2px 6px;white-space:nowrap}
+.price{font-size:13px;font-weight:600;white-space:nowrap}
+.cart{background:none;border:1px solid var(--border);color:var(--text);font:inherit;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:7px 12px;border-radius:2px;cursor:pointer;white-space:nowrap}
+.cart:hover{border-color:var(--acid);color:var(--acid)}
+
+/* estado vacio */
+.empty{border:1px solid var(--border);background:var(--surf);border-radius:3px;padding:40px 28px;text-align:center}
+.empty h3{font-size:20px;font-weight:800;margin:0 0 10px}
+.empty p{color:var(--muted);font-size:13px;line-height:1.7;margin:0 auto 26px;max-width:440px}
+.sugtitle{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:22px 0 12px}
+.sugs{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.sug{display:flex;align-items:center;gap:9px;border:1px solid var(--border);background:var(--bg);border-radius:2px;padding:8px 12px}
+.sug .r{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)}
+.sug .n{font-size:13px;font-weight:600}
+.sug .f{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--acid);border:1px solid #2a3300;border-radius:2px;padding:3px 8px}
+
+/* conmutador feed / vacio: solo CSS, sin logica */
+.sw{display:none}
+.swbar{display:flex;gap:6px;margin:8px 0 0}
+.swbar label{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border:1px solid var(--border);border-radius:2px;padding:6px 12px;cursor:pointer}
+#feed:checked~.swbar label[for=feed],#vacio:checked~.swbar label[for=vacio]{border-color:var(--acid);color:var(--acid)}
+#feed:checked~.pane-vacio,#vacio:checked~.pane-feed{display:none}
+
+footer.site{border-top:1px solid var(--border);padding:24px 20px;text-align:center;margin-top:64px}
+footer.site .tag2{font-size:9px;color:var(--muted);letter-spacing:3px}
+footer.site .links{margin-top:14px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+footer.site .links a{font-size:9px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase}
+footer.site .links a:hover{color:var(--acid)}
+@media(max-width:640px){ h1.page{font-size:21px} .wrap{padding:0 14px} }
+
+.dayhead{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;border-bottom:1px solid var(--border);padding-bottom:12px;margin:44px 0 22px}
+.dayhead .big{font-size:30px;font-weight:800;letter-spacing:-0.6px}
+.dayhead .n{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:26px 20px}
+.card .cv{width:100%;aspect-ratio:1;object-fit:cover;background:#1a1a1a;border-radius:2px}
+.card .meta{padding-top:11px;display:flex;flex-direction:column;gap:5px}
+.card .tt{font-size:13px;font-weight:700;line-height:1.35}
+.card .ar{font-size:12px;color:var(--muted)}
+.card .btm{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:5px}
+@media(max-width:640px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:20px 14px}.dayhead .big{font-size:22px}}
+</style>
+</head><body>
+<div class="mockbar"><b>Mockup B</b> <span>Editorial radar — static, no logic · real data: customer 24893619962240 following Omar S + Deep Jungle</span> <a href="../a/">A · dense list</a><a href="../c/">C · shelves</a></div>
+<nav class="site">
+  <div class="logo">HOUSE<span>ONLY</span></div>
+  <div class="navr"><button class="pill">← Shop</button><button class="pill on">Account</button></div>
+</nav>
+<div class="wrap">
+<h1 class="page">Your feed</h1><p class="sub">103 records from the artists and labels you follow · last 90 days</p>
+<input class="sw" type="radio" name="st" id="feed" checked><input class="sw" type="radio" name="st" id="vacio">
+<div class="swbar"><label for="feed">Feed</label><label for="vacio">Empty state</label></div>
+<div class="pane-feed">
+<h2 class="sec">Following · 2</h2>
+<div class="follows">
+  <div class="fchip"><span class="nm">Omar S</span><span class="ct">Artist · 11 records</span><span class="x">Unfollow</span></div><div class="fchip"><span class="nm">Deep Jungle</span><span class="ct">Label · 94 records</span><span class="x">Unfollow</span></div>
+  <div class="fchip" style="border-style:dashed"><span class="nm" style="color:var(--muted)">+ Follow an artist or label</span></div>
+</div>
+<div class="dayhead"><div class="big">Thu 23 Jul</div><div class="n">94 new for you</div></div>
+<div class="grid">
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT105.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Combiner One / Pom Pom Inna Dance / Survival / No Violence Here</div>
+      <div class="ar">Phineus II</div>
+      <div class="btm"><span class="price">€25.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/JIG001.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Meantime / On My Own</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€25.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/JIG003.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Run It / Redlight / We Enter</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT008.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Red / Temple Of Heaven</div>
+      <div class="ar">Harmony &amp; Xtreme</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT029.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Abbey Road / Ever More</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT031.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">I Can&#39;t Stop / Bee</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT032.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Murder Style / You</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT035.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">New World Order / Bulletproof</div>
+      <div class="ar">Phantom Image</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT036.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Mother / Your Goal / Fly With Me</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT037.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Reggae Music / The Beautiful / Searchin</div>
+      <div class="ar">Tech Itch</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT038.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Digging / I Like It / Who Are You</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT039.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Peggy / Boomerang Ragga / Knockout Noels / Dog &amp; Bone</div>
+      <div class="ar">Phineus II</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT040.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Say Go / All On Me / Late Coffee</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT041.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Eastern Temple / Troposphere / Seeeeeen! / On The Flex</div>
+      <div class="ar">Tim Reaper</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT042.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Get Down / Dreaming / Caulk</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT043.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Life Of Music / Look Around / Future Sons Of Bass</div>
+      <div class="ar">Kid Lib</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT044.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Oxy (ft. Peppa) / Photing / Divine Toll</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT045.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Three Gold Chains / Snakes N Ladders / Under Kontrol</div>
+      <div class="ar">Phineus II</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT046.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Living In The Zone / The Warning / Don&#39;t Make Me Wait</div>
+      <div class="ar">Kid Lib</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT047.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Just Rollin A Fat &quot;B&quot; / I Got You (Ezee Boy)</div>
+      <div class="ar">Pascal</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT048.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Inception / Gravity</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT050.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Moving Along / Crazy Eyes</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT053.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Tranquility To Earth / Intalect VIP</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT055.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Lost Entity</div>
+      <div class="ar">DJ Trace</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT056.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Radiance / Alone</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT057.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Aquatics EP</div>
+      <div class="ar">Dwarde &amp; Tim Reaper</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT058.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Luna / Mystical</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT059.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Experience / I Can&#39;t Understand</div>
+      <div class="ar">DJ Crystl</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT060.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">New Hope / Your All</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT061.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Intalect (Remix) / Sample &amp; Hold</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT062.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Stop That / Poison Arrow</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€25.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT063.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Coffee EP</div>
+      <div class="ar">DJ Trace</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT064.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">We Run It / No Other Way</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT066.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Ikigai / Can You Hear Me</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT067.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Fantasy EP</div>
+      <div class="ar">Ricky Force</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT068.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Come With Me / Forever Young / Alpen</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT069.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Crystlize &#39;94 / Live</div>
+      <div class="ar">DJ Crystl</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT070.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">In My Soul / Balance</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT071.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Nosebleed EP</div>
+      <div class="ar">Pascal</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT072.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Enchanted / Over / Fire / Hypnotising</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT073.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Don Bad Man EP</div>
+      <div class="ar">DJ Trace &amp; Ed Rush</div>
+      <div class="btm"><span class="price">€25.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT074.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Return / Sweet Dreams / Abbey Road (Orca Remix)</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT075.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">So True EP</div>
+      <div class="ar">Dwarde</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT076.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Blissful Solace / Only One / Believe</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT078.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Roundabout / Let Me In (Remix) / All Your Dreams</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT079.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">By Any Means Necessary (Mixes)</div>
+      <div class="ar">DJ Trace</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT080.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Pipe &amp; Slippers / Murder / I Need You</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT081.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Miles High / After Hours (+ Nine Windows Remixes)</div>
+      <div class="ar">DJ Trace</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT082.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">You Got / Think About It / Transit</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT083.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">The Deep EP</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT084.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Last Tune / City Of Gold</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT085.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Test /2/ EP</div>
+      <div class="ar">Dillinja</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT086.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Hold It / Star Chaser</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT087.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Band Of Gold / Nocturnal</div>
+      <div class="ar">Danny C &amp; Mike Pears</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT088-C-D.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Fantasy / Rhodes Tune</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT089.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">What Kind Of World / Camyx / Echoes</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT090.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Now Massive / Ohh Baby</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT091.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Low Cut Jeans EP</div>
+      <div class="ar">Artificial Red</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT092.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">In The Morning / Yummy</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT093.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Controlling Us / High Time / My Voice</div>
+      <div class="ar">Kid Lib</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT094.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">NY Soul / Sade</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT095.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Fire Feeler / Dressback / Future</div>
+      <div class="ar">Harmony &amp; Kid Lib</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT096.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Take Me Up / Sirens</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT097.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">9 Lives EP</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT098.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Burn It Down / Room To Move</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT099.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">The Truth / I Feel It / Forever Amen</div>
+      <div class="ar">Danny C &amp; Mike Pears</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT100.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">New World / Buss Up / Free You</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT101.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Rass Clart Money EP</div>
+      <div class="ar">Dubtronix</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT102.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Gonna Be / Feelin / Cobweb Sound</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT103.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">The Groove / The Groove (Bad Man Mix)</div>
+      <div class="ar">Devious D</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT104.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Sympathy / Alright / Gallows / The Way I Feel</div>
+      <div class="ar">Harmony X Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT106.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Destiny / Listen / Healing</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT107.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Majestic B Line EP</div>
+      <div class="ar">Dillinja</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT108.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Remixes EP (When You Hold Me / Normal Function / Rage)</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT109.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Archangel / Reef / Be Right There</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT110.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Pearshape / Fog Of War / Pufferfish / Mixed Bag</div>
+      <div class="ar">Tim Reaper</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT111.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Harmony EP (Keep On / Drift)</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT112.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">DJ Trace EP (Lost Entity Remixes)</div>
+      <div class="ar">DJ Trace</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT113.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Vision / Dogs / Wrong Turn</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT114.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Dancing With Dolphins Vol. 2</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT115.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Kookaburra / Horns / Late Coffee Remix</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT116.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Pulse / Get Hyper / Like Dat</div>
+      <div class="ar">DJ Fokus</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT117.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Ecstasy / Solar / Kaos</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT118.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Euphoria / Eden / Angels In Rhythm / Angels In Dub</div>
+      <div class="ar">Future Sound Of Hardcore</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT119.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Freeze / Darkside</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT120.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Long Distance (Promised Land VIP) / Sky High / Summers Edge / Full Of Stars</div>
+      <div class="ar">Voyager</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT121.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Give It To Me / Better Know / Moving</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT122.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Back To The Jungle / Separate Reality / Sky Hook</div>
+      <div class="ar">Orca</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT123.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Come On / Summer Is Gone / Be Mine</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT002LP.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Resurgence Episode 2</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€60.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT004LP.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Evolution</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€60.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT001LP.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Resurgence LP</div>
+      <div class="ar">Harmony</div>
+      <div class="btm"><span class="price">€60.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT088-A-B.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Mash Up / Spaced Out</div>
+      <div class="ar">Subjects</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/DAT124.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Deep Jungle</span></div>
+      <div class="tt">Living In The Zone Remix / A New Start / Dubplate Chop / Feel 4 U</div>
+      <div class="ar">Kid Lib</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag out">Sold out</span></div>
+    </div>
+  </div>
+</div>
+<div class="dayhead"><div class="big">Wed 24 Jun</div><div class="n">9 new for you</div></div>
+<div class="grid">
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS891.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Something Real ft Desire</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€18.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Pain E.P.</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€21.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS432Z.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Psychotic Photosynthesis (No Drum Mix)</div>
+      <div class="ar">Omar s</div>
+      <div class="btm"><span class="price">€12.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">1 Out Of 853 Beats / Hot Ones Echo Thru The Ghetto (7&quot;)</div>
+      <div class="ar">Omar-S</div>
+      <div class="btm"><span class="price">€12.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Can&#39;t Get</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS2021.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Conant Gardens Party Store</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€13.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS2020.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">Record Packer Soundtrack Part 4 (7&quot;)</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€13.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS111.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">111</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€20.99</span><span class="tag in">1 in stock</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <img class="cv" loading="lazy" src="https://cdn.shopify.com/s/files/1/0990/0893/8368/files/AOS1105.jpg?width=420" alt="">
+    <div class="meta">
+      <div><span class="via">via Omar S</span></div>
+      <div class="tt">All The Little Hands Around</div>
+      <div class="ar">Omar S</div>
+      <div class="btm"><span class="price">€16.99</span><span class="tag in">2 in stock</span></div>
+    </div>
+  </div>
+</div></div>
+<div class="pane-vacio">
+<h2 class="sec">Following · 0</h2>
+<div class="follows">
+  <div class="fchip" style="border-style:dashed"><span class="nm" style="color:var(--muted)">+ Follow an artist or label</span></div>
+</div><h2 class="sec">Feed</h2>
+<div class="empty">
+  <h3>Your feed is empty</h3>
+  <p>Follow the artists and labels you care about and every new record of theirs lands here — pre-orders included, before they go public.</p>
+  <div class="sugtitle">From your wishlist</div>
+  <div class="sugs">
+    <div class="sug"><span class="r">Artist</span><span class="n">Soul Intent</span><span class="f">Follow</span></div>
+    <div class="sug"><span class="r">Label</span><span class="n">Mooncraft</span><span class="f">Follow</span></div>
+  </div>
+  <div class="sugtitle">Most stocked in the shop</div>
+  <div class="sugs">
+    <div class="sug"><span class="r">Label</span><span class="n">Deep Jungle</span><span class="ct" style="font-size:10px;color:var(--muted)">94</span><span class="f">Follow</span></div><div class="sug"><span class="r">Label</span><span class="n">Fokuz Recordings</span><span class="ct" style="font-size:10px;color:var(--muted)">81</span><span class="f">Follow</span></div><div class="sug"><span class="r">Label</span><span class="n">Rawax</span><span class="ct" style="font-size:10px;color:var(--muted)">36</span><span class="f">Follow</span></div><div class="sug"><span class="r">Artist</span><span class="n">Harmony</span><span class="ct" style="font-size:10px;color:var(--muted)">30</span><span class="f">Follow</span></div><div class="sug"><span class="r">Artist</span><span class="n">Calibre</span><span class="ct" style="font-size:10px;color:var(--muted)">28</span><span class="f">Follow</span></div><div class="sug"><span class="r">Label</span><span class="n">Chiwax</span><span class="ct" style="font-size:10px;color:var(--muted)">25</span><span class="f">Follow</span></div>
+  </div>
+</div></div></div>
+<footer class="site">
+  <span class="tag2">HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
+  <div class="links"><a>Privacy Policy</a><a>Terms of Service</a><a>Returns &amp; Refunds</a><a>Shipping Policy</a><a>Legal Notice</a><a>Contact</a></div>
+</footer>
+</body></html>
