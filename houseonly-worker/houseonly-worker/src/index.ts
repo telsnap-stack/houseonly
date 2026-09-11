@@ -861,6 +861,16 @@ import {
   handleEntityGet,
 } from './lib/entities';
 
+// Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
+import {
+  listFollows,
+  addFollow,
+  removeFollow,
+  mergeFollows,
+  buildFeed,
+  entityPage,
+} from './lib/follows';
+
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 
 import {
@@ -2631,6 +2641,59 @@ export default {
       }
 
       return jsonRes({ error: 'method not allowed' }, 405);
+    }
+
+    // ── FOLLOWS Y FEED (fase 5a) ─────────────────────────────
+    // Misma autenticacion que la wishlist, a proposito: mismo id numerico de
+    // Shopify, misma resolveCustomerId, y por tanto el mismo merge
+    // invitado→logueado que ya funciona.
+    if (action === 'follows' || action === 'follows-merge' || action === 'feed') {
+      const isGet = request.method === 'GET';
+      let body: any = {};
+      if (!isGet) {
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      }
+      const session = isGet ? (url.searchParams.get('session') || '') : (body.session || '');
+      const token   = isGet ? (url.searchParams.get('token')   || '') : (body.token   || '');
+      const cid = await resolveCustomerId(env, { session, token });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      if (action === 'feed') {
+        if (!isGet) return jsonRes({ error: 'method not allowed' }, 405);
+        const feed = await buildFeed(env, cid, {
+          days: url.searchParams.get('days'),
+          limit: url.searchParams.get('limit'),
+          cursor: url.searchParams.get('cursor') || '',
+        });
+        return jsonRes(feed);
+      }
+
+      if (action === 'follows-merge') {
+        if (request.method !== 'POST') return jsonRes({ error: 'method not allowed' }, 405);
+        const incoming = Array.isArray(body.entities) ? body.entities : [];
+        return jsonRes(await mergeFollows(env, cid, incoming));
+      }
+
+      if (isGet) return jsonRes(await listFollows(env, cid));
+
+      if (request.method === 'POST' || request.method === 'DELETE') {
+        const res = request.method === 'POST'
+          ? await addFollow(env, cid, body.slug)
+          : await removeFollow(env, cid, body.slug);
+        if ('error' in res) return jsonRes({ error: res.error }, res.status);
+        return jsonRes(res);
+      }
+
+      return jsonRes({ error: 'method not allowed' }, 405);
+    }
+
+    // Ficha publica de una entidad. Sin Bearer: es lo que pintara la tienda.
+    if (action === 'entity-public' && request.method === 'GET') {
+      const page = await entityPage(env, url.searchParams.get('slug') || '', {
+        limit: url.searchParams.get('limit'),
+      });
+      if (!page) return jsonRes({ error: 'unknown entity' }, 404);
+      return jsonRes(page);
     }
 
     // ── POST: upload file to R2 ──────────────────────────────
