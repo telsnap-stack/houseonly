@@ -2176,7 +2176,7 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
 }
 
 // ── ACCOUNT DRAWER ─────────────────────────────────────────────
-function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout, openView, onOpenViewUsed }) {
+function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout }) {
   // Orders panel state
   const [view, setView] = useState('home'); // home | orders
   const [orders, setOrders] = useState(null); // null = not loaded, [] = empty
@@ -2205,18 +2205,6 @@ function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout, openV
     if (orders === null) loadOrders();
   };
 
-  // El portal enlaza a "My Orders": el cajon se abre ya en esa vista en vez de
-  // obligar a un toque mas. Se consume una sola vez para que cerrarlo y volver
-  // a abrirlo desde el icono siga llevando a la home del cajon.
-  useEffect(() => {
-    if (open && openView === 'orders') {
-      goToOrders();
-      onOpenViewUsed?.();
-    }
-    // goToOrders y onOpenViewUsed se recrean en cada render; meterlos en las
-    // dependencias haria que esto se disparase en bucle.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, openView]);
 
   // Header text varies by view
   const headerLabel = !auth ? 'Sign In' : (view === 'orders' ? 'My Orders' : 'My Account');
@@ -11138,10 +11126,19 @@ function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
 }
 
 /** /account — la home del portal. Solo con sesion. */
-function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate, wishSyncedAt }) {
+function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt, onLogout }) {
   const isMobile = useIsMobile(720);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
+  // Los pedidos se ven aqui dentro, no en un cajon lateral. El cajon tiene
+  // sentido mientras navegas discos —no te saca de donde estabas—, pero en el
+  // propio portal ese razonamiento se da la vuelta: aqui ya estas en tu cuenta.
+  // shelves | artists | labels | orders. Separar artistas de sellos es gratis
+  // —es la misma lista filtrada por rol— y es como la gente piensa en lo que
+  // sigue: "mis artistas" y "mis sellos", no "mis entidades".
+  const [view, setView] = useState('shelves');
+  const [orders, setOrders] = useState(null);
+  const [ordersErr, setOrdersErr] = useState('');
   // `loading` se deduce, no se guarda: un setState al entrar en el efecto
   // dispara un render de mas por cada carga.
   const loading = !data && !err;
@@ -11167,6 +11164,15 @@ function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate,
     fetchAccountHome(auth.session).then(setData).catch(() => {});
   };
 
+  const verPedidos = () => {
+    setView('orders');
+    if (orders === null && auth?.session) {
+      customerOrders(auth.session)
+        .then(setOrders)
+        .catch(() => setOrdersErr('Could not load your orders.'));
+    }
+  };
+
   if (!auth?.session) {
     return (
       <div style={{ maxWidth:520, margin:'0 auto', padding:'64px 20px', textAlign:'center' }}>
@@ -11179,34 +11185,80 @@ function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate,
     );
   }
 
-  const shelves = data?.shelves || [];
+  const todas = data?.shelves || [];
+  const shelves = view === 'artists' ? todas.filter(s => (s.roles||[]).includes('artist'))
+    : view === 'labels' ? todas.filter(s => (s.roles||[]).includes('label'))
+    : todas;
   return (
     <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
       {/* color explicito: index.css pinta los h1 con --text-h, que sobre el
           fondo negro de la tienda se lee como azul oscuro sobre negro. */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
-        <h1 style={{ fontSize:isMobile?21:26, fontWeight:800, letterSpacing:'-0.4px', margin:0, color:S.text }}>Your shelves</h1>
+        <div style={{ display:'flex', alignItems:'center', gap:12, minWidth:0 }}>
+          {/* El logo tambien vuelve, pero sin un camino escrito nadie lo prueba. */}
+          <ILink to="/" onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.muted, border:`1px solid ${S.border}`, borderRadius:2, padding:'6px 11px', whiteSpace:'nowrap' }}>← Shop</ILink>
+          <h1 style={{ fontSize:isMobile?21:26, fontWeight:800, letterSpacing:'-0.4px', margin:0, color:S.text }}>
+            {view === 'orders' ? 'Your orders' : view === 'artists' ? 'Your artists' : view === 'labels' ? 'Your labels' : 'Your shelves'}
+          </h1>
+        </div>
         {/* Lo demas de la cuenta vive en el cajon: aqui solo se enlaza, no se
             repite. Van en la fila del titulo, con el mismo peso que el resto de
             controles secundarios de la tienda. */}
-        <div style={{ display:'flex', gap:6 }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
           <Btn ch="Wishlist" variant="ghost" onClick={onOpenWishlist} />
-          <Btn ch="My Orders" variant="ghost" onClick={onOpenOrders} />
+          <Btn ch="Sign Out" variant="ghost" onClick={onLogout} />
         </div>
       </div>
+      {/* Las secciones del portal. La wishlist sigue en su cajon a proposito:
+          ahi se añade al carrito y se quita, y duplicarla aqui seria tener dos
+          sitios donde hacer lo mismo. */}
+      <div style={{ display:'flex', gap:6, flexWrap:'wrap', margin:'16px 0 2px' }}>
+        {[['shelves','Shelves',todas.length],
+          ['artists','Artists',todas.filter(x=>(x.roles||[]).includes('artist')).length],
+          ['labels','Labels',todas.filter(x=>(x.roles||[]).includes('label')).length],
+          ['orders','Orders',null]].map(([k,label,n])=>(
+          <button key={k} onClick={()=>{ if (k==='orders') verPedidos(); else setView(k); }}
+            style={{ background:view===k?S.accent:'transparent', color:view===k?S.bg:S.muted,
+              border:`1px solid ${view===k?S.accent:S.border}`, borderRadius:2, cursor:'pointer',
+              fontFamily:'inherit', fontWeight:700, fontSize:9, letterSpacing:1.5, textTransform:'uppercase',
+              padding:'7px 12px', whiteSpace:'nowrap' }}>
+            {label}{n != null && n > 0 ? ` · ${n}` : ''}
+          </button>
+        ))}
+      </div>
+
       <p style={{ color:S.muted, fontSize:13, margin:'8px 0 4px' }}>
-        {loading && !data ? 'Loading…' : `${shelves.length} ${shelves.length === 1 ? 'artist or label' : 'artists and labels'} you follow`}
+        {view === 'orders'
+          ? 'Everything you have bought, most recent first'
+          : loading && !data ? 'Loading…'
+          : view === 'artists' ? `${shelves.length} ${shelves.length === 1 ? 'artist' : 'artists'} you follow`
+          : view === 'labels' ? `${shelves.length} ${shelves.length === 1 ? 'label' : 'labels'} you follow`
+          : `${todas.length} ${todas.length === 1 ? 'artist or label' : 'artists and labels'} you follow`}
       </p>
 
-      {err && <div style={{ color:S.danger, fontSize:12, marginTop:18 }}>{err}</div>}
+      {view === 'orders' && (
+        <div style={{ marginTop:22 }}>
+          {/* El mismo OrdersView del cajon: una sola lista de pedidos en toda la
+              tienda, pintada donde toque. */}
+          <OrdersView orders={orders} loading={orders === null && !ordersErr} err={ordersErr}
+            onRefresh={()=>{ setOrders(null); setOrdersErr(''); verPedidos(); }} />
+        </div>
+      )}
 
-      {shelves.map(s => <EntityShelf key={s.slug} shelf={s} onNavigate={onNavigate} />)}
+      {view !== 'orders' && err && <div style={{ color:S.danger, fontSize:12, marginTop:18 }}>{err}</div>}
 
-      {data && !shelves.length && (
+      {view !== 'orders' && shelves.map(s => <EntityShelf key={s.slug} shelf={s} onNavigate={onNavigate} />)}
+      {view !== 'orders' && view !== 'shelves' && data && !shelves.length && (
+        <div style={{ color:S.muted, fontSize:13, marginTop:26 }}>
+          You don&apos;t follow any {view === 'artists' ? 'artists' : 'labels'} yet.
+        </div>
+      )}
+
+      {view === 'shelves' && data && !shelves.length && (
         <PortalEmpty suggestions={data.suggestions || []} auth={auth} onSignIn={onSignIn} onChange={recargar} />
       )}
 
-      {data && !!(data.following || []).length && (
+      {view === 'shelves' && data && !!(data.following || []).length && (
         <section style={{ marginTop:44 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:12 }}>Following · {data.following.length}</div>
           <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
@@ -11225,7 +11277,7 @@ function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate,
 }
 
 /** /artist/{slug} y /label/{slug} — publicas, sin sesion. */
-function EntityPage({ slug, auth, onSignIn, following, onFollowChange }) {
+function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigate }) {
   const isMobile = useIsMobile(720);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -11254,7 +11306,10 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange }) {
     <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
         <div style={{ minWidth:0 }}>
-          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:6 }}>{roleLabel(data)}</div>
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+            <ILink to="/" onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.muted, border:`1px solid ${S.border}`, borderRadius:2, padding:'5px 10px', whiteSpace:'nowrap' }}>← Shop</ILink>
+            <span style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted }}>{roleLabel(data)}</span>
+          </div>
           <h1 style={{ fontSize:isMobile?24:32, fontWeight:800, letterSpacing:'-0.6px', margin:0, color:S.text }}>{data.display}</h1>
           <div style={{ fontSize:12, color:S.muted, marginTop:8 }}>
             {data.total} {data.total === 1 ? 'record' : 'records'} in the shop
@@ -11348,7 +11403,6 @@ export default function App() {
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
   // Que entidades sigue, para que el boton de la ficha sepa como pintarse.
   const [followSlugs,setFollowSlugs]     = useState([]);
-  const [accountView,setAccountView]     = useState(null);   // 'orders' para abrir el cajon ahi
   const [wishSyncedAt,setWishSyncedAt]   = useState(0);      // cuando acabo el merge invitado→cuenta
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
@@ -11810,10 +11864,10 @@ export default function App() {
   return (
     <PlayerProvider gate={playGate}>
     <div style={{background:S.bg,minHeight:'100vh',color:S.text,fontFamily:"'Inter',system-ui,sans-serif",paddingBottom:'var(--player-h, 64px)'}}>
-      <Nav onLogo={()=>{setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
+      <Nav onLogo={()=>{navigate('/');setPage('shop');setFilters(f=>({...f,forthcoming:false,dnb:false}));}}>
         {/* Icon buttons — row 1, top-right beside the logo on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?1:2,flexShrink:0,marginLeft:navMobile?'auto':0}}>
-          <button onClick={()=>setAccountOpen(true)} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+          <button onClick={()=>{ if (auth) navigate('/account'); else setAccountOpen(true); }} title={auth?'My Account':'Sign In'} aria-label={auth?'My Account':'Sign In'} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={auth?S.accent:S.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </button>
           <button onClick={()=>setWishOpen(true)} title="Wishlist" aria-label="Wishlist" style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,padding:'5px 10px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,gap:5,color:wishItems.length>0?S.accent:S.muted}}>
@@ -11839,7 +11893,7 @@ export default function App() {
               auth={auth}
               onSignIn={handleSignIn}
               onOpenWishlist={()=>setWishOpen(true)}
-              onOpenOrders={()=>{setAccountView('orders');setAccountOpen(true);}}
+              onLogout={handleLogout}
               onNavigate={navigate}
               wishSyncedAt={wishSyncedAt}
             />
@@ -11848,6 +11902,7 @@ export default function App() {
               slug={portalRoute.slug}
               auth={auth}
               onSignIn={handleSignIn}
+              onNavigate={navigate}
               following={followSlugs.includes(portalRoute.slug)}
               onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
             />
@@ -11919,7 +11974,7 @@ export default function App() {
         onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
         r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
-      <AccountDrawer openView={accountView} onOpenViewUsed={()=>setAccountView(null)} open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
+      <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       {audioGateOpen && (
         <div onClick={()=>setAudioGateOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
