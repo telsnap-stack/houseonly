@@ -381,7 +381,7 @@ el apartado anterior: mientras los importers no resuelvan (fase 4), cada
 importación deja su rastro aquí.
 
 Despachadas el mismo día. El estado con el que se cierra la jornada:
-**1481 entidades** (983 artista, 485 sello, 13 con los dos roles), 2769 alias,
+**1481 entidades** (984 artista, 484 sello, 13 con los dos roles), 2769 alias,
 19 `ignore:`, 0 filas en cola, y **cobertura completa**: no queda ni un `vendor`
 ni un tag `label:` del catálogo publicado sin resolver contra una entidad o un
 `ignore:`.
