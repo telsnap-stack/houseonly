@@ -35,7 +35,7 @@ function producto(handle: string, dias_: number, artistSlugs: string[] = [], lab
 	return {
 		handle, title: handle.toUpperCase(), vendor: "X", createdAt: dias(dias_),
 		forthcoming: false, releaseDate: "", imageUrl: "", price: "12.00",
-		currency: "EUR", stock: 1, artistSlugs, labelSlugs,
+		currency: "EUR", stock: 1, artistSlugs, labelSlugs, slug: handle,
 	};
 }
 
@@ -459,5 +459,64 @@ describe("entity-index: lo que el prerender necesita", () => {
 		await entidad("vieja", "Vieja", ["label"], { status: "merged", mergedInto: "viva" });
 		await indice([{ ...producto("a", 1, [], ["vieja"]), id: "1" }]);
 		expect((await entityIndex(env as any)).map(e => e.slug)).toEqual([]);
+	});
+});
+
+describe("sugerencias: todas, y con la portada que las justifica", () => {
+	beforeEach(async () => { await wipe(); });
+
+	it("lista TODAS las entidades de la wishlist, no un puñado", async () => {
+		// El caso real: 7 discos guardados, 12 entidades entre artistas y sellos.
+		const items = [];
+		for (let i = 0; i < 7; i++) {
+			await entidad(`art${i}`, `Artista ${i}`);
+			await entidad(`sel${i}`, `Sello ${i}`, ["label"]);
+			await env.ENTITIES.put(`alias:a:artista${i}`, `art${i}`);
+			await env.ENTITIES.put(`alias:l:sello${i}`, `sel${i}`);
+			items.push({ ...producto(`d${i}`, i + 1, [`art${i}`], [`sel${i}`]), id: `gid://p/${i}`, imageUrl: `https://cdn/${i}.jpg` });
+		}
+		await indice(items);
+
+		const home = await accountHome(env as any, CID, [],
+			Array.from({ length: 7 }, (_, i) => ({ artist: `Artista ${i}`, label: `Sello ${i}`, handle: `d${i}` })));
+
+		expect(home.suggestions).toHaveLength(14);
+	});
+
+	it("la portada es la del disco guardado, no una cualquiera de la entidad", async () => {
+		await entidad("frank-music", "Frank Music", ["label"]);
+		await env.ENTITIES.put("alias:l:frankmusic", "frank-music");
+		await indice([
+			{ ...producto("otro-suyo", 1, [], ["frank-music"]), id: "gid://p/1", imageUrl: "https://cdn/otro.jpg" },
+			{ ...producto("el-guardado", 9, [], ["frank-music"]), id: "gid://p/2", imageUrl: "https://cdn/guardado.jpg" },
+		]);
+
+		const home = await accountHome(env as any, CID, [], [{ label: "Frank Music", handle: "el-guardado" }]);
+		expect(home.suggestions[0]).toMatchObject({
+			slug: "frank-music", coverUrl: "https://cdn/guardado.jpg", coverTitle: "EL-GUARDADO", total: 2,
+		});
+	});
+
+
+	it("la wishlist guarda el slug del sitio, no el handle: tambien casa", async () => {
+		await entidad("tartelet", "Tartelet", ["label"]);
+		await env.ENTITIES.put("alias:l:tartelet", "tartelet");
+		await indice([
+			{ ...producto("otro", 1, [], ["tartelet"]), id: "gid://p/1", imageUrl: "https://cdn/otro.jpg" },
+			{ ...producto("pf-utopia", 9, [], ["tartelet"]), id: "gid://p/2", imageUrl: "https://cdn/utopia.jpg",
+			  slug: "paffetti-aka-black-loops-utopia" },
+		]);
+		// Asi es exactamente como lo guarda la wishlist del cliente.
+		const home = await accountHome(env as any, CID, [], [{ label: "Tartelet", handle: "paffetti-aka-black-loops-utopia" }]);
+		expect(home.suggestions[0].coverUrl).toBe("https://cdn/utopia.jpg");
+	});
+	it("desde los pedidos, la portada es la del disco comprado", async () => {
+		await entidad("omar-s", "Omar S");
+		await indice([
+			{ ...producto("comprado", 3, ["omar-s"]), id: "gid://p/comprado", imageUrl: "https://cdn/comprado.jpg" },
+			{ ...producto("no-comprado", 1, ["omar-s"]), id: "gid://p/otro", imageUrl: "https://cdn/otro.jpg" },
+		]);
+		const home = await accountHome(env as any, CID, ["gid://p/comprado"]);
+		expect(home.suggestions[0]).toMatchObject({ from: "orders", coverUrl: "https://cdn/comprado.jpg" });
 	});
 });
