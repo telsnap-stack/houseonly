@@ -2771,8 +2771,13 @@ export default {
 
     // Baja desde el enlace del correo. Publica y con token opaco: apaga los
     // avisos y NADA MAS — el newsletter tiene su propia baja.
-    if (action === 'follow-alerts-unsubscribe' && request.method === 'GET') {
+    if (action === 'follow-alerts-unsubscribe' && (request.method === 'GET' || request.method === 'POST')) {
       const ok = await unsubscribeByToken(env, url.searchParams.get('t') || '');
+      // One-Click: el cliente de correo manda un POST y no espera pagina, solo
+      // un 200. Si aqui se devolviera HTML, Gmail lo daria por fallido.
+      if (request.method === 'POST') {
+        return new Response(ok ? 'unsubscribed' : 'unknown token', { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
       return new Response(
         `<!doctype html><meta charset="utf-8"><title>House Only</title>
          <body style="margin:0;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">

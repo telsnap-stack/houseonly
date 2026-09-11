@@ -288,6 +288,29 @@ describe("el boton de cada disco", () => {
 	});
 });
 
+describe("salida al portal y baja", () => {
+	const d: any = { cid: "1", email: "e@x", token: "t",
+		groups: [{ slug: "omar-s", display: "Omar S", items: [prod("p", 1, ["omar-s"])] }], total: 1 };
+
+	it("siempre hay enlace al portal, no solo cuando el correo se corta", () => {
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("See all in your account");
+		expect(html).toContain("houseonly.store/account");
+	});
+
+	it("la cabecera lleva el logo, y su alt dice la marca por si se bloquean las imagenes", () => {
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("brand/houseonly-logo.png");
+		expect(html).toContain('alt="HOUSE ONLY"');
+	});
+
+	it("la baja va en su propia linea y se lee", () => {
+		const html = renderAlertEmail(d, "https://w/unsub?t=tok");
+		expect(html).toContain("Stop these alerts");
+		expect(html).toContain("text-decoration:underline");
+	});
+});
+
 describe("pie del correo", () => {
 	it("dice que no se conteste y a donde ir si esta agotado", () => {
 		const d: any = { cid: "1", email: "e@x", token: "t",
@@ -295,5 +318,36 @@ describe("pie del correo", () => {
 		const html = renderAlertEmail(d, "https://w/x");
 		expect(html).toContain("Don't reply to this email.");
 		expect(html).toContain("Request a copy from the record page.");
+	});
+});
+
+describe("cabeceras de baja en un clic", () => {
+	let fetchOriginal: typeof fetch;
+	let peticiones: any[];
+
+	beforeEach(async () => {
+		await wipe();
+		await entidad("omar-s", "Omar S");
+		await indice([prod("nuevo", 2, ["omar-s"])]);
+		await addFollow(env as any, CID, "omar-s");
+		await setEmailAlerts(env as any, CID, true, "cliente@example.com");
+		peticiones = [];
+		fetchOriginal = globalThis.fetch;
+		globalThis.fetch = (async (url: any, init: any) => {
+			if (String(url).includes('api.resend.com')) { peticiones.push(JSON.parse(init.body)); return new Response('{"id":"x"}', { status: 200 }); }
+			return fetchOriginal(url, init);
+		}) as any;
+		(env as any).RESEND_API_KEY = 'test';
+	});
+	afterEach(() => { globalThis.fetch = fetchOriginal; });
+
+	it("van las dos, y la URL es la misma que la del pie", async () => {
+		await runFollowAlerts(env as any, { mode: 'test', testTo: 'e@x', workerUrl: 'https://w' });
+		const h = peticiones[0].headers;
+		expect(h['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
+		expect(h['List-Unsubscribe']).toMatch(/^<https:\/\/w\/\?action=follow-alerts-unsubscribe&t=.+>$/);
+		// El cliente de correo y el humano acaban en el mismo sitio.
+		const url = h['List-Unsubscribe'].slice(1, -1);
+		expect(peticiones[0].html).toContain(url.replace(/&/g, '&amp;'));
 	});
 });
