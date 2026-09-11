@@ -781,35 +781,225 @@ de entidad es donde se pintan. Lo que falta decidir es de dónde salen los datos
 — a mano en el admin, de Bandsintown o del propio artista — y eso es una
 decisión de producto, no de esquema.
 
-## Promoción a producción: aplazada hasta la fase 4/5
+## Promoción a producción: la secuencia
 
-**Decisión del 2026-09-10: no se promociona nada todavía.** El motivo no es que
-falte trabajo, es que promocionar ahora no compra nada y cuesta algo:
+La v1 está cerrada en staging: entidades, portal, fichas públicas, prerender y
+avisos. Esto es **cómo se sube**, paso a paso, con qué se comprueba cada uno y
+cómo se deshace. Se ejecuta **con parada entre pasos**: nadie encadena dos sin
+mirar el anterior.
 
-- **Nada en producción consume entidades.** El worker de prod no tiene los
-  endpoints, la tienda no lee slugs y no hay portal de follows. Subir la capa
-  sería dejarla mirando a la pared.
-- **Una sola verdad mientras tanto.** En cuanto existan dos namespaces con
-  entidades, cada aprobación hay que hacerla o copiarla dos veces, y la primera
-  divergencia silenciosa aparece el día que alguien apruebe en el sitio
-  equivocado. Hasta que el portal las use, las entidades viven **solo en
-  staging** y esa es la copia buena.
-
-Lo que está verificado y no hay que volver a mirar cuando toque:
+Medido el 2026-09-11, no estimado:
 
 | | |
 |---|---|
-| Worker de prod | Corre el código de la rama `staging` a fecha 2026-09-09 (`emails-list`, que solo existe en `staging`, responde 401 en prod) |
-| Delta worker prod ↔ `staging` HEAD | **Solo los 9 commits de Entidades**. `wrangler deploy` no arrastraría nada más |
-| `?action=entity-review-list` en prod | No existe: cae en el fallback |
-| Namespace `ENTITIES` de prod (`e1148360…`) | Existe, ya está en `wrangler.jsonc`, **0 claves** |
+| Worker de prod | No tiene ningún endpoint de entidades (`entity-public`, `follows`, `feed`, `account-home` caen en el fallback) |
+| Secretos en prod | Ya están los cinco que hacen falta: `BOOTSTRAP_AUTH_SECRET`, `RESEND_API_KEY`, `STOREFRONT_TOKEN`, `SHOPIFY_ADMIN_CLIENT_ID/SECRET` |
+| `ENTITIES` de prod | **0 claves** |
+| A copiar desde staging | **4269**: 1480 `entity:`, 2769 `alias:`, 20 `ignore:`, 0 `children:` |
+| `src/App.jsx` | **+1365 / −30** respecto a `main` |
+| Worker | 43 commits que `main` no tiene |
 
-El orden, cuando se retome: (1) `wrangler deploy` desde un checkout de `staging`
-—el worker no va por git—; (2) copiar `entity:`, `alias:`, `ignore:` y
-`children:` de staging a prod con `kv bulk get`/`kv bulk put` (las decisiones
-fueron humanas: se copian, no se repiten); (3) `entities-sweep.mjs --send --prod`
-como verificación —si la copia está bien, la cola de prod sale casi vacía—; y
-(4) el frontend, que es lo que manda el calendario.
+### Tres cambios antes de empezar
+
+**1. `noindex` en las fichas flacas.** De las 1475 fichas de entidad, **1311
+tienen menos de 3 discos** (el 89 %) y solo **164** llegan a tres. Mil trescientas
+páginas casi vacías es justo lo que Google castiga como contenido de relleno, y
+arrastra al resto del dominio.
+
+- El prerender pone `<meta name="robots" content="noindex,follow">` en las fichas
+  con menos de 3 discos activos. `follow` y no `nofollow`: que siga los enlaces a
+  los productos, que esos sí valen.
+- Esas URLs **no entran en el sitemap**. El sitemap pasa de 2752 a ~1440 entradas.
+- La página se genera igual: sirve para navegar y para compartir, solo que no
+  pide ser indexada.
+
+**2. Fuera `ENTITIES_WORKER_URL`.** Hoy el portal, la pestaña Entidades y el
+recompute de los importers apuntan a mano al worker de staging (7 usos más el
+alias `PORTAL_WORKER_URL`). Al promocionar, todo pasa a `WORKER_URL`.
+
+> **Cuidado, y esto hay que decidirlo antes**: `VITE_WORKER_URL` **no está puesto
+> en el proyecto de Pages**, así que `WORKER_URL` es el worker de producción en
+> los dos entornos. En cuanto se quite la constante, **el preview de staging
+> escribirá en las entidades de producción**. Si se quiere seguir probando en
+> staging sin tocar prod, hay que añadir `VITE_WORKER_URL` =
+> `https://houseonly-worker-staging.emontagut.workers.dev` como variable de
+> entorno del *preview* en el proyecto de Pages. Es un clic en el dashboard y va
+> en el paso 1.
+
+**3. Cron de avisos en prod, apagado.** `wrangler.jsonc` ya declara las dos
+expresiones (`*/15` para Discogs y graduación, `0 6` para los avisos) y
+`scheduled()` bifurca por `event.cron`. El modo vive en KV y, al estar el
+namespace de prod vacío, `getMode()` devuelve `off`: **el cron se activará pero
+no mandará nada** hasta que alguien lo ponga en `live` a mano.
+
+---
+
+### Paso 0 — Fotografía previa (no cambia nada)
+
+```bash
+# Version desplegada hoy en prod, que es a donde se vuelve si algo sale mal
+cd houseonly-worker/houseonly-worker && npx wrangler deployments list | tail -20
+# Confirmar que prod NO tiene entidades y que el namespace esta vacio
+curl -s "https://houseonly-worker.emontagut.workers.dev/?action=entity-public&slug=omar-s"   # → {"imageUrl":""}
+npx wrangler kv key list --namespace-id=e1148360f4af4c72ad608e60c03e9813 --remote | head
+```
+
+**Verificación**: el `entity-public` devuelve el fallback y el namespace está
+vacío. **Anotar el Version ID actual de prod**: es el botón de emergencia de
+todos los pasos siguientes.
+
+---
+
+### Paso 1 — Los tres cambios de código, en staging
+
+Rama, PR a `staging`, y se prueba allí antes de tocar prod.
+
+**Verificación**: `vitest run` en verde; `npm run build` genera las fichas con
+`noindex` donde toca (`grep -c noindex dist/artist/*/index.html` ≈ 1311) y el
+sitemap ya sin ellas; preview de Pages sigue funcionando con `VITE_WORKER_URL`
+puesto en el dashboard.
+
+**Vuelta atrás**: revertir el merge en `staging`. No hay nada en prod todavía.
+
+---
+
+### Paso 2 — El worker a producción
+
+```bash
+cd houseonly-worker/houseonly-worker
+git checkout staging          # el worker NO va por git: se despliega desde el checkout
+npx wrangler deploy           # sin --env: el entorno por defecto ES produccion
+```
+
+**Verificación**:
+
+```bash
+W=https://houseonly-worker.emontagut.workers.dev
+curl -s -o /dev/null -w "%{http_code}\n" "$W/?action=entity-review-list&kind=artist"   # 401 = existe
+curl -s "$W/?action=follow-alerts-mode" -H "Authorization: Bearer $PROD_BS"            # {"mode":"off"}
+curl -s "$W/?action=sync-status" -H "Authorization: Bearer $PROD_BS" | head -c 200     # el Discogs de siempre, intacto
+curl -s -o /dev/null -w "%{http_code}\n" "$W/?action=emails-list"                      # 401, como antes
+```
+
+Lo que **no** debe cambiar: las ventas de Discogs, la graduación, la wishlist y
+el newsletter. Son aditivos los seis endpoints nuevos.
+
+**Vuelta atrás**: `npx wrangler rollback [version-id-del-paso-0]`. Un minuto.
+
+---
+
+### Paso 3 — Copiar las entidades a producción
+
+Las 1480 decisiones fueron humanas: se copian, no se repiten.
+
+```bash
+NS_STG=bf137c15dc6d4c4f8f21a9987108f2f2
+NS_PRD=e1148360f4af4c72ad608e60c03e9813
+# Solo estos cuatro prefijos. NO se copian follow:, fanout:, alerttoken:,
+# alertsent:, feedindex: ni entityindex:  →  son de clientes de prueba y caches.
+```
+
+Un script de operación (`scripts/entities-copy-namespace.mjs`, dry-run por
+defecto) que lista las claves de los cuatro prefijos, las lee con `kv bulk get`
+en lotes de 100 y las escribe con `kv bulk put`.
+
+**Verificación**:
+
+```bash
+npx wrangler kv key list --namespace-id=$NS_PRD --remote | grep -c '"name"'   # 4269
+curl -s "$W/?action=entity-public&slug=omar-s" | head -c 120                  # Omar S, 11 discos
+curl -s "$W/?action=entity-lookup&kind=label&raw=Deep%20Jungle"               # deep-jungle
+```
+
+**Vuelta atrás**: el namespace estaba **vacío**, así que deshacer es borrar esos
+cuatro prefijos en prod. Sin riesgo de pisar nada.
+
+---
+
+### Paso 4 — Barrido en producción y cola
+
+```bash
+STAGING_BS=… PROD_BS=… node scripts/entities-sweep.mjs --send --prod
+node scripts/entities-sweep.mjs --summary --prod
+```
+
+**Verificación**: la cola debe salir **cerca de 0**. Si la copia del paso 3 fue
+completa, lo único que puede aparecer son productos entrados después del último
+barrido de staging. Si salieran cientos de filas, **la copia no fue bien**: parar
+y volver al paso 3.
+
+**Vuelta atrás**: las filas de la cola son inertes —no afectan a la tienda— y se
+borran con `entity-review-reject` o desde la pestaña.
+
+---
+
+### Paso 5 — El file-drop de `src/App.jsx`
+
+```bash
+git checkout main && git pull
+git diff main origin/staging --stat -- src/App.jsx     # esperado: +1365 / −30
+git diff main origin/staging -- src/App.jsx | less     # leerlo entero, no por encima
+git checkout origin/staging -- src/App.jsx
+npm run build                                          # vite + prerender
+```
+
+**Verificación antes de commitear**: el build pasa; el lint de `App.jsx` da los
+mismos problemas que antes (86/80, ninguno nuevo); `git diff --cached --stat`
+enseña **un solo fichero**.
+
+**Vuelta atrás**: `git revert` del commit en `main` y push. Pages reconstruye
+sola.
+
+---
+
+### Paso 6 — Pages y el prerender
+
+El push a `main` del paso 5 dispara el build de producción.
+
+**Verificación**:
+
+```bash
+S=https://houseonly.store
+curl -s -o /dev/null -w "%{http_code}\n" $S/artist/omar-s/          # 200
+curl -s $S/artist/omar-s/ | grep -E "<title>|canonical|robots"      # sin noindex: tiene 11 discos
+curl -s $S/artist/<una-de-un-disco>/ | grep robots                  # noindex,follow
+curl -s $S/sitemap.xml | grep -c "<url>"                            # ~1440, no 2752
+curl -s -o /dev/null -w "%{http_code}\n" $S/products/<cualquiera>/  # la tienda de siempre, intacta
+```
+
+**Vuelta atrás**: revertir en `main`; o, si urge, volver al deployment anterior
+desde el dashboard de Pages, que es instantáneo.
+
+---
+
+### Paso 7 — Smoke test con una cuenta real
+
+Con la cuenta de Eduardo, en `houseonly.store`:
+
+1. Icono de cuenta → `/account`. Estado vacío con sugerencias de su wishlist.
+2. Seguir a un artista desde una ficha de producto → aparece el prompt de avisos
+   **una sola vez**. Decir "Not now".
+3. La estantería aparece; "All N →" lleva a la ficha de la entidad.
+4. Encender los avisos desde Following y comprobar en KV que `follow:{cid}`
+   tiene `emailAlerts: true` **y correo**.
+5. `follow-alerts-run` en modo `test` a la dirección de Eduardo: un correo, con
+   su logo, sus botones y su baja.
+6. Dejar el modo global en **`off`**.
+
+**Vuelta atrás**: apagar los avisos del cliente y, si hiciera falta, `wrangler
+rollback` del worker. El catálogo no se toca en ningún paso de esta secuencia.
+
+---
+
+### Lo que esta secuencia NO hace
+
+- **No enciende los avisos.** El cron queda activo y en `off`. Encenderlos es una
+  decisión aparte, con su propia prueba en vivo.
+- **No toca el catálogo.** Ni `Vendor`, ni tags, ni precios. Los metafields ya se
+  escribieron en la fase 4 y están en producción desde entonces.
+- **No borra el namespace de staging.** Sigue siendo el banco de pruebas; a
+  partir de aquí las dos copias divergen y hay que decidir cuál manda. Lo
+  razonable: prod manda, y staging se resincroniza desde prod cuando haga falta.
 
 ### El file-drop de `src/App.jsx`: preparado, no ejecutado
 
