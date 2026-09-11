@@ -10352,7 +10352,10 @@ function EntitiesPanel() {
         {viewBtn('bulk','Bulk',bulkAll.length)}
         {viewBtn('split','Split',split.length)}
         {viewBtn('merge','Merge',merge.length)}
-        {otras.length>0 && viewBtn('otras','Other',otras.length)}
+        {/* Other se pinta SIEMPRE, aunque este a cero. Escondiendolo al
+            vaciarse desaparecia el boton mientras su vista seguia
+            seleccionada: parecia que se habian perdido filas. */}
+        {viewBtn('otras','Other',otras.length)}
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
         {kindBtn('artist','Artists')}

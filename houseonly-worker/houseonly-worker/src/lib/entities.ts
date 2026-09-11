@@ -916,7 +916,36 @@ export async function handleEntityReviewApprove(request: Request, env: EntitiesE
     const parentSlug = action === 'child' ? String(body?.parentSlug || '').trim() : '';
     if (action === 'child') {
       if (!parentSlug) return json({ error: 'parentSlug required for child' }, 400);
-      if (!(await getEntity(env, parentSlug))) return json({ error: `unknown parentSlug ${parentSlug}` }, 400);
+      const parentRec = await getEntity(env, parentSlug);
+      if (!parentRec) return json({ error: `unknown parentSlug ${parentSlug}` }, 400);
+
+      // Nadie es hijo de si mismo. Paso de verdad: "Alpha Rhythm & Natus" se
+      // aprobo como hija de `alpha-rhythm` y la entidad quedo con
+      // parent: 'alpha-rhythm' apuntandose a si misma, mas una clave
+      // children:alpha-rhythm:alpha-rhythm. Quien hace eso casi siempre queria
+      // 'merge', asi que se devuelve 400 y la fila se queda en la cola: tragarse
+      // el parent en silencio borraria la fila y esconderia el error.
+      //
+      // Se comprueba ANTES de escribir nada. KV no tiene transacciones y un
+      // 'child' de dos partes ya habria creado la primera cuando falle la
+      // segunda.
+      const wanted = parts
+        .map((p: any) => slugify(String(p?.slug || '').trim() || cleanDisplay(String(p?.display || p?.raw || ''))))
+        .filter(Boolean);
+      if (wanted.includes(parentSlug)) {
+        return json({ error: `${parentSlug} cannot be its own parent — did you mean merge?` }, 400);
+      }
+      // Y tampoco un ciclo mas largo: la expansion de seguidores sube por
+      // `parent`, y A -> B -> A la dejaria dando vueltas.
+      const seen = new Set<string>([parentSlug]);
+      let up = parentRec.parent;
+      while (up && !seen.has(up)) {
+        if (wanted.includes(up)) {
+          return json({ error: `parent ${parentSlug} already descends from ${up} — that would be a cycle` }, 400);
+        }
+        seen.add(up);
+        up = (await getEntity(env, up))?.parent;
+      }
     }
 
     for (const p of parts) {

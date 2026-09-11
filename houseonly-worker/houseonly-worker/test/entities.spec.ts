@@ -513,6 +513,95 @@ describe("recompute: candidatos fila contra fila", () => {
 
 // El barrido inicial destapa pares donde NINGUNA de las dos es entidad todavia
 // —Freerange / Freerange Records—, asi que no hay targetSlug al que apuntar.
+describe("child: nadie es hijo de si mismo", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+	});
+
+	/** Aprueba `raw` como entidad suelta y devuelve su slug. */
+	async function crear(kind: "artist" | "label", raw: string) {
+		await resolveOne(env as any, kind, { raw }, "sweep");
+		const res: any = await (await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({ kind, norm: normalizeName(raw), action: "create" }),
+		}), env as any)).json();
+		return res.slugs[0];
+	}
+
+	it("rechaza el child cuya parte es el propio padre, y no toca nada", async () => {
+		// El caso real: "Alpha Rhythm & Natus" aprobado como hijo de Alpha Rhythm.
+		expect(await crear("artist", "Alpha Rhythm")).toBe("alpha-rhythm");
+		await resolveOne(env as any, "artist", { raw: "Alpha Rhythm & Natus" }, "sweep");
+		const norm = normalizeName("Alpha Rhythm & Natus");
+
+		const res = await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "artist", norm, action: "child",
+				parentSlug: "alpha-rhythm",
+				parts: [{ display: "Alpha Rhythm" }],
+			}),
+		}), env as any);
+
+		expect(res.status).toBe(400);
+		expect((await res.json() as any).error).toMatch(/its own parent/);
+
+		// Ni parent apuntandose a si mismo, ni clave children, ni fila perdida:
+		// se queda en la cola para que la persona elija merge.
+		const e = await getEntity(env as any, "alpha-rhythm");
+		expect(e?.parent).toBeUndefined();
+		expect((await env.ENTITIES.list({ prefix: "children:" })).keys).toHaveLength(0);
+		expect(await env.ENTITIES.get(`review:artist:${norm}`)).not.toBeNull();
+	});
+
+	it("rechaza el ciclo largo A -> B -> A", async () => {
+		await crear("label", "Chiwax");
+		await resolveOne(env as any, "label", { raw: "Chiwax Classic Edition" }, "sweep");
+		// Chiwax Classic Edition cuelga de Chiwax: eso si vale.
+		const ok = await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "label", norm: normalizeName("Chiwax Classic Edition"),
+				action: "child", parentSlug: "chiwax",
+				parts: [{ display: "Chiwax Classic Edition" }],
+			}),
+		}), env as any);
+		expect(ok.status).toBe(200);
+		expect((await getEntity(env as any, "chiwax-classic-edition"))?.parent).toBe("chiwax");
+
+		// Pero colgar Chiwax de su propia hija cerraria el ciclo.
+		await resolveOne(env as any, "label", { raw: "Chiwax Records" }, "sweep");
+		const res = await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "label", norm: normalizeName("Chiwax Records"),
+				action: "child", parentSlug: "chiwax-classic-edition",
+				parts: [{ display: "Chiwax" }],
+			}),
+		}), env as any);
+		expect(res.status).toBe(400);
+		expect((await res.json() as any).error).toMatch(/cycle/);
+		expect((await getEntity(env as any, "chiwax"))?.parent).toBeUndefined();
+	});
+
+	it("un child normal sigue funcionando", async () => {
+		await crear("label", "Rawax");
+		await resolveOne(env as any, "label", { raw: "RAWAX MOTOR CITY EDITION" }, "sweep");
+		const res: any = await (await handleEntityReviewApprove(req("https://x/", {
+			method: "POST",
+			body: JSON.stringify({
+				kind: "label", norm: normalizeName("RAWAX MOTOR CITY EDITION"),
+				action: "child", parentSlug: "rawax",
+				parts: [{ display: "Rawax Motor City Edition" }],
+			}),
+		}), env as any)).json();
+		expect(res.slugs).toEqual(["rawax-motor-city-edition"]);
+		expect((await getEntity(env as any, "rawax-motor-city-edition"))?.parent).toBe("rawax");
+		expect(await env.ENTITIES.get("children:rawax:rawax-motor-city-edition")).toBe("1");
+	});
+});
+
 describe("merge-rows: fusionar dos filas de la cola", () => {
 	beforeEach(async () => {
 		await wipe();
