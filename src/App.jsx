@@ -11028,6 +11028,8 @@ function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md', 
       setState(next);
       if (next) await followAdd(auth.session, slug); else await followRemove(auth.session, slug);
       onChange?.(slug, next);
+      // Primer follow: preguntar por los avisos. El gancho decide si toca.
+      if (next) askAlertsHook?.(slug);
     } catch {
       setState(s => !s);
     } finally { setBusy(false); }
@@ -11154,8 +11156,100 @@ function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
   );
 }
 
+// ── AVISOS DE NOVEDADES (fase 6) ───────────────────────────────
+// Se pregunta UNA vez, en el primer follow. Una pregunta que se repite deja de
+// leerse y se contesta que no por reflejo.
+//
+// El gancho es de modulo porque el boton de seguir vive en cinco sitios —ficha
+// de producto, ficha de entidad, sugerencias, portal— y todos tienen que poder
+// disparar el mismo prompt sin pasarse props por media aplicacion.
+let askAlertsHook = null;
+function registerAlertsHook(fn) { askAlertsHook = fn; }
+
+const fetchAlertsState = session => portalGet('follow-alerts', { session });
+const setAlertsPref = (session, enabled) => portalSend('follow-alerts', 'POST', { session, enabled });
+
+/** El doble opt-in que ya existe. Seguir a alguien NO suscribe a nada. */
+async function joinNewsletter(email) {
+  await fetch(`${WORKER_URL}?action=newsletter-subscribe`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, source: 'follow-alerts' }),
+  });
+}
+
+/** El prompt de un toque. Sale una sola vez por cliente. */
+function AlertsPrompt({ display, email, session, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [newsletter, setNewsletter] = useState(false);   // desmarcada a proposito
+
+  const responder = async (enabled) => {
+    setBusy(true);
+    try {
+      await setAlertsPref(session, enabled);
+      // El newsletter es una decision aparte y va por su propio doble opt-in:
+      // nunca se suscribe a nadie por seguir a un artista.
+      if (enabled && newsletter && email) await joinNewsletter(email);
+    } catch { /* si falla, se le vuelve a preguntar la proxima vez */ }
+    finally { setBusy(false); onDone(enabled); }
+  };
+
+  return (
+    <div onClick={()=>onDone(null)} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:S.surf, border:`1px solid ${S.border}`, borderRadius:6, padding:'26px 24px', maxWidth:360, width:'100%', textAlign:'left' }}>
+        <div style={{ fontSize:10, color:S.accent, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:10 }}>
+          Following {display}
+        </div>
+        <div style={{ fontSize:15, color:S.text, lineHeight:1.5, marginBottom:18 }}>
+          We&apos;ll tell you when they release something new.
+        </div>
+
+        <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+          <Btn ch={busy ? '…' : 'Yes, email me'} onClick={()=>responder(true)} disabled={busy} />
+          <Btn ch="Not now" variant="ghost" onClick={()=>responder(false)} disabled={busy} />
+        </div>
+
+        <label style={{ display:'flex', alignItems:'center', gap:9, cursor:'pointer', fontSize:12, color:S.muted }}>
+          <input type="checkbox" checked={newsletter} onChange={e=>setNewsletter(e.target.checked)}
+            style={{ accentColor:S.accent, width:14, height:14 }} />
+          Also join the newsletter
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/** El interruptor del portal, para quien dijo "not now" y luego cambia de idea. */
+function AlertsToggle({ state, session, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const on = state?.emailAlerts === true;
+
+  const cambiar = async () => {
+    setBusy(true);
+    try { await setAlertsPref(session, !on); onChange?.(!on); }
+    catch { /* se queda como estaba */ }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap',
+      border:`1px solid ${S.border}`, background:S.surf, borderRadius:2, padding:'12px 14px', marginTop:14 }}>
+      <div style={{ minWidth:0 }}>
+        <div style={{ fontSize:13, color:S.text, fontWeight:600 }}>Email alerts</div>
+        <div style={{ fontSize:12, color:S.muted, marginTop:3 }}>We&apos;ll tell you when they release something new.</div>
+      </div>
+      <button onClick={cambiar} disabled={busy} style={{
+        background:'transparent', color: on ? S.accent : S.text,
+        border:`1px solid ${on ? S.accent : S.border}`, borderRadius:2, cursor: busy ? 'wait' : 'pointer',
+        fontFamily:'inherit', fontWeight:700, fontSize:9, letterSpacing:1.5, textTransform:'uppercase',
+        padding:'7px 12px', whiteSpace:'nowrap', opacity: busy ? 0.6 : 1 }}>
+        {on ? '✓ On' : 'Turn on'}
+      </button>
+    </div>
+  );
+}
+
 /** /account — la home del portal. Solo con sesion. */
-function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt, onLogout }) {
+function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt, onLogout, alertsState, onAlertsChange }) {
   const isMobile = useIsMobile(720);
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -11290,6 +11384,8 @@ function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt,
       {view === 'shelves' && data && !!(data.following || []).length && (
         <section style={{ marginTop:44 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:12 }}>Following · {data.following.length}</div>
+          {/* Aqui es donde alguien viene a buscarlo despues de haber dicho "not now". */}
+          <AlertsToggle state={alertsState || data.alerts} session={auth.session} onChange={onAlertsChange} />
           <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
             {data.following.map(f => (
               <div key={f.slug} style={{ display:'flex', alignItems:'center', gap:10, border:`1px solid ${S.border}`, background:S.surf, borderRadius:2, padding:'9px 13px' }}>
@@ -11431,6 +11527,8 @@ export default function App() {
   // Que entidades sigue, para que el boton de la ficha sepa como pintarse.
   const [followSlugs,setFollowSlugs]     = useState([]);
   const [wishSyncedAt,setWishSyncedAt]   = useState(0);      // cuando acabo el merge invitado→cuenta
+  const [alertsState,setAlertsState]     = useState(null);   // {emailAlerts, asked, email}
+  const [alertsPrompt,setAlertsPrompt]   = useState(null);   // {slug, display} mientras se pregunta
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
   // On first mount, prefer a session arriving in the URL fragment (just
@@ -11608,6 +11706,8 @@ export default function App() {
     let vivo = true;
     // Si se pulso Follow sin sesion, se aplica ANTES de leer la lista: al volver
     // del login el boton tiene que estar ya en Following.
+    // Estado de los avisos: dice si al cliente ya se le pregunto.
+    fetchAlertsState(auth.session).then(st => { if (vivo) setAlertsState(st); }).catch(()=>{});
     const pendiente = takePendingFollow();
     (pendiente ? followAdd(auth.session, pendiente).catch(()=>{}) : Promise.resolve())
       .then(()=> portalGet('follows', { session: auth.session }))
@@ -11678,6 +11778,19 @@ export default function App() {
       })
       .catch(()=>{ /* network error — leave on home rather than crash */ });
   },[path, records]);
+
+  // El boton de seguir avisa por aqui tras un alta. Se pregunta UNA vez: si ya
+  // hay respuesta guardada —si o no— no se vuelve a molestar.
+  useEffect(()=>{
+    registerAlertsHook((slug)=>{
+      if (!auth?.session) return;
+      if (!alertsState || alertsState.asked) return;
+      fetchEntityPublic(slug, 1)
+        .then(d => setAlertsPrompt({ slug, display: d?.display || slug }))
+        .catch(() => setAlertsPrompt({ slug, display: slug }));
+    });
+    return ()=>registerAlertsHook(null);
+  },[auth?.session, alertsState]);
 
   // Rutas del portal (fase 5b). /account pide sesion; las fichas de entidad no.
   const portalRoute = useMemo(()=>{
@@ -11922,6 +12035,8 @@ export default function App() {
               onOpenWishlist={()=>setWishOpen(true)}
               onLogout={handleLogout}
               onNavigate={navigate}
+              alertsState={alertsState}
+              onAlertsChange={(on)=>setAlertsState(st=>({ ...(st||{}), asked:true, emailAlerts:on }))}
               wishSyncedAt={wishSyncedAt}
             />
           : <EntityPage
@@ -12013,6 +12128,18 @@ export default function App() {
             <button onClick={()=>setAudioGateOpen(false)} style={{background:'transparent',border:'none',color:S.muted,cursor:'pointer',fontSize:11,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit'}}>Not now</button>
           </div>
         </div>
+      )}
+      {alertsPrompt && auth?.session && (
+        <AlertsPrompt
+          display={alertsPrompt.display}
+          email={profile?.email || alertsState?.email || ''}
+          session={auth.session}
+          onDone={(respuesta)=>{
+            setAlertsPrompt(null);
+            // Cerrar sin responder (clic fuera) NO cuenta: se vuelve a preguntar.
+            if (respuesta !== null) setAlertsState(st => ({ ...(st||{}), asked:true, emailAlerts: respuesta === true }));
+          }}
+        />
       )}
       <PlayerBar isWished={isWished} onWishlistToggle={wishlistToggle} onOpenRelease={openProduct} />
     </div>

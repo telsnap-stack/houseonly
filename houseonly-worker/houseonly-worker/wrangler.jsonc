@@ -47,7 +47,10 @@
   // to prod. Polls Discogs marketplace every 15 min to detect sales (Fase 3E).
   // Staging cron continues to run independently (see env.staging.triggers below).
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    // */15 — Discogs + graduacion, lo de siempre.
+    // 0 6  — avisos de novedades (fase 6). scheduled() bifurca por event.cron;
+    //        la expresion tiene que coincidir con DAILY_CRON en src/index.ts.
+    "crons": ["*/15 * * * *", "0 6 * * *"]
   },
   "env": {
     "staging": {
@@ -92,8 +95,11 @@
       // Nothing depended on it. The staging worker itself stays — six scripts
       // POST to its fetch endpoints (webhook registration/tests, backfills) —
       // and graduation can still be driven by hand via ?action=graduation-run.
+      // Staging corre SOLO la tanda de avisos. El poll de Discogs sigue fuera
+      // por lo que explica el comentario de arriba: competia por el mismo cupo
+      // de 60/min que necesita produccion, y en dry no creaba nada.
       "triggers": {
-        "crons": []
+        "crons": ["0 6 * * *"]
       }
     }
   }

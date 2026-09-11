@@ -683,6 +683,15 @@ async function nlCreateBroadcastDraft(env: Env, subject: string, html: string, n
 
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 
+// La expresion diaria de los avisos de novedades (fase 6). Se compara tal cual
+// con event.cron, asi que tiene que ser IDENTICA a la de wrangler.jsonc.
+// 06:00 UTC = 08:00 en Madrid en verano, 07:00 en invierno. El cron es UTC y
+// eso se acepta: ver "decisiones abiertas" en docs/entities.md.
+const DAILY_CRON = '0 6 * * *';
+// El enlace de baja tiene que apuntar al worker que manda el correo, y en el
+// cron no hay peticion de la que sacar el origen.
+const FOLLOW_ALERTS_ORIGIN = 'https://houseonly-worker.emontagut.workers.dev';
+
 interface WishlistItem {
   handle: string;
   title?: string;
@@ -856,6 +865,15 @@ import {
   lookupPublic,
   entityIndex,
 } from './lib/follows';
+import {
+  getAlertsState,
+  setEmailAlerts,
+  refreshStoredEmail,
+  unsubscribeByToken,
+  getMode as getAlertsMode,
+  setMode as setAlertsMode,
+  runFollowAlerts,
+} from './lib/alerts';
 import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './lib/slug';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
@@ -2708,7 +2726,91 @@ export default {
       let wishlistRaws: any[] = [];
       try { wishlistRaws = JSON.parse(wl || '{}').items || []; } catch { /* wishlist ilegible */ }
 
-      return jsonRes(await accountHome(env, cid, ownedIds, wishlistRaws));
+      const home = await accountHome(env, cid, ownedIds, wishlistRaws);
+      // De paso se refresca el correo guardado: aqui hay sesion, y el cron que
+      // manda los avisos no la tendra.
+      const alerts = await getAlertsState(env, cid);
+      try {
+        const d: any = await caapiQueryBySession(env, url.searchParams.get('session') || '',
+          `query { customer { emailAddress { emailAddress } } }`);
+        const email = d?.data?.customer?.emailAddress?.emailAddress || '';
+        if (email) await refreshStoredEmail(env, cid, email);
+      } catch { /* el correo viejo sigue sirviendo */ }
+      return jsonRes({ ...home, alerts });
+    }
+
+    // Avisos de novedades (fase 6). El interruptor es del cliente, con su
+    // sesion; el correo se captura AQUI, que es el unico momento en que el
+    // worker puede saberlo.
+    if (action === 'follow-alerts') {
+      const isGet = request.method === 'GET';
+      let body: any = {};
+      if (!isGet) {
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      }
+      const session = isGet ? (url.searchParams.get('session') || '') : (body.session || '');
+      const cid = await resolveCustomerId(env, { session, token: isGet ? (url.searchParams.get('token') || '') : (body.token || '') });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      if (isGet) return jsonRes(await getAlertsState(env, cid));
+      if (request.method !== 'POST') return jsonRes({ error: 'method not allowed' }, 405);
+
+      // El correo sale de la Customer Account API, que es la unica que lo sabe,
+      // y solo mientras haya sesion. Por eso se guarda al decir que si.
+      let email = '';
+      if (body.enabled) {
+        try {
+          const d: any = await caapiQueryBySession(env, session,
+            `query { customer { emailAddress { emailAddress } } }`);
+          email = d?.data?.customer?.emailAddress?.emailAddress || '';
+        } catch { /* sin correo no se puede avisar; se responde igual */ }
+      }
+      const r = await setEmailAlerts(env, cid, body.enabled === true, email);
+      return jsonRes({ ...r, email });
+    }
+
+    // Baja desde el enlace del correo. Publica y con token opaco: apaga los
+    // avisos y NADA MAS — el newsletter tiene su propia baja.
+    if (action === 'follow-alerts-unsubscribe' && request.method === 'GET') {
+      const ok = await unsubscribeByToken(env, url.searchParams.get('t') || '');
+      return new Response(
+        `<!doctype html><meta charset="utf-8"><title>House Only</title>
+         <body style="margin:0;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+         <div><p style="font-size:22px;font-weight:900;letter-spacing:-1px">HOUSE<span style="color:#c8ff00">ONLY</span></p>
+         <p style="font-size:15px">${ok ? 'Listo: no volveremos a avisarte de novedades.' : 'Ese enlace ya no vale.'}</p>
+         <p style="color:#585858;font-size:12px">Tu suscripción al newsletter no ha cambiado.</p>
+         <p style="margin-top:22px"><a href="https://houseonly.store/account" style="color:#c8ff00;font-size:12px">Volver a tus estanterías</a></p>
+         </div></body>`,
+        { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      );
+    }
+
+    // Modo y disparo manual de la tanda. Bearer, como el resto de lo operativo.
+    if (action === 'follow-alerts-mode') {
+      const authA = request.headers.get('authorization') || '';
+      if (authA !== `Bearer ${env.BOOTSTRAP_AUTH_SECRET}`) return jsonRes({ error: 'unauthorized' }, 401);
+      if (request.method === 'POST') {
+        let body: any = {};
+        try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+        const m = body?.mode;
+        if (m !== 'off' && m !== 'test' && m !== 'live') return jsonRes({ error: "mode must be off|test|live" }, 400);
+        await setAlertsMode(env, m);
+        return jsonRes({ ok: true, mode: m });
+      }
+      return jsonRes({ mode: await getAlertsMode(env) });
+    }
+
+    if (action === 'follow-alerts-run' && request.method === 'POST') {
+      const authA = request.headers.get('authorization') || '';
+      if (authA !== `Bearer ${env.BOOTSTRAP_AUTH_SECRET}`) return jsonRes({ error: 'unauthorized' }, 401);
+      let body: any = {};
+      try { body = await request.json(); } catch { /* todo por defecto */ }
+      const summary = await runFollowAlerts(env, {
+        mode: body.mode, testTo: body.testTo,
+        sinceMs: body.hours ? Number(body.hours) * 3600000 : undefined,
+        workerUrl: url.origin,
+      });
+      return jsonRes(summary);
     }
 
     // Todas las entidades con producto vivo. Lo lee el prerender para generar
@@ -2849,6 +2951,23 @@ export default {
   // returns before pollDiscogsForSales is done. Errors are caught so a
   // bad poll doesn't crash the Worker — we want next run to try again.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // ── AVISOS DE NOVEDADES (fase 6) ────────────────────────
+    // La tanda diaria va en SU PROPIA expresion de cron, y aqui se bifurca.
+    // Sin esta bifurcacion, activar un cron en staging —que hoy no tiene
+    // ninguno a proposito— devolveria el poll de Discogs que se quito para no
+    // competir por el cupo de 60/min que necesita produccion.
+    if (event.cron === DAILY_CRON) {
+      ctx.waitUntil(
+        runFollowAlerts(env, { workerUrl: FOLLOW_ALERTS_ORIGIN }).then(
+          (summary) => env.ENTITIES.put('meta:follow_alerts_last_run',
+            JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ...summary })),
+          (err) => env.ENTITIES.put('meta:follow_alerts_last_run',
+            JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+        ),
+      );
+      return;
+    }
+
     ctx.waitUntil(
       pollDiscogsForSales(env).then(
         (result) => {
