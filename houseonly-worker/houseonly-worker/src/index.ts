@@ -523,26 +523,9 @@ function nlEsc(s: string): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Slug helpers — MUST mirror scripts/prerender.mjs and App.jsx EXACTLY.
-// The site (links, sitemap, prerendered pages) is keyed by this slug, NOT by
-// the Shopify handle. The handle is usually the SKU (e.g. "chiwax027ltd")
-// while the slug is artist+title (e.g. "jakobiin-a-place-called-jack"), so a
-// link built from the handle 404s to home. Build email links from the slug.
-function nlSlugify(str: string): string {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-function nlMakeSlug(artist: string, title: string, catalog: string): string {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = nlSlugify(base);
-  if (s) return s;
-  return nlSlugify(catalog) || 'release';
-}
+// El slug del sitio vive ahora en ./lib/slug, que comparten el newsletter, el
+// feed y el portal: eran dos copias de lo mismo y la tercera habria sido la que
+// se desincronizara.
 
 function nlProductUrl(p: NLProduct): string {
   const slug = nlMakeSlug(p.vendor, p.title, p.sku);
@@ -869,7 +852,11 @@ import {
   mergeFollows,
   buildFeed,
   entityPage,
+  accountHome,
+  lookupPublic,
+  entityIndex,
 } from './lib/follows';
+import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './lib/slug';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 
@@ -2685,6 +2672,57 @@ export default {
       }
 
       return jsonRes({ error: 'method not allowed' }, 405);
+    }
+
+    // Home del portal: estanterias, "ya lo tienes" y sugerencias, en UNA llamada.
+    // Tres peticiones encadenadas para pintar una pantalla se notan en el movil.
+    if (action === 'account-home' && request.method === 'GET') {
+      const cid = await resolveCustomerId(env, {
+        session: url.searchParams.get('session') || '',
+        token: url.searchParams.get('token') || '',
+      });
+      if (!cid) return jsonRes({ error: 'auth' }, 401);
+
+      // Que discos tiene ya. La Customer Account API es la unica que sabe lo que
+      // ha comprado ESTE cliente, y da el gid del producto por linea de pedido.
+      let ownedIds: string[] = [];
+      try {
+        const d: any = await caapiQueryBySession(env, url.searchParams.get('session') || '', `
+          query {
+            customer {
+              orders(first: 50, sortKey: PROCESSED_AT, reverse: true) {
+                nodes { lineItems(first: 50) { nodes { productId } } }
+              }
+            }
+          }
+        `);
+        for (const o of d?.data?.customer?.orders?.nodes || []) {
+          for (const li of o?.lineItems?.nodes || []) if (li?.productId) ownedIds.push(li.productId);
+        }
+      } catch {
+        // Sin pedidos legibles se pinta igual: "ya lo tienes" es un adorno util,
+        // no un requisito para ver tus estanterias.
+      }
+
+      const wl = await env.WISHLIST.get(`wl:${cid}`);
+      let wishlistRaws: any[] = [];
+      try { wishlistRaws = JSON.parse(wl || '{}').items || []; } catch { /* wishlist ilegible */ }
+
+      return jsonRes(await accountHome(env, cid, ownedIds, wishlistRaws));
+    }
+
+    // Todas las entidades con producto vivo. Lo lee el prerender para generar
+    // una pagina por artista y por sello, y el sitemap.
+    if (action === 'entity-index' && request.method === 'GET') {
+      return jsonRes({ entities: await entityIndex(env) });
+    }
+
+    // De un nombre crudo a su entidad. Publico y de solo lectura: lo llama la
+    // ficha de producto para saber a donde enlazar el artista y el sello.
+    if (action === 'entity-lookup' && request.method === 'GET') {
+      const kind = url.searchParams.get('kind') === 'label' ? 'label' : 'artist';
+      const entities = await lookupPublic(env, kind, url.searchParams.get('raw') || '');
+      return jsonRes({ entities });
     }
 
     // Ficha publica de una entidad. Sin Bearer: es lo que pintara la tienda.

@@ -630,6 +630,24 @@ para una pantalla que aún no existe. Si el portal acaba pidiendo historia, el
 camino está apuntado aquí y el índice se puede construir en cualquier momento a
 partir de los metafields.
 
+### Eventos de artista y sello: v2, no ahora
+
+Un follow sabe *que* sacas discos, no *cuando* tocas. Lo natural cuando el
+portal esté en pie es que seguir a una entidad traiga también sus fechas —
+"Omar S toca en Madrid el 14"— y que eso aparezca en su ficha y en las
+estanterías de quien le sigue.
+
+Queda fuera de la fase 5 **a propósito**, porque no es más pantalla: es una
+fuente de datos nueva que la tienda no tiene. Un evento necesita fecha, ciudad,
+sala, enlace de entradas y alguien que lo mantenga al día; ni Shopify ni Discogs
+lo dan, y un listado de conciertos desactualizado hace más daño que no tenerlo.
+
+Cuando se retome, lo que ya está hecho encaja sin tocarlo: `entity:{slug}` es el
+sitio donde colgar los eventos, `fanout:{slug}:*` dice a quién avisar, y la ficha
+de entidad es donde se pintan. Lo que falta decidir es de dónde salen los datos
+— a mano en el admin, de Bandsintown o del propio artista — y eso es una
+decisión de producto, no de esquema.
+
 ## Promoción a producción: aplazada hasta la fase 4/5
 
 **Decisión del 2026-09-10: no se promociona nada todavía.** El motivo no es que

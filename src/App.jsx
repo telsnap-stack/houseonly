@@ -1980,7 +1980,7 @@ function TrackPlayer({ tracks, release }) {
   );
 }
 
-function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
+function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate }) {
   // Variant choice (Deep Jungle colour editions: Black / Coloured). Hook must
   // run unconditionally, so it sits before the null guard. When the selected
   // id belongs to a previously-opened product we fall back to the first
@@ -2013,9 +2013,15 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle }) {
           </div>
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
             <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
-            <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>{r.label} · {r.catalog}</div>
+            {/* Fase 5b: el sello y el artista llevan a su ficha de entidad. Si el
+                nombre no resuelve, EntityLink pinta el texto de siempre. */}
+            <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:4 }}>
+              <EntityLink kind="label" raw={r.label} onNavigate={onNavigate} /> · {r.catalog}
+            </div>
             <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
-            <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>{r.artist}</div>
+            <div style={{ fontSize:12, color:S.muted, marginBottom:12 }}>
+              <EntityLink kind="artist" raw={r.artist} onNavigate={onNavigate} />
+            </div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
               {[r.genre,r.year].filter(Boolean).map(v=><span key={v} style={{ fontSize:9, fontWeight:700, letterSpacing:1, padding:'2px 8px', borderRadius:2, background:S.border, color:S.muted, textTransform:'uppercase' }}>{v}</span>)}
             </div>
@@ -2170,7 +2176,7 @@ function CartDrawer({ cart, open, onClose, onRemove, onCheckout }) {
 }
 
 // ── ACCOUNT DRAWER ─────────────────────────────────────────────
-function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout }) {
+function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout, openView, onOpenViewUsed }) {
   // Orders panel state
   const [view, setView] = useState('home'); // home | orders
   const [orders, setOrders] = useState(null); // null = not loaded, [] = empty
@@ -2198,6 +2204,19 @@ function AccountDrawer({ open, onClose, auth, profile, onSignIn, onLogout }) {
     setView('orders');
     if (orders === null) loadOrders();
   };
+
+  // El portal enlaza a "My Orders": el cajon se abre ya en esa vista en vez de
+  // obligar a un toque mas. Se consume una sola vez para que cerrarlo y volver
+  // a abrirlo desde el icono siga llevando a la home del cajon.
+  useEffect(() => {
+    if (open && openView === 'orders') {
+      goToOrders();
+      onOpenViewUsed?.();
+    }
+    // goToOrders y onOpenViewUsed se recrean en cada render; meterlos en las
+    // dependencias haria que esto se disparase en bucle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, openView]);
 
   // Header text varies by view
   const headerLabel = !auth ? 'Sign In' : (view === 'orders' ? 'My Orders' : 'My Account');
@@ -10907,6 +10926,355 @@ function Nav({ onLogo, children }) {
   );
 }
 
+// ── PORTAL DE CLIENTE: FOLLOWS Y FICHAS DE ENTIDAD (fase 5b) ────
+// docs/entities.md. Tres pantallas nuevas y un enlace: /account con una
+// estanteria por entidad seguida, /artist/{slug} y /label/{slug} publicas, y el
+// artista y el sello de cada ficha de producto apuntando a ellas.
+//
+// Apunta al worker de STAGING a proposito, igual que la cola de entidades: la
+// fase 5a no esta en produccion todavia. La sesion sirve en los dos, porque el
+// namespace donde vive (`sess:`) lo comparten. Cuando la fase suba, esta
+// constante desaparece y se usa WORKER_URL.
+const PORTAL_WORKER_URL = ENTITIES_WORKER_URL;
+
+async function portalGet(action, params = {}) {
+  const qs = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  const r = await fetch(`${PORTAL_WORKER_URL}?action=${action}${qs ? '&' + qs : ''}`);
+  if (!r.ok) throw new Error(`${action}: HTTP ${r.status}`);
+  return r.json();
+}
+
+async function portalSend(action, method, body) {
+  const r = await fetch(`${PORTAL_WORKER_URL}?action=${action}`, {
+    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d?.error || `${action}: HTTP ${r.status}`);
+  return d;
+}
+
+const fetchAccountHome  = session        => portalGet('account-home', { session });
+const fetchEntityPublic = (slug, limit)  => portalGet('entity-public', { slug, limit });
+const lookupEntity      = (kind, raw)    => portalGet('entity-lookup', { kind, raw });
+const followAdd         = (session, slug) => portalSend('follows', 'POST', { session, slug });
+const followRemove      = (session, slug) => portalSend('follows', 'DELETE', { session, slug });
+
+// La ficha de producto pregunta por el mismo artista muchas veces en una sesion.
+const lookupCache = new Map();
+async function lookupEntityCached(kind, raw) {
+  const key = `${kind}:${raw}`;
+  if (lookupCache.has(key)) return lookupCache.get(key);
+  const p = lookupEntity(kind, raw).then(d => d.entities || []).catch(() => []);
+  lookupCache.set(key, p);
+  return p;
+}
+
+const entityPath = e => `/${(e.roles || []).includes('label') && !(e.roles || []).includes('artist') ? 'label' : 'artist'}/${e.slug}/`;
+const roleLabel  = e => ((e.roles || []).includes('artist') && (e.roles || []).includes('label'))
+  ? 'Artist & Label' : ((e.roles || []).includes('label') ? 'Label' : 'Artist');
+
+/** Enlace interno que no recarga la pagina. */
+function ILink({ to, onNavigate, children, style }) {
+  return (
+    <a href={to} style={{ color:'inherit', textDecoration:'none', ...style }}
+       onClick={e => { if (e.metaKey||e.ctrlKey||e.shiftKey||e.button) return; e.preventDefault(); onNavigate(to); }}>
+      {children}
+    </a>
+  );
+}
+
+/** Boton de seguir. Sin sesion manda a entrar y vuelve a esta misma pagina. */
+function FollowButton({ slug, following, auth, onSignIn, onChange, size = 'md' }) {
+  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState(following);
+  useEffect(() => { setState(following); }, [following]);
+
+  const click = async () => {
+    if (!auth?.session) { onSignIn(); return; }
+    setBusy(true);
+    try {
+      const next = !state;
+      // Optimista: el boton responde al dedo, no a la red. Si falla, vuelve.
+      setState(next);
+      if (next) await followAdd(auth.session, slug); else await followRemove(auth.session, slug);
+      onChange?.(slug, next);
+    } catch {
+      setState(s => !s);
+    } finally { setBusy(false); }
+  };
+
+  const pad = size === 'sm' ? '5px 10px' : '9px 16px';
+  return (
+    <button onClick={click} disabled={busy} style={{
+      background: state ? 'transparent' : S.accent, color: state ? S.accent : S.bg,
+      border: `1px solid ${state ? S.border : S.accent}`, borderRadius:2, cursor: busy ? 'wait' : 'pointer',
+      fontFamily:'inherit', fontWeight:700, fontSize: size === 'sm' ? 9 : 10, letterSpacing:1.5,
+      textTransform:'uppercase', padding:pad, whiteSpace:'nowrap', opacity: busy ? 0.6 : 1,
+    }}>{state ? 'Following' : 'Follow'}</button>
+  );
+}
+
+/** Marca de "ya lo tienes" sobre la portada. */
+function OwnedBadge() {
+  return (
+    <div style={{ position:'absolute', left:6, top:6, background:S.accent, color:S.bg, fontSize:8,
+      fontWeight:700, letterSpacing:1.2, textTransform:'uppercase', padding:'3px 6px', borderRadius:2 }}>
+      You have it
+    </div>
+  );
+}
+
+/** Una tarjeta de disco. El enlace es de verdad: navegar recarga la ficha. */
+function ReleaseCard({ p, width = 150 }) {
+  return (
+    <a href={`/products/${p.slug}/`} style={{ display:'block', width, flex:`0 0 ${width}px`, scrollSnapAlign:'start', color:'inherit', textDecoration:'none' }}>
+      <div style={{ position:'relative', width, height:width, background:S.surf, borderRadius:2, overflow:'hidden' }}>
+        {p.imageUrl
+          ? <img src={`${p.imageUrl.split('?')[0]}?width=${width * 2}`} alt="" loading="lazy" style={{ width:'100%', height:'100%', objectFit:'cover', opacity: p.owned ? 0.55 : 1 }} />
+          : null}
+        {p.owned && <OwnedBadge />}
+      </div>
+      <div style={{ fontSize:12, fontWeight:600, marginTop:8, lineHeight:1.35, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{p.title}</div>
+      <div style={{ fontSize:11, color:S.muted, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{p.vendor}</div>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6, marginTop:6 }}>
+        <span style={{ fontSize:12, fontWeight:600 }}>{p.price ? `€${Number(p.price).toFixed(2)}` : ''}</span>
+        {p.forthcoming
+          ? <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.bg, background:S.accent, fontWeight:700, padding:'2px 5px', borderRadius:2 }}>Pre-order</span>
+          : p.stock > 0
+            ? <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.muted }}>{p.stock} left</span>
+            : <span style={{ fontSize:8, letterSpacing:1.2, textTransform:'uppercase', color:S.muted }}>Sold out</span>}
+      </div>
+    </a>
+  );
+}
+
+/**
+ * Una estanteria por entidad. Se desliza con el pulgar: `overflow-x:auto` con
+ * scroll-snap y sin barra visible en movil, que es donde se usa esto.
+ */
+function EntityShelf({ shelf, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  const w = isMobile ? 136 : 156;
+  const to = entityPath(shelf);
+  return (
+    <section style={{ marginTop:34 }}>
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:12, marginBottom:12 }}>
+        <div style={{ minWidth:0 }}>
+          <ILink to={to} onNavigate={onNavigate} style={{ fontSize:isMobile?16:19, fontWeight:800, letterSpacing:'-0.3px' }}>{shelf.display}</ILink>
+          <span style={{ fontSize:9, letterSpacing:2, textTransform:'uppercase', color:S.muted, marginLeft:9 }}>
+            {roleLabel(shelf)}{shelf.owned > 0 ? ` · you have ${shelf.owned} of ${shelf.total}` : ` · ${shelf.total} records`}
+          </span>
+        </div>
+        <ILink to={to} onNavigate={onNavigate} style={{ fontSize:9, letterSpacing:1.5, textTransform:'uppercase', color:S.accent, border:`1px solid ${S.border}`, borderRadius:2, padding:'5px 10px', whiteSpace:'nowrap' }}>
+          All {shelf.total} →
+        </ILink>
+      </div>
+      <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:12, scrollSnapType:'x mandatory', WebkitOverflowScrolling:'touch' }}>
+        {shelf.items.map(p => <ReleaseCard key={p.handle} p={p} width={w} />)}
+      </div>
+    </section>
+  );
+}
+
+/** Estado vacio: lo que ya ha mirado o comprado, a un clic de seguirlo. */
+function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
+  const wl = suggestions.filter(s => s.from === 'wishlist');
+  const or = suggestions.filter(s => s.from === 'orders');
+  const grupo = (titulo, lista) => lista.length ? (
+    <>
+      <div style={{ fontSize:9, letterSpacing:2, textTransform:'uppercase', color:S.muted, margin:'22px 0 12px' }}>{titulo}</div>
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'center' }}>
+        {lista.map(s => (
+          <div key={s.slug} style={{ display:'flex', alignItems:'center', gap:9, border:`1px solid ${S.border}`, background:S.bg, borderRadius:2, padding:'8px 12px' }}>
+            <span style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:S.muted }}>{roleLabel(s)}</span>
+            <span style={{ fontSize:13, fontWeight:600 }}>{s.display}</span>
+            <span style={{ fontSize:10, color:S.muted }}>{s.total}</span>
+            <FollowButton slug={s.slug} following={false} auth={auth} onSignIn={onSignIn} onChange={onChange} size="sm" />
+          </div>
+        ))}
+      </div>
+    </>
+  ) : null;
+
+  return (
+    <div style={{ border:`1px solid ${S.border}`, background:S.surf, borderRadius:3, padding:'40px 24px', textAlign:'center', marginTop:20 }}>
+      <div style={{ fontSize:20, fontWeight:800, marginBottom:10 }}>Your shelves are empty</div>
+      <p style={{ color:S.muted, fontSize:13, lineHeight:1.7, margin:'0 auto', maxWidth:440 }}>
+        Follow the artists and labels you care about and every new record of theirs lands here — pre-orders included, before they go public.
+      </p>
+      {grupo('From your wishlist', wl)}
+      {grupo('From what you have bought', or)}
+      {!wl.length && !or.length && (
+        <p style={{ color:S.muted, fontSize:12, marginTop:22 }}>Open a release and follow its artist or label to start.</p>
+      )}
+    </div>
+  );
+}
+
+/** /account — la home del portal. Solo con sesion. */
+function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  // `loading` se deduce, no se guarda: un setState al entrar en el efecto
+  // dispara un render de mas por cada carga.
+  const loading = !data && !err;
+
+  useEffect(() => {
+    if (!auth?.session) return;
+    let vivo = true;
+    fetchAccountHome(auth.session)
+      .then(d => { if (vivo) setData(d); })
+      .catch(() => { if (vivo) setErr('Could not load your shelves.'); });
+    return () => { vivo = false; };
+  }, [auth?.session]);
+
+  // Al seguir o dejar de seguir se recarga: las estanterias cambian de orden y
+  // de contenido, y reconstruirlas a mano aqui seria repetir al worker.
+  const recargar = () => {
+    if (!auth?.session) return;
+    fetchAccountHome(auth.session).then(setData).catch(() => {});
+  };
+
+  if (!auth?.session) {
+    return (
+      <div style={{ maxWidth:520, margin:'0 auto', padding:'64px 20px', textAlign:'center' }}>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:10 }}>Your records, in one place</div>
+        <p style={{ color:S.muted, fontSize:13, lineHeight:1.7, marginBottom:26 }}>
+          Sign in to follow artists and labels and see every new release of theirs the day it lands.
+        </p>
+        <Btn ch="Sign In" onClick={onSignIn} />
+      </div>
+    );
+  }
+
+  const shelves = data?.shelves || [];
+  return (
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px' }}>
+      <h1 style={{ fontSize:isMobile?21:26, fontWeight:800, letterSpacing:'-0.4px', margin:'0 0 4px' }}>Your shelves</h1>
+      <p style={{ color:S.muted, fontSize:13, margin:'6px 0 18px' }}>
+        {loading && !data ? 'Loading…' : `${shelves.length} ${shelves.length === 1 ? 'artist or label' : 'artists and labels'} you follow`}
+      </p>
+
+      {/* Lo demas de la cuenta vive en el cajon: aqui solo se enlaza, no se repite. */}
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+        <button onClick={onOpenWishlist} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontFamily:'inherit', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'7px 12px', borderRadius:2 }}>Wishlist</button>
+        <button onClick={onOpenOrders} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontFamily:'inherit', fontSize:9, letterSpacing:1.5, textTransform:'uppercase', padding:'7px 12px', borderRadius:2 }}>My Orders</button>
+      </div>
+
+      {err && <div style={{ color:S.danger, fontSize:12, marginTop:18 }}>{err}</div>}
+
+      {shelves.map(s => <EntityShelf key={s.slug} shelf={s} onNavigate={onNavigate} />)}
+
+      {data && !shelves.length && (
+        <PortalEmpty suggestions={data.suggestions || []} auth={auth} onSignIn={onSignIn} onChange={recargar} />
+      )}
+
+      {data && !!(data.following || []).length && (
+        <section style={{ marginTop:44 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:12 }}>Following · {data.following.length}</div>
+          <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+            {data.following.map(f => (
+              <div key={f.slug} style={{ display:'flex', alignItems:'center', gap:10, border:`1px solid ${S.border}`, background:S.surf, borderRadius:2, padding:'9px 13px' }}>
+                <ILink to={entityPath(f)} onNavigate={onNavigate} style={{ fontSize:13, fontWeight:600 }}>{f.display}</ILink>
+                <span style={{ fontSize:10, color:S.muted, letterSpacing:1, textTransform:'uppercase' }}>{roleLabel(f)} · {f.total}</span>
+                <FollowButton slug={f.slug} following auth={auth} onSignIn={onSignIn} onChange={recargar} size="sm" />
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** /artist/{slug} y /label/{slug} — publicas, sin sesion. */
+function EntityPage({ slug, auth, onSignIn, following, onFollowChange }) {
+  const isMobile = useIsMobile(720);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+
+  // El reseteo al cambiar de entidad lo hace el `key` del sitio de uso, no un
+  // setState dentro del efecto.
+  useEffect(() => {
+    let vivo = true;
+    fetchEntityPublic(slug, 100)
+      .then(d => { if (vivo) setData(d); })
+      .catch(() => { if (vivo) setErr('not-found'); });
+    return () => { vivo = false; };
+  }, [slug]);
+
+  if (err) {
+    return (
+      <div style={{ maxWidth:520, margin:'0 auto', padding:'72px 20px', textAlign:'center' }}>
+        <div style={{ fontSize:20, fontWeight:800, marginBottom:10 }}>Not found</div>
+        <p style={{ color:S.muted, fontSize:13 }}>We don&apos;t have an artist or label under that name.</p>
+      </div>
+    );
+  }
+  if (!data) return <div style={{ maxWidth:1100, margin:'0 auto', padding:'40px 20px', color:S.muted, fontSize:12 }}>Loading…</div>;
+
+  return (
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
+        <div style={{ minWidth:0 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:6 }}>{roleLabel(data)}</div>
+          <h1 style={{ fontSize:isMobile?24:32, fontWeight:800, letterSpacing:'-0.6px', margin:0 }}>{data.display}</h1>
+          <div style={{ fontSize:12, color:S.muted, marginTop:8 }}>
+            {data.total} {data.total === 1 ? 'record' : 'records'} in the shop
+            {data.parent ? ' · sub-label' : ''}
+          </div>
+        </div>
+        <FollowButton slug={data.slug} following={following} auth={auth} onSignIn={onSignIn} onChange={onFollowChange} />
+      </div>
+
+      {!!(data.aliases || []).length && (
+        <div style={{ fontSize:10, color:S.muted, marginTop:14, letterSpacing:0.4 }}>
+          Also written as: {data.aliases.join(' · ')}
+        </div>
+      )}
+
+      <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?136:156}px,1fr))`, gap:isMobile?14:18, marginTop:28 }}>
+        {(data.products || []).map(p => <ReleaseCard key={p.handle} p={p} width={isMobile?136:156} />)}
+      </div>
+
+      {!data.products?.length && (
+        <div style={{ color:S.muted, fontSize:13, marginTop:28 }}>Nothing in stock right now.</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * El artista y el sello de una ficha de producto, como enlaces a su entidad.
+ * Resuelve por el metafield que escribio la fase 4 y, si el producto aun no lo
+ * tiene, cae al indice de alias. Si no resuelve, se pinta el texto de siempre:
+ * un enlace roto es peor que un nombre sin enlazar.
+ */
+function EntityLink({ kind, raw, onNavigate, style }) {
+  const [ents, setEnts] = useState(null);
+  useEffect(() => {
+    if (!raw) return;
+    let vivo = true;
+    lookupEntityCached(kind, raw).then(e => { if (vivo) setEnts(e); });
+    return () => { vivo = false; };
+  }, [kind, raw]);
+
+  if (!ents?.length) return <span style={style}>{raw}</span>;
+  return (
+    <span style={style}>
+      {ents.map((e, i) => (
+        <span key={e.slug}>
+          {i > 0 ? ' & ' : ''}
+          <ILink to={entityPath(e)} onNavigate={onNavigate} style={{ borderBottom:`1px solid ${S.border}` }}>{e.display}</ILink>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
   const [records,setRecords]             = useState([]);
@@ -10936,6 +11304,9 @@ export default function App() {
   // Resets to 'list' every time the user enters the Forthcoming section.
   const [forthcomingView,setForthcomingView] = useState('list');
   const [path,setPath]                   = useState(typeof window!=='undefined'?window.location.pathname:'/');
+  // Que entidades sigue, para que el boton de la ficha sepa como pintarse.
+  const [followSlugs,setFollowSlugs]     = useState([]);
+  const [accountView,setAccountView]     = useState(null);   // 'orders' para abrir el cajon ahi
 
   // ── AUTH + WISHLIST STATE ────────────────────────────────────
   // On first mount, prefer a session arriving in the URL fragment (just
@@ -11103,6 +11474,17 @@ export default function App() {
     }
   };
 
+  // La lista de seguidos se carga una vez por sesion: la ficha de entidad la
+  // necesita para saber si el boton dice Follow o Following.
+  useEffect(()=>{
+    if (!auth?.session) { setFollowSlugs([]); return; }
+    let vivo = true;
+    portalGet('follows', { session: auth.session })
+      .then(d => { if (vivo) setFollowSlugs((d.entities||[]).map(e=>e.slug)); })
+      .catch(()=>{ /* sin follows se pinta Follow, que es lo correcto */ });
+    return ()=>{ vivo = false; };
+  },[auth?.session]);
+
   // Keep `path` in sync with browser back/forward
   useEffect(()=>{
     const onPop = () => setPath(window.location.pathname);
@@ -11165,6 +11547,13 @@ export default function App() {
       })
       .catch(()=>{ /* network error — leave on home rather than crash */ });
   },[path, records]);
+
+  // Rutas del portal (fase 5b). /account pide sesion; las fichas de entidad no.
+  const portalRoute = useMemo(()=>{
+    if (/^\/account\/?$/.test(path)) return { kind:'account' };
+    const m = path.match(/^\/(artist|label)\/([^/]+)\/?$/);
+    return m ? { kind:m[1], slug:m[2] } : null;
+  },[path]);
 
   // Navigation helpers — push URL + update state in one call
   const navigate = (newPath) => {
@@ -11393,6 +11782,26 @@ export default function App() {
         </div>
       </Nav>
 
+      {portalRoute ? (
+        portalRoute.kind === 'account'
+          ? <AccountPage
+              key={auth?.session || 'anon'}
+              auth={auth}
+              onSignIn={handleSignIn}
+              onOpenWishlist={()=>setWishOpen(true)}
+              onOpenOrders={()=>{setAccountView('orders');setAccountOpen(true);}}
+              onNavigate={navigate}
+            />
+          : <EntityPage
+              key={portalRoute.slug}
+              slug={portalRoute.slug}
+              auth={auth}
+              onSignIn={handleSignIn}
+              following={followSlugs.includes(portalRoute.slug)}
+              onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
+            />
+      ) : (
+      <>
       <div style={{padding:'56px 20px 44px',borderBottom:`1px solid ${S.border}`,maxWidth:1100,margin:'0 auto',textAlign:'left'}}>
         <Logo scale={window.innerWidth<480?1.4:2.2} />
         {filters.forthcoming
@@ -11439,6 +11848,9 @@ export default function App() {
         )}
       </div>
 
+      </>
+      )}
+
       <NewsletterSignup variant="footer" source="footer" />
 
       <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
@@ -11452,9 +11864,9 @@ export default function App() {
 
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
-      <Modal r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
+      <Modal onNavigate={navigate} r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />
-      <AccountDrawer open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
+      <AccountDrawer openView={accountView} onOpenViewUsed={()=>setAccountView(null)} open={accountOpen} onClose={()=>setAccountOpen(false)} auth={auth} profile={profile} onSignIn={handleSignIn} onLogout={()=>{handleLogout();setAccountOpen(false);}} />
       <WishlistDrawer items={wishItems} open={wishOpen} onClose={()=>setWishOpen(false)} onRemove={wishlistRemove} onAddToCart={addWishlistItemToCart} onAddAllToCart={addAllWishlistToCart} onOpenItem={openWishlistItem} isLoggedIn={!!auth} onSignInClick={()=>{setWishOpen(false);setAccountOpen(true);}} />
       {audioGateOpen && (
         <div onClick={()=>setAudioGateOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>

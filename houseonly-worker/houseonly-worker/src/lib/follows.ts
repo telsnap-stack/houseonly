@@ -17,6 +17,7 @@
 
 import { getEntity, normalizeName, type EntityRecord } from './entities';
 import { parseSlugs } from './entity-metafields';
+import { makeReleaseSlug } from './slug';
 
 export interface FollowsEnv {
   ENTITIES: KVNamespace;
@@ -47,7 +48,8 @@ const K = {
   follow: (cid: string) => `follow:${cid}`,
   fanout: (slug: string, cid: string) => `fanout:${slug}:${cid}`,
   children: (slug: string) => `children:${slug}:`,
-  index: 'feedindex:v1',
+  index: 'feedindex:v2',   // v2: cada producto lleva su gid, para cruzar pedidos
+  entityIndex: 'entityindex:v1',
 };
 
 // ── LECTURA Y ESCRITURA DE FOLLOWS ──────────────────────────────────
@@ -210,7 +212,9 @@ export async function mergeFollows(
 // ── INDICE DEL CATALOGO ─────────────────────────────────────────────
 
 export interface IndexedProduct {
-  handle: string;
+  id: string;              // gid de Shopify — es por donde casan los pedidos
+  handle: string;          // handle de Shopify: NO es lo que llevan los enlaces
+  slug: string;            // el slug del sitio, artista-titulo: esto si
   title: string;
   vendor: string;
   createdAt: string;
@@ -234,11 +238,11 @@ const INDEX_QUERY = `
     products(first: 250, after: $cursor, sortKey: CREATED_AT, reverse: true) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        handle title vendor createdAt tags
+        id handle title vendor createdAt tags
         featuredImage { url }
         artist: metafield(namespace: "houseonly", key: "artist_slugs") { value }
         label: metafield(namespace: "houseonly", key: "label_slugs") { value }
-        variants(first: 1) { nodes { quantityAvailable price { amount currencyCode } } }
+        variants(first: 1) { nodes { sku quantityAvailable price { amount currencyCode } } }
       }
     }
   }
@@ -308,8 +312,11 @@ export async function annotate(env: FollowsEnv, nodes: any[]): Promise<IndexedPr
     if (!labelSlugs.length && label) labelSlugs = await viaAlias('l', label);
 
     const v = n.variants?.nodes?.[0];
+
     out.push({
+      id: n.id || '',
       handle: n.handle,
+      slug: makeReleaseSlug(vendor, n.title, v?.sku || n.handle),
       title: n.title,
       vendor,
       createdAt: n.createdAt,
@@ -479,4 +486,179 @@ export async function entityPage(
     products: todos.slice(0, limit),
     total: todos.length,
   };
+}
+
+// ── HOME DEL PORTAL ─────────────────────────────────────────────────
+
+export interface Shelf {
+  slug: string;
+  display: string;
+  roles: string[];
+  total: number;                 // discos activos de la entidad
+  owned: number;                 // de esos, cuantos ya tiene el cliente
+  newest: string;                // fecha del mas reciente — ordena las estanterias
+  items: Array<IndexedProduct & { owned: boolean }>;
+}
+
+export interface Suggestion {
+  slug: string;
+  display: string;
+  roles: string[];
+  total: number;
+  from: 'wishlist' | 'orders';
+}
+
+export interface AccountHome {
+  following: Array<{ slug: string; display: string; roles: string[]; total: number; owned: number }>;
+  shelves: Shelf[];
+  suggestions: Suggestion[];
+}
+
+/** Cuantos discos por estanteria como mucho. Mas que eso no lo desliza nadie. */
+export const SHELF_MAX = 40;
+
+/**
+ * Todo lo que la home del portal necesita, en UNA llamada. En el movil, tres
+ * peticiones encadenadas para pintar una pantalla se notan; esta no.
+ *
+ * `ownedIds` son los gid de producto que el cliente ya ha comprado, que index.ts
+ * saca de la Customer Account API. Aqui solo se cruzan.
+ */
+export async function accountHome(
+  env: FollowsEnv,
+  cid: string,
+  ownedIds: string[],
+  wishlistRaws: Array<{ artist?: string; label?: string }> = [],
+): Promise<AccountHome> {
+  const owned = new Set((ownedIds || []).filter(Boolean));
+  const idx = await getCatalogIndex(env);
+  const { entities } = await listFollows(env, cid);
+
+  // ── estanterias ──
+  const shelves: Shelf[] = [];
+  for (const e of entities) {
+    const efectivos = await expandDown(env, [e.slug]);
+    const suyos = idx.items
+      .filter(p => [...p.artistSlugs, ...p.labelSlugs].some(s => efectivos.has(s)))
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    shelves.push({
+      slug: e.slug, display: e.display, roles: e.roles,
+      total: suyos.length,
+      owned: suyos.filter(p => owned.has(p.id)).length,
+      newest: suyos[0]?.createdAt || '',
+      items: suyos.slice(0, SHELF_MAX).map(p => ({ ...p, owned: owned.has(p.id) })),
+    });
+  }
+  // Primero la entidad que ha sacado algo hace menos: es lo que trae a alguien
+  // de vuelta al portal.
+  shelves.sort((a, b) => (Date.parse(b.newest) || 0) - (Date.parse(a.newest) || 0));
+
+  // ── sugerencias para el estado vacio ──
+  const yaSeguidas = new Set(entities.map(e => e.slug));
+  const sug = new Map<string, Suggestion>();
+
+  const proponer = async (slug: string, from: 'wishlist' | 'orders') => {
+    if (!slug || yaSeguidas.has(slug) || sug.has(slug)) return;
+    const ent = await liveEntity(env, slug);
+    if (!ent) return;
+    const total = idx.items.filter(p => [...p.artistSlugs, ...p.labelSlugs].includes(ent.slug)).length;
+    sug.set(ent.slug, { slug: ent.slug, display: ent.display, roles: ent.roles, total, from });
+  };
+
+  // De la wishlist: el texto guardado se resuelve como lo resolveria el importer.
+  for (const it of wishlistRaws) {
+    for (const [kind, raw] of [['a', it?.artist], ['l', it?.label]] as const) {
+      const norm = normalizeName(String(raw || ''));
+      if (!norm) continue;
+      const hit = await env.ENTITIES.get(`alias:${kind}:${norm}`);
+      for (const slug of (hit || '').split(',').map(s => s.trim()).filter(Boolean)) {
+        await proponer(slug, 'wishlist');
+      }
+    }
+  }
+
+  // De los pedidos: lo que ya compro dice mas que lo que guardo para luego.
+  const comprados = idx.items.filter(p => owned.has(p.id));
+  const frecuencia = new Map<string, number>();
+  for (const p of comprados) {
+    for (const s of [...p.artistSlugs, ...p.labelSlugs]) frecuencia.set(s, (frecuencia.get(s) || 0) + 1);
+  }
+  for (const [slug] of [...frecuencia.entries()].sort((a, b) => b[1] - a[1])) {
+    if (sug.size >= 12) break;
+    await proponer(slug, 'orders');
+  }
+
+  return {
+    following: shelves.map(s => ({ slug: s.slug, display: s.display, roles: s.roles, total: s.total, owned: s.owned })),
+    shelves,
+    suggestions: [...sug.values()],
+  };
+}
+
+/**
+ * Resuelve un nombre crudo —el vendor o el tag `label:` de un producto— a las
+ * entidades que le corresponden. SOLO LEE: a diferencia de `entity-resolve`, no
+ * encola nada en revision, porque esto lo llama la tienda en cada ficha de
+ * producto y la cola es cosa del admin.
+ */
+export async function lookupPublic(
+  env: FollowsEnv, kind: 'artist' | 'label', raw: string,
+): Promise<Array<{ slug: string; display: string; roles: string[] }>> {
+  const k = kind === 'artist' ? 'a' : 'l';
+  const limpio = String(raw || '').trim();
+  if (!limpio) return [];
+
+  // Mismo orden que el resolver: exacto, normalizado, y nada mas. Sin
+  // distancia de edicion ni troceo: aqui no se adivina.
+  const hit = (await env.ENTITIES.get(`alias:${k}:${limpio}`))
+    || (await env.ENTITIES.get(`alias:${k}:${normalizeName(limpio)}`));
+  if (!hit) return [];
+
+  const out: Array<{ slug: string; display: string; roles: string[] }> = [];
+  for (const slug of hit.split(',').map(x => x.trim()).filter(Boolean)) {
+    const e = await liveEntity(env, slug);
+    if (e) out.push({ slug: e.slug, display: e.display, roles: e.roles });
+  }
+  return out;
+}
+
+/**
+ * Todas las entidades que tienen algo vivo en la tienda, con su display y su
+ * cuenta. Publico y pequeño: lo usa el prerender para generar una pagina por
+ * entidad, y de paso sirve para el sitemap.
+ *
+ * Se calcula del indice cacheado, asi que no cuesta mas que una lectura de KV.
+ */
+export async function entityIndex(env: FollowsEnv, now = Date.now()): Promise<Array<{
+  slug: string; display: string; roles: string[]; total: number;
+}>> {
+  const raw = await env.ENTITIES.get(K.entityIndex);
+  if (raw) {
+    try {
+      const c = JSON.parse(raw);
+      if (c?.builtAt && now - c.builtAt < INDEX_TTL_MS && Array.isArray(c.items)) return c.items;
+    } catch { /* se reconstruye */ }
+  }
+
+  const idx = await getCatalogIndex(env, now);
+  const cuenta = new Map<string, number>();
+  for (const p of idx.items) {
+    for (const s of new Set([...p.artistSlugs, ...p.labelSlugs])) cuenta.set(s, (cuenta.get(s) || 0) + 1);
+  }
+
+  // En lotes y en paralelo. De una en una son ~1500 lecturas encadenadas y la
+  // llamada se va por encima de los veinte segundos: el prerender la abortaba.
+  const slugs = [...cuenta.keys()];
+  const out: Array<{ slug: string; display: string; roles: string[]; total: number }> = [];
+  const LOTE = 50;
+  for (let i = 0; i < slugs.length; i += LOTE) {
+    const recs = await Promise.all(slugs.slice(i, i + LOTE).map(s => getEntity(env as any, s)));
+    for (const e of recs) {
+      if (!e || e.status === 'merged') continue;
+      out.push({ slug: e.slug, display: e.display, roles: e.roles, total: cuenta.get(e.slug) || 0 });
+    }
+  }
+  out.sort((a, b) => b.total - a.total);
+  await env.ENTITIES.put(K.entityIndex, JSON.stringify({ builtAt: now, items: out }));
+  return out;
 }
