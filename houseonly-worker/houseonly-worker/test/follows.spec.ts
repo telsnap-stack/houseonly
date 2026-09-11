@@ -5,12 +5,13 @@ import {
 	buildFeed, entityPage, annotate, expandDown,
 	clampDays, clampLimit, afterCursor,
 	MAX_FOLLOWS, FEED_DAYS_DEFAULT, FEED_DAYS_MAX,
+	accountHome, SHELF_MAX, lookupPublic, entityIndex,
 } from "../src/lib/follows";
 
 const CID = "7788990011";
 
 async function wipe() {
-	for (const prefix of ["entity:", "alias:", "ignore:", "children:", "follow:", "fanout:", "feedindex:"]) {
+	for (const prefix of ["entity:", "alias:", "ignore:", "children:", "follow:", "fanout:", "feedindex:", "entityindex:"]) {
 		const l = await env.ENTITIES.list({ prefix, limit: 1000 });
 		for (const k of l.keys) await env.ENTITIES.delete(k.name);
 	}
@@ -25,7 +26,7 @@ async function entidad(slug: string, display: string, roles: string[] = ["artist
 
 /** Mete un indice ya construido para que el feed no salga a la red. */
 async function indice(items: any[], builtAt = Date.now()) {
-	await env.ENTITIES.put("feedindex:v1", JSON.stringify({ builtAt, items }));
+	await env.ENTITIES.put("feedindex:v2", JSON.stringify({ builtAt, items }));
 }
 
 const dias = (n: number) => new Date(Date.now() - n * 86400000).toISOString();
@@ -250,6 +251,26 @@ describe("annotate: metafield primero, alias despues", () => {
 		expect(p.forthcoming).toBe(true);
 	});
 
+	it("cada producto lleva el slug del SITIO, no el handle de Shopify", async () => {
+		// Un enlace construido con el handle cae en la home: la tienda indexa por
+		// artista-titulo. Mismo makeSlug que el prerender.
+		const [p] = await annotate(env as any, [{
+			id: "gid://shopify/Product/1", handle: "chiwax027ltd", title: "A Place Called Jack",
+			vendor: "Jakobiin", tags: [], artist: null, label: null,
+			variants: { nodes: [{ sku: "CHIWAX027LTD" }] },
+		}]);
+		expect(p.slug).toBe("jakobiin-a-place-called-jack");
+		expect(p.handle).toBe("chiwax027ltd");
+	});
+
+	it("sin artista ni titulo, el slug cae al catalogo", async () => {
+		const [p] = await annotate(env as any, [{
+			id: "gid://shopify/Product/2", handle: "x", title: "", vendor: "", tags: [],
+			artist: null, label: null, variants: { nodes: [{ sku: "SS 004" }] },
+		}]);
+		expect(p.slug).toBe("ss-004");
+	});
+
 	it("un alias con varios slugs se parte en varios", async () => {
 		await env.ENTITIES.put("alias:a:delanosmithbriankage", "delano-smith,brian-kage");
 		const [p] = await annotate(env as any, [{
@@ -305,5 +326,138 @@ describe("expandDown", () => {
 		const m = await expandDown(env as any, ["rawax"]);
 		expect(m.get("rawax")).toBe("rawax");
 		expect(m.get("rawax-motor-city-edition")).toBe("rawax");
+	});
+});
+
+describe("accountHome: lo que pinta la home del portal", () => {
+	beforeEach(async () => {
+		await wipe();
+		await entidad("omar-s", "Omar S");
+		await entidad("deep-jungle", "Deep Jungle", ["label"]);
+	});
+
+	/** Producto con id, que es por donde casan los pedidos. */
+	function prod(handle: string, dias_: number, a: string[] = [], l: string[] = [], id = handle) {
+		return { ...producto(handle, dias_, a, l), id: `gid://shopify/Product/${id}` };
+	}
+
+	it("una estanteria por entidad, la del release mas reciente primero", async () => {
+		await indice([
+			prod("viejo-omar", 30, ["omar-s"]),
+			prod("nuevo-dj", 2, [], ["deep-jungle"]),
+		]);
+		await addFollow(env as any, CID, "omar-s");
+		await addFollow(env as any, CID, "deep-jungle");
+
+		const home = await accountHome(env as any, CID, []);
+		expect(home.shelves.map(s => s.slug)).toEqual(["deep-jungle", "omar-s"]);
+		expect(home.shelves[0].items.map(i => i.handle)).toEqual(["nuevo-dj"]);
+	});
+
+	it("sin ventana: la estanteria trae tambien lo viejo", async () => {
+		await indice([prod("antiguo", 400, ["omar-s"])]);
+		await addFollow(env as any, CID, "omar-s");
+		const home = await accountHome(env as any, CID, []);
+		expect(home.shelves[0].total).toBe(1);
+		expect(home.shelves[0].items[0].handle).toBe("antiguo");
+	});
+
+	it("marca lo que el cliente ya tiene, y lo cuenta en la cabecera", async () => {
+		await indice([prod("tengo", 5, ["omar-s"]), prod("no-tengo", 6, ["omar-s"])]);
+		await addFollow(env as any, CID, "omar-s");
+
+		const home = await accountHome(env as any, CID, ["gid://shopify/Product/tengo"]);
+		expect(home.shelves[0].owned).toBe(1);
+		expect(home.shelves[0].total).toBe(2);
+		expect(home.shelves[0].items.find(i => i.handle === "tengo")!.owned).toBe(true);
+		expect(home.shelves[0].items.find(i => i.handle === "no-tengo")!.owned).toBe(false);
+		expect(home.following[0]).toMatchObject({ slug: "omar-s", total: 2, owned: 1 });
+	});
+
+	it("sin seguir a nadie: sugiere desde la wishlist y desde los pedidos", async () => {
+		await entidad("mooncraft", "Mooncraft", ["label"]);
+		await entidad("soul-intent", "Soul Intent");
+		await env.ENTITIES.put("alias:l:mooncraft", "mooncraft");
+		await env.ENTITIES.put("alias:a:soulintent", "soul-intent");
+		await indice([
+			prod("de-la-wishlist", 10, ["soul-intent"], ["mooncraft"]),
+			prod("comprado", 20, ["omar-s"]),
+		]);
+
+		const home = await accountHome(env as any, CID,
+			["gid://shopify/Product/comprado"],
+			[{ artist: "Soul Intent", label: "Mooncraft" }]);
+
+		expect(home.shelves).toEqual([]);
+		const porOrigen = Object.fromEntries(home.suggestions.map(s => [s.slug, s.from]));
+		expect(porOrigen["soul-intent"]).toBe("wishlist");
+		expect(porOrigen["mooncraft"]).toBe("wishlist");
+		expect(porOrigen["omar-s"]).toBe("orders");
+	});
+
+	it("no sugiere lo que ya se sigue", async () => {
+		await indice([prod("comprado", 20, ["omar-s"])]);
+		await addFollow(env as any, CID, "omar-s");
+		const home = await accountHome(env as any, CID, ["gid://shopify/Product/comprado"]);
+		expect(home.suggestions.map(s => s.slug)).not.toContain("omar-s");
+	});
+
+	it("una estanteria no se pasa del tope", async () => {
+		await indice(Array.from({ length: SHELF_MAX + 5 }, (_, i) => prod(`p${i}`, i + 1, ["omar-s"])));
+		await addFollow(env as any, CID, "omar-s");
+		const home = await accountHome(env as any, CID, []);
+		expect(home.shelves[0].total).toBe(SHELF_MAX + 5);
+		expect(home.shelves[0].items).toHaveLength(SHELF_MAX);
+	});
+});
+
+describe("entity-lookup: del nombre crudo a la entidad", () => {
+	beforeEach(async () => { await wipe(); await entidad("omar-s", "Omar S"); });
+
+	it("resuelve por alias exacto y por normalizado", async () => {
+		await env.ENTITIES.put("alias:a:Omar-S", "omar-s");
+		await env.ENTITIES.put("alias:a:omars", "omar-s");
+		expect(await lookupPublic(env as any, "artist", "Omar-S")).toEqual([{ slug: "omar-s", display: "Omar S", roles: ["artist"] }]);
+		expect((await lookupPublic(env as any, "artist", "OMAR S"))[0].slug).toBe("omar-s");
+	});
+
+	it("un split devuelve las dos entidades", async () => {
+		await entidad("brian-kage", "Brian Kage");
+		await entidad("delano-smith", "Delano Smith");
+		await env.ENTITIES.put("alias:a:delanosmithbriankage", "delano-smith,brian-kage");
+		const r = await lookupPublic(env as any, "artist", "Delano Smith & Brian Kage");
+		expect(r.map(x => x.slug)).toEqual(["delano-smith", "brian-kage"]);
+	});
+
+	it("lo que no resuelve devuelve vacio y NO encola nada", async () => {
+		expect(await lookupPublic(env as any, "artist", "Nadie Conocido")).toEqual([]);
+		// Esto lo llama la tienda en cada ficha: si encolara, la cola de revision
+		// se llenaria sola de visitas.
+		expect((await env.ENTITIES.list({ prefix: "review:" })).keys).toHaveLength(0);
+	});
+});
+
+describe("entity-index: lo que el prerender necesita", () => {
+	beforeEach(async () => { await wipe(); });
+
+	it("solo entidades con producto vivo, ordenadas por cuantos tienen", async () => {
+		await entidad("omar-s", "Omar S");
+		await entidad("deep-jungle", "Deep Jungle", ["label"]);
+		await entidad("sin-nada", "Sin Nada");
+		await indice([
+			{ ...producto("a", 1, ["omar-s"], ["deep-jungle"]), id: "1" },
+			{ ...producto("b", 2, [], ["deep-jungle"]), id: "2" },
+		]);
+		const idx = await entityIndex(env as any);
+		expect(idx.map(e => [e.slug, e.total])).toEqual([["deep-jungle", 2], ["omar-s", 1]]);
+		// Una entidad sin catalogo no merece pagina: seria un 200 vacio para Google.
+		expect(idx.map(e => e.slug)).not.toContain("sin-nada");
+	});
+
+	it("una entidad fusionada no genera pagina", async () => {
+		await entidad("viva", "Viva", ["label"]);
+		await entidad("vieja", "Vieja", ["label"], { status: "merged", mergedInto: "viva" });
+		await indice([{ ...producto("a", 1, [], ["vieja"]), id: "1" }]);
+		expect((await entityIndex(env as any)).map(e => e.slug)).toEqual([]);
 	});
 });

@@ -23,6 +23,10 @@ const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 const SHOPIFY_TOKEN  = process.env.VITE_SHOPIFY_TOKEN || '3edf470af24f9bd4b81bca274121eec4';
 const SHOPIFY_API    = '2024-01';
 const DIST_DIR = 'dist';
+// Fase 5b: de donde salen las entidades para prerenderizar sus fichas. Apunta
+// al worker de staging mientras la fase 5a no este en produccion; cuando suba,
+// el valor por defecto pasa a ser el worker de prod.
+const ENTITY_WORKER = process.env.VITE_WORKER_URL || 'https://houseonly-worker-staging.emontagut.workers.dev';
 
 // ── Slug helpers (mirror App.jsx exactly) ───────────────────────
 function slugify(str) {
@@ -80,7 +84,7 @@ async function shopifyQuery(query, attempt = 1) {
         'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN,
       },
       body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
+      signal: AbortSignal.timeout(60000),
     });
     // 4xx other than 429 means the request itself is wrong (bad token, bad
     // query) — retrying just burns five more attempts on the same answer.
@@ -268,12 +272,72 @@ function renderProductHtml(template, product) {
 }
 
 // ── Sitemap + robots.txt ────────────────────────────────────────
-function renderSitemap(products) {
+// ── Fichas de entidad (artistas y sellos) ───────────────────────
+//
+// Una pagina por artista y por sello con producto vivo. Sin esto, /artist/x/
+// existe solo para quien llega con JavaScript: Google veria la cascara vacia de
+// la SPA y no habria nada que indexar.
+
+/** Misma regla que entityPath() en App.jsx: sello puro va a /label/, el resto a /artist/. */
+function entityDir(e) {
+  const roles = e.roles || [];
+  return roles.includes('label') && !roles.includes('artist') ? 'label' : 'artist';
+}
+
+async function fetchEntities() {
+  const r = await fetch(`${ENTITY_WORKER}?action=entity-index`, { signal: AbortSignal.timeout(60000) });
+  if (!r.ok) throw new Error(`entity-index HTTP ${r.status}`);
+  const d = await r.json();
+  return Array.isArray(d.entities) ? d.entities : [];
+}
+
+function renderEntityHtml(template, e) {
+  const dir = entityDir(e);
+  const url = `${SITE_URL}/${dir}/${e.slug}/`;
+  const rol = dir === 'label' ? 'label' : 'artist';
+  const title = `${e.display} — vinyl ${rol === 'label' ? 'releases' : 'records'} | House Only`;
+  const desc = `Every ${e.display} record in stock at House Only — ${e.total} ${e.total === 1 ? 'release' : 'releases'}. Follow ${e.display} to get new ones first. Worldwide shipping.`;
+
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': rol === 'label' ? 'Organization' : 'MusicGroup',
+    name: e.display,
+    url,
+  };
+
+  // Mismo procedimiento que las fichas de producto: se quitan el <title> y el
+  // canonical de la plantilla y se inyecta el bloque entero. La plantilla no
+  // trae <meta name="description">, asi que sustituirla no valdria de nada.
+  const seoHead = `  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(desc)}" />
+  <link rel="canonical" href="${url}" />
+  <meta property="og:type" content="profile" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(desc)}" />
+  <meta property="og:url" content="${url}" />
+  <meta name="entity-slug" content="${escapeHtml(e.slug)}" />
+  <script type="application/ld+json">${escapeJson(JSON.stringify(jsonLd))}</script>`;
+
+  // Un H1 en el HTML servido: sin esto, lo unico que ve un rastreador sin
+  // JavaScript es la cascara de la SPA.
+  const seoBody = `<noscript><h1>${escapeHtml(e.display)}</h1><p>${escapeHtml(desc)}</p></noscript>`;
+
+  return template
+    .replace(/<title>[^<]*<\/title>/, '')
+    .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
+    .replace('</head>', `${seoHead}\n  </head>`)
+    .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
+}
+
+function renderSitemap(products, entities = []) {
   const today = new Date().toISOString().slice(0, 10);
   const urls = [
     `<url><loc>${SITE_URL}/</loc><lastmod>${today}</lastmod><priority>1.0</priority></url>`,
     ...products.map(p =>
       `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
+    ),
+    ...entities.map(e =>
+      `<url><loc>${SITE_URL}/${entityDir(e)}/${e.slug}/</loc><lastmod>${today}</lastmod><priority>0.6</priority></url>`
     ),
   ];
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -311,13 +375,32 @@ async function main() {
   }
   console.log(`[prerender] Wrote ${written} product pages`);
 
+  // Las fichas de entidad NO pueden tumbar el build: si el worker no contesta,
+  // se avisa y se sigue. Un despliegue sin paginas de artista es un problema
+  // pequeño; un despliegue que no ocurre es uno grande.
+  let entities = [];
+  try {
+    console.log('[prerender] Fetching entities...');
+    entities = await fetchEntities();
+    let e = 0;
+    for (const ent of entities) {
+      const out = join(DIST_DIR, entityDir(ent), ent.slug, 'index.html');
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, renderEntityHtml(template, ent));
+      e++;
+    }
+    console.log(`[prerender] Wrote ${e} entity pages`);
+  } catch (err) {
+    console.warn(`[prerender] ⚠ entity pages skipped: ${err.message}`);
+  }
+
   console.log('[prerender] Generating sitemap.xml...');
-  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products));
+  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities));
 
   console.log('[prerender] Generating robots.txt...');
   writeFileSync(join(DIST_DIR, 'robots.txt'), renderRobots());
 
-  console.log(`[prerender] ✓ Done. ${products.length} products, sitemap, robots.`);
+  console.log(`[prerender] ✓ Done. ${products.length} products, ${entities.length} entities, sitemap, robots.`);
 }
 
 main().catch(err => {
