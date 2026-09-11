@@ -10142,9 +10142,11 @@ function PreorderImporter() {
 //            escrita de dos maneras, un sub-sello, o nada (AXIS / Axis Of
 //            People son sellos distintos). Por eso lo mira una persona.
 //
-// La cola vive SOLO en staging: la fase 1 no esta en produccion todavia.
-// Cuando suba, esta constante desaparece y se usa REVIEW_WORKER_URL.
-const ENTITIES_WORKER_URL = 'https://houseonly-worker-staging.emontagut.workers.dev';
+// Las entidades ya estan en produccion, asi que esto va al worker del entorno:
+// VITE_WORKER_URL apunta al de staging en el preview de Pages y al de prod en
+// produccion. Antes habia aqui una constante clavada al de staging, que era lo
+// que permitia usar la cola desde un preview mientras la fase 1 no estaba
+// desplegada.
 
 // El recompute automatico al terminar un importer necesita el Bearer, y los
 // importers no lo piden a nadie. Se guarda aqui cuando alguien conecta la
@@ -10160,7 +10162,7 @@ async function recomputeEntitiesQueue(secretOverride) {
   for (const kind of ['artist', 'label']) {
     let cursor = null;
     for (let i = 0; i < 60; i++) {
-      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-recompute`, {
+      const r = await fetch(`${WORKER_URL}?action=entity-review-recompute`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${sec}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, limit: 150, cursor }),
@@ -10188,7 +10190,7 @@ async function recomputeEntitiesQueue(secretOverride) {
 async function resolveEntityRaws(kind, items, secret) {
   const out = new Map();
   for (let i = 0; i < items.length; i += 100) {
-    const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-resolve`, {
+    const r = await fetch(`${WORKER_URL}?action=entity-resolve`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind, source: 'importer', items: items.slice(i, i + 100) }),
@@ -10320,7 +10322,7 @@ function EntitiesPanel() {
         let cursor = null;
         for (let i = 0; i < 60; i++) {
           const qs = `&kind=${kind}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-          const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-list${qs}`, {
+          const r = await fetch(`${WORKER_URL}?action=entity-review-list${qs}`, {
             headers: { 'Authorization': `Bearer ${useSecret}` },
           });
           if (r.status === 401) { setError('Unauthorized — check the secret.'); setAuthed(false); setLoading(false); return; }
@@ -10404,7 +10406,7 @@ function EntitiesPanel() {
     for (let i = 0; i < chosen.length; i += APPROVE_CHUNK) {
       const chunk = chosen.slice(i, i + APPROVE_CHUNK);
       try {
-        const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve-bulk`, {
+        const r = await fetch(`${WORKER_URL}?action=entity-review-approve-bulk`, {
           method: 'POST', headers: hdrs(),
           body: JSON.stringify({ kind: kindTab, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
         });
@@ -10441,7 +10443,7 @@ function EntitiesPanel() {
   async function approveOne(r, body) {
     setBusy(true); setError('');
     try {
-      const res = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve`, {
+      const res = await fetch(`${WORKER_URL}?action=entity-review-approve`, {
         method: 'POST', headers: hdrs(),
         body: JSON.stringify({ kind: r.kind, norm: r.norm, ...body }),
       });
@@ -10455,7 +10457,7 @@ function EntitiesPanel() {
   async function rejectOne(r) {
     setBusy(true);
     try {
-      await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-reject`, {
+      await fetch(`${WORKER_URL}?action=entity-review-reject`, {
         method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: r.kind, norm: r.norm }),
       });
       setRows(rows.filter(x => rk(x) !== rk(r)));
@@ -10938,11 +10940,8 @@ function Nav({ onLogo, children }) {
 // estanteria por entidad seguida, /artist/{slug} y /label/{slug} publicas, y el
 // artista y el sello de cada ficha de producto apuntando a ellas.
 //
-// Apunta al worker de STAGING a proposito, igual que la cola de entidades: la
-// fase 5a no esta en produccion todavia. La sesion sirve en los dos, porque el
-// namespace donde vive (`sess:`) lo comparten. Cuando la fase suba, esta
-// constante desaparece y se usa WORKER_URL.
-const PORTAL_WORKER_URL = ENTITIES_WORKER_URL;
+// El portal habla con el worker del entorno, como todo lo demas.
+const PORTAL_WORKER_URL = WORKER_URL;
 
 async function portalGet(action, params = {}) {
   const qs = Object.entries(params)
