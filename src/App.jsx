@@ -11051,7 +11051,7 @@ function ReleaseCard({ p, width = 150 }) {
           : null}
         {p.owned && <OwnedBadge />}
       </div>
-      <div style={{ fontSize:12, fontWeight:600, marginTop:8, lineHeight:1.35, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{p.title}</div>
+      <div style={{ fontSize:12, fontWeight:600, marginTop:8, lineHeight:1.35, minHeight:'2.7em', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{p.title}</div>
       <div style={{ fontSize:11, color:S.muted, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{p.vendor}</div>
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6, marginTop:6 }}>
         <span style={{ fontSize:12, fontWeight:600 }}>{p.price ? `€${Number(p.price).toFixed(2)}` : ''}</span>
@@ -11101,12 +11101,12 @@ function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
   // Cada sugerencia lleva la portada del disco que la justifica: sin ella la
   // lista es una tabla de nombres y nadie recuerda por que sale Frank Music.
   const tarjeta = s => (
-    <div key={s.slug} style={{ display:'flex', alignItems:'center', gap:11, border:`1px solid ${S.border}`, background:S.bg, borderRadius:2, padding:8, minWidth:236 }}>
+    <div key={s.slug} style={{ display:'flex', alignItems:'center', gap:11, border:`1px solid ${S.border}`, background:S.bg, borderRadius:2, padding:8 }}>
       <div style={{ width:44, height:44, flex:'0 0 44px', background:S.surf, borderRadius:2, overflow:'hidden' }}>
         {s.coverUrl ? <img src={`${s.coverUrl.split('?')[0]}?width=88`} alt={s.coverTitle || ''} loading="lazy" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : null}
       </div>
       <div style={{ minWidth:0, flex:1, textAlign:'left' }}>
-        <div style={{ fontSize:13, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{s.display}</div>
+        <div style={{ fontSize:13, fontWeight:600, lineHeight:1.3, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{s.display}</div>
         <div style={{ fontSize:9, letterSpacing:1.2, textTransform:'uppercase', color:S.muted, marginTop:2 }}>{roleLabel(s)} · {s.total}</div>
       </div>
       <FollowButton slug={s.slug} following={false} auth={auth} onSignIn={onSignIn} onChange={onChange} size="sm" />
@@ -11116,7 +11116,7 @@ function PortalEmpty({ suggestions, auth, onSignIn, onChange }) {
   const grupo = (titulo, lista) => lista.length ? (
     <>
       <div style={{ fontSize:9, letterSpacing:2, textTransform:'uppercase', color:S.muted, margin:'24px 0 12px' }}>{titulo} · {lista.length}</div>
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(236px,1fr))', gap:8 }}>{lista.map(tarjeta)}</div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(268px,1fr))', gap:8 }}>{lista.map(tarjeta)}</div>
     </>
   ) : null;
 
@@ -11181,7 +11181,7 @@ function AccountPage({ auth, onSignIn, onOpenOrders, onOpenWishlist, onNavigate,
 
   const shelves = data?.shelves || [];
   return (
-    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px' }}>
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
       {/* color explicito: index.css pinta los h1 con --text-h, que sobre el
           fondo negro de la tienda se lee como azul oscuro sobre negro. */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
@@ -11251,7 +11251,7 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange }) {
   if (!data) return <div style={{ maxWidth:1100, margin:'0 auto', padding:'40px 20px', color:S.muted, fontSize:12 }}>Loading…</div>;
 
   return (
-    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px' }}>
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
         <div style={{ minWidth:0 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:6 }}>{roleLabel(data)}</div>
@@ -11265,7 +11265,7 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange }) {
       </div>
 
       {!!(data.aliases || []).length && (
-        <div style={{ fontSize:10, color:S.muted, marginTop:14, letterSpacing:0.4 }}>
+        <div style={{ fontSize:10, color:S.muted, marginTop:14, letterSpacing:0.4, textAlign:'left' }}>
           Also written as: {data.aliases.join(' · ')}
         </div>
       )}
