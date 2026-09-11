@@ -1,4 +1,8 @@
 import { useState, useRef, useEffect, useMemo, createContext, useContext, useCallback } from "react";
+// Fase 4 (docs/entities.md): cabeceras y formato de los metafields de entidad.
+// Es el MISMO modulo que usan el script de definiciones y el backfill, no una
+// copia: Vite resuelve el .ts del worker y lo mete en el bundle.
+import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -3194,9 +3198,15 @@ function ZipImporter() {
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_ws.csv'; a.click();
@@ -3569,9 +3579,15 @@ function TripleVisionImporter() {
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_tv.csv'; a.click();
@@ -3967,14 +3983,20 @@ function RubadubImporter() {
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
-  const downloadCSV = () => {
+  const downloadCSV = async () => {
     // Rows already in the shop never travel. That makes Shopify's "Overwrite
     // products with matching handles" checkbox irrelevant for them: there is
     // no row to match, so neither answer can damage the existing product.
     const kept = results.filter(r => !r._alreadyLive);
     if (!kept.length) return;
-    const CSV_KEYS = Object.keys(kept[0]).filter(k => !k.startsWith('_'));
-    const lines = [CSV_KEYS.join(','), ...kept.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(kept);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'shopify_import_rd.csv'; a.click();
@@ -4199,7 +4221,7 @@ function KudosImporter() {
     return {api:e,fmt};
   }
 
-  function exportShopify() {
+  async function exportShopify() {
     const m=margin/100;
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
     const csvRows=[cols];
@@ -4258,7 +4280,9 @@ function KudosImporter() {
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
-    const csv=csvRows.map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
+    const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
     const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');a.href=url;a.download='shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv';
@@ -4606,9 +4630,15 @@ function DBHImporter() {
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k=>!k.startsWith('_')) : [];
-    const lines = [CSV_KEYS.join(','), ...results.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
+    const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -5471,11 +5501,17 @@ function MotherTongueImporter() {
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
-      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+      ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
@@ -5982,11 +6018,17 @@ function RushHourImporter() {
     }
   };
 
-  const downloadCSV = () => {
-    const CSV_KEYS = results.length ? Object.keys(results[0]).filter(k => !k.startsWith('_')) : [];
+  const downloadCSV = async () => {
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    const ent = await withEntityColumns(results);
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
-      ...results.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
+      ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
     const blob = new Blob([lines.join('\n')], { type:'text/csv' });
     const a = document.createElement('a');
@@ -9469,11 +9511,19 @@ function PreorderImporter() {
     r._release ? `release:${r._release}` : '',
   ].filter(Boolean).join(', ');
 
-  const downloadCSV = () => {
+  const downloadCSV = async () => {
     const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
-    const CSV_KEYS = Object.keys(kept[0]).filter(k=>!k.startsWith('_'));
-    const lines = [CSV_KEYS.join(','), ...kept.map(row=>CSV_KEYS.map(h=>{
+    // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
+    // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
+    // sale con la celda vacia y NO frena la importacion.
+    // Aqui el sello NO sale de los tags: los monta tagsForRow() al escribir,
+    // y el valor bueno esta en _label desde el parseo.
+    const ent = await withEntityColumns(kept, { labelOf: r => r._label });
+    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    const rows = ent.rows;
+    const CSV_KEYS = Object.keys(rows[0]).filter(k=>!k.startsWith('_'));
+    const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>{
       const val = h==='Tags' ? tagsForRow(row) : row[h];
       return `"${String(val||'').replace(/"/g,'""')}"`;
     }).join(','))];
@@ -10098,6 +10148,106 @@ async function recomputeEntitiesQueue(secretOverride) {
     }
   }
   return out;
+}
+
+// ── EL SLUG DE ENTIDAD EN EL CSV (fase 4) ──────────────────────
+// Las cabeceras y el formato del valor NO se escriben aqui: salen del mismo
+// modulo que usan el script de definiciones y el backfill. Antes esto habria
+// sido un "MUST mirror" con dos literales copiados; Vite resuelve el .ts del
+// worker, asi que no hay espejo que se pueda desincronizar. Y si se
+// desincronizara, Shopify no daria ningun error: importaria el metafield a
+// ningun sitio.
+
+/** Una llamada por cada 100 valores, no una por fila. */
+async function resolveEntityRaws(kind, items, secret) {
+  const out = new Map();
+  for (let i = 0; i < items.length; i += 100) {
+    const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-resolve`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, source: 'importer', items: items.slice(i, i + 100) }),
+    });
+    if (!r.ok) throw new Error(`${kind}: HTTP ${r.status}`);
+    const d = await r.json();
+    // Lo que no resuelve —'review' o 'ignored'— vuelve con slugs vacios y se
+    // queda como celda vacia. El producto sube igual: una importacion NO espera
+    // a la cola de revision.
+    for (const res of d.results || []) out.set(res.raw, res.slugs || []);
+  }
+  return out;
+}
+
+/**
+ * Añade a cada fila del CSV las dos columnas de metafield con el slug canonico.
+ *
+ * `opts.labelOf` existe porque no todos los importers guardan el sello en el
+ * mismo sitio: el de pre-orders lo lleva en `_label` y monta los tags al
+ * escribir el fichero.
+ *
+ * NUNCA lanza. Si no hay Bearer o el worker falla, devuelve las filas tal cual
+ * y el motivo: un importador que deja de funcionar porque falta el token de una
+ * funcion accesoria es peor que un CSV sin metafield.
+ */
+async function withEntityColumns(rows, opts = {}) {
+  const out = { rows, reason: '', resolved: 0, pending: 0 };
+  if (!rows || !rows.length) return out;
+  if (!entitiesSecret) {
+    out.reason = 'the Entities tab is not connected in this session (no Bearer)';
+    return out;
+  }
+
+  const vendorOf = opts.vendorOf || (r => r['Vendor']);
+  const labelOf  = opts.labelOf  || (r => labelFromTags(r['Tags']));
+
+  try {
+    const artists = [], labels = [];
+    const seenA = new Set(), seenL = new Set();
+    for (const r of rows) {
+      const ctx = { handle: r['Handle'] || '', title: r['Title'] || '' };
+      const v = String(vendorOf(r) || '').trim();
+      if (v && !seenA.has(v)) { seenA.add(v); artists.push({ raw: v, context: ctx }); }
+      const l = String(labelOf(r) || '').trim();
+      if (l && !seenL.has(l)) { seenL.add(l); labels.push({ raw: l, context: ctx }); }
+    }
+
+    const aMap = await resolveEntityRaws('artist', artists, entitiesSecret);
+    const lMap = await resolveEntityRaws('label', labels, entitiesSecret);
+
+    out.rows = rows.map(r => {
+      const a = aMap.get(String(vendorOf(r) || '').trim()) || [];
+      const l = lMap.get(String(labelOf(r) || '').trim()) || [];
+      if (a.length) out.resolved++; else out.pending++;
+      return { ...r, ...entityCsvColumns(a, l) };
+    });
+    console.log(`[entidades] CSV: ${out.resolved} filas con slug de artista, ${out.pending} pendientes de la cola`);
+  } catch (e) {
+    out.rows = rows;
+    out.reason = e?.message || String(e);
+  }
+  return out;
+}
+
+/**
+ * Variante para el importer que construye el CSV como array de arrays en vez de
+ * como objetos por fila. Mismo contrato: si algo falla, devuelve lo que habia.
+ */
+async function withEntityColumnsArray(cols, rows) {
+  const vi = cols.indexOf('Vendor'), ti = cols.indexOf('Tags');
+  const asObjects = rows.map(row => ({
+    Handle: row[0], Title: row[1],
+    Vendor: vi >= 0 ? row[vi] : '',
+    Tags:   ti >= 0 ? row[ti] : '',
+  }));
+  const ent = await withEntityColumns(asObjects);
+  const A = csvHeader('artist'), L = csvHeader('label');
+  if (ent.reason || !ent.rows.length || !(A in ent.rows[0])) {
+    return { cols, rows, reason: ent.reason };
+  }
+  return {
+    cols: [...cols, A, L],
+    rows: rows.map((row, i) => [...row, ent.rows[i][A] || '', ent.rows[i][L] || '']),
+    reason: '',
+  };
 }
 
 /** Lo llaman los importers al terminar. Silencioso si no hay secreto. */
