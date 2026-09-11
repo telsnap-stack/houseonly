@@ -693,6 +693,18 @@ Un job diario en el cron del worker:
    precio y enlace. Si un cliente no tiene novedades, **no recibe nada**: un
    correo que dice "no hay nada" es el que hace que se den de baja.
 
+**Un disco, un sitio.** Un mismo disco lo traen a menudo dos entidades seguidas
+—el artista y su sello, o dos artistas de la misma ficha—. Agrupado por entidad
+sin más, el correo lo repetía bajo cada una: "Boots On The Ground" salía bajo
+Massive Attack y otra vez bajo Play It Again Sam, y el asunto prometía cinco
+discos cuando había tres. Regla: **cada producto aparece una sola vez**, se lo
+queda el **artista seguido** —a quien de verdad se sigue— y el sello recoge lo
+que no trae ningún artista seguido detrás. A igualdad manda el orden de la
+propia ficha, así que el primer artista va antes que el segundo. Debajo del
+disco, una línea **"also from X"** nombra a las demás entidades seguidas que lo
+traen: la información no se pierde, solo deja de duplicarse. El total del asunto
+y el "And N more" cuentan **discos únicos**, no apariciones.
+
 ```
 alertsent:{customerId}:{YYYY-MM-DD} → "1"   (TTL 60 días)
 ```
