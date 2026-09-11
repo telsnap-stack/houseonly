@@ -373,6 +373,13 @@ Cola a **0 filas**. En `ENTITIES` de staging:
 Los 13 de doble rol son los previstos en el diseño: `2000Black`, `Neroli`,
 `Rhythm & Sound` y compañía, que son vendor y sello a la vez.
 
+Ese mismo día, un segundo barrido metió **34 filas nuevas** (12 artistas, 22
+sellos) de los 22 productos que habían entrado en el catálogo entre el 25-08 y
+el 10-09 —16 de ellos de la importación W&S— y que por tanto no existían cuando
+se hizo el barrido inicial. Es la cola de régimen, y es la prueba de lo que dice
+el apartado anterior: mientras los importers no resuelvan (fase 4), cada
+importación deja su rastro aquí.
+
 ## Fases
 
 | Fase | Qué | Dónde | Despliegue |
