@@ -520,3 +520,21 @@ describe("sugerencias: todas, y con la portada que las justifica", () => {
 		expect(home.suggestions[0]).toMatchObject({ from: "orders", coverUrl: "https://cdn/comprado.jpg" });
 	});
 });
+
+describe("entity-lookup: un alias muerto no puede dejar la ficha en blanco", () => {
+	beforeEach(async () => { await wipe(); await entidad("norma-jean-bell", "Norma Jean Bell"); });
+
+	it("si el alias exacto apunta a una entidad borrada, sigue por el normalizado", async () => {
+		// Exactamente lo que paso al renombrar una entidad a mano: se repunto el
+		// alias normalizado y el crudo se quedo mirando al slug viejo.
+		await env.ENTITIES.put("alias:a:norma jean bell", "norma-jean-bell-aka-moodymann");
+		await env.ENTITIES.put("alias:a:normajeanbell", "norma-jean-bell");
+		const r = await lookupPublic(env as any, "artist", "norma jean bell");
+		expect(r.map(e => e.slug)).toEqual(["norma-jean-bell"]);
+	});
+
+	it("si ninguno de los dos lleva a una entidad viva, devuelve vacio", async () => {
+		await env.ENTITIES.put("alias:a:fantasma", "no-existe");
+		expect(await lookupPublic(env as any, "artist", "fantasma")).toEqual([]);
+	});
+});

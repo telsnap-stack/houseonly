@@ -641,16 +641,23 @@ export async function lookupPublic(
 
   // Mismo orden que el resolver: exacto, normalizado, y nada mas. Sin
   // distancia de edicion ni troceo: aqui no se adivina.
-  const hit = (await env.ENTITIES.get(`alias:${k}:${limpio}`))
-    || (await env.ENTITIES.get(`alias:${k}:${normalizeName(limpio)}`));
-  if (!hit) return [];
-
-  const out: Array<{ slug: string; display: string; roles: string[] }> = [];
-  for (const slug of hit.split(',').map(x => x.trim()).filter(Boolean)) {
-    const e = await liveEntity(env, slug);
-    if (e) out.push({ slug: e.slug, display: e.display, roles: e.roles });
+  //
+  // Los dos intentos se prueban hasta dar con uno que lleve a una entidad VIVA.
+  // Un alias que apunta a una entidad borrada existe —devuelve valor— pero no
+  // resuelve a nada, y quedarse en el primer acierto dejaba la ficha sin enlace
+  // ni boton en silencio. Paso de verdad: al renombrar una entidad a mano se
+  // repunto el alias normalizado y se olvido el crudo.
+  for (const clave of [`alias:${k}:${limpio}`, `alias:${k}:${normalizeName(limpio)}`]) {
+    const hit = await env.ENTITIES.get(clave);
+    if (!hit) continue;
+    const out: Array<{ slug: string; display: string; roles: string[] }> = [];
+    for (const slug of hit.split(',').map(x => x.trim()).filter(Boolean)) {
+      const e = await liveEntity(env, slug);
+      if (e) out.push({ slug: e.slug, display: e.display, roles: e.roles });
+    }
+    if (out.length) return out;
   }
-  return out;
+  return [];
 }
 
 /**
