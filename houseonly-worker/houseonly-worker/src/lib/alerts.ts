@@ -20,11 +20,12 @@ export interface AlertsEnv extends FollowsEnv {
  * no arrastra la reputacion de la otra lista. El dominio ya esta verificado en
  * Resend, asi que basta con el buzon.
  *
- * El reply-to es el de atencion de la tienda: quien conteste a un aviso espera
- * que le lea una persona, no un buzon de envios.
+ * El reply-to es un buzon que no se lee, y el pie lo dice: contestar a un aviso
+ * automatico no llega a ninguna parte, y lo que la gente quiere preguntar —"se
+ * agoto, me lo consigues?"— tiene su propio sitio en la ficha del disco.
  */
 const ALERTS_FROM = 'House Only <alerts@houseonly.store>';
-const ALERTS_REPLY_TO = 'info@houseonly.store';
+const ALERTS_REPLY_TO = 'no-reply@houseonly.store';
 const SITE = 'https://houseonly.store';
 
 /** Tope de discos por correo. Lo que pase de ahi se resume en un "y N mas". */
@@ -232,6 +233,18 @@ const esc = (s: string) => String(s ?? '')
 
 const precio = (p: IndexedProduct) => p.price ? `€${Number(p.price).toFixed(2)}` : '';
 
+/**
+ * Mismo criterio que la tienda para decidir el boton: con stock se compra, y un
+ * agotado solo admite peticion si es reciente —el año del disco es lo que lo
+ * decide, igual que en isBackorderEligible() de App.jsx—. Un agotado viejo no
+ * puede decir "Request a copy", porque al llegar a la ficha no habria formulario.
+ */
+export function ctaFor(p: IndexedProduct, now = Date.now()): { label: string; backorder: boolean } {
+  if (p.stock > 0 || p.forthcoming) return { label: 'View record', backorder: false };
+  const elegible = p.year > 0 && p.year >= new Date(now).getFullYear() - 1;
+  return elegible ? { label: 'Request a copy', backorder: true } : { label: 'View record', backorder: false };
+}
+
 export function renderAlertEmail(d: Digest, unsubUrl: string): string {
   let restantes = MAX_PER_EMAIL;
   const bloques: string[] = [];
@@ -252,6 +265,9 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
             <a href="${SITE}/products/${esc(p.slug)}/" style="color:#efefef;text-decoration:none;font-size:15px;font-weight:700;">${esc(p.title)}</a>
             <div style="color:#585858;font-size:13px;padding-top:3px;">${esc(p.vendor)}</div>
             <div style="padding-top:6px;font-size:13px;color:#efefef;">${precio(p)}${p.forthcoming ? ' · <span style="color:#c8ff00;font-weight:700;">PRE-ORDER</span>' : ''}</div>
+            <div style="padding-top:9px;">
+              <a href="${SITE}/products/${esc(p.slug)}/" style="display:inline-block;border:1px solid ${ctaFor(p).backorder ? '#c8ff00' : '#1e1e1e'};color:${ctaFor(p).backorder ? '#c8ff00' : '#efefef'};text-decoration:none;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:6px 11px;border-radius:2px;">${ctaFor(p).label}</a>
+            </div>
           </td>
         </tr>
       </table>`).join('')}`);
@@ -269,6 +285,8 @@ export function renderAlertEmail(d: Digest, unsubUrl: string): string {
     ${bloques.join('')}
     ${cola}
     <p style="border-top:1px solid #1e1e1e;margin:34px 0 0;padding-top:18px;color:#585858;font-size:11px;line-height:1.7;">
+      Don't reply to this email. Sold out? Request a copy from the record page.
+      <br><br>
       You're getting this because you follow these artists or labels at House Only.
       <a href="${esc(unsubUrl)}" style="color:#585858;">Stop these alerts</a>.
       Your newsletter subscription isn't affected.

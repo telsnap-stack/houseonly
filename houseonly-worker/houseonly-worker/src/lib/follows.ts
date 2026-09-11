@@ -239,6 +239,8 @@ export interface IndexedProduct {
   publishedAt: string;
   forthcoming: boolean;
   releaseDate: string;
+  /** Del tag `year:YYYY` o del tag de cuatro digitos. 0 si no lo trae. */
+  year: number;
   imageUrl: string;
   price: string;
   currency: string;
@@ -266,6 +268,13 @@ const INDEX_QUERY = `
     }
   }
 `;
+
+/** Mismo criterio que la tienda: `year:YYYY` o un tag de cuatro digitos. */
+function yearFromTags(tags: string[]): number {
+  const yt = (tags || []).find(x => /^year:\d{4}$/i.test(x)) || (tags || []).find(x => /^\d{4}$/.test(x));
+  const m = yt?.match(/(\d{4})/);
+  return m ? parseInt(m[1], 10) : 0;
+}
 
 function tagValue(tags: string[], prefix: RegExp): string {
   for (const t of tags || []) {
@@ -342,6 +351,7 @@ export async function annotate(env: FollowsEnv, nodes: any[]): Promise<IndexedPr
       publishedAt: n.publishedAt || '',
       forthcoming: tags.some(t => String(t).toLowerCase() === 'forthcoming'),
       releaseDate: tagValue(tags, /^\s*release\s*:\s*(.+)$/i),
+      year: yearFromTags(tags),
       imageUrl: n.featuredImage?.url || '',
       price: v?.price?.amount || '',
       currency: v?.price?.currencyCode || '',

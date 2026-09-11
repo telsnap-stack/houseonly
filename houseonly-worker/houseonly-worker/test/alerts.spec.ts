@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	getAlertsState, setEmailAlerts, refreshStoredEmail, unsubscribeByToken,
-	buildDigests, renderAlertEmail, alertSubject, runFollowAlerts, MAX_PER_EMAIL,
+	buildDigests, renderAlertEmail, alertSubject, runFollowAlerts, MAX_PER_EMAIL, ctaFor,
 } from "../src/lib/alerts";
 import { addFollow } from "../src/lib/follows";
 
@@ -260,5 +260,40 @@ describe("la preferencia de avisos sobrevive a lo demas", () => {
 		const { removeFollow } = await import("../src/lib/follows");
 		await removeFollow(env as any, CID, "rawax");
 		expect(await getAlertsState(env as any, CID)).toMatchObject({ emailAlerts: true, email: "e@example.com" });
+	});
+});
+
+describe("el boton de cada disco", () => {
+	const base: any = { stock: 0, forthcoming: false, year: 0 };
+	const ahora = Date.parse("2026-09-11T12:00:00Z");
+
+	it("con stock, lleva a la ficha a comprar", () => {
+		expect(ctaFor({ ...base, stock: 3 }, ahora)).toEqual({ label: "View record", backorder: false });
+	});
+
+	it("agotado y reciente: se puede pedir", () => {
+		expect(ctaFor({ ...base, year: 2026 }, ahora).label).toBe("Request a copy");
+		expect(ctaFor({ ...base, year: 2025 }, ahora).label).toBe("Request a copy");
+	});
+
+	it("agotado y viejo: NO promete lo que la ficha no ofrece", () => {
+		// isBackorderEligible() de la tienda corta en el año anterior. Si el
+		// correo dijera "Request a copy", al llegar no habria formulario.
+		expect(ctaFor({ ...base, year: 2024 }, ahora).label).toBe("View record");
+		expect(ctaFor({ ...base, year: 0 }, ahora).label).toBe("View record");
+	});
+
+	it("un pre-order lleva a la ficha, que es donde se reserva", () => {
+		expect(ctaFor({ ...base, forthcoming: true, stock: 0, year: 2026 }, ahora).label).toBe("View record");
+	});
+});
+
+describe("pie del correo", () => {
+	it("dice que no se conteste y a donde ir si esta agotado", () => {
+		const d: any = { cid: "1", email: "e@x", token: "t",
+			groups: [{ slug: "omar-s", display: "Omar S", items: [prod("p", 1, ["omar-s"])] }], total: 1 };
+		const html = renderAlertEmail(d, "https://w/x");
+		expect(html).toContain("Don't reply to this email.");
+		expect(html).toContain("Request a copy from the record page.");
 	});
 });
