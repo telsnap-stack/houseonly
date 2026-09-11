@@ -506,6 +506,9 @@ export interface Suggestion {
   roles: string[];
   total: number;
   from: 'wishlist' | 'orders';
+  /** La portada del disco que justifica la sugerencia: por que sale esta y no otra. */
+  coverUrl: string;
+  coverTitle: string;
 }
 
 export interface AccountHome {
@@ -518,6 +521,13 @@ export interface AccountHome {
 export const SHELF_MAX = 40;
 
 /**
+ * Tope de sugerencias. Alto a proposito: se quieren TODAS las entidades de la
+ * wishlist y de las compras, no una seleccion. El tope existe solo para que una
+ * cuenta con cientos de pedidos no devuelva una lista infinita.
+ */
+export const MAX_SUGGESTIONS = 60;
+
+/**
  * Todo lo que la home del portal necesita, en UNA llamada. En el movil, tres
  * peticiones encadenadas para pintar una pantalla se notan; esta no.
  *
@@ -528,7 +538,7 @@ export async function accountHome(
   env: FollowsEnv,
   cid: string,
   ownedIds: string[],
-  wishlistRaws: Array<{ artist?: string; label?: string }> = [],
+  wishlistRaws: Array<{ artist?: string; label?: string; handle?: string }> = [],
 ): Promise<AccountHome> {
   const owned = new Set((ownedIds || []).filter(Boolean));
   const idx = await getCatalogIndex(env);
@@ -556,36 +566,57 @@ export async function accountHome(
   // ── sugerencias para el estado vacio ──
   const yaSeguidas = new Set(entities.map(e => e.slug));
   const sug = new Map<string, Suggestion>();
+  // La wishlist guarda el SLUG DEL SITIO en su campo `handle` —lo que va en la
+  // URL—, no el handle de Shopify. Se indexa por los dos para que la portada sea
+  // la del disco guardado y no una cualquiera de la entidad.
+  const porClave = new Map<string, IndexedProduct>();
+  for (const p of idx.items) { porClave.set(p.handle, p); porClave.set(p.slug, p); }
 
-  const proponer = async (slug: string, from: 'wishlist' | 'orders') => {
+  /**
+   * `justifica` es el disco por el que aparece esta sugerencia: de el sale la
+   * portada. Sin ella, la lista es una tabla de nombres sueltos y nadie se
+   * acuerda de por que esta ahi Frank Music.
+   */
+  const proponer = async (slug: string, from: 'wishlist' | 'orders', justifica?: IndexedProduct) => {
     if (!slug || yaSeguidas.has(slug) || sug.has(slug)) return;
+    if (sug.size >= MAX_SUGGESTIONS) return;
     const ent = await liveEntity(env, slug);
     if (!ent) return;
-    const total = idx.items.filter(p => [...p.artistSlugs, ...p.labelSlugs].includes(ent.slug)).length;
-    sug.set(ent.slug, { slug: ent.slug, display: ent.display, roles: ent.roles, total, from });
+    const suyos = idx.items.filter(p => [...p.artistSlugs, ...p.labelSlugs].includes(ent.slug));
+    const cover = justifica || suyos[0];
+    sug.set(ent.slug, {
+      slug: ent.slug, display: ent.display, roles: ent.roles, total: suyos.length, from,
+      coverUrl: cover?.imageUrl || '', coverTitle: cover?.title || '',
+    });
   };
 
-  // De la wishlist: el texto guardado se resuelve como lo resolveria el importer.
+  // De la wishlist, TODAS: el texto guardado se resuelve como lo resolveria el
+  // importer, y la portada sale del disco guardado, no de uno cualquiera de la
+  // entidad.
   for (const it of wishlistRaws) {
+    const suyo = it?.handle ? porClave.get(it.handle) : undefined;
     for (const [kind, raw] of [['a', it?.artist], ['l', it?.label]] as const) {
       const norm = normalizeName(String(raw || ''));
       if (!norm) continue;
       const hit = await env.ENTITIES.get(`alias:${kind}:${norm}`);
       for (const slug of (hit || '').split(',').map(s => s.trim()).filter(Boolean)) {
-        await proponer(slug, 'wishlist');
+        await proponer(slug, 'wishlist', suyo);
       }
     }
   }
 
-  // De los pedidos: lo que ya compro dice mas que lo que guardo para luego.
+  // De los pedidos: lo que ya compro dice mas que lo que guardo para luego. La
+  // portada es la del disco comprado.
   const comprados = idx.items.filter(p => owned.has(p.id));
-  const frecuencia = new Map<string, number>();
+  const frecuencia = new Map<string, { n: number; cover: IndexedProduct }>();
   for (const p of comprados) {
-    for (const s of [...p.artistSlugs, ...p.labelSlugs]) frecuencia.set(s, (frecuencia.get(s) || 0) + 1);
+    for (const s of [...p.artistSlugs, ...p.labelSlugs]) {
+      const prev = frecuencia.get(s);
+      frecuencia.set(s, { n: (prev?.n || 0) + 1, cover: prev?.cover || p });
+    }
   }
-  for (const [slug] of [...frecuencia.entries()].sort((a, b) => b[1] - a[1])) {
-    if (sug.size >= 12) break;
-    await proponer(slug, 'orders');
+  for (const [slug, v] of [...frecuencia.entries()].sort((a, b) => b[1].n - a[1].n)) {
+    await proponer(slug, 'orders', v.cover);
   }
 
   return {
