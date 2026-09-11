@@ -823,8 +823,8 @@ alias `PORTAL_WORKER_URL`). Al promocionar, todo pasa a `WORKER_URL`.
 > escribirá en las entidades de producción**. Si se quiere seguir probando en
 > staging sin tocar prod, hay que añadir `VITE_WORKER_URL` =
 > `https://houseonly-worker-staging.emontagut.workers.dev` como variable de
-> entorno del *preview* en el proyecto de Pages. Es un clic en el dashboard y va
-> en el paso 1.
+> entorno del *preview* en el proyecto de Pages. **Decidido el 2026-09-11: se
+> añade**, y va en el paso 1 antes de quitar la constante.
 
 **3. Cron de avisos en prod, apagado.** `wrangler.jsonc` ya declara las dos
 expresiones (`*/15` para Discogs y graduación, `0 6` para los avisos) y
@@ -834,7 +834,24 @@ no mandará nada** hasta que alguien lo ponga en `live` a mano.
 
 ---
 
-### Paso 0 — Fotografía previa (no cambia nada)
+### Paso 0 — Fotografía previa — HECHO el 2026-09-11
+
+**Los dos botones de emergencia, anotados antes de tocar nada:**
+
+| Qué | Identificador | Corresponde a |
+|---|---|---|
+| Worker de prod | Version `f84297a2-dad1-44a7-9002-25f99d36cac9` | desplegado el 2026-09-09 |
+| Pages producción | Deployment `1184db4c-ddfa-4f80-8104-ee6bea58a2c8` | commit `c12a3b7` de `main` |
+
+Estado verificado: el worker de prod **no tiene** ninguno de los ocho endpoints
+nuevos —todos caen en el fallback— y sí conserva los de siempre (`emails-list`,
+`graduation-status`, `zip-proxy`, `sync-status`, `wishlist`). El `ENTITIES` de
+prod está **vacío**. En staging hay **4269** claves que copiar (1480 `entity:`,
+2769 `alias:`, 20 `ignore:`, 0 `children:`) y **13 que no se copian**
+—`follow:`, `fanout:`, `alerttoken:`, `feedindex:`, `entityindex:`—, que son
+clientes de prueba y cachés.
+
+### Paso 0 — Cómo se tomó (no cambia nada)
 
 ```bash
 # Version desplegada hoy en prod, que es a donde se vuelve si algo sale mal
@@ -997,9 +1014,12 @@ rollback` del worker. El catálogo no se toca en ningún paso de esta secuencia.
   decisión aparte, con su propia prueba en vivo.
 - **No toca el catálogo.** Ni `Vendor`, ni tags, ni precios. Los metafields ya se
   escribieron en la fase 4 y están en producción desde entonces.
-- **No borra el namespace de staging.** Sigue siendo el banco de pruebas; a
-  partir de aquí las dos copias divergen y hay que decidir cuál manda. Lo
-  razonable: prod manda, y staging se resincroniza desde prod cuando haga falta.
+- **No borra el namespace de staging.** Pero a partir de la copia **la fuente de
+  verdad es producción**, decidido el 2026-09-11: las aprobaciones de la cola, los
+  follows y los avisos que cuentan son los de prod. `staging-ENTITIES` se queda
+  como **datos de prueba**, y cuando haga falta se resincroniza *desde* prod, no
+  al revés. Nadie vuelve a aprobar entidades en staging esperando que suban
+  solas.
 
 ### El file-drop de `src/App.jsx`: preparado, no ejecutado
 
