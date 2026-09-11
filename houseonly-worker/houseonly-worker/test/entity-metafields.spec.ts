@@ -9,6 +9,8 @@ import {
 	csvHeader,
 	sameSlugs,
 	isDefinitionTaken,
+	labelFromTags,
+	entityCsvColumns,
 } from "../src/lib/entity-metafields";
 
 describe("nombres de los metafields", () => {
@@ -113,5 +115,53 @@ describe("isDefinitionTaken", () => {
 		])).toBe(false);
 		expect(isDefinitionTaken([])).toBe(false);
 		expect(isDefinitionTaken(null)).toBe(false);
+	});
+});
+
+describe("labelFromTags", () => {
+	it("acepta las tres grafias de prefijo que hay en el catalogo", () => {
+		expect(labelFromTags(["vinyl", "label:Aus Music"])).toBe("Aus Music");
+		expect(labelFromTags(["vinyl", "Label: Aus Music"])).toBe("Aus Music");
+		expect(labelFromTags(["vinyl", "label: Aus Music"])).toBe("Aus Music");
+	});
+
+	it("da igual que lleguen como lista o como la cadena del CSV", () => {
+		expect(labelFromTags("vinyl, label:Freerange Records, house")).toBe("Freerange Records");
+		expect(labelFromTags(["vinyl", "label:Freerange Records", "house"])).toBe("Freerange Records");
+	});
+
+	it("sin tag de sello, cadena vacia — no null, que acabaria en la celda", () => {
+		expect(labelFromTags(["vinyl", "house"])).toBe("");
+		expect(labelFromTags("")).toBe("");
+		expect(labelFromTags(null)).toBe("");
+		// `label:` a secas no es un sello.
+		expect(labelFromTags(["label:", "label:   "])).toBe("");
+	});
+
+	it("no confunde otro tag que empiece por algo parecido", () => {
+		expect(labelFromTags(["labelled:x", "source:ws"])).toBe("");
+	});
+});
+
+describe("entityCsvColumns", () => {
+	it("devuelve las dos celdas con las cabeceras exactas", () => {
+		const cols = entityCsvColumns(["delano-smith", "brian-kage"], ["mixmode"]);
+		expect(cols).toEqual({
+			"Artist entities (product.metafields.houseonly.artist_slugs)": "delano-smith,brian-kage",
+			"Label entities (product.metafields.houseonly.label_slugs)": "mixmode",
+		});
+	});
+
+	it("lo que esta en revision sale como celda vacia, no como hueco", () => {
+		const cols = entityCsvColumns([], []);
+		expect(Object.keys(cols)).toHaveLength(2);
+		expect(Object.values(cols)).toEqual(["", ""]);
+	});
+
+	it("se puede esparcir sobre la fila sin pisarla", () => {
+		const fila = { Handle: "pampa045", Vendor: "DJ Koze" };
+		const out = { ...fila, ...entityCsvColumns(["dj-koze"], []) };
+		expect(out.Handle).toBe("pampa045");
+		expect(out["Artist entities (product.metafields.houseonly.artist_slugs)"]).toBe("dj-koze");
 	});
 });

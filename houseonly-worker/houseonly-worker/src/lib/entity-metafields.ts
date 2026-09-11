@@ -112,6 +112,40 @@ export function csvHeader(kind: EntityMetafieldKind): string {
   return `${def.name} (product.metafields.${def.namespace}.${def.key})`;
 }
 
+/**
+ * Saca el valor del sello de los tags de Shopify. En el catalogo conviven TRES
+ * grafias del prefijo —`label:X`, `Label: X` y `label: X`— y las tres son el
+ * mismo campo. Acepta la lista de tags o la cadena separada por comas del CSV,
+ * porque segun desde donde se mire llega de una forma o de la otra.
+ */
+export function labelFromTags(tags: string | string[] | null | undefined): string {
+  const list = Array.isArray(tags) ? tags : String(tags || '').split(',');
+  for (const t of list) {
+    const m = String(t).match(/^\s*label\s*:\s*(.+)$/i);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return '';
+}
+
+/**
+ * Las dos celdas de metafield de una fila del CSV de importacion. Devolver un
+ * objeto y no dos valores sueltos es a proposito: asi el importer hace
+ * `{ ...fila, ...entityCsvColumns(a, l) }` y no puede equivocarse de cabecera.
+ *
+ * Una entidad en revision llega aqui como lista vacia y sale como celda vacia:
+ * el producto se sube igual y el hueco se rellena despues. La importacion NO
+ * espera a la cola.
+ */
+export function entityCsvColumns(
+  artistSlugs: Array<string | null | undefined>,
+  labelSlugs: Array<string | null | undefined>,
+): Record<string, string> {
+  return {
+    [csvHeader('artist')]: joinSlugs(artistSlugs),
+    [csvHeader('label')]: joinSlugs(labelSlugs),
+  };
+}
+
 /** Compara lo que hay con lo que habria que escribir. El backfill no reescribe. */
 export function sameSlugs(a: Array<string | null | undefined>, b: Array<string | null | undefined>): boolean {
   return joinSlugs(a) === joinSlugs(b);
