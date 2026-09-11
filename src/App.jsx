@@ -2024,7 +2024,10 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             </div>
             {r.catalog && <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>{r.catalog}</div>}
             <h2 style={{ margin:'0 0 4px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
-            <div style={{ fontSize:12, color:S.muted, marginBottom:12, lineHeight:2 }}>
+            {/* El artista es lo segundo que se lee, despues del titulo: va en
+                color de texto y con peso, no como un metadato. El sello si se
+                queda pequeño y apagado, porque alli es contexto. */}
+            <div style={{ fontSize:14, color:S.text, fontWeight:600, marginBottom:14, lineHeight:2 }}>
               <EntityLink kind="artist" raw={r.artist} onNavigate={onNavigate} auth={auth} onSignIn={onSignIn} followSlugs={followSlugs} onFollowChange={onFollowChange} />
             </div>
             <div style={{ display:'flex', gap:6, marginBottom:14, flexWrap:'wrap' }}>
