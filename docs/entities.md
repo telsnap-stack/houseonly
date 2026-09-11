@@ -727,6 +727,19 @@ alerttoken:{token} → customerId     (token opaco, creado al decir que sí)
 Un token opaco y no el `customerId` firmado: si algún día se filtra un enlace,
 lo que revela es un token que solo sirve para darse de baja.
 
+### Pendiente para v2: la baja necesita una pantalla de confirmación
+
+Hoy `?action=follow-alerts-unsubscribe&t=…` da de baja **en el GET**. Es lo que
+pide One-Click para el `List-Unsubscribe` —y ahí está bien, porque eso llega por
+POST—, pero el enlace "Stop these alerts" del pie es un GET normal, y los
+escáneres de seguridad del correo corporativo **prefetchean los enlaces** de los
+mensajes que analizan. Un escáner puede dar de baja a un cliente que nunca tocó
+nada, y el cliente no se entera: deja de recibir avisos sin explicación.
+
+Arreglo en v2: que el GET sirva una página con un botón —"Yes, stop these
+alerts"— que haga el POST, y que solo el POST apague `emailAlerts`. El
+`List-Unsubscribe-Post` sigue funcionando igual, porque ya viaja por POST.
+
 ### El cron
 
 El worker de producción ya corre cada 15 minutos (Discogs + graduación) y el de

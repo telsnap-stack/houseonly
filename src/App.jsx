@@ -10309,6 +10309,16 @@ function EntitiesPanel() {
   const [parts, setParts]     = useState({});
   const [choice, setChoice]   = useState({});
   const [progress, setProgress] = useState(null);   // {done,total} mientras se aprueba
+  // Entidades ya aprobadas, para renombrarlas. Se cargan al abrir la vista.
+  const [ents, setEnts]       = useState(null);
+  const [entsBusy, setEntsBusy] = useState(false);
+  const [entQ, setEntQ]       = useState('');
+  const [entEdit, setEntEdit] = useState(null);   // {slug, value}
+
+  // Las entidades se cargan al abrir su vista. El hook va aqui arriba, antes
+  // del gate del secreto: detras del return temprano cambiaria el numero de
+  // hooks al autenticarse.
+  useEffect(() => { if (view === 'ents' && authed && !ents && !entsBusy) loadEntities(); }, [view, authed]);   // eslint-disable-line
 
   const rk = r => `${r.kind}:${r.norm}`;
   const hdrs = sec => ({ 'Authorization': `Bearer ${sec || secret}`, 'Content-Type': 'application/json' });
@@ -10489,6 +10499,36 @@ function EntitiesPanel() {
     );
   }
 
+  // La lista de entidades aprobadas es el mismo indice que lee el portal, asi
+  // que lo que se renombre aqui es exactamente lo que se ve en la tienda.
+  async function loadEntities() {
+    setEntsBusy(true); setError('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=entity-index`);
+      if (!r.ok) { setError(`Entities failed (HTTP ${r.status})`); return; }
+      const d = await r.json();
+      setEnts(d.entities || []);
+    } catch { setError('Entities failed — network.'); }
+    finally { setEntsBusy(false); }
+  }
+
+  // Renombrar cambia el nombre, nunca el slug: la ficha, los metafields y los
+  // follows cuelgan de el.
+  async function renameEntity(slug, display) {
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=entity-edit-display`, {
+        method: 'POST', headers: hdrs(), body: JSON.stringify({ slug, display }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(d.error || `Rename failed (HTTP ${r.status})`); return; }
+      setEnts(list => (list || []).map(e => e.slug === slug ? { ...e, display } : e));
+      setEntEdit(null);
+      setMsg(d.changed ? `Renamed to "${display}". The record pages pick it up on the next build.` : 'Same name — nothing to change.');
+    } catch { setError('Rename failed — network.'); }
+    finally { setBusy(false); }
+  }
+
   const viewBtn = (k, label, n) => (
     <button onClick={()=>setView(k)} style={{background:view===k?S.accent:S.border,color:view===k?'#080808':S.muted,border:'none',borderRadius:2,cursor:'pointer',fontSize:9,fontWeight:view===k?700:400,letterSpacing:1.2,textTransform:'uppercase',padding:'6px 12px'}}>{label} · {n}</button>
   );
@@ -10520,7 +10560,7 @@ function EntitiesPanel() {
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <div style={{fontSize:10,color:S.muted}}>{rows.length} rows in queue · staging worker</div>
+        <div style={{fontSize:10,color:S.muted}}>{rows.length} rows in queue · {(WORKER_URL.match(/\/\/([^/]+)/) || [])[1]}</div>
         <div style={{display:'flex',gap:6}}>
           <Btn ch={busy?'…':'↻ Recompute candidates'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
           <Btn ch={loading?'…':'↻ Reload'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
@@ -10534,6 +10574,7 @@ function EntitiesPanel() {
             vaciarse desaparecia el boton mientras su vista seguia
             seleccionada: parecia que se habian perdido filas. */}
         {viewBtn('otras','Other',otras.length)}
+        {viewBtn('ents','Entities',ents ? ents.length : '…')}
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
         {kindBtn('artist','Artists')}
@@ -10731,6 +10772,67 @@ function EntitiesPanel() {
           </div>
         </div>
       )}
+
+      {view==='ents' && (() => {
+        const q = entQ.trim().toLowerCase();
+        const todas = (ents || []).filter(e => (e.roles || []).includes(kindTab));
+        const hallados = q ? todas.filter(e => e.display.toLowerCase().includes(q) || e.slug.includes(q)) : todas;
+        const TOPE = 60;
+        return (
+          <div>
+            <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+              Already approved. Renaming changes the name shown on the record page, the entity
+              page and the alerts — never the slug, which is the address of the page and what the
+              metafields and follows hang from. The old name stays as an alias.
+            </div>
+            <div style={{display:'flex',gap:6,marginBottom:12,alignItems:'center',flexWrap:'wrap'}}>
+              <input value={entQ} onChange={e=>setEntQ(e.target.value)} placeholder="Search name or slug…"
+                style={{flex:1,minWidth:180,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+              <Btn ch={entsBusy?'…':'↻ Reload'} variant="ghost" onClick={loadEntities} disabled={entsBusy} />
+            </div>
+            {!ents && <div style={{fontSize:10,color:S.muted}}>Loading entities…</div>}
+            {ents && hallados.length===0 && <div style={{fontSize:10,color:S.muted}}>Nothing matches.</div>}
+            <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
+              {hallados.slice(0,TOPE).map(e=>{
+                const editando = entEdit?.slug === e.slug;
+                return (
+                  <div key={e.slug} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      {editando ? (
+                        <input autoFocus value={entEdit.value}
+                          onChange={ev=>setEntEdit({slug:e.slug,value:ev.target.value})}
+                          onKeyDown={ev=>{
+                            if (ev.key==='Enter' && entEdit.value.trim()) renameEntity(e.slug, entEdit.value.trim());
+                            if (ev.key==='Escape') setEntEdit(null);
+                          }}
+                          style={{width:'100%',background:'none',border:'none',borderBottom:`1px solid ${S.accent}`,color:S.text,fontSize:12,fontFamily:'inherit',outline:'none',padding:'2px 0'}} />
+                      ) : (
+                        <div style={{fontSize:12,color:S.text}}>{e.display}</div>
+                      )}
+                      <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+                        <span style={{fontFamily:'monospace'}}>{e.slug}</span> · {(e.roles||[]).join(' + ')} · {e.total} record{e.total===1?'':'s'}
+                      </div>
+                    </div>
+                    {editando ? (
+                      <div style={{display:'flex',gap:6}}>
+                        <Btn ch={busy?'…':'Save'} onClick={()=>entEdit.value.trim() && renameEntity(e.slug, entEdit.value.trim())} disabled={busy||!entEdit.value.trim()} />
+                        <Btn ch="Cancel" variant="ghost" onClick={()=>setEntEdit(null)} disabled={busy} />
+                      </div>
+                    ) : (
+                      <Btn ch="Rename" variant="ghost" onClick={()=>setEntEdit({slug:e.slug,value:e.display})} disabled={busy} />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {hallados.length>TOPE && (
+              <div style={{fontSize:10,color:S.muted,marginTop:10}}>
+                Showing {TOPE} of {hallados.length} — narrow the search to find the rest.
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -851,6 +851,7 @@ import {
   handleEntityReviewRecompute,
   handleEntityReviewReject,
   handleEntityGet,
+  handleEntityEditDisplay,
 } from './lib/entities';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
@@ -1339,6 +1340,10 @@ export default {
     }
     if (action === 'entity-get' && request.method === 'GET') {
       return await handleEntityGet(request, env);
+    }
+
+    if (action === 'entity-edit-display' && request.method === 'POST') {
+      return await handleEntityEditDisplay(request, env);
     }
 
     // ── PENDING SALES ───────────────────────────────────────

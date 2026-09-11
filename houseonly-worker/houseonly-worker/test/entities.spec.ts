@@ -12,6 +12,7 @@ import {
 	handleEntityReviewList,
 	handleEntityReviewApproveBulk,
 	handleEntityReviewRecompute,
+	handleEntityEditDisplay,
 	computeBucket,
 	pickDisplay,
 	shouldSplit,
@@ -925,5 +926,71 @@ describe("cola: aprobar y rechazar", () => {
 		const body: any = await res.json();
 		expect(body.records[0].raw).toBe("Calibre");
 		expect(body.records[0].count).toBe(3);
+	});
+});
+
+describe("renombrar el display de una entidad aprobada", () => {
+	const edit = (body: any) => handleEntityEditDisplay(
+		req("https://x/?action=entity-edit-display", { method: "POST", body: JSON.stringify(body) }), env as any);
+
+	beforeEach(async () => {
+		await wipe();
+		await env.ENTITIES.put("entity:dj-koze", JSON.stringify({
+			slug: "dj-koze", display: "Dj Koze", roles: ["artist"], aliases: ["Dj Koze"],
+			sources: ["sweep"], status: "active", createdAt: 1, updatedAt: 1 }));
+		await env.ENTITIES.put("alias:a:dj koze", "dj-koze");
+	});
+
+	it("cambia el nombre y NO el slug: la ficha, los metafields y el fanout siguen donde estaban", async () => {
+		const d = await (await edit({ slug: "dj-koze", display: "DJ Koze" })).json() as any;
+		expect(d).toMatchObject({ ok: true, slug: "dj-koze", display: "DJ Koze", before: "Dj Koze", changed: true });
+		const e = await getEntity(env as any, "dj-koze");
+		expect(e!.display).toBe("DJ Koze");
+		expect(e!.slug).toBe("dj-koze");
+	});
+
+	it("el nombre viejo sigue siendo alias: el catalogo lo trae escrito como estaba", async () => {
+		await edit({ slug: "dj-koze", display: "DJ Koze" });
+		const e = await getEntity(env as any, "dj-koze");
+		expect(e!.aliases).toContain("Dj Koze");
+		expect(e!.aliases).toContain("DJ Koze");
+		const r = await resolveOne(env as any, "artist", { raw: "Dj Koze" }, "test");
+		expect(r.status).toBe("resolved");
+		expect(r.slugs).toEqual(["dj-koze"]);
+	});
+
+	it("no roba un alias que ya apunta a otra entidad", async () => {
+		await env.ENTITIES.put("alias:a:koze", "otro-koze");
+		await edit({ slug: "dj-koze", display: "Koze" });
+		expect(await env.ENTITIES.get("alias:a:koze")).toBe("otro-koze");
+	});
+
+	it("sin sesion de admin no se renombra nada", async () => {
+		const r = await handleEntityEditDisplay(
+			new Request("https://x/?action=entity-edit-display", { method: "POST", body: JSON.stringify({ slug: "dj-koze", display: "X" }) }), env as any);
+		expect(r.status).toBe(401);
+		expect((await getEntity(env as any, "dj-koze"))!.display).toBe("Dj Koze");
+	});
+
+	it("una entidad que no existe da 404, no crea una nueva a escondidas", async () => {
+		const r = await edit({ slug: "no-existe", display: "X" });
+		expect(r.status).toBe(404);
+		expect(await getEntity(env as any, "no-existe")).toBeNull();
+	});
+
+	it("nombre vacio: 400, que un display en blanco deja la ficha sin titulo", async () => {
+		expect((await edit({ slug: "dj-koze", display: "   " })).status).toBe(400);
+		expect((await getEntity(env as any, "dj-koze"))!.display).toBe("Dj Koze");
+	});
+
+	it("el mismo nombre no escribe nada", async () => {
+		const d = await (await edit({ slug: "dj-koze", display: "Dj Koze" })).json() as any;
+		expect(d.changed).toBe(false);
+	});
+
+	it("tira el indice cacheado: el portal no puede seguir diciendo el nombre viejo", async () => {
+		await env.ENTITIES.put("entityindex:v1", JSON.stringify({ builtAt: Date.now(), items: [{ slug: "dj-koze", display: "Dj Koze", roles: ["artist"], total: 2 }] }));
+		await edit({ slug: "dj-koze", display: "DJ Koze" });
+		expect(await env.ENTITIES.get("entityindex:v1")).toBeNull();
 	});
 });

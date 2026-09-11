@@ -1107,6 +1107,66 @@ export async function handleEntityReviewReject(request: Request, env: EntitiesEn
   return json({ ok: true, ignored: norm, kind });
 }
 
+/**
+ * POST ?action=entity-edit-display  {slug, display}
+ *
+ * Renombrar lo que se ve. El display sale del catalogo o de un Title Case
+ * automatico, y el automatico se equivoca con los acronimos —"Dj Koze" por
+ * "DJ Koze"—; sin esto, el unico arreglo era editar KV a mano.
+ *
+ * No toca el slug: es la direccion de la ficha, los metafields de 2391
+ * productos y las claves de fanout. Solo cambia el nombre y deja el anterior
+ * como alias, porque el catalogo sigue trayendolo escrito como estaba.
+ */
+export async function handleEntityEditDisplay(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  let body: any;
+  try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+
+  const slug = String(body?.slug || '').trim();
+  const display = String(body?.display || '').trim().replace(/\s+/g, ' ');
+  if (!slug || !display) return json({ error: 'slug and display required' }, 400);
+  if (display.length > 120) return json({ error: 'display too long' }, 400);
+
+  const e = await getEntity(env, slug);
+  if (!e) return json({ error: 'not found' }, 404);
+  if (e.status === 'merged') return json({ error: `${slug} is merged into another entity` }, 400);
+
+  const antes = e.display;
+  if (antes === display) return json({ ok: true, slug, display, changed: false });
+
+  e.display = display;
+  for (const a of [antes, display]) if (a && !e.aliases.includes(a)) e.aliases.push(a);
+  e.updatedAt = Date.now();
+  await putEntity(env, e);
+
+  // El nombre nuevo tambien tiene que resolver, pero SIN robar un alias que ya
+  // apunte a otra entidad: un alias compartido es una decision de la cola, no
+  // algo que deba cambiar por un renombrado.
+  const keys = new Set<string>();
+  for (const kind of e.roles) {
+    for (const raw of [antes, display]) {
+      if (!raw) continue;
+      keys.add(K.alias(kind, raw));
+      const n = normalizeName(raw);
+      if (n) keys.add(K.alias(kind, n));
+    }
+  }
+  const nuevos: string[] = [];
+  for (const k of keys) {
+    if (await env.ENTITIES.get(k)) continue;
+    await env.ENTITIES.put(k, slug);
+    nuevos.push(k);
+  }
+
+  // El indice de entidades cachea displays diez minutos. Al renombrar se tira,
+  // que para eso el admin acaba de mirar la fila.
+  await env.ENTITIES.delete('entityindex:v1');
+
+  return json({ ok: true, slug, display, before: antes, changed: true, aliasKeysAdded: nuevos.length });
+}
+
 /** GET ?action=entity-get&slug=… */
 export async function handleEntityGet(request: Request, env: EntitiesEnv): Promise<Response> {
   if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
