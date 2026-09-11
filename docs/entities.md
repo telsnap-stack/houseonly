@@ -512,6 +512,14 @@ alguien conecta la pestaña Entidades. Si no está, se genera el CSV sin las dos
 columnas y se avisa en pantalla. Un importador que deja de funcionar porque falta
 el token de una función accesoria es peor que un CSV sin metafield.
 
+> **Pendiente (2026-09-11).** Ese aviso llega **después** de generar el fichero, y
+> eso es poco: el CSV sin columnas se sube igual de bien a Shopify y el error no
+> se ve hasta semanas más tarde, cuando alguien busca por entidad y faltan discos.
+> El importer debe **pedir confirmación explícita antes de generar** —"vas a
+> generar el CSV sin las columnas de entidad porque no hay Bearer, ¿sigo?"— y
+> dejar seguir solo si se dice que sí. Generar a ciegas y avisar después invierte
+> el orden: la decisión es de quien importa, no del programa.
+
 ### (b) Follows: esquema y endpoints (fase 5a)
 
 Calco literal de `wl:`, porque ya resolvió estos problemas.
