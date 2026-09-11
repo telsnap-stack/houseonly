@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	getAlertsState, setEmailAlerts, refreshStoredEmail, unsubscribeByToken,
 	buildDigests, renderAlertEmail, alertSubject, runFollowAlerts, MAX_PER_EMAIL, ctaFor,
+	snoozeAlertsPrompt, PROMPT_COOLDOWN_MS,
 } from "../src/lib/alerts";
 import { addFollow } from "../src/lib/follows";
 
@@ -75,6 +76,51 @@ describe("consentimiento de avisos", () => {
 		expect(f.emailAlerts).toBe(false);
 		expect(f.entities).toEqual(["omar-s"]);   // sigue siguiendo
 		expect(await unsubscribeByToken(env as any, "inventado")).toBe(false);
+	});
+});
+
+describe("el recordatorio al seguir a alguien", () => {
+	beforeEach(async () => { await wipe(); await entidad("omar-s", "Omar S"); await addFollow(env as any, CID, "omar-s"); });
+
+	const estado = (now?: number) => getAlertsState(env as any, CID, now);
+
+	it("nunca preguntado: se ofrece", async () => {
+		expect((await estado()).prompt).toBe(true);
+	});
+
+	it("ya los tiene encendidos: no se le dice nada nunca mas", async () => {
+		await setEmailAlerts(env as any, CID, true, "e@example.com");
+		expect((await estado()).prompt).toBe(false);
+		expect((await estado(Date.now() + 10 * PROMPT_COOLDOWN_MS)).prompt).toBe(false);
+	});
+
+	it("dijo que no hace dos dias: no se le vuelve a preguntar", async () => {
+		await setEmailAlerts(env as any, CID, false);
+		expect((await estado(Date.now() + 2 * 24 * 3600000)).prompt).toBe(false);
+	});
+
+	it("dijo que no hace mas de un mes: al seguir a otro se le recuerda", async () => {
+		await setEmailAlerts(env as any, CID, false);
+		expect((await estado(Date.now() + PROMPT_COOLDOWN_MS + 1000)).prompt).toBe(true);
+	});
+
+	it("apagarlos desde el portal tambien cuenta como respuesta reciente", async () => {
+		await setEmailAlerts(env as any, CID, true, "e@example.com");
+		await setEmailAlerts(env as any, CID, false);
+		expect((await estado()).prompt).toBe(false);
+	});
+
+	it("cerrarlo sin contestar lo aparta, pero no lo da por contestado", async () => {
+		await snoozeAlertsPrompt(env as any, CID);
+		expect(await estado()).toMatchObject({ prompt: false, asked: false });
+		expect((await estado(Date.now() + PROMPT_COOLDOWN_MS + 1000)).prompt).toBe(true);
+	});
+
+	it("apartarlo no toca ni la preferencia ni la lista de seguidos", async () => {
+		await snoozeAlertsPrompt(env as any, CID);
+		const f = JSON.parse((await env.ENTITIES.get(`follow:${CID}`))!);
+		expect(f.entities).toEqual(["omar-s"]);
+		expect(f.emailAlerts).toBeUndefined();
 	});
 });
 
