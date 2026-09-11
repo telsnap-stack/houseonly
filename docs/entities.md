@@ -520,6 +520,30 @@ el token de una función accesoria es peor que un CSV sin metafield.
 > dejar seguir solo si se dice que sí. Generar a ciegas y avisar después invierte
 > el orden: la decisión es de quien importa, no del programa.
 
+#### Lo que el filtro del admin sí y no encuentra
+
+Medido en la tienda el 2026-09-11, después del backfill. **El filtro por metafield
+de la Admin API compara el valor ENTERO, no sus trozos.** No hay búsqueda por
+token, ni por prefijo, ni comodines:
+
+| Consulta | Devuelve | Por qué |
+|---|---|---|
+| `label_slugs:deep-jungle` | 94 de 94 | Valor de un solo slug: exacto |
+| `artist_slugs:omar-s` | 10 de 11 | Los 10 discos suyos; **no** el split de cuatro artistas |
+| `artist_slugs:omar` | 0 | No hay prefijos |
+| `artist_slugs:d-julz` | 0 | Existe, pero solo dentro de un valor de cuatro |
+| `artist_slugs:*omar-s*` | 0 | No hay comodines |
+
+O sea: **los 153 productos de varios artistas no salen al filtrar por uno solo**.
+Los otros 1123 y los sellos —ninguno tiene más de un slug— filtran perfecto.
+
+Se acepta a sabiendas. El filtro del admin es una comodidad; el feed de la fase 5
+**no depende de él**, porque parte el valor por comas él mismo (`parseSlugs`) y
+filtra en memoria. Si algún día filtrar splits en el admin se vuelve trabajo de
+verdad, la salida es un segundo metafield de tipo `list.single_line_text_field`
+escrito por API —los tipos `list.*` no se pueden importar por CSV, que es lo que
+obligó a la coma— y se rellena con el mismo backfill, sin tocar lo que ya hay.
+
 ### (b) Follows: esquema y endpoints (fase 5a)
 
 Calco literal de `wl:`, porque ya resolvió estos problemas.
