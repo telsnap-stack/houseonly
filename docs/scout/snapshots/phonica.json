@@ -1,7 +1,7 @@
 {
  "key": "phonica",
  "name": "Phonica",
- "visto": "2026-09-12T10:38:34.828Z",
+ "visto": "2026-09-12T11:46:51.972Z",
  "paginas": {
   "home": {
    "url": "https://www.phonicarecords.com/",
@@ -56,7 +56,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/phonica-home.jpg"
   },
   "listing": {
    "url": "https://www.phonicarecords.com/new-releases",
@@ -111,7 +112,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/phonica-listing.jpg"
   },
   "product": {
    "url": "https://www.phonicarecords.com/product/psychemagik-amazing-grace-2001-undercover-lovers-vol-psychemagik/212847",
@@ -167,7 +169,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/phonica-product.jpg"
   }
  },
  "errores": []

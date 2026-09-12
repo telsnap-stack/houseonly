@@ -1360,7 +1360,7 @@ export default {
       const markdown = String(body?.markdown || '');
       if (!markdown.trim()) return jsonRes({ error: 'markdown required' }, 400);
       try {
-        return jsonRes(await sendScoutReport(env as any, to, subject, markdown));
+        return jsonRes(await sendScoutReport(env as any, to, subject, markdown, Array.isArray(body?.attachments) ? body.attachments : []));
       } catch (e: any) {
         return jsonRes({ error: String(e?.message || e).slice(0, 200) }, 502);
       }

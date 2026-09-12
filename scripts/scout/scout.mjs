@@ -34,10 +34,11 @@ const SNAPS = join(RAIZ, 'docs', 'scout', 'snapshots');
 const args     = process.argv.slice(2);
 const soloUna  = (args.find(a => a.startsWith('--only=')) || '').split('=')[1] || '';
 const guardar  = !args.includes('--no-save');
-const PAUSA_MS = 2500;   // entre pagina y pagina: cortesia, no sigilo
+const PAUSA_MS = 7000;   // entre pagina y pagina: cortesia, no sigilo
 const ESPERA   = 30000;
 
 const dormir = ms => new Promise(r => setTimeout(r, ms));
+const HOY = new Date().toISOString().slice(0, 10);
 
 // ── ROBOTS ──────────────────────────────────────────────────────────
 // Lectura simple y estricta: ante la duda, no se entra.
@@ -72,9 +73,11 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 // funcion.
 const HUELLA = () => {
   const limpia = s => String(s || '').replace(/\s+/g, ' ').trim();
+  // Un precio en cualquier posicion delata catalogo: "cassette — £out of stock"
+  // es una variante de un disco concreto, no una funcion de la tienda.
   const esContenido = t =>
     !t || t.length > 38 || (t.match(/\d/g) || []).length >= 3 ||
-    /^[€$£]/.test(t) || /\b(19|20)\d{2}\b/.test(t);
+    /[€$£¥]/.test(t) || /\b(19|20)\d{2}\b/.test(t);
 
   // "cantiga de longe play" es el boton de reproducir de un disco concreto: la
   // funcion es "play" y el resto es catalogo, que cambia cada semana. Se recorta
@@ -183,12 +186,35 @@ async function fueraElMuro(page) {
   return hayMuro ? 'muro sin salida de rechazo' : 'sin muro';
 }
 
+/**
+ * Una captura por pagina. Es la prueba: el informe dice "control nuevo: notify
+ * me" y la captura enseña donde esta y como lo han puesto. JPEG de calidad
+ * media y solo lo que entra en pantalla — un full-page de un listado son ocho
+ * megas y nadie los mira.
+ */
+async function captura(page, key, nombre) {
+  const dir = join(RAIZ, 'docs', 'scout', 'shots', HOY);
+  mkdirSync(dir, { recursive: true });
+  const ruta = join(dir, `${key}-${nombre}.jpg`);
+  await page.screenshot({ path: ruta, type: 'jpeg', quality: 55 }).catch(() => {});
+  return ruta;
+}
+
+/**
+ * Retos de verificacion. Si una tienda decide que quiere comprobar quien entra,
+ * esa es su decision: se anota y se sigue. NO se intenta pasar —ni esperando a
+ * que caduque, ni falseando nada—, porque eso ya seria saltarse un control de
+ * acceso en vez de mirar un escaparate.
+ */
+const ES_RETO = /^(just a moment|checking your browser|verifying you are human|attention required|access denied|un momento)/i;
+
 async function miraPagina(page, url) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: ESPERA });
   await page.waitForTimeout(2000);
   const consent = await fueraElMuro(page);
   await page.waitForTimeout(1500);            // que arranque lo que carga tarde
   const h = await page.evaluate(HUELLA);
+  if (ES_RETO.test(h.title)) return { url, reto: h.title.slice(0, 40) };
   return { url, consent, ...h };
 }
 
@@ -216,15 +242,19 @@ async function visita(browser, site) {
     if (!url) continue;
     if (prohibido(reglas, url)) { out.errores.push(`${nombre}: robots.txt lo prohibe`); continue; }
     try {
-      out.paginas[nombre] = await miraPagina(page, url);
-      if (nombre === 'listing') {
+      const visto = await miraPagina(page, url);
+      if (visto.reto) { out.errores.push(`${nombre}: reto de verificacion (${visto.reto}) — no se pasa por diseno`); }
+      else { out.paginas[nombre] = visto; visto.shot = await captura(page, site.key, nombre); }
+      if (nombre === 'listing' && out.paginas.listing) {
         // Si la tienda pinta el listado con JS o usa una forma de URL rara, se
         // le pone la ficha a mano en sites.json y se deja de adivinar.
         const ficha = (await primerDisco(page, url)) || site.product || null;
         if (!ficha) out.errores.push('listing: no se encontro enlace a ficha de disco');
         if (ficha && !prohibido(reglas, ficha)) {
           await dormir(PAUSA_MS);
-          out.paginas.product = await miraPagina(page, ficha);
+          const vistoF = await miraPagina(page, ficha);
+          if (vistoF.reto) out.errores.push(`product: reto de verificacion — no se pasa por diseno`);
+          else { out.paginas.product = vistoF; vistoF.shot = await captura(page, site.key, 'product'); }
         }
       }
     } catch (e) {
@@ -245,10 +275,15 @@ function compara(viejo, nuevo) {
     const n = nuevo.paginas[nombre];
     const v = viejo?.paginas?.[nombre];
     if (!v) { cambios.push({ pagina: nombre, url: n.url, nuevaPagina: true }); continue; }
+    // En la ficha NO se comparan controles: cada semana toca un disco distinto y
+    // sus tallas, formatos y agotados cambiarian siempre sin que nadie haya
+    // construido nada. De la ficha interesan los scripts, los formularios y las
+    // señales, que si son de la tienda y no del disco.
+    const soloDisco = nombre === 'product';
     const c = {
-      pagina: nombre, url: n.url,
-      controlsNuevos: menos(n.controls, v.controls),
-      controlsIdos:   menos(v.controls, n.controls),
+      pagina: nombre, url: n.url, shot: n.shot || null,
+      controlsNuevos: soloDisco ? [] : menos(n.controls, v.controls),
+      controlsIdos:   soloDisco ? [] : menos(v.controls, n.controls),
       formsNuevos:    menos(n.forms, v.forms),
       scriptsNuevos:  menos(n.scriptHosts, v.scriptHosts),
       scriptsIdos:    menos(v.scriptHosts, n.scriptHosts),
@@ -265,7 +300,15 @@ const { sites } = JSON.parse(readFileSync(join(AQUI, 'sites.json'), 'utf8'));
 const lista = soloUna ? sites.filter(s => s.key === soloUna) : sites;
 if (!lista.length) { console.error(`No hay tienda "${soloUna}" en sites.json`); process.exit(1); }
 
-const browser = await chromium.launch({ channel: 'chrome' });
+// Chrome de verdad, con ventana. Varias tiendas grandes —Boomkat, Juno— no
+// sirven nada al modo headless, y con una ventana normal cargan enteras: no hay
+// nada que saltarse, solo un navegador que se comporta como un navegador. La
+// ventana se abre fuera de la pantalla para no molestar al lunes por la mañana.
+const browser = await chromium.launch({
+  channel: 'chrome',
+  headless: process.env.SCOUT_HEADLESS === '1',
+  args: ['--window-position=-2400,0', '--window-size=1440,1000'],
+});
 const informe = { fecha: new Date().toISOString().slice(0, 10), tiendas: [] };
 
 for (const site of lista) {
@@ -283,6 +326,10 @@ for (const site of lista) {
     errores: nuevo.errores,
     cambios,
   });
+
+  // Lo que esta semana no se dejo ver conserva su huella anterior: mejor un dato
+  // de hace siete dias que un agujero que finge que la tienda cambio.
+  if (viejo) for (const [n, p] of Object.entries(viejo.paginas || {})) if (!nuevo.paginas[n]) nuevo.paginas[n] = p;
 
   if (guardar && Object.keys(nuevo.paginas).length) {
     mkdirSync(dirname(ruta), { recursive: true });

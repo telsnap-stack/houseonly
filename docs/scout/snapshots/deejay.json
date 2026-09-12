@@ -1,7 +1,7 @@
 {
  "key": "deejay",
  "name": "Deejay.de",
- "visto": "2026-09-12T10:40:37.084Z",
+ "visto": "2026-09-12T11:50:07.377Z",
  "paginas": {
   "home": {
    "url": "https://www.deejay.de/",
@@ -57,7 +57,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/deejay-home.jpg"
   },
   "listing": {
    "url": "https://www.deejay.de/new",
@@ -250,7 +251,8 @@
     "resenas": true,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/deejay-listing.jpg"
   }
  },
  "errores": [

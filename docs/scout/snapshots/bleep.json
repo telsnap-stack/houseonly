@@ -1,7 +1,7 @@
 {
  "key": "bleep",
  "name": "Bleep",
- "visto": "2026-09-12T10:39:54.944Z",
+ "visto": "2026-09-12T11:49:03.509Z",
  "paginas": {
   "home": {
    "url": "https://bleep.com/",
@@ -54,17 +54,56 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/bleep-home.jpg"
   },
   "listing": {
-   "url": "https://bleep.com/vinyl",
+   "url": "https://bleep.com/stream/new-warehouse-arrivals",
    "consent": "sin muro",
-   "title": "Page Not Found · 404",
-   "controls": [],
-   "forms": [],
-   "scriptHosts": [],
+   "title": "Bleep - New Warehouse Arrivals",
+   "controls": [
+    "allow all",
+    "analytics",
+    "applied filters:",
+    "cart 0",
+    "cassette",
+    "cd",
+    "checkout",
+    "close",
+    "close view full product",
+    "confirm choices",
+    "downloads",
+    "features.playlist.label",
+    "manage consent preferences",
+    "marketing and advertising",
+    "next",
+    "pause",
+    "play",
+    "pre-orders",
+    "previous",
+    "redeem gift voucher",
+    "search",
+    "select all",
+    "sign in",
+    "strictly necessary",
+    "submit",
+    "view full product",
+    "view your wish list",
+    "vinyl"
+   ],
+   "forms": [
+    "/app/action []",
+    "/search/query [q]",
+    "/stream/new-warehouse-arrivals [_format-digital,_format-vinyl,_select-all-formats,format-d"
+   ],
+   "scriptHosts": [
+    "cdn.raygun.io",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "static.zdassets.com"
+   ],
    "signals": {
-    "audio": false,
+    "audio": true,
     "embedSonido": false,
     "wishlist": false,
     "preorder": false,
@@ -74,10 +113,85 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/bleep-listing.jpg"
+  },
+  "product": {
+   "url": "https://bleep.com/release/607467-various-artists-nigeria-80",
+   "consent": "sin muro",
+   "title": "Various Artists - Nigeria 80. Bleep.",
+   "controls": [
+    "add to cart",
+    "advice / oge chi kanma",
+    "akugbue nwa ewu",
+    "allow all",
+    "analytics",
+    "apama",
+    "ayubele",
+    "cart 0",
+    "checkout",
+    "close",
+    "close view full product",
+    "confirm choices",
+    "create gift voucher",
+    "ekute",
+    "email",
+    "features.playlist.label",
+    "gift this product",
+    "ije love pt. 2",
+    "manage consent preferences",
+    "marketing and advertising",
+    "mp3",
+    "next",
+    "ocheme mia",
+    "oke mi ye",
+    "pause",
+    "play",
+    "play gift this product share email",
+    "pre-orders",
+    "previous",
+    "read more",
+    "redeem gift voucher",
+    "se rere",
+    "search",
+    "select format",
+    "share",
+    "sign in",
+    "soko soko",
+    "strictly necessary",
+    "the world",
+    "view full product",
+    "view more",
+    "view your wish list",
+    "wav / flac",
+    "we have got it",
+    "yo-pop music"
+   ],
+   "forms": [
+    "/app/action []",
+    "/search/query [q]"
+   ],
+   "scriptHosts": [
+    "cdn.raygun.io",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "platform.twitter.com",
+    "static.zdassets.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": true,
+    "preorder": false,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": false,
+    "newsletter": false
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/bleep-product.jpg"
   }
  },
- "errores": [
-  "listing: no se encontro enlace a ficha de disco"
- ]
+ "errores": []
 }

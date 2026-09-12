@@ -5,8 +5,8 @@
    "key": "hhv",
    "name": "HHV",
    "paginas": 3,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:37:51.045Z",
    "errores": [],
    "cambios": []
   },
@@ -14,8 +14,8 @@
    "key": "phonica",
    "name": "Phonica",
    "paginas": 3,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:38:24.998Z",
    "errores": [],
    "cambios": []
   },
@@ -23,8 +23,8 @@
    "key": "hardwax",
    "name": "Hard Wax",
    "paginas": 3,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:39:03.306Z",
    "errores": [],
    "cambios": []
   },
@@ -32,8 +32,8 @@
    "key": "clone",
    "name": "Clone",
    "paginas": 3,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:39:37.108Z",
    "errores": [],
    "cambios": []
   },
@@ -41,8 +41,8 @@
    "key": "rushhour",
    "name": "Rush Hour",
    "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:40:11.984Z",
    "errores": [
     "listing: no se encontro enlace a ficha de disco"
    ],
@@ -51,42 +51,36 @@
   {
    "key": "bleep",
    "name": "Bleep",
-   "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
-   "errores": [
-    "listing: no se encontro enlace a ficha de disco"
-   ],
+   "paginas": 3,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:40:35.898Z",
+   "errores": [],
    "cambios": []
   },
   {
    "key": "boomkat",
    "name": "Boomkat",
-   "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
-   "errores": [
-    "listing: no se encontro enlace a ficha de disco"
-   ],
+   "paginas": 1,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:41:13.818Z",
+   "errores": [],
    "cambios": []
   },
   {
    "key": "juno",
    "name": "Juno",
-   "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
-   "errores": [
-    "listing: no se encontro enlace a ficha de disco"
-   ],
+   "paginas": 1,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:41:26.476Z",
+   "errores": [],
    "cambios": []
   },
   {
    "key": "deejay",
    "name": "Deejay.de",
    "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:41:39.816Z",
    "errores": [
     "listing: no se encontro enlace a ficha de disco"
    ],
@@ -96,19 +90,48 @@
    "key": "rubadub",
    "name": "Rubadub",
    "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:42:05.622Z",
    "errores": [
     "listing: no se encontro enlace a ficha de disco"
    ],
-   "cambios": []
+   "cambios": [
+    {
+     "pagina": "home",
+     "url": "https://www.rubadub.co.uk/",
+     "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rubadub-home.jpg",
+     "controlsNuevos": [],
+     "controlsIdos": [
+      "gbp £",
+      "usd $"
+     ],
+     "formsNuevos": [],
+     "scriptsNuevos": [],
+     "scriptsIdos": [],
+     "signalsNuevas": []
+    },
+    {
+     "pagina": "listing",
+     "url": "https://www.rubadub.co.uk/collections/new-releases",
+     "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rubadub-listing.jpg",
+     "controlsNuevos": [],
+     "controlsIdos": [
+      "gbp £",
+      "usd $"
+     ],
+     "formsNuevos": [],
+     "scriptsNuevos": [],
+     "scriptsIdos": [],
+     "signalsNuevas": []
+    }
+   ]
   },
   {
    "key": "kudos",
    "name": "Kudos",
    "paginas": 3,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:45:31.952Z",
    "errores": [],
    "cambios": []
   },
@@ -116,8 +139,8 @@
    "key": "triplevision",
    "name": "Triple Vision",
    "paginas": 2,
-   "primeraVez": true,
-   "desde": null,
+   "primeraVez": false,
+   "desde": "2026-09-12T11:43:07.286Z",
    "errores": [
     "listing: no se encontro enlace a ficha de disco"
    ],

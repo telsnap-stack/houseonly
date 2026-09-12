@@ -1,7 +1,7 @@
 {
  "key": "hhv",
  "name": "HHV",
- "visto": "2026-09-12T10:38:15.168Z",
+ "visto": "2026-09-12T11:46:18.112Z",
  "paginas": {
   "home": {
    "url": "https://www.hhv.de/shop/en",
@@ -69,7 +69,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hhv-home.jpg"
   },
   "listing": {
    "url": "https://www.hhv.de/shop/en/vinyl/new-releases/c1-1",
@@ -139,7 +140,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hhv-listing.jpg"
   },
   "product": {
    "url": "https://www.hhv.de/en/clothing/catalog/filter/hhv-clothing-sale-N3S6SA1",
@@ -225,7 +227,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hhv-product.jpg"
   }
  },
  "errores": []
