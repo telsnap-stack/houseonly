@@ -14,6 +14,38 @@ Tienda **HOUSE ONLY** (vinilos / música). Dos partes en el repo:
   - Prod: `https://houseonly-worker.emontagut.workers.dev`
   - Tienda Shopify: `house-only-2.myshopify.com` · Admin API `2026-04`
 
+## Despliegue del frontend (Cloudflare Pages)
+
+No hay config de despliegue en el repo (ni `wrangler.toml` de frontend, ni
+`netlify.toml`, ni workflow de CI): **todo está en el dashboard de Cloudflare**.
+
+- **Proyecto Pages**: `houseonly` — cuenta `Emontagut@telsnap.com`
+  (`5a3afbf5a56a1f377bf73413a299c0fc`).
+- **Origen**: GitHub `telsnap-stack/houseonly`, con Git provider conectado —
+  cada push despliega solo.
+  - `main` → **producción**: `houseonly.pages.dev` + `houseonly.store`
+  - `staging` → **preview**: `staging.houseonly.pages.dev`
+    (más una URL `<id>.houseonly.pages.dev` por despliegue)
+- **Build**: `npm run build` = `vite build && node scripts/prerender.mjs` → `dist/`
+  (`dist/` no se versiona; Pages construye desde el código).
+- **Dominio**: `houseonly.store` va como custom domain del proyecto Pages; el
+  ápex se sirve con registros A aplanados. `www` → ápex por Redirect Rule de
+  Cloudflare, que crea `scripts/houseonly-redirect-allinone.sh`.
+
+### Si houseonly.store no carga
+
+Antes de tocar nada, comprobar si el problema es de red y no del sitio. Se ha
+dado ya (2026-08-26): Movistar/Telefónica bloqueó por null-route las dos IPs de
+borde del ápex y la tienda quedó inalcanzable **solo desde España**, sin error,
+solo timeout. Se resolvió sola en unas horas.
+
+- El ápex está fijado a `188.114.96.5` / `188.114.97.5`. Las zonas del plan free
+  llevan un par de IPs fijo: **cambiar de DNS no sirve de nada**.
+- Diagnóstico rápido: si `houseonly.pages.dev` (rango `172.66.x`, distinto)
+  responde 200 pero el ápex no conecta por TCP, el sitio está bien y el corte
+  está en la ruta del ISP. `traceroute` a la IP de borde lo confirma.
+- Comprobar desde fuera (móvil con datos, proxy externo) antes de concluir.
+
 ## Conceptos clave del Worker
 
 - **Tags de origen (`source:*`)** marcan de qué importador viene cada producto:
