@@ -1,0 +1,79 @@
+{
+ "key": "boomkat",
+ "name": "Boomkat",
+ "visto": "2026-09-12T10:40:08.387Z",
+ "paginas": {
+  "home": {
+   "url": "https://boomkat.com/",
+   "consent": "sin muro",
+   "title": "Boomkat: Independent Music Specialist selling Vinyl, CD’s, Cassettes and Downloads worldwide",
+   "controls": [
+    "(see all)",
+    "[0]",
+    "all",
+    "back",
+    "cassettes",
+    "cd",
+    "clear all hide playlist show playlist",
+    "close",
+    "crate: (empty)",
+    "downloads",
+    "enter email address",
+    "log in",
+    "merchandise",
+    "pre-orders",
+    "search",
+    "sign up",
+    "vinyl",
+    ""
+   ],
+   "forms": [
+    "//boomkat.us1.list-manage.com/subscribe/post [EMAIL,subscribe]",
+    "/products [q[keywords],utf8]"
+   ],
+   "scriptHosts": [
+    "googletagmanager.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": true,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": true,
+    "listas": false,
+    "newsletter": true
+   }
+  },
+  "listing": {
+   "url": "https://boomkat.com/new-releases",
+   "consent": "sin muro",
+   "title": "Just a moment...",
+   "controls": [
+    "cloudflare, opens in a new tab",
+    "privacy, opens in a new tab"
+   ],
+   "forms": [],
+   "scriptHosts": [
+    "challenges.cloudflare.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": false,
+    "newsletter": false
+   }
+  }
+ },
+ "errores": [
+  "listing: no se encontro enlace a ficha de disco"
+ ]
+}

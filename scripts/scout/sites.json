@@ -1,0 +1,81 @@
+{
+  "_comment": "Tiendas que se vigilan cada semana. `listing` es una pagina de novedades o de un genero: de ahi sale el primer enlace a disco para mirar tambien una ficha. Quitar o anadir tiendas aqui; el resto del script no cambia.",
+  "sites": [
+    {
+      "key": "hhv",
+      "name": "HHV",
+      "home": "https://www.hhv.de/shop/en",
+      "listing": "https://www.hhv.de/shop/en/vinyl/new-releases/c1-1"
+    },
+    {
+      "key": "phonica",
+      "name": "Phonica",
+      "home": "https://www.phonicarecords.com/",
+      "listing": "https://www.phonicarecords.com/new-releases"
+    },
+    {
+      "key": "hardwax",
+      "name": "Hard Wax",
+      "home": "https://hardwax.com/",
+      "listing": "https://hardwax.com/this-week/",
+      "product": "https://hardwax.com/89415/sanskrit/ultramarine-ep/"
+    },
+    {
+      "key": "clone",
+      "name": "Clone",
+      "home": "https://clone.nl/",
+      "listing": "https://clone.nl/new-arrivals"
+    },
+    {
+      "key": "rushhour",
+      "name": "Rush Hour",
+      "home": "https://rushhour.nl/",
+      "listing": "https://rushhour.nl/collections/new-in"
+    },
+    {
+      "key": "bleep",
+      "name": "Bleep",
+      "home": "https://bleep.com/",
+      "listing": "https://bleep.com/vinyl",
+      "nota": "Devuelve pagina vacia al navegador automatizado (verificacion de bot). Se intenta igual y se reporta como no accesible."
+    },
+    {
+      "key": "boomkat",
+      "name": "Boomkat",
+      "home": "https://boomkat.com/",
+      "listing": "https://boomkat.com/new-releases",
+      "nota": "Idem Bleep: verificacion de bot."
+    },
+    {
+      "key": "juno",
+      "name": "Juno",
+      "home": "https://www.juno.co.uk/",
+      "listing": "https://www.juno.co.uk/new-releases/",
+      "nota": "Idem Bleep: verificacion de bot."
+    },
+    {
+      "key": "deejay",
+      "name": "Deejay.de",
+      "home": "https://www.deejay.de/",
+      "listing": "https://www.deejay.de/new"
+    },
+    {
+      "key": "rubadub",
+      "name": "Rubadub",
+      "home": "https://www.rubadub.co.uk/",
+      "listing": "https://www.rubadub.co.uk/collections/new-releases"
+    },
+    {
+      "key": "kudos",
+      "name": "Kudos",
+      "home": "https://www.kudosrecords.co.uk/",
+      "listing": "https://www.kudosrecords.co.uk/new-releases.html"
+    },
+    {
+      "key": "triplevision",
+      "name": "Triple Vision",
+      "home": "https://www.triplevision.nl/",
+      "listing": "https://www.triplevision.nl/music"
+    }
+  ]
+}

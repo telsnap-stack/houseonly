@@ -1,0 +1,83 @@
+{
+ "key": "bleep",
+ "name": "Bleep",
+ "visto": "2026-09-12T10:39:54.944Z",
+ "paginas": {
+  "home": {
+   "url": "https://bleep.com/",
+   "consent": "sin muro",
+   "title": "Bleep - Your Source for Independent and Innovative Music - Buy Vinyl and CD, Download MP3, WAV/FLAC, 24bit WAV and Buy M",
+   "controls": [
+    "allow all",
+    "analytics",
+    "cart 0",
+    "checkout",
+    "close",
+    "close view full product",
+    "confirm choices",
+    "features.playlist.label",
+    "manage consent preferences",
+    "marketing and advertising",
+    "next",
+    "pause",
+    "play",
+    "pre-orders",
+    "previous",
+    "redeem gift voucher",
+    "search",
+    "sign in",
+    "strictly necessary",
+    "view full product",
+    "view more",
+    "view your wish list"
+   ],
+   "forms": [
+    "/app/action []",
+    "/search/query [q]"
+   ],
+   "scriptHosts": [
+    "cdn.raygun.io",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "static.hotjar.com",
+    "static.zdassets.com",
+    "tracker.metricool.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": false,
+    "newsletter": false
+   }
+  },
+  "listing": {
+   "url": "https://bleep.com/vinyl",
+   "consent": "sin muro",
+   "title": "Page Not Found · 404",
+   "controls": [],
+   "forms": [],
+   "scriptHosts": [],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": false,
+    "newsletter": false
+   }
+  }
+ },
+ "errores": [
+  "listing: no se encontro enlace a ficha de disco"
+ ]
+}

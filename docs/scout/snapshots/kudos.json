@@ -1,0 +1,127 @@
+{
+ "key": "kudos",
+ "name": "Kudos",
+ "visto": "2026-09-12T10:41:08.991Z",
+ "paginas": {
+  "home": {
+   "url": "https://www.kudosrecords.co.uk/",
+   "consent": "sin muro",
+   "title": "Kudos Records",
+   "controls": [
+    "0",
+    "digital",
+    "search",
+    "toggle navigation"
+   ],
+   "forms": [
+    "/search/ [_token,results]"
+   ],
+   "scriptHosts": [
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com",
+    "widget.trustpilot.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": true,
+    "listas": false,
+    "newsletter": false
+   }
+  },
+  "listing": {
+   "url": "https://www.kudosrecords.co.uk/new-releases.html",
+   "consent": "sin muro",
+   "title": "Kudos Records",
+   "controls": [
+    "0",
+    "search",
+    "toggle navigation"
+   ],
+   "forms": [
+    "/search/ [_token,results]"
+   ],
+   "scriptHosts": [
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com",
+    "widget.trustpilot.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": true,
+    "listas": false,
+    "newsletter": false
+   }
+  },
+  "product": {
+   "url": "https://eglo.kudosrecords.co.uk/release/eglo101/alex-nut-the-heat-ep",
+   "consent": "sin muro",
+   "title": "Alex Nut — The Heat EP | Eglo Records",
+   "controls": [
+    "0",
+    "apple music",
+    "bandcamp",
+    "boomkat",
+    "deezer",
+    "facebook",
+    "google",
+    "itunes",
+    "jp-play",
+    "media player",
+    "search",
+    "soundcloud",
+    "spotify",
+    "tidal",
+    "title",
+    "toggle navigation",
+    "traxsource",
+    "twitter",
+    "volumo"
+   ],
+   "forms": [
+    "/search/ [_token,results]"
+   ],
+   "scriptHosts": [
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com",
+    "widget.trustpilot.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": false,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": true,
+    "listas": false,
+    "newsletter": false
+   }
+  }
+ },
+ "errores": []
+}

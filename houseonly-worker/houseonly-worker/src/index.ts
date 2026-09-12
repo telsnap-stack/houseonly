@@ -853,6 +853,7 @@ import {
   handleEntityGet,
   handleEntityEditDisplay,
 } from './lib/entities';
+import { sendScoutReport } from './lib/scout-mail';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1345,6 +1346,24 @@ export default {
 
     if (action === 'entity-edit-display' && request.method === 'POST') {
       return await handleEntityEditDisplay(request, env);
+    }
+
+    // El informe semanal del vigia de tiendas (scripts/scout/). Va por aqui
+    // porque la clave de Resend vive en el worker y no en la maquina de nadie.
+    if (action === 'scout-report' && request.method === 'POST') {
+      const authS = request.headers.get('authorization') || '';
+      if (authS !== `Bearer ${env.BOOTSTRAP_AUTH_SECRET}`) return jsonRes({ error: 'unauthorized' }, 401);
+      let body: any = {};
+      try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
+      const to = String(body?.to || '').trim();
+      const subject = String(body?.subject || 'House Only — vigía de tiendas').slice(0, 200);
+      const markdown = String(body?.markdown || '');
+      if (!markdown.trim()) return jsonRes({ error: 'markdown required' }, 400);
+      try {
+        return jsonRes(await sendScoutReport(env as any, to, subject, markdown));
+      } catch (e: any) {
+        return jsonRes({ error: String(e?.message || e).slice(0, 200) }, 502);
+      }
     }
 
     // ── PENDING SALES ───────────────────────────────────────

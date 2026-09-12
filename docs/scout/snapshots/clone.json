@@ -1,0 +1,152 @@
+{
+ "key": "clone",
+ "name": "Clone",
+ "visto": "2026-09-12T10:39:19.721Z",
+ "paginas": {
+  "home": {
+   "url": "https://clone.nl/",
+   "consent": "sin muro",
+   "title": "CLONE.NL",
+   "controls": [
+    "0 downloads",
+    "0 items",
+    "artists",
+    "charts",
+    "clone records mailing",
+    "close",
+    "e-mail",
+    "email:",
+    "frei aber froh! »",
+    "genres",
+    "home",
+    "la mer »",
+    "labels",
+    "lists",
+    "login",
+    "next",
+    "pre-order",
+    "previous",
+    "remind",
+    "search",
+    "set reminder",
+    "store only",
+    "subscribe",
+    "toggle navigation",
+    "trip recordings »",
+    "×"
+   ],
+   "forms": [
+    "# [email]",
+    "/all/search [query]",
+    "/mailing [_token,email,vinylmailing]"
+   ],
+   "scriptHosts": [
+    "clarity.ms",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": true,
+    "wishlist": true,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": true
+   }
+  },
+  "listing": {
+   "url": "https://clone.nl/new-arrivals",
+   "consent": "sin muro",
+   "title": "CLONE.NL",
+   "controls": [
+    "0 downloads",
+    "0 items",
+    "artists",
+    "charts",
+    "close",
+    "email:",
+    "genres",
+    "home",
+    "labels",
+    "lists",
+    "login",
+    "pre-order",
+    "search",
+    "set reminder",
+    "toggle navigation",
+    "×"
+   ],
+   "forms": [
+    "# [email]",
+    "/all/search [query]"
+   ],
+   "scriptHosts": [
+    "clarity.ms",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": true
+   }
+  },
+  "product": {
+   "url": "https://clone.nl/charts/030303/2417",
+   "consent": "sin muro",
+   "title": "030303 - Still Going Chart (23-04-2026) - CLONE.NL",
+   "controls": [
+    "0 downloads",
+    "0 items",
+    "artists",
+    "charts",
+    "close",
+    "email:",
+    "genres",
+    "home",
+    "labels",
+    "lists",
+    "login",
+    "pre-order",
+    "remind",
+    "search",
+    "set reminder",
+    "toggle navigation",
+    "×"
+   ],
+   "forms": [
+    "# [email]",
+    "/all/search [query]"
+   ],
+   "scriptHosts": [
+    "clarity.ms",
+    "googletagmanager.com",
+    "static.cloudflareinsights.com"
+   ],
+   "signals": {
+    "audio": false,
+    "embedSonido": false,
+    "wishlist": true,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": true
+   }
+  }
+ },
+ "errores": []
+}
