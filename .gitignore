@@ -27,3 +27,4 @@ dist-ssr
 *.backup-*
 
 docs/scout/shots/
+docs/scout/diff-*-*-*-*.json
