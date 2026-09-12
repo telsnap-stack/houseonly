@@ -77,15 +77,33 @@ export function markdownACorreo(md: string): string {
 
 const UNA_DIRECCION = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
 
+export interface ScoutAdjunto { filename: string; content: string }
+
+/** Tope duro: el correo lo tiene que abrir alguien en el movil un lunes. */
+const MAX_ADJUNTOS = 6;
+const MAX_BASE64 = 8 * 1024 * 1024;
+
 export async function sendScoutReport(
   env: ScoutMailEnv, to: string, subject: string, markdown: string,
-): Promise<{ ok: true; to: string }> {
+  adjuntos: ScoutAdjunto[] = [],
+): Promise<{ ok: true; to: string; attachments: number }> {
   if (!UNA_DIRECCION.test(to)) throw new Error('to must be a single address');
+
+  const limpios = adjuntos
+    .filter(a => a && typeof a.filename === 'string' && typeof a.content === 'string')
+    .filter(a => /^[\w.-]{1,60}\.(jpg|jpeg|png)$/i.test(a.filename))
+    .slice(0, MAX_ADJUNTOS);
+  let total = 0;
+  const pasan = limpios.filter(a => (total += a.content.length) <= MAX_BASE64);
+
   const r = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.RESEND_API_KEY}` },
-    body: JSON.stringify({ from: FROM, to, subject, html: markdownACorreo(markdown), reply_to: REPLY_TO }),
+    body: JSON.stringify({
+      from: FROM, to, subject, html: markdownACorreo(markdown), reply_to: REPLY_TO,
+      ...(pasan.length ? { attachments: pasan } : {}),
+    }),
   });
   if (!r.ok) throw new Error(`resend ${r.status}: ${(await r.text()).slice(0, 160)}`);
-  return { ok: true, to };
+  return { ok: true, to, attachments: pasan.length };
 }

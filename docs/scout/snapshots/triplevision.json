@@ -1,7 +1,7 @@
 {
  "key": "triplevision",
  "name": "Triple Vision",
- "visto": "2026-09-12T10:41:31.383Z",
+ "visto": "2026-09-12T11:51:34.372Z",
  "paginas": {
   "home": {
    "url": "https://www.triplevision.nl/",
@@ -107,7 +107,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/triplevision-home.jpg"
   },
   "listing": {
    "url": "https://www.triplevision.nl/music",
@@ -132,7 +133,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/triplevision-listing.jpg"
   }
  },
  "errores": [

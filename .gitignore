@@ -26,3 +26,4 @@ dist-ssr
 # Worker backups (local-only, not tracked)
 *.backup-*
 
+docs/scout/shots/

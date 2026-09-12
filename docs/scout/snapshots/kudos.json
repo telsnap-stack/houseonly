@@ -1,7 +1,7 @@
 {
  "key": "kudos",
  "name": "Kudos",
- "visto": "2026-09-12T10:41:08.991Z",
+ "visto": "2026-09-12T11:50:58.126Z",
  "paginas": {
   "home": {
    "url": "https://www.kudosrecords.co.uk/",
@@ -9,7 +9,6 @@
    "title": "Kudos Records",
    "controls": [
     "0",
-    "digital",
     "search",
     "toggle navigation"
    ],
@@ -36,7 +35,8 @@
     "resenas": true,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/kudos-home.jpg"
   },
   "listing": {
    "url": "https://www.kudosrecords.co.uk/new-releases.html",
@@ -70,32 +70,22 @@
     "resenas": true,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/kudos-listing.jpg"
   },
   "product": {
-   "url": "https://eglo.kudosrecords.co.uk/release/eglo101/alex-nut-the-heat-ep",
+   "url": "https://pacifictheatre.kudosrecords.co.uk/release/pt017lp/the-bamboos-sugar-on-top",
    "consent": "sin muro",
-   "title": "Alex Nut — The Heat EP | Eglo Records",
+   "title": "The Bamboos — Sugar on Top | Pacific Theatre",
    "controls": [
     "0",
-    "apple music",
-    "bandcamp",
-    "boomkat",
-    "deezer",
     "facebook",
     "google",
-    "itunes",
-    "jp-play",
     "media player",
     "search",
-    "soundcloud",
-    "spotify",
-    "tidal",
     "title",
     "toggle navigation",
-    "traxsource",
-    "twitter",
-    "volumo"
+    "twitter"
    ],
    "forms": [
     "/search/ [_token,results]"
@@ -120,7 +110,8 @@
     "resenas": true,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/kudos-product.jpg"
   }
  },
  "errores": []

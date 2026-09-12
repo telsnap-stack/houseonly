@@ -34,11 +34,36 @@ if (!to || !bearer) {
   process.exit(0);
 }
 
+// Las capturas de lo que cambio van adjuntas: el informe dice "control nuevo:
+// notify me" y la imagen enseña donde esta y como lo han puesto. Solo las de las
+// tiendas que cambiaron, y con tope: un correo de diez megas no lo abre nadie.
+const TOPE_ADJUNTOS = 4, TOPE_BYTES = 3_500_000;
+const attachments = [];
+try {
+  const diffs = readdirSync(DIR).filter(f => f === `diff-${fecha}.json`);
+  if (diffs.length) {
+    const d = JSON.parse(readFileSync(join(DIR, diffs[0]), 'utf8'));
+    let bytes = 0;
+    for (const t of d.tiendas) {
+      if (t.primeraVez) continue;
+      for (const c of t.cambios) {
+        if (!c.shot || attachments.length >= TOPE_ADJUNTOS) continue;
+        try {
+          const raw = readFileSync(c.shot);
+          if (bytes + raw.length > TOPE_BYTES) continue;
+          bytes += raw.length;
+          attachments.push({ filename: `${t.key}-${c.pagina}.jpg`, content: raw.toString('base64') });
+        } catch { /* la captura pudo no salir */ }
+      }
+    }
+  }
+} catch { /* sin adjuntos se manda igual: el texto es lo que importa */ }
+
 const r = await fetch(`${WORKER}/?action=scout-report`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearer}` },
-  body: JSON.stringify({ to, subject, markdown }),
+  body: JSON.stringify({ to, subject, markdown, attachments }),
 });
 const d = await r.json().catch(() => ({}));
 if (!r.ok) { console.error(`  fallo al mandar (${r.status}): ${d.error || ''}`); process.exit(1); }
-console.log(`  enviado a ${d.to} · ${subject}`);
+console.log(`  enviado a ${d.to} · ${subject}${attachments.length ? ` · ${attachments.length} captura(s)` : ''}`);

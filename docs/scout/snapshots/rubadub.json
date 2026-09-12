@@ -1,7 +1,7 @@
 {
  "key": "rubadub",
  "name": "Rubadub",
- "visto": "2026-09-12T10:40:53.413Z",
+ "visto": "2026-09-12T11:50:33.264Z",
  "paginas": {
   "home": {
    "url": "https://www.rubadub.co.uk/",
@@ -38,7 +38,6 @@
     "filter",
     "first name",
     "france",
-    "gbp £",
     "germany",
     "i agree with the terms and conditions.",
     "i’m shopping for....",
@@ -60,7 +59,6 @@
     "subscribe",
     "united kingdom",
     "united states",
-    "usd $",
     "view cart",
     "wales",
     "wishlist",
@@ -99,7 +97,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rubadub-home.jpg"
   },
   "listing": {
    "url": "https://www.rubadub.co.uk/collections/new-releases",
@@ -133,7 +132,6 @@
     "filter",
     "first name",
     "france",
-    "gbp £",
     "germany",
     "i agree with the terms and conditions.",
     "i’m shopping for....",
@@ -152,7 +150,6 @@
     "subscribe",
     "united kingdom",
     "united states",
-    "usd $",
     "view cart",
     "wales",
     "wishlist",
@@ -191,7 +188,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rubadub-listing.jpg"
   }
  },
  "errores": [

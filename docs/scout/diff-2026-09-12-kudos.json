@@ -1,0 +1,14 @@
+{
+ "fecha": "2026-09-12",
+ "tiendas": [
+  {
+   "key": "kudos",
+   "name": "Kudos",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  }
+ ]
+}

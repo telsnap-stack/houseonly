@@ -121,6 +121,7 @@ for (const t of conCambios) {
     if (!bloques.length) continue;
     L.push(`- **${c.pagina}** (${c.url})`);
     L.push(...bloques);
+    if (c.shot) bloques.push(`  - captura: \`${c.shot.replace(/^.*\/docs\//, 'docs/')}\` (adjunta al correo)`);
   }
   L.push('');
   L.push('**Para hablarlo con Claude** — pégale esto:');

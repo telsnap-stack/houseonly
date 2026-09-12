@@ -1,7 +1,7 @@
 {
  "key": "clone",
  "name": "Clone",
- "visto": "2026-09-12T10:39:19.721Z",
+ "visto": "2026-09-12T11:48:04.716Z",
  "paginas": {
   "home": {
    "url": "https://clone.nl/",
@@ -56,7 +56,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/clone-home.jpg"
   },
   "listing": {
    "url": "https://clone.nl/new-arrivals",
@@ -100,7 +101,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/clone-listing.jpg"
   },
   "product": {
    "url": "https://clone.nl/charts/030303/2417",
@@ -145,7 +147,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": true
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/clone-product.jpg"
   }
  },
  "errores": []

@@ -1,7 +1,7 @@
 {
  "key": "hardwax",
  "name": "Hard Wax",
- "visto": "2026-09-12T10:38:58.839Z",
+ "visto": "2026-09-12T11:47:30.850Z",
  "paginas": {
   "home": {
    "url": "https://hardwax.com/",
@@ -37,7 +37,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hardwax-home.jpg"
   },
   "listing": {
    "url": "https://hardwax.com/this-week/",
@@ -72,12 +73,13 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hardwax-listing.jpg"
   },
   "product": {
-   "url": "https://hardwax.com/89415/sanskrit/ultramarine-ep/",
+   "url": "https://hardwax.com/88761/antonio-fevola/if-the-choice-was-mine/",
    "consent": "sin muro",
-   "title": "Sanskrit: Ultramarine EP - Hard Wax",
+   "title": "Antonio Fevola: If The Choice Was Mine - Hard Wax",
    "controls": [
     "artist",
     "basket",
@@ -107,7 +109,8 @@
     "resenas": false,
     "listas": false,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/hardwax-product.jpg"
   }
  },
  "errores": []

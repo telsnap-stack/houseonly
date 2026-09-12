@@ -29,7 +29,34 @@ son cuatro cosas:
 
 Un botón de reproducir que pone *"cantiga de longe play"* se recorta a `play`:
 si no, la huella se llenaría de nombres de discos y cada semana parecería que
-media tienda ha cambiado.
+media tienda ha cambiado. Por lo mismo, en la **ficha** no se comparan controles
+—cada semana toca un disco distinto, con otras tallas y otros agotados—: de la
+ficha interesan los scripts, los formularios y las señales, que son de la tienda
+y no del disco.
+
+## El navegador, y dónde está la raya
+
+Va un **Chrome de verdad con ventana**, no headless: varias tiendas grandes
+—Boomkat, Juno— no le sirven nada al modo headless y con una ventana normal
+cargan enteras. La ventana se abre fuera de pantalla para no molestar el lunes
+por la mañana.
+
+Lo que **no** se hace, y no es negociable: **no se pasan retos de verificación**.
+Si aparece un "Just a moment…" de Cloudflare, se anota y se sigue; no se espera a
+que caduque, no se falsea huella, no se parchea el navegador. Eso sería saltarse
+un control de acceso en vez de mirar un escaparate. Boomkat y Juno disparan el
+reto en cualquier segunda página, así que de ellas se mira **solo la portada**
+—que en Juno son 147 controles con wishlist, pre-order, back-order y chat—.
+
+Una página en reto **conserva su huella de la semana anterior** en vez de
+guardarse vacía: mejor un dato de hace siete días que un agujero que finge que la
+tienda ha perdido todos sus botones.
+
+## Capturas
+
+Una por página, JPEG, en `docs/scout/shots/FECHA/` —fuera del repo, que pesan—.
+Las de las páginas que cambiaron van **adjuntas al correo**: el informe dice
+"control nuevo: notify me" y la captura enseña dónde está y cómo lo han puesto.
 
 ## Las reglas
 

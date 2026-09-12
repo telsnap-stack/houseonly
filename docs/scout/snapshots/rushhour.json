@@ -1,7 +1,7 @@
 {
  "key": "rushhour",
  "name": "Rush Hour",
- "visto": "2026-09-12T10:39:40.476Z",
+ "visto": "2026-09-12T11:48:39.606Z",
  "paginas": {
   "home": {
    "url": "https://rushhour.nl/",
@@ -41,7 +41,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rushhour-home.jpg"
   },
   "listing": {
    "url": "https://rushhour.nl/collections/new-in",
@@ -75,7 +76,8 @@
     "resenas": false,
     "listas": true,
     "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/rushhour-listing.jpg"
   }
  },
  "errores": [

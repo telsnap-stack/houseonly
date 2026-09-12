@@ -36,22 +36,22 @@
       "key": "bleep",
       "name": "Bleep",
       "home": "https://bleep.com/",
-      "listing": "https://bleep.com/vinyl",
-      "nota": "Devuelve pagina vacia al navegador automatizado (verificacion de bot). Se intenta igual y se reporta como no accesible."
+      "listing": "https://bleep.com/stream/new-warehouse-arrivals",
+      "nota": "No sirve nada al modo headless; con ventana de Chrome normal carga entera."
     },
     {
       "key": "boomkat",
       "name": "Boomkat",
       "home": "https://boomkat.com/",
-      "listing": "https://boomkat.com/new-releases",
-      "nota": "Idem Bleep: verificacion de bot."
+      "listing": null,
+      "nota": "Solo portada: cualquier segunda pagina dispara un reto de verificacion de Cloudflare, y los retos no se pasan. Su portada ya es rica en senales."
     },
     {
       "key": "juno",
       "name": "Juno",
       "home": "https://www.juno.co.uk/",
-      "listing": "https://www.juno.co.uk/new-releases/",
-      "nota": "Idem Bleep: verificacion de bot."
+      "listing": null,
+      "nota": "Solo portada: cualquier segunda pagina dispara un reto de verificacion de Cloudflare, y los retos no se pasan. Su portada ya es rica en senales."
     },
     {
       "key": "deejay",

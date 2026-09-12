@@ -1,7 +1,7 @@
 {
  "key": "juno",
  "name": "Juno",
- "visto": "2026-09-12T10:40:22.413Z",
+ "visto": "2026-09-12T11:49:54.054Z",
  "paginas": {
   "home": {
    "url": "https://www.juno.co.uk/",
@@ -174,40 +174,14 @@
     "wishlist": true,
     "preorder": true,
     "backorder": true,
-    "suscripcion": true,
+    "suscripcion": false,
     "chat": true,
     "resenas": true,
     "listas": true,
     "newsletter": false
-   }
-  },
-  "listing": {
-   "url": "https://www.juno.co.uk/new-releases/",
-   "consent": "sin muro",
-   "title": "Just a moment...",
-   "controls": [
-    "cloudflare, opens in a new tab",
-    "privacy, opens in a new tab"
-   ],
-   "forms": [],
-   "scriptHosts": [
-    "challenges.cloudflare.com"
-   ],
-   "signals": {
-    "audio": false,
-    "embedSonido": false,
-    "wishlist": false,
-    "preorder": false,
-    "backorder": false,
-    "suscripcion": false,
-    "chat": false,
-    "resenas": false,
-    "listas": false,
-    "newsletter": false
-   }
+   },
+   "shot": "/private/tmp/claude-501/-Users-eduardomontagut-houseonly-houseonly/56d316e3-715f-4c1f-b6b0-eed199d2345e/scratchpad/wtS/docs/scout/shots/2026-09-12/juno-home.jpg"
   }
  },
- "errores": [
-  "listing: no se encontro enlace a ficha de disco"
- ]
+ "errores": []
 }
