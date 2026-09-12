@@ -1,0 +1,174 @@
+{
+ "key": "phonica",
+ "name": "Phonica",
+ "visto": "2026-09-12T10:38:34.828Z",
+ "paginas": {
+  "home": {
+   "url": "https://www.phonicarecords.com/",
+   "consent": "sin muro",
+   "title": "Vinyl Records Specialists, London Soho Vinyl Music Records - Phonica Records - Latest Releases, Pre-Orders and Merchandi",
+   "controls": [
+    "0",
+    "a-z",
+    "add all",
+    "add to cart",
+    "all",
+    "cancel",
+    "cd",
+    "checkout",
+    "latest releases",
+    "log in",
+    "more",
+    "on sale",
+    "play all",
+    "pre-orders",
+    "price",
+    "search",
+    "submit",
+    "vinyl",
+    "▲",
+    "▼"
+   ],
+   "forms": [
+    "(misma pagina) [search-submit,search-text]",
+    "(misma pagina) [wishlist-email,wishlist-email,wishlist-email]",
+    "/checkout/customer_address [is_new_quote]"
+   ],
+   "scriptHosts": [
+    "ajax.googleapis.com",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "google-analytics.com",
+    "googletagservices.com",
+    "maxcdn.bootstrapcdn.com",
+    "platform.twitter.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": false
+   }
+  },
+  "listing": {
+   "url": "https://www.phonicarecords.com/new-releases",
+   "consent": "sin muro",
+   "title": "Vinyl Records Specialists, London Soho Vinyl Music Records - Phonica Records - Latest Releases, Pre-Orders and Merchandi",
+   "controls": [
+    "0",
+    "a-z",
+    "add all",
+    "add to cart",
+    "all",
+    "cancel",
+    "cd",
+    "checkout",
+    "latest releases",
+    "log in",
+    "more",
+    "on sale",
+    "play all",
+    "pre-orders",
+    "price",
+    "search",
+    "submit",
+    "vinyl",
+    "▲",
+    "▼"
+   ],
+   "forms": [
+    "(misma pagina) [search-submit,search-text]",
+    "(misma pagina) [wishlist-email,wishlist-email,wishlist-email]",
+    "/checkout/customer_address [is_new_quote]"
+   ],
+   "scriptHosts": [
+    "ajax.googleapis.com",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "google-analytics.com",
+    "googletagservices.com",
+    "maxcdn.bootstrapcdn.com",
+    "platform.twitter.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": false
+   }
+  },
+  "product": {
+   "url": "https://www.phonicarecords.com/product/psychemagik-amazing-grace-2001-undercover-lovers-vol-psychemagik/212847",
+   "consent": "sin muro",
+   "title": "PSYCHEMAGIK/Amazing Grace / 2001 (Undercover Lovers Vol. 7)/PSYCHEMAGIK - Vinyl Records Specialists, London Soho Vinyl M",
+   "controls": [
+    "0",
+    "a-z",
+    "add all",
+    "add to cart",
+    "all",
+    "cancel",
+    "cd",
+    "checkout",
+    "latest releases",
+    "log in",
+    "more",
+    "on sale",
+    "play all",
+    "pre-orders",
+    "price",
+    "search",
+    "submit",
+    "vinyl",
+    "▲",
+    "▼"
+   ],
+   "forms": [
+    "(misma pagina) [search-submit,search-text]",
+    "(misma pagina) [wishlist-email,wishlist-email,wishlist-email]",
+    "/checkout/customer_address [is_new_quote]"
+   ],
+   "scriptHosts": [
+    "ajax.googleapis.com",
+    "apis.google.com",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "code.jquery.com",
+    "connect.facebook.net",
+    "google-analytics.com",
+    "googletagservices.com",
+    "maxcdn.bootstrapcdn.com",
+    "platform.twitter.com"
+   ],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": true,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": false
+   }
+  }
+ },
+ "errores": []
+}

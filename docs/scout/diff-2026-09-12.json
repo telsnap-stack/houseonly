@@ -1,0 +1,127 @@
+{
+ "fecha": "2026-09-12",
+ "tiendas": [
+  {
+   "key": "hhv",
+   "name": "HHV",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  },
+  {
+   "key": "phonica",
+   "name": "Phonica",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  },
+  {
+   "key": "hardwax",
+   "name": "Hard Wax",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  },
+  {
+   "key": "clone",
+   "name": "Clone",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  },
+  {
+   "key": "rushhour",
+   "name": "Rush Hour",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "bleep",
+   "name": "Bleep",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "boomkat",
+   "name": "Boomkat",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "juno",
+   "name": "Juno",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "deejay",
+   "name": "Deejay.de",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "rubadub",
+   "name": "Rubadub",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  },
+  {
+   "key": "kudos",
+   "name": "Kudos",
+   "paginas": 3,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [],
+   "cambios": []
+  },
+  {
+   "key": "triplevision",
+   "name": "Triple Vision",
+   "paginas": 2,
+   "primeraVez": true,
+   "desde": null,
+   "errores": [
+    "listing: no se encontro enlace a ficha de disco"
+   ],
+   "cambios": []
+  }
+ ]
+}

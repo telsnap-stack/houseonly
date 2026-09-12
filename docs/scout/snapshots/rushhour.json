@@ -1,0 +1,84 @@
+{
+ "key": "rushhour",
+ "name": "Rush Hour",
+ "visto": "2026-09-12T10:39:40.476Z",
+ "paginas": {
+  "home": {
+   "url": "https://rushhour.nl/",
+   "consent": "sin muro",
+   "title": "Rush Hour | Independent Music Retailer, Distribution, Recordlabel, Events Organisation & more...",
+   "controls": [
+    "add to cart",
+    "artist",
+    "cart",
+    "duration",
+    "forthcoming titles",
+    "grid",
+    "login",
+    "media player",
+    "next",
+    "play",
+    "previous",
+    "search",
+    "stop",
+    "table",
+    "time",
+    "title",
+    "yours sincerely"
+   ],
+   "forms": [
+    "/search [query,sort_by]"
+   ],
+   "scriptHosts": [],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": false
+   }
+  },
+  "listing": {
+   "url": "https://rushhour.nl/collections/new-in",
+   "consent": "sin muro",
+   "title": "Page not found",
+   "controls": [
+    "artist",
+    "duration",
+    "forthcoming titles",
+    "media player",
+    "next",
+    "play",
+    "previous",
+    "search",
+    "stop",
+    "time",
+    "title"
+   ],
+   "forms": [
+    "/search [query,sort_by]"
+   ],
+   "scriptHosts": [],
+   "signals": {
+    "audio": true,
+    "embedSonido": false,
+    "wishlist": false,
+    "preorder": false,
+    "backorder": true,
+    "suscripcion": false,
+    "chat": false,
+    "resenas": false,
+    "listas": true,
+    "newsletter": false
+   }
+  }
+ },
+ "errores": [
+  "listing: no se encontro enlace a ficha de disco"
+ ]
+}
