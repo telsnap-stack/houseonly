@@ -2045,7 +2045,12 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             </div>
           </div>
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
-            <button onClick={onClose} style={{ float:'right', background:'none', border:'none', color:S.muted, cursor:'pointer', fontSize:20 }}>×</button>
+            {/* La X va en S.text, el mismo blanco del titulo y del artista: en
+                movil, sobre el panel oscuro, en S.muted no se veia. El area
+                pulsable sube a 44x44 con padding transparente, y los margenes
+                negativos devuelven la caja de flujo a su tamaño anterior
+                (24x25) para que el icono no se mueva ni empuje al sello. */}
+            <button onClick={onClose} aria-label="Close" style={{ float:'right', background:'none', border:'none', color:S.text, cursor:'pointer', fontSize:20, padding:'12px 16px', margin:'-11px -10px' }}>×</button>
             {/* Fase 5b: el sello y el artista llevan a su ficha de entidad. Si el
                 nombre no resuelve, EntityLink pinta el texto de siempre. */}
             {/* El sello con su control; el catno baja a su propia linea para que
