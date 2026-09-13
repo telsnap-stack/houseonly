@@ -5,7 +5,7 @@ import { useState, useRef, useEffect, useMemo, createContext, useContext, useCal
 import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
-import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.ts";
+import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
