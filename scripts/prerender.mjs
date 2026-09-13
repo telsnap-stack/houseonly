@@ -16,6 +16,7 @@
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { htmlToText } from '../houseonly-worker/houseonly-worker/src/lib/html-text.ts';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
@@ -148,36 +149,11 @@ async function fetchAllProducts() {
 }
 
 // ── Parse product (mirror App.jsx parseProduct) ────────────────
-function decodeHtmlEntities(s) {
-  if (!s) return '';
-  return String(s)
-    .replace(/&amp;amp;/g, '&')   // double-encoded ampersand
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&euro;/g, '€')
-    .replace(/&ndash;/g, '–')
-    .replace(/&mdash;/g, '—');
-}
-function cleanDescription(html) {
-  let s = String(html || '');
-  s = s.replace(/<script[\s\S]*?<\/script>/gi, '');
-  s = s.replace(/<\/(p|div|br|li|h[1-6])\s*>/gi, ' ');     // close tags = space
-  s = s.replace(/<br\s*\/?>/gi, ' ');                       // <br> = space
-  s = s.replace(/<[^>]+>/g, '');                             // strip remaining tags
-  s = decodeHtmlEntities(s);
-  s = s.replace(/\s+/g, ' ').trim();
-  return s;
-}
-
 function parseProduct(node) {
   const v = node.variants.edges[0]?.node;
   const img = node.images.edges[0]?.node;
   const tags = node.tags || [];
-  const desc = cleanDescription(node.descriptionHtml || '');
+  const desc = htmlToText(node.descriptionHtml || '');
   const artist = node.vendor || '';
   const title = node.title || '';
   const catalog = v?.sku || '';

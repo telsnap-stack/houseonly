@@ -5,6 +5,7 @@ import { useState, useRef, useEffect, useMemo, createContext, useContext, useCal
 import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
+import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.ts";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -82,8 +83,9 @@ function parseProduct({ node }) {
   const tags = node.tags || [];
   const { genre, year, label } = extractTagMeta(tags);
   const bodyHtml = node.descriptionHtml || '';
-  const cleanHtml = bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '');
-  const desc  = cleanHtml.replace(/<[^>]+>/g,'').trim() || '';
+  // El mismo paso a texto que usa el prerender: quitar etiquetas Y decodificar
+  // entidades. Hacerlo solo a medias es lo que imprimia "&amp;" en la ficha.
+  const desc  = htmlToText(bodyHtml);
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
   // as an artist. Treat it as no-artist (blank) so it can be corrected in
@@ -1630,12 +1632,41 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const hasVariantChoice = (r.variants?.length || 0) > 1;
   return (
     <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} style={{ background:S.surf, border:`1px solid ${hov?'#2e2e2e':S.border}`, borderRadius:3, overflow:'hidden', transition:'border 0.15s, transform 0.15s', transform:hov?'translateY(-2px)':'none' }}>
-      <div style={{ position:'relative', paddingBottom:'100%', cursor:'pointer' }} onClick={()=>onOpen(r)}>
-        <div style={{ position:'absolute', inset:0, background:`linear-gradient(${r.g})`, backgroundImage:coverSrc(r.coverUrl)?`url(${coverSrc(r.coverUrl)})`:'none', backgroundSize:'cover', backgroundPosition:'center' }}>
+      {/* La portada es un enlace de verdad a la ficha prerenderizada, con su
+          barra final: asi cmd-clic y "abrir en pestaña nueva" funcionan, y el
+          buscador ve el enlace. El clic normal lo cancela y abre el modal, que
+          es lo de siempre. Los botones de la tarjeta —wishlist, play, cola,
+          carrito— quedan FUERA del <a> a proposito: un <button> dentro de un
+          <a> es HTML invalido y rompe el clic. */}
+      <a
+        href={r.slug ? `/products/${r.slug}/` : undefined}
+        onClick={e=>{
+          // Un clic con modificador —o que no sea el boton principal— es del
+          // navegador: pestaña nueva, ventana, descarga. No se toca.
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+          e.preventDefault();
+          onOpen(r);
+        }}
+        style={{ display:'block', position:'relative', paddingBottom:'100%', cursor:'pointer', textDecoration:'none', color:'inherit' }}>
+        {/* Sin fondo: el `backgroundImage:'none'` de antes anulaba el gradiente
+            del shorthand, asi que un disco sin portada se veia liso. Se
+            mantiene igual, ahora sin el rodeo. */}
+        <div style={{ position:'absolute', inset:0, overflow:'hidden' }}>
+          {/* <img> y no fondo CSS: lleva alt y entra en Google Imagenes. La
+              caja ya la reserva el paddingBottom de arriba, asi que cargar la
+              imagen no mueve la rejilla. */}
+          {coverSrc(r.coverUrl) && (
+            <img
+              src={coverSrc(r.coverUrl)}
+              alt={[r.artist, r.title].filter(Boolean).join(' – ') || r.title || r.catalog}
+              loading="lazy"
+              style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', objectPosition:'center', display:'block' }}
+            />
+          )}
           <div style={{ position:'absolute', bottom:0, left:0, right:0, padding:'4px 8px', background:'rgba(0,0,0,0.5)', fontFamily:'monospace', fontSize:7, color:'rgba(255,255,255,0.35)', letterSpacing:2 }}>{r.catalog}</div>
           {hov&&<div style={{ position:'absolute', inset:0, background:'rgba(0,0,0,0.55)', display:'flex', alignItems:'center', justifyContent:'center', backdropFilter:'blur(2px)' }}><span style={{ color:S.text, fontSize:10, letterSpacing:2, fontWeight:700, textTransform:'uppercase' }}>View Details</span></div>}
         </div>
-      </div>
+      </a>
       <div style={{ padding:'12px 12px 14px' }}>
         <div style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:3 }}>{r.label}</div>
         <div style={{ fontSize:13, fontWeight:700, color:S.text, lineHeight:1.3, marginBottom:2 }}>{r.title}</div>
