@@ -6,6 +6,10 @@
  * prerender— y solo el prerender decodificaba las entidades, asi que el mismo
  * disco se leia "ru ff & jackin" en el <meta> y "ru ff &amp; jackin" en la
  * ficha. Una sola funcion, dos llamadores.
+ *
+ * JavaScript plano y no TypeScript a proposito: lo importa scripts/prerender.mjs,
+ * que corre con node a secas en el build de Pages. Ese node no quita tipos, y un
+ * .ts ahi revienta el build entero con ERR_UNKNOWN_FILE_EXTENSION.
  */
 
 /**
@@ -13,7 +17,8 @@
  * y se escaparon otra vez al guardarlos. Va primero, porque si no quedaria un
  * `&amp;` a medio decodificar.
  */
-export function decodeHtmlEntities(s: string): string {
+/** @param {string} s @returns {string} */
+export function decodeHtmlEntities(s) {
   if (!s) return '';
   return String(s)
     .replace(/&amp;amp;/g, '&')
@@ -32,7 +37,8 @@ export function decodeHtmlEntities(s: string): string {
  * Los cierres de parrafo y los <br> pasan a espacio ANTES de quitar etiquetas:
  * sin eso, "…(1999).</p><p>classic…" queda pegado como "(1999).classic".
  */
-export function htmlToText(html: string): string {
+/** @param {string} html @returns {string} */
+export function htmlToText(html) {
   let s = String(html || '');
   s = s.replace(/<script[\s\S]*?<\/script>/gi, '');
   s = s.replace(/<\/(p|div|br|li|h[1-6])\s*>/gi, ' ');

@@ -16,7 +16,7 @@
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { htmlToText } from '../houseonly-worker/houseonly-worker/src/lib/html-text.ts';
+import { htmlToText } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
