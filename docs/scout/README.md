@@ -52,6 +52,27 @@ Una página en reto **conserva su huella de la semana anterior** en vez de
 guardarse vacía: mejor un dato de hace siete días que un agujero que finge que la
 tienda ha perdido todos sus botones.
 
+## Si hiciera falta una página tras iniciar sesión
+
+No hace falta hoy: las doce tiendas se leen sin cuenta. Si algún día hiciera
+falta, la sesión **la abre Eduardo**, no el vigía:
+
+```
+node scripts/scout/login.mjs boomkat.com     # se abre SU Chrome, entra él, cierra
+echo "SCOUT_PROFILE=$HOME/.houseonly-scout-perfil" >> ~/.houseonly-scout.env
+```
+
+El perfil guarda la cookie y el vigía la reutiliza el lunes. **Por aquí no pasan
+contraseñas**: no se piden, no se escriben y no se guardan en ningún sitio del
+repo. Si la cookie caduca, esa página sale como no accesible y se vuelve a
+entrar a mano.
+
+Merece la pena decirlo: leer el escaparate público de una tienda una vez por
+semana es una cosa, y entrar con cuenta a hacerlo automáticamente es otra —las
+condiciones de uso de varias de estas tiendas lo prohíben—. Por eso el modo
+perfil está apagado por defecto y es una decisión consciente, no el camino
+normal.
+
 ## Capturas
 
 Una por página, JPEG, en `docs/scout/shots/FECHA/` —fuera del repo, que pesan—.

@@ -235,7 +235,7 @@ async function primerDisco(page, listing) {
 async function visita(browser, site) {
   const reglas = await robots(site.home);
   const out = { key: site.key, name: site.name, visto: new Date().toISOString(), paginas: {}, errores: [] };
-  const page = await browser.newPage({ userAgent: UA, viewport: { width: 1440, height: 1000 } });
+  const page = PERFIL ? await browser.newPage() : await browser.newPage({ userAgent: UA, viewport: { width: 1440, height: 1000 } });
 
   const objetivos = [['home', site.home], ['listing', site.listing]];
   for (const [nombre, url] of objetivos) {
@@ -300,15 +300,26 @@ const { sites } = JSON.parse(readFileSync(join(AQUI, 'sites.json'), 'utf8'));
 const lista = soloUna ? sites.filter(s => s.key === soloUna) : sites;
 if (!lista.length) { console.error(`No hay tienda "${soloUna}" en sites.json`); process.exit(1); }
 
-// Chrome de verdad, con ventana. Varias tiendas grandes —Boomkat, Juno— no
-// sirven nada al modo headless, y con una ventana normal cargan enteras: no hay
-// nada que saltarse, solo un navegador que se comporta como un navegador. La
-// ventana se abre fuera de la pantalla para no molestar al lunes por la mañana.
-const browser = await chromium.launch({
-  channel: 'chrome',
-  headless: process.env.SCOUT_HEADLESS === '1',
-  args: ['--window-position=-2400,0', '--window-size=1440,1000'],
-});
+/**
+ * Chrome de verdad, con ventana. Varias tiendas grandes —Boomkat, Juno— no
+ * sirven nada al modo headless, y con una ventana normal cargan enteras: no hay
+ * nada que saltarse, solo un navegador que se comporta como un navegador. La
+ * ventana se abre fuera de la pantalla para no molestar al lunes por la mañana.
+ *
+ * Con SCOUT_PROFILE se usa un perfil propio y persistente en vez de uno limpio.
+ * Sirve para paginas que solo existen tras iniciar sesion: la sesion la abre
+ * Eduardo a mano una vez —`node scripts/scout/login.mjs`— y el vigia reutiliza
+ * esa cookie. Aqui NO hay contraseñas: ni se guardan, ni se escriben, ni se
+ * piden. Si la cookie caduca, la pagina sale como no accesible y se vuelve a
+ * entrar a mano; no se intenta nada mas.
+ */
+const ARGS = ['--window-position=-2400,0', '--window-size=1440,1000'];
+const PERFIL = process.env.SCOUT_PROFILE || '';
+const headless = process.env.SCOUT_HEADLESS === '1';
+
+const browser = PERFIL
+  ? await chromium.launchPersistentContext(PERFIL, { channel: 'chrome', headless, args: ARGS, viewport: { width: 1440, height: 1000 } })
+  : await chromium.launch({ channel: 'chrome', headless, args: ARGS });
 const informe = { fecha: new Date().toISOString().slice(0, 10), tiendas: [] };
 
 for (const site of lista) {
