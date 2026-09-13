@@ -1,0 +1,38 @@
+{
+ "hardwax": {
+  "url": "https://hardwax.com/this-week/",
+  "marcas": {
+   "back in stock": 1
+  }
+ },
+ "phonica": {
+  "url": "https://www.phonicarecords.com/browse/new-releases",
+  "marcas": {}
+ },
+ "bleep": {
+  "url": "https://bleep.com/stream/new-warehouse-arrivals",
+  "marcas": {}
+ },
+ "houseonly": {
+  "url": "https://houseonly.store/",
+  "marcas": {
+   "only 1 left": 3,
+   "only 2 left": 20,
+   "pre-order": 2
+  }
+ },
+ "clone": {
+  "url": "https://clone.nl/all/new",
+  "marcas": {
+   "out of stock": 3,
+   "back in stock": 1,
+   "pre-order": 1
+  }
+ },
+ "juno": {
+  "url": "https://www.juno.co.uk/all/this-week/",
+  "marcas": {
+   "out of stock": 1
+  }
+ }
+}

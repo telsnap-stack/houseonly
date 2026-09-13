@@ -1,0 +1,15 @@
+{
+ "tienda": "phonica",
+ "pasos": [
+  "1: añadir al carrito desde la ficha",
+  "2: página de carrito"
+ ],
+ "carro": {
+  "url": "https://www.phonicarecords.com/cart",
+  "envioMencionado": false,
+  "frasesEnvio": [],
+  "espana": false,
+  "botones": [],
+  "texto": "404 Page Not Found\nThe page you requested was not found."
+ }
+}

@@ -1,0 +1,15 @@
+{
+ "tienda": "boomkat",
+ "sondas": {
+  "artista": {
+   "reto": true,
+   "donde": "portada"
+  },
+  "sello": {
+   "error": "locator.click: Timeout 8000ms exceeded."
+  },
+  "catno": {
+   "error": "locator.click: Timeout 8000ms exceeded."
+  }
+ }
+}

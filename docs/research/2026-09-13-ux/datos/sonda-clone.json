@@ -1,0 +1,17 @@
+{
+ "tienda": "clone",
+ "sondas": {
+  "artista": {
+   "reto": true,
+   "donde": "resultados"
+  },
+  "sello": {
+   "reto": true,
+   "donde": "resultados"
+  },
+  "catno": {
+   "reto": true,
+   "donde": "resultados"
+  }
+ }
+}

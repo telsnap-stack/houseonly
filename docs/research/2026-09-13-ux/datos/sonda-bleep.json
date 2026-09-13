@@ -1,0 +1,23 @@
+{
+ "tienda": "bleep",
+ "sondas": {
+  "artista": {
+   "url": "https://bleep.com/search/query?q=DJ+Koze",
+   "contador": "7 Records",
+   "vacio": false,
+   "cuerpo": "Music | Merchandise | Genres | Features | Sale | Artists | DJ Koze | Dj Koze / Naum | DJ Koze feat. Ada | DJ Koze feat. Rahel | DJ Koze feat. Milosh | DJ Koze vs Sid LeRock | Nathan Fake / DJ Koze | DJ Koze feat. Caribou | DJ Koze feat. Apparat | Efdemin feat. DJ Koze | DJ Koze, Sophia Kennedy | Justus Kohncke / DJ Koze | Dj Koze / Gebr. Teichmann"
+  },
+  "sello": {
+   "url": "https://bleep.com/search/query?q=Pampa",
+   "contador": "",
+   "vacio": false,
+   "cuerpo": "Music | Merchandise | Genres | Features | Sale | Labels | Pampa Records | Products | Various Artists | DJ Koze Presents Pampa, Vol. 1 | Pampa Records |  Play 19 Tracks |  Download | Jackmate & The Missing Linkx | Discodisco2 | Pampa Records |  Play 2 Tracks |  Download | Isolée"
+  },
+  "catno": {
+   "url": "https://bleep.com/search/query?q=PAMPA024",
+   "contador": "",
+   "vacio": true,
+   "cuerpo": "Music | Merchandise | Genres | Features | Sale | No Results | Newsletter Facebook Instagram Mixcloud SoundCloud X Spotify | Contact Support Help Centre Terms & Conditions Privacy Policy Redeem Download Code Redeem Gift Voucher Jobs About  | English (US) |  Sign In | All site content copyright © Bleep Ltd. | Registered office: Spectrum House, 32–34 Gordon House Road, London, NW5"
+  }
+ }
+}

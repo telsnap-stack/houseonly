@@ -1,0 +1,26 @@
+{
+ "tienda": "bleep",
+ "pasos": [
+  "1: añadir al carrito desde la ficha",
+  "2: página de carrito"
+ ],
+ "carro": {
+  "url": "https://bleep.com/cart",
+  "envioMencionado": true,
+  "frasesEnvio": [
+   "Worldwide Shipping",
+   "Shipping "
+  ],
+  "espana": false,
+  "botones": [
+   "Search",
+   "Update",
+   "Apply Voucher",
+   "Allow All",
+   "Manage Consent Preferences",
+   "Confirm Choices",
+   "Allow All"
+  ],
+  "texto": "Worldwide Shipping\nNewsletter\nGift Vouchers\nSign In\nMusic\nMerchandise\nGenres\nFeatures\nSale\nYour Cart\nSub-total \nUSD 44.99\nShipping \n-\nTotal\nUSD 44.99\nCheckout\nBoards of Canada\nInferno\nVinyl (2×LP (Deluxe)) Deluxe Edition Transparent Red Vinyl\nRead More\nUSD 44.99\nQuantity \nRemove\nTotal\nUSD 44.99\nRedeem Voucher\nVoucher Code  \nPCI Compliant\nContact Support Help Centre Terms & Conditions Privacy Policy Redeem Download Code Redeem Gift Voucher Jobs About \nEnglish (US)\n Sign In\nAll site content copyright © Bleep Ltd.\nRegistered office: Spectrum House, 32–34 Gordon House Road, London, NW5 1LP.\nCompany Registration Number: 6684190.\nPowered by Ochre.\nRegistered office: Spectrum House, 32–34 Gordon Ho"
+ }
+}

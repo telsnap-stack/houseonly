@@ -1,0 +1,15 @@
+{
+ "tienda": "hardwax",
+ "pasos": [
+  "1: no se encontró botón de añadir con texto reconocible",
+  "2: página de carrito"
+ ],
+ "carro": {
+  "url": "https://hardwax.com/cart/",
+  "envioMencionado": false,
+  "frasesEnvio": [],
+  "espana": false,
+  "botones": [],
+  "texto": "404 - Not Found"
+ }
+}
