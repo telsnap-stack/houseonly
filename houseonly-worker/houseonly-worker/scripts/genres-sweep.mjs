@@ -18,7 +18,24 @@
  *   node scripts/genres-sweep.mjs --limpieza      dry-run de la pasada B
  *   node scripts/genres-sweep.mjs --limpieza --apply
  */
+import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { GENRES, NO_SON_GENEROS, resolveGenre, clasificaValor, genreTag } from '../src/lib/genres.mjs';
+
+/**
+ * Las credenciales de Admin viven en ~/.houseonly-secrets, fuera del repo. El
+ * dry-run no las necesita —lee por Storefront—, asi que la falta solo se nota
+ * al aplicar, y se avisa entonces.
+ */
+(() => {
+  const f = join(homedir(), '.houseonly-secrets');
+  if (!existsSync(f)) return;
+  for (const linea of readFileSync(f, 'utf8').split('\n')) {
+    const m = linea.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
+  }
+})();
 
 const SHOP = 'house-only-2.myshopify.com';
 const STOREFRONT = '3edf470af24f9bd4b81bca274121eec4';   // token publico, solo lectura
@@ -27,6 +44,15 @@ const API_SF = '2024-01', API_ADMIN = '2026-04';
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 const LIMPIEZA = args.includes('--limpieza');
+
+/**
+ * Arreglos puntuales, los dos de la pasada B (la A no borra nunca):
+ *   - un tag mal escrito en origen, que se reescribe;
+ *   - dos nombres de artista metidos como genero en UN disco concreto.
+ * Van con nombre y apellidos a proposito: son correcciones de datos, no reglas.
+ */
+const REESCRITURAS = { 'soul/r&amp;b': 'Soul/R&B' };
+const QUITAR_EN = { 'RH-STOREJAMS031': ['Darryn Jones', 'Mark Grusane'] };
 
 /** Tags que el producto ya trae y que NO son genero: se dejan en paz. */
 const esEstructural = t => /:/.test(t) || /^\d{4}$/.test(t) || /^forthcoming$/i.test(t)
@@ -55,7 +81,7 @@ async function leerStorefront() {
 
 async function tokenAdmin() {
   const id = process.env.SHOPIFY_ADMIN_CLIENT_ID, secret = process.env.SHOPIFY_ADMIN_CLIENT_SECRET;
-  if (!id || !secret) throw new Error('faltan SHOPIFY_ADMIN_CLIENT_ID / SHOPIFY_ADMIN_CLIENT_SECRET');
+  if (!id || !secret) throw new Error('faltan SHOPIFY_ADMIN_CLIENT_ID y SHOPIFY_ADMIN_CLIENT_SECRET en ~/.houseonly-secrets');
   const r = await fetch(`https://${SHOP}/admin/oauth/access_token`, { method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: new URLSearchParams({ grant_type:'client_credentials', client_id:id, client_secret:secret }) });
@@ -86,11 +112,17 @@ function plan(productos) {
       p.escrituras.push({ ...prod, anadir:[g.tag], quitar:[] });
     } else {
       const quitar = (prod.tags || []).filter(t => !esEstructural(t) && clasificaValor(t) === 'borrar');
-      if (!quitar.length) continue;
+      const puntuales = (QUITAR_EN[prod.sku] || []).filter(t => (prod.tags || []).includes(t));
+      quitar.push(...puntuales);
+      const reescribir = (prod.tags || [])
+        .filter(t => REESCRITURAS[t.toLowerCase()])
+        .map(t => ({ de: t, a: REESCRITURAS[t.toLowerCase()] }));
+      if (!quitar.length && !reescribir.length) continue;
       // Nunca se quita nada si el canonico no esta ya puesto: seria perder el dato.
       if (g && !(prod.tags || []).includes(g.tag)) continue;
       for (const t of quitar) p.borrados.set(t, (p.borrados.get(t) || 0) + 1);
-      p.escrituras.push({ ...prod, anadir:[], quitar });
+      for (const r of reescribir) p.borrados.set(`${r.de}  →  ${r.a}`, (p.borrados.get(`${r.de}  →  ${r.a}`) || 0) + 1);
+      p.escrituras.push({ ...prod, anadir: reescribir.map(r => r.a), quitar: [...quitar, ...reescribir.map(r => r.de)] });
     }
   }
   return p;
@@ -145,7 +177,13 @@ for (const [v, skus] of desc) {
 
 if (!APPLY) { console.log('\nDry-run: nada escrito.\n'); process.exit(0); }
 
-const token = await tokenAdmin();
+let token;
+try { token = await tokenAdmin(); }
+catch (e) {
+  console.error(`\n  NO SE APLICA: ${e.message}`);
+  console.error('  Crea ~/.houseonly-secrets con esas dos lineas y vuelve a lanzarlo.\n');
+  process.exit(1);
+}
 let ok = 0, fallos = 0;
 for (const prod of p.escrituras) {
   try { await escribir(token, prod); ok++; } catch (e) { fallos++; console.error(`  ${prod.sku}: ${e.message}`); }

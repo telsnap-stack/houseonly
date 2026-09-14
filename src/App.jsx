@@ -4290,7 +4290,11 @@ function KudosImporter() {
     pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).forEach(r=>{
       const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
       const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
-      const label=api?decodeHtml(api.label):''; const genre=api?api.genre:''; const subgenre=api?api.subgenre:'';
+      // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
+      // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
+      // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
+      // tratan igual.
+      const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
       const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
       const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
       const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;

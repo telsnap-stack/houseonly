@@ -34,8 +34,9 @@ export const GENRES = [
     { raw:'dnb', tipo:'misma' }, { raw:'Drum n Bass', tipo:'misma' },
     { raw:'Drum and Bass', tipo:'misma' }, { raw:'Drum & Bass', tipo:'misma' },
     { raw:'Drum + Bass', tipo:'misma' }, { raw:"Jungle / Drum 'n' Bass", tipo:'misma' },
-    { raw:'Jungle / Drum n Bass', tipo:'misma' },
+    { raw:'Jungle / Drum n Bass', tipo:'misma' }, { raw:'Jungle / Drum & Bass', tipo:'misma' },
     { raw:'Jungle', tipo:'sub' }, { raw:'Liquid Funk', tipo:'sub' },
+    { raw:'Hardcore Drum & Bass', tipo:'sub' },
   ]},
   { id:'deephouse', label:'Deep House', seccion:'house', alias:[
     { raw:'Deep House', tipo:'canonico' }, { raw:'Deephouse', tipo:'misma' },
@@ -72,6 +73,13 @@ export const GENRES = [
  */
 export const NO_SON_GENEROS = ['Dark D', 'blue', 'Brazil', 'Reissue', 'Carl Craig', 'Eclectic', 'Folk', 'Headz', 'Patchwork'];
 
+/**
+ * Tags que hablan del PRENSADO, no de la musica: color del vinilo, tirada,
+ * edicion. No son generos y tampoco son basura —dicen algo del disco— asi que
+ * ni resuelven genero, ni se borran, ni ensucian la cola de revision.
+ */
+export const RUIDO_DE_PRENSADO = ['limited', 'collectors edition', 'colored', 'orange', 'red', 'clear', 'W/Lbl', '200 copies', '10'];
+
 export const genreTag = id => `genre:${id}`;
 
 const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -104,6 +112,7 @@ export function resolveGenre(valores) {
 /** ¿Este valor crudo se borra del producto, se conserva, o no lo conocemos? */
 export function clasificaValor(v) {
   const n = norm(v);
+  if (RUIDO_DE_PRENSADO.some(x => norm(x) === n)) return 'conservar';
   if (NO_SON_GENEROS.some(x => norm(x) === n)) return 'borrar';
   const hit = INDICE.get(n);
   if (!hit) return 'desconocido';
