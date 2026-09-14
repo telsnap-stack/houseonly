@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -211,7 +211,18 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // entre lo que hay en stock— pero DENTRO de la seccion Forthcoming hay que
   // exigirlo. Estaba clavado a excluir, asi que buscar ahi dejaba fuera
   // exactamente lo que se estaba mirando.
-  const queryParts = [searchTerm.trim(), forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
+  /**
+   * Si lo que escribe el cliente ES un genero —"deep house", "deephouse",
+   * "DEEP HOUSE", "dnb"— se le suma su tag canonico con un OR. No lo sustituye:
+   * "deep house pampa" tiene que seguir funcionando como texto libre.
+   *
+   * Sin esto, al limpiar los tags viejos del catalogo esas busquedas se caian a
+   * casi cero, porque `genre:deephouse` va pegado y no casa con dos palabras.
+   */
+  const termino = searchTerm.trim();
+  const genero = resolveGenre([termino]);
+  const texto = genero ? `(${termino} OR tag:'${genero.tag}')` : termino;
+  const queryParts = [texto, forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   // El BUSCADOR no se reparte por secciones. La separacion entre house y drum &
   // bass es para navegar; buscar es otra cosa: quien escribe "Fokuz" quiere sus
@@ -221,29 +232,28 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   //
   // Lo de `forthcoming` si se mantiene: un pre-order no es lo mismo que algo en
   // stock, y ahi la separacion es de estado, no de estilo.
+  /**
+   * `products(query:)` y no `search(...)`: medido contra el catalogo, el
+   * conector `search` NO respeta el OR booleano —devolvia MENOS resultados que
+   * el texto solo— y sin OR no hay forma de sumar el tag del genero. La
+   * coincidencia por prefijo se conserva igual ("pamp" encuentra los 10 de
+   * Pampa), y las descripciones se siguen indexando.
+   */
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
-    search(query: ${combinedQuery}, first: 24${after}, types: PRODUCT, prefix: LAST) {
+    products(first: 24${after}, query: ${combinedQuery}) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          ... on Product {
-            id title vendor descriptionHtml tags
-            variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
-            images(first:1) { edges { node { url } } }
-          }
+          id title vendor descriptionHtml tags
+          variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
+          images(first:1) { edges { node { url } } }
         }
       }
     }
   }`);
-  const { edges, pageInfo } = data.search;
-  // Filter out any edges that weren't Products (defensive — types: PRODUCT
-  // should make this unnecessary, but if Shopify ever returns mixed types
-  // we won't crash on missing fields).
-  const products = edges
-    .map(e => e.node)
-    .filter(n => n && n.id && n.id.includes('/Product/'))
-    .map(node => parseProduct({ node }));
+  const { edges, pageInfo } = data.products;
+  const products = edges.map(e => parseProduct({ node: e.node }));
   return { products, hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
