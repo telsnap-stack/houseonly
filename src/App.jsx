@@ -6,6 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
+import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -68,12 +69,14 @@ function extractTagMeta(tags) {
     /^forthcoming$/i.test(t) ||                       // pre-order flag
     SKIP_TAGS.some(s => s.toLowerCase() === t.toLowerCase()) ||
     /^(12|excl|lp|ep|single|vinyl|kudos)/i.test(t);   // format / marker tokens
-  const genre = GENRE_TAGS.find(g => tags.some(t => t.toLowerCase() === g.toLowerCase()))
-    || tags.find(t => !isStructural(t))
-    || '';
+  // El genero sale de su tag canonico y de ningun otro sitio. El fallback de
+  // "coge el primer tag no estructural" es lo que llenaba el desplegable de
+  // "blue", "Carl Craig" y "Dark D": un disco sin genero se queda SIN genero.
+  const genre = generoDeTags(tags)?.label || '';
   const year = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0');
-  const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim()
-    || tags.find(t => !isStructural(t)) || '';
+  // Mismo criterio para el sello: el tag `label:` o nada. Era la misma linea la
+  // que colaba generos en el desplegable de sellos.
+  const label = tags.find(t => t.toLowerCase().startsWith('label:'))?.slice(6).trim() || '';
   return { genre, year, label };
 }
 
@@ -130,11 +133,11 @@ function parseProduct({ node }) {
   };
 }
 
-// Tags that mark a release as Drum & Bass (incl. jungle / liquid). The TV
-// importer always writes 'dnb' on D&B records; the others catch any variant
-// spelling. This set both POPULATES the "Drum & Bass Only" section and is
-// EXCLUDED from the main house catalogue so the two never mix.
-const DNB_TAGS = ['dnb', 'jungle', 'Jungle', 'Drum n Bass', 'Drum and Bass', 'Liquid Funk'];
+// La seccion de Drum & Bass se define por el GENERO CANONICO, leido del modulo
+// compartido (src/lib/genres.mjs), no por una lista de grafias. Antes habia un
+// DNB_TAGS con seis escrituras a mano que no cubria "Drum + Bass" ni
+// "Jungle / Drum 'n' Bass", y esos discos se colaban entre el house.
+const DNB_TAG = genreTag(DNB_GENRE_ID);
 
 async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false, dnb=false } = {}) {
   const after = cursor ? `, after: "${cursor}"` : '';
@@ -156,10 +159,10 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
   const clauses = filterTags.map(t => `tag:'${t}'`);
   clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
   if (dnb) {
-    clauses.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+    clauses.push(`tag:'${DNB_TAG}'`);
   } else if (!forthcoming) {
     // Main catalogue: hide every D&B record from the house genres.
-    for (const t of DNB_TAGS) clauses.push(`-tag:'${t}'`);
+    clauses.push(`-tag:'${DNB_TAG}'`);
   }
   const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
@@ -213,9 +216,9 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // D&B scoping: in the D&B section, require a D&B tag; in the main catalogue,
   // exclude all D&B tags so house searches never surface drum & bass.
   if (dnb) {
-    queryParts.push(`(${DNB_TAGS.map(t => `tag:'${t}'`).join(' OR ')})`);
+    queryParts.push(`tag:'${DNB_TAG}'`);
   } else {
-    for (const t of DNB_TAGS) queryParts.push(`-tag:'${t}'`);
+    queryParts.push(`-tag:'${DNB_TAG}'`);
   }
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
@@ -252,25 +255,6 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
 // images, variants, descriptionHtml etc. so the response is small and fast
 // even with thousands of products. Paginates with the Storefront API maximum
 // of 250 per page.
-async function fetchAllProductMetadata() {
-  const all = [];
-  let cursor = null;
-  let safety = 25; // up to 25 pages × 250 = 6250 products. Hard-stop if catalog ever balloons past that.
-  while (safety-- > 0) {
-    const after = cursor ? `, after: "${cursor}"` : '';
-    const data = await shopifyQuery(`{
-      products(first: 250${after}) {
-        pageInfo { hasNextPage endCursor }
-        edges { node { tags vendor } }
-      }
-    }`);
-    const { edges, pageInfo } = data.products;
-    for (const e of edges) all.push(e.node);
-    if (!pageInfo.hasNextPage) break;
-    cursor = pageInfo.endCursor;
-  }
-  return all;
-}
 
 // Fetch the set of handles + variant SKUs of every LIVE product, lowercased.
 // Used by the pre-order importer to auto-exclude records that already exist in
@@ -2565,31 +2549,25 @@ function ResetPasswordPage({ mode, resetUrl, onSuccess, onCancel }) {
 }
 
 
-function Filters({ filters, onChange, records, allLabels, allGenres, allYears }) {
-  // Prefer the catalog-wide arrays (computed from a separate lightweight Shopify
-  // query that fetches every product's tags, regardless of pagination). Fall
-  // back to deriving from `records` while that fetch is still in flight, so
-  // filters at least show something on first paint.
-  const labels = allLabels?.length ? allLabels : [...new Set(records.map(r=>r.label))].filter(Boolean).sort();
-  const genres = allGenres?.length ? allGenres : [...new Set(records.map(r=>r.genre))].filter(Boolean).sort();
-  const years  = allYears?.length  ? allYears  : [...new Set(records.map(r=>r.year).filter(Boolean))].sort((a,b)=>b-a);
-  const pill = (key,val,label) => {
-    const active = filters[key]===val;
-    return <button key={String(val)} onClick={()=>onChange(key,active?null:val)} style={{ background:active?S.accent:S.border, color:active?'#080808':S.muted, border:'none', borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:active?700:400, letterSpacing:1.5, padding:'6px 14px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', flexShrink:0 }}>{label||val}</button>;
-  };
+function Filters({ filters, onChange }) {
+  // El desplegable sale del modulo compartido y de la SECCION en la que estas,
+  // no de recorrer el catalogo. Por eso en la rejilla de house no puede
+  // aparecer drum & bass —ni al reves—, y por eso ninguna opcion puede dar cero:
+  // se ofrece exactamente lo que existe en esta seccion.
+  const generos = generosDeSeccion(filters.dnb ? 'dnb' : 'house');
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
       <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ appearance:'none', WebkitAppearance:'none', background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
         <option value="">{placeholder}</option>
-        {opts.map(o=><option key={o} value={o}>{o}</option>)}
+        {opts.map(o=><option key={o.id} value={o.id}>{o.label}</option>)}
       </select>
       <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:filters[key]?'#080808':S.muted }}>▼</span>
     </div>
   );
   return (
     <div style={{ marginBottom:24 }}>
-      <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:10 }}>
-        {sel('genre', genres, 'All Genres')}{sel('label', labels, 'All Labels')}
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+        {sel('genre', generos, 'All Genres')}
         <div style={{ position:'relative', flexShrink:0 }}>
           <select value={filters.sort||'newest'} onChange={e=>onChange('sort',e.target.value)} style={{ appearance:'none', WebkitAppearance:'none', background:S.surf, color:S.muted, border:`1px solid ${S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:120 }}>
             <option value="newest">New Arrivals</option>
@@ -2599,9 +2577,6 @@ function Filters({ filters, onChange, records, allLabels, allGenres, allYears })
           </select>
           <span style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', pointerEvents:'none', fontSize:8, color:S.muted }}>▼</span>
         </div>
-      </div>
-      <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4, scrollbarWidth:'none' }}>
-        {pill('year',null,'All')}{years.map(y=>pill('year',y,y))}
       </div>
     </div>
   );
@@ -4290,7 +4265,11 @@ function KudosImporter() {
     pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).forEach(r=>{
       const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
       const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
-      const label=api?decodeHtml(api.label):''; const genre=api?api.genre:''; const subgenre=api?api.subgenre:'';
+      // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
+      // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
+      // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
+      // tratan igual.
+      const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
       const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
       const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
       const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
@@ -11638,7 +11617,6 @@ function EntityLink({ kind, raw, onNavigate, style, auth, onSignIn, followSlugs,
 // ── APP ────────────────────────────────────────────────────────
 export default function App() {
   const [records,setRecords]             = useState([]);
-  const [catalogMeta,setCatalogMeta]     = useState([]); // lite metadata (tags, vendor) for ALL products — drives filter pills
   const [shopifyLoaded,setShopifyLoaded] = useState(false);
   const [shopifyErr,setShopifyErr]       = useState('');
   const [hasMore,setHasMore]             = useState(false);
@@ -11648,7 +11626,7 @@ export default function App() {
   const [cartOpen,setCartOpen]           = useState(false);
   const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
-  const [filters,setFilters]             = useState({genre:null,label:null,year:null,sort:'newest',forthcoming:false,dnb:false});
+  const [filters,setFilters]             = useState({genre:null,sort:'newest',forthcoming:false,dnb:false});
   const [search,setSearch]               = useState('');
   const navMobile = useIsMobile(720); // drives the two-row mobile header layout
   // Debounced version of `search`: updated 300ms after the user stops typing.
@@ -11980,14 +11958,13 @@ export default function App() {
   // on every keystroke.
   const fetchParams = useMemo(() => {
     const filterTags = [];
-    if (filters.genre) filterTags.push(filters.genre);
-    if (filters.label) filterTags.push(`label:${filters.label}`);
-    if (filters.year)  filterTags.push(String(filters.year));
+    // Un solo filtro, y su valor ya es el id canonico: `genre:deephouse`.
+    if (filters.genre) filterTags.push(genreTag(filters.genre));
     let sortKey = 'CREATED_AT', reverse = true;
     if (filters.sort === 'price-asc')  { sortKey = 'PRICE'; reverse = false; }
     if (filters.sort === 'price-desc') { sortKey = 'PRICE'; reverse = true;  }
     return { filterTags, sortKey, reverse, searchTerm: debouncedSearch, forthcoming: !!filters.forthcoming, dnb: !!filters.dnb };
-  }, [filters.genre, filters.label, filters.year, filters.sort, filters.forthcoming, filters.dnb, debouncedSearch]);
+  }, [filters.genre, filters.sort, filters.forthcoming, filters.dnb, debouncedSearch]);
 
   // Fetch (or refetch) page 1 whenever sort, filter, OR search params change.
   // Code paths:
@@ -12040,16 +12017,6 @@ export default function App() {
       .catch(e=>{ setShopifyErr(e.message); setShopifyLoaded(true); });
   },[fetchActivePage]);
 
-  // Catalog-wide metadata fetch (tags + vendor only, all products). Powers the
-  // filter pills so customers can see every genre, year, and label that exists
-  // in the catalog from the moment the page loads — not just the genres/years
-  // present in the first paginated batch of cards.
-  useEffect(()=>{
-    fetchAllProductMetadata()
-      .then(setCatalogMeta)
-      .catch(()=>{ /* non-fatal — Filters falls back to deriving from records */ });
-  },[]);
-
   const loadMore=async()=>{
     if(!hasMore||loadingMore) return; setLoadingMore(true);
     try {
@@ -12087,24 +12054,6 @@ export default function App() {
 
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
 
-  // Derive filter pill values from the catalog-wide metadata (every product's
-  // tags). useMemo so we don't recompute on every render. If catalogMeta hasn't
-  // arrived yet, these are empty arrays — Filters falls back to deriving from
-  // the loaded `records` so something always shows.
-  const { allLabels, allGenres, allYears } = useMemo(()=>{
-    const labelSet = new Set(), genreSet = new Set(), yearSet = new Set();
-    for (const node of catalogMeta) {
-      const { genre, year, label } = extractTagMeta(node.tags);
-      if (label) labelSet.add(label);
-      if (genre) genreSet.add(genre);
-      if (year)  yearSet.add(year);
-    }
-    return {
-      allLabels: [...labelSet].sort(),
-      allGenres: [...genreSet].sort(),
-      allYears:  [...yearSet].sort((a,b)=>b-a),
-    };
-  }, [catalogMeta]);
 
   // Legacy password-reset / account-activation deep-links from Shopify's OLD
   // (pre-NCA) emails:
@@ -12162,8 +12111,8 @@ export default function App() {
         </div>
         {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
         <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
-          <button onClick={()=>setFilters(f=>({...f, forthcoming:!f.forthcoming, dnb:false, genre:null, label:null, year:null}))} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
-          <button onClick={()=>setFilters(f=>({...f, dnb:!f.dnb, forthcoming:false, genre:null, label:null, year:null}))} title={filters.dnb?'Exit Drum & Bass — back to all records':'Drum & Bass Only'} style={{background:filters.dnb?S.accent:'transparent',color:filters.dnb?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.dnb?'✕ Drum & Bass':'Drum & Bass'}</button>
+          <button onClick={()=>setFilters(f=>({...f, forthcoming:!f.forthcoming, dnb:false, genre:null}))} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
+          <button onClick={()=>setFilters(f=>({...f, dnb:!f.dnb, forthcoming:false, genre:null}))} title={filters.dnb?'Exit Drum & Bass — back to all records':'Drum & Bass Only'} style={{background:filters.dnb?S.accent:'transparent',color:filters.dnb?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.dnb?'✕ Drum & Bass':'Drum & Bass'}</button>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
@@ -12203,7 +12152,7 @@ export default function App() {
       </div>
 
       <div style={{maxWidth:1100,margin:'0 auto',padding:'28px 16px'}}>
-        <Filters filters={filters} onChange={setFilter} records={records} allLabels={allLabels} allGenres={filters.dnb ? allGenres.filter(g=>DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase())) : allGenres.filter(g=>!DNB_TAGS.some(d=>d.toLowerCase()===g.toLowerCase()))} allYears={allYears} />
+        <Filters filters={filters} onChange={setFilter} />
         {filters.forthcoming && (
           <div style={{display:'flex',justifyContent:'flex-end',gap:6,marginBottom:14}}>
             {['list','grid'].map(v=>(
