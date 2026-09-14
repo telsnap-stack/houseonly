@@ -82,7 +82,12 @@ export const RUIDO_DE_PRENSADO = ['limited', 'collectors edition', 'colored', 'o
 
 export const genreTag = id => `genre:${id}`;
 
-const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+/**
+ * Guiones, barras y subrayados valen como espacio: el cliente escribe
+ * "deep-house" o "drum/and/bass" y espera lo mismo que "deep house". Lo de
+ * quitar la puntuacion no afecta a los TAGS, que van pegados y con prefijo.
+ */
+const norm = s => String(s || '').trim().toLowerCase().replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ');
 
 /** raw (en minusculas) → { id, tipo } */
 const INDICE = (() => {
