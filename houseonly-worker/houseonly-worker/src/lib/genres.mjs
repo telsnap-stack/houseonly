@@ -30,7 +30,7 @@
  *             producto (no entra en el desplegable, pero sigue en la busqueda).
  */
 export const GENRES = [
-  { id:'drumandbass', label:'Drum & Bass', seccion:'dnb', alias:[
+  { id:'drumandbass', label:'Drum & Bass', seccion:'dnb', orden:1, alias:[
     { raw:'dnb', tipo:'misma' }, { raw:'Drum n Bass', tipo:'misma' },
     { raw:'Drum and Bass', tipo:'misma' }, { raw:'Drum & Bass', tipo:'misma' },
     { raw:'Drum + Bass', tipo:'misma' }, { raw:"Jungle / Drum 'n' Bass", tipo:'misma' },
@@ -38,26 +38,26 @@ export const GENRES = [
     { raw:'Jungle', tipo:'sub' }, { raw:'Liquid Funk', tipo:'sub' },
     { raw:'Hardcore Drum & Bass', tipo:'sub' },
   ]},
-  { id:'deephouse', label:'Deep House', seccion:'house', alias:[
+  { id:'deephouse', label:'Deep House', seccion:'house', orden:2, alias:[
     { raw:'Deep House', tipo:'canonico' }, { raw:'Deephouse', tipo:'misma' },
   ]},
-  { id:'techhouse', label:'Tech House', seccion:'house', alias:[
+  { id:'techhouse', label:'Tech House', seccion:'house', orden:4, alias:[
     { raw:'Tech House', tipo:'canonico' }, { raw:'Techhouse', tipo:'misma' },
   ]},
-  { id:'brokenbeat', label:'Broken Beat', seccion:'house', alias:[
+  { id:'brokenbeat', label:'Broken Beat', seccion:'house', orden:6, alias:[
     { raw:'Broken Beat', tipo:'canonico' }, { raw:'Broken', tipo:'misma' },
   ]},
-  { id:'electro', label:'Electro', seccion:'house', alias:[
+  { id:'electro', label:'Electro', seccion:'house', orden:5, alias:[
     { raw:'Electro', tipo:'canonico' },
   ]},
-  { id:'techno', label:'Techno', seccion:'house', alias:[
+  { id:'techno', label:'Techno', seccion:'house', orden:3, alias:[
     { raw:'Techno', tipo:'canonico' },
     { raw:'Techno - Minimal', tipo:'sub' }, { raw:'Techno - Dub', tipo:'sub' },
     { raw:'Techno - Broken', tipo:'sub' }, { raw:'Detroit Techno', tipo:'sub' },
     { raw:'Minimal', tipo:'sub' },
   ]},
   // El mas general va el ULTIMO: un disco con "Deep House" y "House" es deep house.
-  { id:'house', label:'House', seccion:'house', alias:[
+  { id:'house', label:'House', seccion:'house', orden:1, alias:[
     { raw:'House', tipo:'canonico' },
     { raw:'Detroit House', tipo:'sub' }, { raw:'Acid House', tipo:'sub' },
     { raw:'Chicago House', tipo:'sub' }, { raw:'Disco House', tipo:'sub' },
@@ -131,9 +131,19 @@ export function generoDeTags(tags) {
   return null;
 }
 
-/** El desplegable de una seccion. Nunca se calcula del catalogo. */
+/**
+ * El desplegable de una seccion. Nunca se calcula del catalogo.
+ *
+ * Sale ordenado por `orden` —de mas discos a menos, que es como lo mira un
+ * cliente— y no por el orden del array, que es la PRIORIDAD de resolucion y no
+ * se toca: ahi `house` va el ultimo a proposito, para que un disco con "Deep
+ * House" y "House" resuelva a deep house.
+ */
 export function generosDeSeccion(seccion) {
-  return GENRES.filter(g => g.seccion === seccion).map(g => ({ id: g.id, label: g.label, tag: genreTag(g.id) }));
+  return GENRES.filter(g => g.seccion === seccion)
+    .slice()
+    .sort((a, b) => (a.orden || 99) - (b.orden || 99))
+    .map(g => ({ id: g.id, label: g.label, tag: genreTag(g.id) }));
 }
 
 /** La seccion de D&B, definida por el genero canonico y no por una lista de tags. */
