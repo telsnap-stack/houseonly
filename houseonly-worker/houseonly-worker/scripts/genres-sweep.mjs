@@ -43,7 +43,32 @@ const API_SF = '2024-01', API_ADMIN = '2026-04';
 
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
-const LIMPIEZA = args.includes('--limpieza');
+const LIMPIEZA = args.includes('--limpieza');   // B2
+const B1 = args.includes('--b1');               // B1: el namespace heredado
+/**
+ * B1 va en dos mitades por una razon medida: quitarle el prefijo a un heredado
+ * lo convierte en un tag plano, y el codigo VIEJO —el que sigue en produccion
+ * hasta el despliegue— si lee tags planos por su fallback. Aplanar antes de
+ * desplegar meteria 9 valores nuevos en el desplegable de la tienda real
+ * (Bass, Boogie, Chicago, Detroit, Dub, Funk, New York, UK, UK Techno).
+ *
+ *   --b1            solo los que son alias de un canonico: invisible, va ANTES.
+ *   --b1 --planos   ademas aplana el resto: va DESPUES del despliegue.
+ */
+const PLANOS = args.includes('--planos');
+
+/**
+ * El namespace `genre:` ya se usaba antes que nosotros, con texto libre escrito
+ * por los importers viejos: genre:House, genre:Nu-Jazz, genre: electro… 26
+ * valores en 199 productos. Como Shopify busca sin distinguir mayusculas,
+ * `genre:House` y `genre:house` son EL MISMO tag para el filtro, y por eso la
+ * pildora House devolvia 151 discos que no le tocan.
+ *
+ * Mientras existan, su valor cuenta como una señal de genero mas (rescata 160
+ * discos que si no se quedarian sin nada). Cuando B1 los retire, esto sobra.
+ */
+const esHeredado = t => /^genre:/i.test(t) && !GENRES.some(g => genreTag(g.id) === t);
+const valorHeredado = t => t.slice(t.indexOf(':') + 1).trim();
 
 /**
  * Arreglos puntuales, los dos de la pasada B (la A no borra nunca):
@@ -94,7 +119,8 @@ function plan(productos) {
   const p = { porGenero:new Map(), sinGenero:[], desconocidos:new Map(), escrituras:[], yaTienen:0, borrados:new Map() };
   for (const prod of productos) {
     const crudos = (prod.tags || []).filter(t => !esEstructural(t));
-    const g = resolveGenre(crudos);
+    const heredados = (prod.tags || []).filter(esHeredado).map(valorHeredado);
+    const g = resolveGenre([...crudos, ...heredados]);
 
     if (g) p.porGenero.set(g.id, (p.porGenero.get(g.id) || 0) + 1);
     else p.sinGenero.push(prod);
@@ -106,10 +132,34 @@ function plan(productos) {
       }
     }
 
-    if (!LIMPIEZA) {
+    if (!LIMPIEZA && !B1) {
       if (!g) continue;
       if ((prod.tags || []).includes(g.tag)) { p.yaTienen++; continue; }
       p.escrituras.push({ ...prod, anadir:[g.tag], quitar:[] });
+    } else if (B1) {
+      const viejos = (prod.tags || []).filter(esHeredado)
+        .filter(t => PLANOS || !!resolveGenre([valorHeredado(t)]));
+      if (!viejos.length) continue;
+      const quitar = [], anadir = [];
+      for (const t of viejos) {
+        const v = valorHeredado(t);
+        quitar.push(t);
+        // Si es alias de un canonico, A bis ya lo escribio y este sobra. Si no,
+        // pierde el prefijo y sigue en el producto como tag plano.
+        const esAlias = !!resolveGenre([v]);
+        const destino = esAlias ? null : v;
+        p.borrados.set(`${t}  →  ${destino ? destino : '(borrado: ya es ' + resolveGenre([v]).tag + ')'}`,
+          (p.borrados.get(`${t}  →  ${destino ? destino : '(borrado: ya es ' + resolveGenre([v]).tag + ')'}`) || 0) + 1);
+        if (destino && !(prod.tags || []).includes(destino)) anadir.push(destino);
+      }
+      /**
+       * Shopify unifica los tags que solo difieren en mayusculas: si el disco
+       * ya tenia `genre:House`, escribir `genre:house` no hizo nada y su unica
+       * copia del canonico es la grafia vieja. Al retirarla hay que volver a
+       * ponerla bien EN LA MISMA escritura, o el disco se queda sin genero.
+       */
+      if (g) anadir.push(g.tag);
+      p.escrituras.push({ ...prod, anadir, quitar });
     } else {
       const quitar = (prod.tags || []).filter(t => !esEstructural(t) && clasificaValor(t) === 'borrar');
       const puntuales = (QUITAR_EN[prod.sku] || []).filter(t => (prod.tags || []).includes(t));
@@ -145,7 +195,7 @@ async function escribir(token, prod) {
 }
 
 // ── PRINCIPAL ───────────────────────────────────────────────────────
-const pasada = LIMPIEZA ? 'B · LIMPIEZA (borra)' : 'A · ADITIVA (solo escribe genre:)';
+const pasada = B1 ? 'B1 · el namespace heredado' : LIMPIEZA ? 'B2 · LIMPIEZA (grafias y arreglos)' : 'A · ADITIVA (solo escribe genre:)';
 console.log(`\ngenres-sweep — pasada ${pasada}`);
 console.log(APPLY ? '  MODO APLICAR: se escribe en la tienda real.\n' : '  DRY-RUN: no se escribe nada. Usa --apply para aplicar.\n');
 
@@ -153,7 +203,7 @@ const productos = await leerStorefront();
 console.log(`  ${productos.length} productos activos leidos\n`);
 const p = plan(productos);
 
-if (!LIMPIEZA) {
+if (!LIMPIEZA && !B1) {
   console.log('  GENERO CANONICO QUE RECIBIRIA CADA PRODUCTO');
   for (const g of GENRES) {
     const n = p.porGenero.get(g.id) || 0;

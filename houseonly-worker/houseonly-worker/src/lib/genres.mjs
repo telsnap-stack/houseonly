@@ -119,6 +119,18 @@ export function clasificaValor(v) {
   return hit.tipo === 'sub' ? 'conservar' : 'borrar';   // 'canonico' y 'misma' se borran: los sustituye genre:<id>
 }
 
+/**
+ * El genero de un producto, leido de su tag canonico. Sin coincidencia, null:
+ * un disco sin genero se queda sin genero. Compara sin distinguir mayusculas
+ * porque Shopify unifica los tags que solo difieren en eso y conserva la
+ * grafia que llego primero.
+ */
+export function generoDeTags(tags) {
+  const bajos = (tags || []).map(t => String(t).toLowerCase());
+  for (const g of GENRES) if (bajos.includes(genreTag(g.id))) return { id: g.id, label: g.label, seccion: g.seccion };
+  return null;
+}
+
 /** El desplegable de una seccion. Nunca se calcula del catalogo. */
 export function generosDeSeccion(seccion) {
   return GENRES.filter(g => g.seccion === seccion).map(g => ({ id: g.id, label: g.label, tag: genreTag(g.id) }));
