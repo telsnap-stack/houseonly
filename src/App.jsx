@@ -213,13 +213,14 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // exactamente lo que se estaba mirando.
   const queryParts = [searchTerm.trim(), forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
-  // D&B scoping: in the D&B section, require a D&B tag; in the main catalogue,
-  // exclude all D&B tags so house searches never surface drum & bass.
-  if (dnb) {
-    queryParts.push(`tag:'${DNB_TAG}'`);
-  } else {
-    queryParts.push(`-tag:'${DNB_TAG}'`);
-  }
+  // El BUSCADOR no se reparte por secciones. La separacion entre house y drum &
+  // bass es para navegar; buscar es otra cosa: quien escribe "Fokuz" quiere sus
+  // discos, y Fokuz es un sello de D&B. Con el filtro de seccion puesto, esa
+  // busqueda devolvia "No records found" con 81 discos en la tienda, y lo mismo
+  // cualquier artista de jungle buscado desde la portada.
+  //
+  // Lo de `forthcoming` si se mantiene: un pre-order no es lo mismo que algo en
+  // stock, y ahi la separacion es de estado, no de estilo.
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
     search(query: ${combinedQuery}, first: 24${after}, types: PRODUCT, prefix: LAST) {
