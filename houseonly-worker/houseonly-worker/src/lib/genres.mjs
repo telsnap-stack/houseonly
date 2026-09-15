@@ -38,10 +38,10 @@ export const GENRES = [
     { raw:'Jungle', tipo:'sub' }, { raw:'Liquid Funk', tipo:'sub' },
     { raw:'Hardcore Drum & Bass', tipo:'sub' },
   ]},
-  { id:'deephouse', label:'Deep House', seccion:'house', orden:2, alias:[
+  { id:'deephouse', label:'Deep House', seccion:'house', orden:2, padre:'house', alias:[
     { raw:'Deep House', tipo:'canonico' }, { raw:'Deephouse', tipo:'misma' },
   ]},
-  { id:'techhouse', label:'Tech House', seccion:'house', orden:4, alias:[
+  { id:'techhouse', label:'Tech House', seccion:'house', orden:4, padre:'house', alias:[
     { raw:'Tech House', tipo:'canonico' }, { raw:'Techhouse', tipo:'misma' },
   ]},
   { id:'brokenbeat', label:'Broken Beat', seccion:'house', orden:6, alias:[
@@ -81,6 +81,23 @@ export const NO_SON_GENEROS = ['Dark D', 'blue', 'Brazil', 'Reissue', 'Carl Crai
 export const RUIDO_DE_PRENSADO = ['limited', 'collectors edition', 'colored', 'orange', 'red', 'clear', 'W/Lbl', '200 copies', '10'];
 
 export const genreTag = id => `genre:${id}`;
+
+/**
+ * Los tags de un genero Y los de sus hijos. Lo usa el BUSCADOR: quien escribe
+ * "house" espera que salga tambien el deep house y el tech house.
+ *
+ * Es una expansion sobre un conjunto CERRADO de tags canonicos —o el disco
+ * lleva uno de los tres, o no sale—, no una coincidencia de texto. La
+ * diferencia importa: lo que habia que evitar era que "deep house" casara por
+ * palabras sueltas con cualquier tag que llevara "house", incluidos 108 discos
+ * de drum & bass.
+ *
+ * El DESPLEGABLE no usa esto: su pildora filtra exacto.
+ */
+export function tagsConHijos(id) {
+  const hijos = GENRES.filter(g => g.padre === id).map(g => genreTag(g.id));
+  return [genreTag(id), ...hijos];
+}
 
 /**
  * Guiones, barras y subrayados valen como espacio: el cliente escribe
