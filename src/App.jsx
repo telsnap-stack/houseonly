@@ -3256,6 +3256,8 @@ function ZipImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -3264,9 +3266,7 @@ function ZipImporter() {
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_ws.csv'; a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_ws.csv', 'ws');
   };
 
   const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
@@ -3637,6 +3637,8 @@ function TripleVisionImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -3645,9 +3647,7 @@ function TripleVisionImporter() {
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_tv.csv'; a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_tv.csv', 'tv');
   };
 
   const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
@@ -4041,6 +4041,8 @@ function RubadubImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Rows already in the shop never travel. That makes Shopify's "Overwrite
     // products with matching handles" checkbox irrelevant for them: there is
     // no row to match, so neither answer can damage the existing product.
@@ -4054,9 +4056,7 @@ function RubadubImporter() {
     const rows = ent.rows;
     const CSV_KEYS = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'shopify_import_rd.csv'; a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_rd.csv', 'rd');
   };
 
   const pct=progress.total?Math.round((progress.done/progress.total)*100):0;
@@ -4279,6 +4279,8 @@ function KudosImporter() {
   }
 
   async function exportShopify() {
+    // Sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     const m=margin/100;
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
     const csvRows=[cols];
@@ -4348,10 +4350,7 @@ function KudosImporter() {
     const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
-    const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');a.href=url;a.download='shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv';
-    document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+        await descargarCsvDeImporter(csv, 'shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv', 'kudos', { bom:true, tipo:'text/csv;charset=utf-8' });
     autoRecomputeEntities('Kudos');
   }
 
@@ -4702,6 +4701,8 @@ function DBHImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -4710,11 +4711,7 @@ function DBHImporter() {
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'dbh_shopify_import.csv';
-    a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'dbh_shopify_import.csv', 'dbh');
   };
 
   const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
@@ -5575,6 +5572,8 @@ function MotherTongueImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -5586,11 +5585,7 @@ function MotherTongueImporter() {
       CSV_KEYS.join(','),
       ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'mothertongue_shopify_import.csv';
-    a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'mothertongue_shopify_import.csv', 'mt');
   };
 
   // ── DERIVED STATS ─────────────────────────────────────────────
@@ -6093,6 +6088,8 @@ function RushHourImporter() {
   };
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -6104,11 +6101,7 @@ function RushHourImporter() {
       CSV_KEYS.join(','),
       ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))
     ];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'rushhour_shopify_import.csv';
-    a.click();
+        await descargarCsvDeImporter(lines.join('\n'), 'rushhour_shopify_import.csv', 'rh');
   };
 
   // ── DERIVED STATS ─────────────────────────────────────────────
@@ -9586,6 +9579,8 @@ function PreorderImporter() {
   ].filter(Boolean).join(', ');
 
   const downloadCSV = async () => {
+    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    exigirColaAutenticada();
     const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
@@ -9601,11 +9596,7 @@ function PreorderImporter() {
       const val = h==='Tags' ? tagsForRow(row) : row[h];
       return `"${String(val||'').replace(/"/g,'""')}"`;
     }).join(','))];
-    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'preorder_shopify_import.csv';
-    a.click();
+    await descargarCsvDeImporter(lines.join('\n'), 'preorder_shopify_import.csv', 'preorder');
   };
 
   const pct       = progress.total ? Math.round((progress.done/progress.total)*100) : 0;
@@ -10229,29 +10220,52 @@ function tagsDeGenero(valorCrudo, ctx = {}) {
   for (const v of desconocidos) {
     pendientesDeCola.push({ value: v, sku: String(ctx.sku || ''), title: String(ctx.title || '') });
   }
-  // El volcado se agenda solo. Son ocho importers con ocho flujos distintos y
-  // cada uno tendria que acordarse de llamar; asi no se pierde un valor porque
-  // alguien olvido una linea. Se agrupa a los dos segundos para que una
-  // importacion de 200 discos sea una sola llamada.
-  if (desconocidos.length) agendarVolcado(ctx.source || '');
+
   return { tags: [...new Set(tags)], desconocidos, resuelto: !!g };
 }
 
-let volcadoAgendado = null;
-function agendarVolcado(source) {
-  if (volcadoAgendado) clearTimeout(volcadoAgendado);
-  volcadoAgendado = setTimeout(async () => {
-    volcadoAgendado = null;
-    const r = await volcarColaDeGeneros(source);
-    if (r.valores) {
-      console.log(`[generos] ${r.valores} valor(es) sin resolver a la cola${r.ok ? '' : ` — NO SE PUDO ENVIAR (${r.motivo})`}: ${(r.lista || []).join(', ')}`);
-    }
-  }, 2000);
+/**
+ * La cola tiene que estar autenticada ANTES de empezar. Sin el secreto de admin
+ * el importer generaria su CSV igual y los generos que no resuelvan se
+ * perderian sin que nadie se entere. Mejor parar que dejar pasar tirando datos.
+ */
+function exigirColaAutenticada() {
+  if (entitiesSecret) return;
+  const aviso = 'La cola de generos no esta autenticada.\n\n' +
+    'Abre la pestaña Entities y entra con el secreto de admin antes de importar.\n' +
+    'Sin ella, los generos que no resuelvan se perderian sin aviso, y el CSV saldria sin ellos.';
+  alert(aviso);
+  throw new Error(aviso);
 }
 
 /**
- * Vuelca a la cola lo acumulado y devuelve el resumen. Lo llama el volcado
- * agendado; un importer puede llamarlo a mano si quiere el resumen en pantalla.
+ * Descarga el CSV de un importer — pero SOLO despues de que la cola confirme.
+ *
+ * El volcado va aqui, sincrono y antes del fichero, no en un temporizador: un
+ * setTimeout vive en la pestaña, y cerrar el admin antes de que salte se
+ * llevaba por delante los valores desconocidos sin decir nada. Si la cola
+ * falla, no hay CSV: el error se ve y la importacion se repite.
+ */
+async function descargarCsvDeImporter(contenido, nombreFichero, source, opciones = {}) {
+  const r = await volcarColaDeGeneros(source);
+  if (!r.ok) {
+    const msg = `La cola de generos no confirmo (${r.motivo}). NO se ha generado el CSV: ` +
+      `${r.productos} valor(es) desconocidos se habrian perdido. Autentica la pestaña Entities y repite.`;
+    alert(msg);
+    throw new Error(msg);
+  }
+  const blob = new Blob([(opciones.bom ? '\ufeff' : '') + contenido], { type: opciones.tipo || 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nombreFichero;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  if (r.valores) console.log(`[generos] ${r.valores} valor(es) a la cola: ${(r.lista || []).join(', ')}`);
+  return r;
+}
+
+/**
+ * Vuelca a la cola lo acumulado y devuelve el resumen.
  */
 async function volcarColaDeGeneros(source) {
   const lote = pendientesDeCola;
@@ -10259,6 +10273,9 @@ async function volcarColaDeGeneros(source) {
   if (!lote.length) return { valores: 0, productos: 0, ok: true };
   const valores = [...new Set(lote.map(x => x.value))];
   const r = await mandarGenerosALaCola(lote, source);
+  // Si no salio, el lote vuelve al buffer: reintentar la descarga tiene que
+  // poder mandarlo, y vaciarlo aqui seria perder lo mismo que se quiere salvar.
+  if (!r.ok) pendientesDeCola = [...lote, ...pendientesDeCola];
   return { valores: valores.length, productos: lote.length, lista: valores, ...r };
 }
 
