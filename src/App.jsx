@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -3231,7 +3231,7 @@ function ZipImporter() {
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
-          'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', genre, String(year)].filter(Boolean).join(', '),
+          'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year)].filter(Boolean).join(', '),
           'Published': 'TRUE', 'Option1 Name': 'Title', 'Option1 Value': 'Default Title', 'Option1 Linked To': '',
           'Option2 Name': '', 'Option2 Value': '', 'Option2 Linked To': '',
           'Option3 Name': '', 'Option3 Value': '', 'Option3 Linked To': '',
@@ -3604,7 +3604,7 @@ function TripleVisionImporter() {
         const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
-        const tags = ['vinyl','source:tv', label?`label:${label}`:'', genre, 'dnb', String(year)]
+        const tags = ['vinyl','source:tv', label?`label:${label}`:'', ...tagsDeGenero(genre, { sku: key, title }).tags, 'dnb', String(year)]
           .filter(Boolean).join(', ');
 
         processed.push({
@@ -4004,7 +4004,7 @@ function RubadubImporter() {
         const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
-        const tags = ['vinyl','source:rd', label?`label:${label}`:'', finalGenre].filter(Boolean).join(', ');
+        const tags = ['vinyl','source:rd', label?`label:${label}`:'', ...tagsDeGenero(finalGenre, { sku: key, title: inv.name || key }).tags].filter(Boolean).join(', ');
 
         // Compared on the normalized key, so "YORE-011LTD" on the invoice finds
         // the live product whether it was created as yore011ltd or yore-011ltd.
@@ -4332,12 +4332,16 @@ function KudosImporter() {
           artist, title, label,
           year: releaseYear,
           tracks: tracksForHelper,
-          sourceNotes: api.b2c_notes || api.b2b_notes || '',
+          // Las notas vienen de la misma API con entidades HTML que el resto.
+          sourceNotes: decodeHtml(api.b2c_notes || api.b2b_notes || ''),
         }) + audioTracksJson;
       } else {
         bodyHtml = buildDescriptionHtml({ artist, title, label });
       }
-      const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);if(subgenre)tags.push(subgenre);if(genre)tags.push(genre);
+      // El genero y el subgenero de Kudos son dos campos de la misma API: se
+      // juntan y se resuelven de una vez, para que "House" + "Deep House" no
+      // escriba dos tags que dicen lo mismo.
+      const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);tags.push(...tagsDeGenero([genre,subgenre].filter(Boolean).join(', '), { sku: r.sku, title }).tags);
       const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
@@ -4521,8 +4525,15 @@ function DBHImporter() {
     return s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&rsquo;/g,"'").replace(/&lsquo;/g,"'").replace(/&ndash;/g,'–').replace(/&mdash;/g,'—').replace(/&hellip;/g,'…').replace(/&nbsp;/g,' ').replace(/&ldquo;/g,'"').replace(/&rdquo;/g,'"').replace(/&bdquo;/g,'„').replace(/&euro;/g,'€');
   }
 
+  /**
+   * Normaliza los nombres de DBH a la forma que el modulo conoce. Ya NO
+   * inventa: antes, un disco sin genero —o con un genero cualquiera que
+   * llevara la palabra "house"— se etiquetaba "Deep House" por defecto, y por
+   * eso DBH no tenia nunca valores desconocidos: el 100% resuelto era un
+   * artefacto. Lo que no reconozca sale tal cual y acaba en la cola.
+   */
   function mapGenre(genreStr) {
-    const g = genreStr.toLowerCase();
+    const g = String(genreStr || '').toLowerCase();
     if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
     if (g.includes('tech house')) return 'Tech House';
     if (g.includes('afro')) return 'Afro House';
@@ -4531,8 +4542,7 @@ function DBHImporter() {
     if (g.includes('acid')) return 'Acid House';
     if (g.includes('detroit')) return 'Detroit House';
     if (g.includes('disco')) return 'Disco House';
-    if (g.includes('house')) return 'Deep House';
-    return genreStr || 'Deep House';
+    return genreStr || '';
   }
 
   function catnoFromZip(name) {
@@ -4579,7 +4589,7 @@ function DBHImporter() {
         const title   = decodeHtml(row['Title'] || '');
         const artist  = decodeHtml(row['Artist'] || '');
         const label   = decodeHtml(row['Label'] || '');
-        const genre   = mapGenre(row['Genre'] || '');
+        const genre   = mapGenre(decodeHtml(row['Genre'] || ''));
         const year    = row['Release Date'] ? new Date(row['Release Date']).getFullYear() : '';
         const ppu     = parseFloat(row['PPU'] || 0);
         const rawPrice = ppu * (1 + margin / 100);
@@ -4641,7 +4651,7 @@ function DBHImporter() {
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
-        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', genre, String(year), tags?tags:''].filter(Boolean).join(', ');
+        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year), tags?tags:''].filter(Boolean).join(', ');
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
@@ -5505,9 +5515,11 @@ function MotherTongueImporter() {
 
         // ── TAGS (D1 label-only + D4 genres) ────────────────────
         const genres = normalizeGenres(meta.genres);
-        const tagParts = ['vinyl', 'source:kudos'];
+        // Escribia `source:kudos` por un copia y pega: este es el de Mother
+        // Tongue y sus discos deben decirlo.
+        const tagParts = ['vinyl', 'source:mt'];
         if (labelClean) tagParts.push(`label:${labelClean}`);
-        for (const g of genres) tagParts.push(`genre:${g}`);
+        tagParts.push(...tagsDeGenero((genres || []).join(', '), { sku: item.catno, title: meta.title || item.catno }).tags);
         tagParts.push(String(new Date().getFullYear()));
         const shopifyTags = tagParts.join(', ');
 
@@ -6023,9 +6035,10 @@ function RushHourImporter() {
 
         // ── TAGS (D1) ────────────────────────────────────────
         const genres = genresFromTag(meta.tag);
-        const tagParts = ['vinyl', 'source:mt'];
+        // Escribia `source:mt`, que es el de Mother Tongue. Este es Rush Hour.
+        const tagParts = ['vinyl', 'source:rh'];
         if (label) tagParts.push(`label:${label}`);
-        for (const g of genres) tagParts.push(`genre:${g}`);
+        tagParts.push(...tagsDeGenero((genres || []).join(', '), { sku: catno, title }).tags);
         if (year) tagParts.push(String(year));
         const shopifyTags = tagParts.join(', ');
 
@@ -9496,7 +9509,7 @@ function PreorderImporter() {
           'vinyl',
           `source:${m.source || 'dbh'}`,
           label ? `label:${label}` : '',
-          genre,
+          ...tagsDeGenero(genre, { sku: m.catno || '', title: m.title || '' }).tags,
           ...dnbTagsFor(m.source, genre),
           year ? String(year) : '',
           // Only a release that is genuinely still forthcoming gets the tag.
@@ -9565,7 +9578,7 @@ function PreorderImporter() {
     'vinyl',
     `source:${r._source || 'dbh'}`,
     r._label ? `label:${r._label}` : '',
-    r._genre || '',
+    ...tagsDeGenero(r._genre, { sku: r._catno || '', title: r._title || '' }).tags,
     ...dnbTagsFor(r._source, r._genre),
     r._year || '',
     r._forthcoming === false ? '' : 'forthcoming',
@@ -10190,6 +10203,87 @@ function PreorderImporter() {
 // sorpresa silenciosa.
 let entitiesSecret = '';
 
+/**
+ * Los tags de genero de un producto. LOS OCHO IMPORTERS PASAN POR AQUI, y es lo
+ * unico que puede escribir un genero en un tag.
+ *
+ * El valor del distribuidor se trocea igual que siempre —"House / Techno" son
+ * dos cosas— y cada parte pasa por resolveGenre(). Gana la primera por
+ * prioridad del modulo, y sale UN tag canonico. Los subgeneros que decidimos
+ * conservar (Detroit House, Techno - Dub…) se escriben ademas como tag plano,
+ * porque nombran algo mas concreto y son dato real.
+ *
+ * Lo que no resuelve NO se escribe: se devuelve en `desconocidos` para que el
+ * importer lo mande a la cola una sola vez por producto. Esa es la puerta que
+ * impide que la proxima importacion vuelva a llenar el catalogo de "Dark D".
+ */
+let pendientesDeCola = [];
+
+function tagsDeGenero(valorCrudo, ctx = {}) {
+  const partes = String(valorCrudo || '').split(/[\/,;|]/).map(x => x.trim()).filter(Boolean);
+  const g = resolveGenre(partes);
+  const subgeneros = partes.filter(x => clasificaValor(x) === 'conservar');
+  const desconocidos = [...new Set(partes.filter(x => clasificaValor(x) === 'desconocido'))];
+  const tags = g ? [g.tag, ...subgeneros] : [];
+  // Una entrada por valor y producto, no una por trozo repetido.
+  for (const v of desconocidos) {
+    pendientesDeCola.push({ value: v, sku: String(ctx.sku || ''), title: String(ctx.title || '') });
+  }
+  // El volcado se agenda solo. Son ocho importers con ocho flujos distintos y
+  // cada uno tendria que acordarse de llamar; asi no se pierde un valor porque
+  // alguien olvido una linea. Se agrupa a los dos segundos para que una
+  // importacion de 200 discos sea una sola llamada.
+  if (desconocidos.length) agendarVolcado(ctx.source || '');
+  return { tags: [...new Set(tags)], desconocidos, resuelto: !!g };
+}
+
+let volcadoAgendado = null;
+function agendarVolcado(source) {
+  if (volcadoAgendado) clearTimeout(volcadoAgendado);
+  volcadoAgendado = setTimeout(async () => {
+    volcadoAgendado = null;
+    const r = await volcarColaDeGeneros(source);
+    if (r.valores) {
+      console.log(`[generos] ${r.valores} valor(es) sin resolver a la cola${r.ok ? '' : ` — NO SE PUDO ENVIAR (${r.motivo})`}: ${(r.lista || []).join(', ')}`);
+    }
+  }, 2000);
+}
+
+/**
+ * Vuelca a la cola lo acumulado y devuelve el resumen. Lo llama el volcado
+ * agendado; un importer puede llamarlo a mano si quiere el resumen en pantalla.
+ */
+async function volcarColaDeGeneros(source) {
+  const lote = pendientesDeCola;
+  pendientesDeCola = [];
+  if (!lote.length) return { valores: 0, productos: 0, ok: true };
+  const valores = [...new Set(lote.map(x => x.value))];
+  const r = await mandarGenerosALaCola(lote, source);
+  return { valores: valores.length, productos: lote.length, lista: valores, ...r };
+}
+
+/**
+ * Manda a la cola lo que no resolvio. Sin secreto de admin no hay cola: se
+ * avisa y se sigue —el producto entra sin genero, que es correcto— pero el
+ * valor se pierde, asi que el importer debe decirlo en pantalla.
+ */
+async function mandarGenerosALaCola(valores, source) {
+  if (!valores.length) return { ok: true, enviados: 0 };
+  if (!entitiesSecret) return { ok: false, motivo: 'sin secreto de admin', enviados: 0 };
+  try {
+    const r = await fetch(`${WORKER_URL}?action=genre-review-add`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${entitiesSecret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, values: valores }),
+    });
+    if (!r.ok) return { ok: false, motivo: `HTTP ${r.status}`, enviados: 0 };
+    const d = await r.json();
+    return { ok: true, enviados: d.anadidos || 0 };
+  } catch (e) {
+    return { ok: false, motivo: 'red', enviados: 0 };
+  }
+}
+
 async function recomputeEntitiesQueue(secretOverride) {
   const sec = secretOverride || entitiesSecret;
   if (!sec) return { ran: false, reason: 'no secret: connect the Entities tab' };
@@ -10345,6 +10439,7 @@ function EntitiesPanel() {
   const [choice, setChoice]   = useState({});
   const [progress, setProgress] = useState(null);   // {done,total} mientras se aprueba
   // Entidades ya aprobadas, para renombrarlas. Se cargan al abrir la vista.
+  const [gen, setGen]         = useState([]);    // la cola de generos
   const [ents, setEnts]       = useState(null);
   const [entsBusy, setEntsBusy] = useState(false);
   const [entQ, setEntQ]       = useState('');
@@ -10380,6 +10475,11 @@ function EntitiesPanel() {
       }
       all.sort((a, b) => (b.count || 0) - (a.count || 0));
       setRows(all);
+      // La cola de generos va aparte: se revisa igual pero no son entidades.
+      try {
+        const rg = await fetch(`${WORKER_URL}?action=entity-review-list&kind=genre&limit=500`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
+        if (rg.ok) { const dg = await rg.json(); setGen((dg.records || []).sort((x, y) => (y.count || 0) - (x.count || 0))); }
+      } catch { /* la cola de generos no puede tumbar la de entidades */ }
       setAuthed(true);
       entitiesSecret = useSecret;   // arma el recompute automatico de los importers
       // Precarga: display propuesto y partes propuestas, editables por fila.
@@ -10549,6 +10649,22 @@ function EntitiesPanel() {
 
   // Renombrar cambia el nombre, nunca el slug: la ficha, los metafields y los
   // follows cuelgan de el.
+  // Ignorar un valor de genero: no vuelve a la cola por mucho que el
+  // distribuidor lo repita. "Aprobar" no existe aqui a proposito: dar de alta
+  // un genero es editar genres.mjs, y eso se revisa como codigo.
+  async function ignorarGenero(norm) {
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=entity-review-reject`, {
+        method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: 'genre', norm }),
+      });
+      if (!r.ok) { setError(`Ignore failed (HTTP ${r.status})`); return; }
+      setGen(g => g.filter(x => x.norm !== norm));
+      setMsg(`"${norm}" ignored — it won't come back.`);
+    } catch { setError('Ignore failed — network.'); }
+    finally { setBusy(false); }
+  }
+
   async function renameEntity(slug, display) {
     setBusy(true); setError(''); setMsg('');
     try {
@@ -10609,6 +10725,7 @@ function EntitiesPanel() {
             vaciarse desaparecia el boton mientras su vista seguia
             seleccionada: parecia que se habian perdido filas. */}
         {viewBtn('otras','Other',otras.length)}
+        {viewBtn('generos','Genres',gen.length)}
         {viewBtn('ents','Entities',ents ? ents.length : '…')}
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
@@ -10804,6 +10921,32 @@ function EntitiesPanel() {
                 </div>
               </div>
             );})}
+          </div>
+        </div>
+      )}
+
+      {view==='generos' && (
+        <div>
+          <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+            Genre values the importers could not resolve. They were never written as a tag:
+            the record came in without a genre. Either add the value to <code>genres.mjs</code>
+            —as a canonical genre or as an alias— or ignore it here, and it won't come back.
+          </div>
+          {gen.length===0 && <div style={{fontSize:10,color:S.muted}}>Nothing waiting.</div>}
+          <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:520,overflowY:'auto'}}>
+            {gen.map(r=>(
+              <div key={r.norm} style={{display:'flex',alignItems:'center',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,color:S.text}}>{(r.variants||[]).join(' · ') || r.raw}</div>
+                  <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+                    {r.count} disco{r.count===1?'':'s'}
+                    {(r.sources||[]).length ? ` · ${r.sources.join(', ')}` : ''}
+                    {(r.samples||[]).length ? ` · ${r.samples.slice(0,3).map(x=>x.sku).join(', ')}` : ''}
+                  </div>
+                </div>
+                <Btn ch="Ignore" variant="ghost" onClick={()=>ignorarGenero(r.norm)} disabled={busy} />
+              </div>
+            ))}
           </div>
         </div>
       )}

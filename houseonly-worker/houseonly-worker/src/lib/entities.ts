@@ -19,6 +19,15 @@
 // juntaria alegremente.
 
 export type EntityKind = 'artist' | 'label';
+
+/**
+ * Lo que puede haber en la cola de revision. Los generos se revisan con las
+ * mismas filas y la misma pestaña, pero NO son entidades: no tienen ficha, ni
+ * alias que apunten a un slug, ni padre. Por eso van en un tipo aparte y solo
+ * admiten listar e ignorar; "aprobar" un genero es editar genres.mjs, que es
+ * codigo y se revisa como codigo.
+ */
+export type ReviewKind = EntityKind | 'genre';
 export type EntityRole = EntityKind;
 
 export interface EntitiesEnv {
@@ -95,9 +104,9 @@ export interface ReviewRecord {
 const K = {
   entity: (slug: string) => `entity:${slug}`,
   alias: (kind: EntityKind, norm: string) => `alias:${kind === 'artist' ? 'a' : 'l'}:${norm}`,
-  ignore: (kind: EntityKind, norm: string) => `ignore:${kind === 'artist' ? 'a' : 'l'}:${norm}`,
+  ignore: (kind: ReviewKind, norm: string) => `ignore:${kind === 'artist' ? 'a' : kind === 'genre' ? 'g' : 'l'}:${norm}`,
   child: (parent: string, child: string) => `children:${parent}:${child}`,
-  review: (kind: EntityKind, norm: string) => `review:${kind}:${norm}`,
+  review: (kind: ReviewKind, norm: string) => `review:${kind}:${norm}`,
 };
 
 // Limite de muestras guardadas por fila de la cola. Suficiente para que una
@@ -676,6 +685,54 @@ function parseKind(v: any): EntityKind | null {
   return v === 'artist' || v === 'label' ? v : null;
 }
 
+/** Igual que parseKind, pero para la cola, que ademas revisa generos. */
+function parseReviewKind(v: any): ReviewKind | null {
+  return v === 'artist' || v === 'label' || v === 'genre' ? v : null;
+}
+
+/**
+ * POST ?action=genre-review-add  {value, sku?, title?, source?}
+ *
+ * Por aqui mandan los importers lo que no resuelve. El valor NO se escribe como
+ * tag en ningun caso: o resuelve a un genero canonico, o acaba aqui. Es la
+ * puerta que impide que la proxima importacion vuelva a llenar el catalogo de
+ * "Dark D" y "Carl Craig".
+ */
+export async function handleGenreReviewAdd(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+  let body: any;
+  try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+
+  const valores: any[] = Array.isArray(body?.values) ? body.values : [body];
+  let anadidos = 0, ignorados = 0;
+  for (const v of valores) {
+    const raw = String(v?.value || '').trim();
+    if (!raw) continue;
+    const norm = normalizeName(raw);
+    if (!norm) continue;
+    // Lo que ya se decidio ignorar no vuelve a la cola.
+    if (await env.ENTITIES.get(K.ignore('genre', norm))) { ignorados++; continue; }
+
+    const key = K.review('genre', norm);
+    let rec: any = null;
+    try { const prev = await env.ENTITIES.get(key); if (prev) rec = JSON.parse(prev); } catch { /* fila corrupta */ }
+    const now = Date.now();
+    if (!rec) rec = { kind: 'genre', norm, raw, variants: [], samples: [], sources: [], count: 0, createdAt: now, updatedAt: now };
+    rec.count = (rec.count || 0) + 1;
+    rec.updatedAt = now;
+    if (!rec.variants.includes(raw)) rec.variants.push(raw);
+    const src = String(v?.source || body?.source || '').trim();
+    if (src && !rec.sources.includes(src)) rec.sources.push(src);
+    const sku = String(v?.sku || '').trim();
+    if (sku && rec.samples.length < 12 && !rec.samples.some((x: any) => x.sku === sku)) {
+      rec.samples.push({ sku, title: String(v?.title || '').slice(0, 80) });
+    }
+    await env.ENTITIES.put(key, JSON.stringify(rec));
+    anadidos++;
+  }
+  return json({ ok: true, anadidos, ignorados });
+}
+
 /** POST ?action=entity-resolve */
 export async function handleEntityResolve(request: Request, env: EntitiesEnv): Promise<Response> {
   if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
@@ -706,7 +763,7 @@ export async function handleEntityReviewList(request: Request, env: EntitiesEnv)
   if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
 
   const url = new URL(request.url);
-  const kind = parseKind(url.searchParams.get('kind'));
+  const kind = parseReviewKind(url.searchParams.get('kind'));
   const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 500);
   const cursor = url.searchParams.get('cursor') || undefined;
   const prefix = kind ? `review:${kind}:` : 'review:';
@@ -1098,7 +1155,7 @@ export async function handleEntityReviewReject(request: Request, env: EntitiesEn
   let body: any;
   try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
 
-  const kind = parseKind(body?.kind);
+  const kind = parseReviewKind(body?.kind);
   const norm = String(body?.norm || '').trim();
   if (!kind || !norm) return json({ error: 'kind and norm required' }, 400);
 
