@@ -212,16 +212,21 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   // exigirlo. Estaba clavado a excluir, asi que buscar ahi dejaba fuera
   // exactamente lo que se estaba mirando.
   /**
-   * Si lo que escribe el cliente ES un genero —"deep house", "deephouse",
-   * "DEEP HOUSE", "dnb"— se le suma su tag canonico con un OR. No lo sustituye:
-   * "deep house pampa" tiene que seguir funcionando como texto libre.
+   * Si el termino ENTERO es un genero —"deep house", "deephouse", "deep-house",
+   * "DEEP HOUSE", "dnb"— la consulta es su tag canonico y nada mas. Escrito de
+   * las cinco maneras da el mismo resultado exacto.
    *
-   * Sin esto, al limpiar los tags viejos del catalogo esas busquedas se caian a
-   * casi cero, porque `genre:deephouse` va pegado y no casa con dos palabras.
+   * Con un OR contra el texto libre no salia: Shopify parte "deep house" en dos
+   * palabras y casaba con cualquier cosa que llevara "house" —un `label:Techno
+   * House Connoisseurs`, un subgenero `Detroit House`, hasta 108 discos de drum
+   * & bass— asi que las cinco grafias daban cinco numeros distintos.
+   *
+   * Si el termino no resuelve —"pampa", "fokuz", "deep house pampa"— sigue
+   * siendo texto libre, igual que siempre.
    */
   const termino = searchTerm.trim();
   const genero = resolveGenre([termino]);
-  const texto = genero ? `(${termino} OR tag:'${genero.tag}')` : termino;
+  const texto = genero ? `tag:'${genero.tag}'` : termino;
   const queryParts = [texto, forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   // El BUSCADOR no se reparte por secciones. La separacion entre house y drum &
