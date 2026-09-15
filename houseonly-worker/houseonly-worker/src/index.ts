@@ -852,6 +852,7 @@ import {
   handleEntityReviewReject,
   handleEntityGet,
   handleEntityEditDisplay,
+  handleGenreReviewAdd,
 } from './lib/entities';
 import { sendScoutReport } from './lib/scout-mail';
 
@@ -1346,6 +1347,11 @@ export default {
 
     if (action === 'entity-edit-display' && request.method === 'POST') {
       return await handleEntityEditDisplay(request, env);
+    }
+
+    // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.
+    if (action === 'genre-review-add' && request.method === 'POST') {
+      return await handleGenreReviewAdd(request, env);
     }
 
     // El informe semanal del vigia de tiendas (scripts/scout/). Va por aqui
