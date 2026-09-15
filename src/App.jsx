@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -226,7 +226,11 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
    */
   const termino = searchTerm.trim();
   const genero = resolveGenre([termino]);
-  const texto = genero ? `tag:'${genero.tag}'` : termino;
+  // Un genero con hijos los arrastra: "house" trae tambien deep house y tech
+  // house. La lista sale del modulo y es cerrada.
+  const texto = genero
+    ? (t => t.length > 1 ? `(${t.map(x => `tag:'${x}'`).join(' OR ')})` : `tag:'${t[0]}'`)(tagsConHijos(genero.id))
+    : termino;
   const queryParts = [texto, forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
   for (const t of filterTags) queryParts.push(`tag:'${t}'`);
   // El BUSCADOR no se reparte por secciones. La separacion entre house y drum &
