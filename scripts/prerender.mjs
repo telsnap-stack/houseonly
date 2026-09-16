@@ -16,7 +16,7 @@
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { htmlToText } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
+import { htmlToText, descripcionDeProducto } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
@@ -153,7 +153,9 @@ function parseProduct(node) {
   const v = node.variants.edges[0]?.node;
   const img = node.images.edges[0]?.node;
   const tags = node.tags || [];
-  const desc = htmlToText(node.descriptionHtml || '');
+  // Las mismas reglas que la ficha: si no, el <meta> y la pagina dirian cosas
+  // distintas del mismo disco.
+  const desc = descripcionDeProducto(node.descriptionHtml || '').texto;
   const artist = node.vendor || '';
   const title = node.title || '';
   const catalog = v?.sku || '';
@@ -187,8 +189,20 @@ function renderProductHtml(template, product) {
     ? `${product.title} — ${product.artist} | House Only`
     : `${product.title} | House Only`;
   const descShort = (product.desc || '').replace(/\s+/g, ' ').trim().slice(0, 155);
-  const metaDesc = descShort
-    || `${product.title} by ${product.artist} on vinyl. ${product.label || ''} ${product.catalog || ''}. Worldwide shipping.`.replace(/\s+/g, ' ').trim();
+  /**
+   * Muchas descripciones quedan vacias a proposito: su contenido era plantilla
+   * —"X by Y released on Z", la coletilla de envio, el tracklist duplicado— y
+   * ahora se limpia al leer. Pero el <meta> y el JSON-LD no pueden ir vacios,
+   * asi que se arma uno con los campos que SI existen, sin dejar huecos ni
+   * puntos sueltos cuando falta el sello o el catalogo.
+   */
+  const metaDesc = descShort || [
+    [product.title, product.artist ? `by ${product.artist}` : ''].filter(Boolean).join(' '),
+    [product.label, product.catalog].filter(Boolean).join(' '),
+    product.year ? String(product.year) : '',
+    'Vinyl, shipped worldwide from House Only.',
+  ].filter(Boolean).join('. ').replace(/\.\s*\./g, '.');
+
 
   // JSON-LD Product schema
   const jsonLd = {
