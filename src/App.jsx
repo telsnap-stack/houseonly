@@ -11915,34 +11915,52 @@ function LoginScreen({ onLogin }) {
   // se pide el secreto de admin y lo valida el worker (?action=admin-check,
   // comparacion en tiempo constante). Si vale, queda en memoria para toda la
   // sesion del admin (establecerSecretoAdmin).
+  //
+  // Formulario de verdad para el llavero de Safari y Chrome: <form>, usuario fijo
+  // "admin" (autocomplete=username) y el secreto como current-password. Lo
+  // recuerda el NAVEGADOR; la pagina no lo guarda en ningun sitio. Al acertar se
+  // quita el formulario y se hace replaceState, que es la señal de envio que
+  // Chromium usa para ofrecer guardarlo (Create Amazing Password Forms).
   const [secreto, setSecreto] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const entorno = WORKER_URL.includes('staging') ? 'staging' : 'producción';
-  const attempt = async () => {
+  const attempt = async (e) => {
+    if (e) e.preventDefault();
     const s = secreto.trim();
     if (!s || busy) return;
     setBusy(true); setErr('');
     try {
       const r = await fetch(`${WORKER_URL}?action=admin-check`, { headers: { 'Authorization': `Bearer ${s}` } });
-      if (r.ok) { establecerSecretoAdmin(s); onLogin(); return; }
+      if (r.ok) {
+        establecerSecretoAdmin(s);
+        try { window.history.replaceState(window.history.state, '', window.location.href); } catch { /* da igual */ }
+        onLogin();
+        return;
+      }
       setErr(r.status === 401 ? 'Secreto incorrecto' : `El worker respondió ${r.status}`);
-    } catch (e) {
-      setErr(`Sin conexión con el worker: ${e.message}`);
+    } catch (e2) {
+      setErr(`Sin conexión con el worker: ${e2.message}`);
     }
     setBusy(false);
   };
+  const campo = {width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12};
   return (
     <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div style={{width:300,background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:32}}>
+      <form onSubmit={attempt} method="post" action="#" autoComplete="on" style={{width:300,background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:32}}>
         <div style={{fontSize:9,letterSpacing:3,color:S.muted,textTransform:'uppercase',marginBottom:12}}>Admin Access</div>
         <div style={{fontSize:10,color:S.muted,lineHeight:1.5,marginBottom:16}}>
-          Secreto de admin de <b style={{color:S.text}}>{entorno}</b> (BOOTSTRAP_AUTH_SECRET). Se queda en memoria hasta recargar; no se guarda.
+          Secreto de admin de <b style={{color:S.text}}>{entorno}</b> (BOOTSTRAP_AUTH_SECRET). La página lo tiene en memoria hasta recargar; si quieres, que lo recuerde el llavero del navegador.
         </div>
-        <input type="password" value={secreto} onChange={e=>setSecreto(e.target.value)} onKeyDown={e=>e.key==='Enter'&&attempt()} placeholder="BOOTSTRAP_AUTH_SECRET" autoComplete="off" style={{width:'100%',background:S.bg,border:`1px solid ${err?S.danger:S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
-        <Btn ch={busy?'Comprobando…':'Enter'} onClick={attempt} disabled={busy||!secreto.trim()} full />
+        <label htmlFor="admin-usuario" style={{display:'block',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:4}}>Usuario</label>
+        <input id="admin-usuario" type="text" name="username" autoComplete="username" value="admin" readOnly style={{...campo, color:S.muted}} />
+        <label htmlFor="admin-secreto" style={{display:'block',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:4}}>Secreto</label>
+        <input id="admin-secreto" type="password" name="password" autoComplete="current-password" value={secreto} onChange={e=>setSecreto(e.target.value)} placeholder="BOOTSTRAP_AUTH_SECRET" style={{...campo, border:`1px solid ${err?S.danger:S.border}`}} />
+        <button type="submit" disabled={busy||!secreto.trim()} style={{width:'100%',background:busy||!secreto.trim()?S.border:S.accent,border:'none',color:busy||!secreto.trim()?S.muted:'#080808',cursor:busy?'wait':'pointer',fontSize:10,padding:'10px 14px',borderRadius:2,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+          {busy?'Comprobando…':'Enter'}
+        </button>
         {err&&<div style={{fontSize:10,color:S.danger,marginTop:8,textAlign:'center'}}>{err}</div>}
-      </div>
+      </form>
     </div>
   );
 }
