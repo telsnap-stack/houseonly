@@ -60,12 +60,37 @@ Prueba con los 20 SKUs del presupuesto 384148 (14-09): 5 con anuncio propio (los
 M052, MG.ART904…), 3 sin correo (`AD002dub` — sufijo DUB no reconocido —,
 `MEOW01`, `UR-020`).
 
+## Segunda vuelta (mismo día)
+
+- **Digests activados** en Find ZIPs como segunda fuente (anuncio propio con
+  enlace > digest con enlace > sin enlace). `AD002dub` se queda sin emparejar a
+  propósito: un dub es otro disco, no un sufijo de formato.
+- **El presupuesto no se leía.** `parseRubadubInvoicePdf` tomaba "EP" como SKU:
+  el presupuesto ordena las columnas Qty · SKU · Item name. Ahora se reconoce por
+  la cabecera y se lee por columnas (aguanta `WPA-4/ UR-079`). Líneas repetidas
+  del mismo SKU se suman: 20 SKUs, 42 unidades = "Total No of Items: 42". La
+  factura SI-283012 sigue dando 41.
+- **Trackers encadenados.** FE005: tracker → tracker → Dropbox `/sh/` → `/scl/fo/`.
+  El worker sigue un salto y solo reconoce `/scl/fo/`; el cliente repite hasta 3
+  saltos y acepta `/sh/` (con `dl=1` da ZIP, firma `PK`).
+
+Resultado esperado sobre el presupuesto 384148, comprobado siguiendo cada enlace
+hasta la firma del ZIP:
+
+| Estado | Catnos |
+|---|---|
+| encontrado (propio) | DR-EP-2073, DR2085, FTC12, UR-029r, WO-KJHBCS |
+| encontrado (digest) | AD009, FE005, FE008, HT001, M052, WAX11110, WPA-4/ UR-079 |
+| correo sin enlace | MG.ART904, WAX30003, WAX70007, WAX80008, WAX90009 |
+| sin correo | AD002dub, MEOW01, UR-020 |
+
+Staging: cherry-pick de los dos commits sobre `origin/staging` (fast-forward
+79d7105 → 26ecaa7). El worker de staging ya tenía `resolve-links`, `zip-proxy`
+y `emails-*`, y comparte el KV del archivo con prod.
+
 ## Pendiente
 
 1. Pegar el `.gs` nuevo en Apps Script.
-2. **Decidir si "Find ZIPs" baja también de digests.** Con enlaces por bloque y el
-   descarte de compartidos es seguro, y sin eso 12 de 20 del pedido actual se
-   quedan en "solo en un digest".
-3. Probar "Find ZIPs" con el secreto de verdad (aquí solo se probó el camino de
+2. Probar "Find ZIPs" con el secreto de verdad (aquí solo se probó el camino de
    error: sin `PROD_BS` en el entorno).
-4. Los ZIP bajados viven en memoria de la pestaña; no se guardan en `Assets/`.
+3. Los ZIP bajados viven en memoria de la pestaña; no se guardan en `Assets/`.
