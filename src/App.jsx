@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { GENRES, generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -3999,10 +3999,11 @@ function RubadubImporter() {
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
   const [fx, setFx]             = useState(1.15);    // GBP→EUR
-  // Vacio por defecto. Con "Deep House" aqui, todo disco cuyo ZIP no traia
-  // SALESPAPER (6 de cada 7 de Rubadub) salia como Deep House: un genero
-  // inventado que, al resolver, ni siquiera pasaba por la cola.
-  const [genre, setGenre]       = useState('');
+  // Genero por disco (useGeneroPorDisco). Antes un campo "Genre" para toda la
+  // tanda, con "Deep House" por defecto: todo disco cuyo ZIP no traia
+  // SALESPAPER (6 de cada 7 de Rubadub) salia como Deep House.
+  const genero = useGeneroPorDisco();
+  const salespaperLeido = useRef(new WeakMap());   // File -> genero crudo del SALESPAPER
   const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
   const [mailSecret, setMailSecret] = useMailSecret();  // compartido con Pre-order
   const [find, setFind]         = useState({});     // invoice key -> {estado, detalle, email}
@@ -4020,7 +4021,7 @@ function RubadubImporter() {
     const zips = files.filter(f => /\.zip$/i.test(f.name));
     if (pdfs[0]) {
       setPdfFile(pdfs[0]);
-      setFind({}); setFindError('');
+      setFind({}); setFindError(''); genero.reset();
       try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
       catch (e) { setError('Could not read invoice PDF: ' + e.message); }
       // An invoiced record may already be a live product — typically one this
@@ -4040,6 +4041,30 @@ function RubadubImporter() {
       return [...prev, ...zips.filter(f => !existing.has(f.name))];
     });
   };
+
+  // Genero preseleccionado ANTES de procesar: de cada ZIP casado se lee solo su
+  // SALESPAPER. Una vez por fichero; process() lo vuelve a leer igualmente.
+  useEffect(() => {
+    if (!invoice) return;
+    let vivo = true;
+    (async () => {
+      let JSZip = null;
+      for (const [k, f] of Object.entries(rdZipsForInvoice(invoice, zipFiles))) {
+        if (!vivo) return;
+        if (salespaperLeido.current.has(f)) { genero.anotarCrudo(k, salespaperLeido.current.get(f)); continue; }
+        let crudo = '';
+        try {
+          JSZip = JSZip || await loadJSZip();
+          const zip = await JSZip.loadAsync(f);
+          const sp = Object.values(zip.files).find(x => !x.dir && /SALESPAPER\.pdf$/i.test(x.name));
+          if (sp) crudo = (await extractSalesPaperText(await sp.async('blob'))).genre || '';
+        } catch { /* ZIP ilegible: se vera al procesar */ }
+        salespaperLeido.current.set(f, crudo);
+        if (vivo) genero.anotarCrudo(k, crudo);
+      }
+    })();
+    return () => { vivo = false; };
+  }, [invoice, zipFiles, genero.anotarCrudo]);
 
   // ── Find ZIPs ──────────────────────────────────────────────
   // Rubadub no manda promopacks con la factura: el ZIP de cada disco esta en su
@@ -4235,7 +4260,6 @@ function RubadubImporter() {
         }
 
         const { artist, title } = rdSplitName(inv.name);
-        const finalGenre = pdfGenre || genre;
         const label = pdfLabel || '';
         const is2LP = /2[\s-]?lp|double\s*lp|3[\s-]?lp|2x12|3x12/i.test(inv.name) || /2lp|3lp|2x12|3x12/i.test(key);
         const grams = is2LP ? '900' : '500';
@@ -4276,7 +4300,7 @@ function RubadubImporter() {
         const handle = key.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year:'', tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
-        const tags = ['vinyl','source:rd', label?`label:${label}`:'', ...tagsDeGenero(finalGenre, { sku: key, title: inv.name || key }).tags].filter(Boolean).join(', ');
+        const tags = ['vinyl','source:rd', label?`label:${label}`:'', ...genero.tags(key, pdfGenre, { sku: key, title: inv.name || key })].filter(Boolean).join(', ');
 
         // Compared on the normalized key, so "YORE-011LTD" on the invoice finds
         // the live product whether it was created as yore011ltd or yore-011ltd.
@@ -4375,7 +4399,7 @@ function RubadubImporter() {
               <span style={{fontFamily:'monospace'}}>{sinZip.map(k => `${invoice[k].sku}${isLiveKey(k)?' (en tienda)':''}`).join(', ')}</span>
             </div>
           ) : (
-            <div style={{fontSize:10,color:S.accent,marginBottom:findRows.length?8:0}}>Todos los discos de la factura tienen ZIP.</div>
+            <div style={{fontSize:10,color:S.accent,marginBottom:8}}>Todos los discos de la factura tienen ZIP.</div>
           )}
           {sinZip.length>0&&(
             <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
@@ -4391,27 +4415,55 @@ function RubadubImporter() {
             </div>
           )}
           {findError&&<div style={{marginTop:8,fontSize:10,color:S.danger}}>{findError}</div>}
-          {findRows.length>0&&(
-            <div style={{marginTop:10,maxHeight:260,overflowY:'auto',overflowX:'auto'}}>
-              <table style={{width:'100%',borderCollapse:'collapse',fontSize:9}}>
-                <tbody>
-                  {findRows.map(([k, v]) => {
-                    const e = RD_FIND_ESTADOS[v.estado] || RD_FIND_ESTADOS.error;
-                    return (
-                      <tr key={k} style={{borderTop:`1px solid ${S.border}`}}>
-                        <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{invoice?.[k]?.sku || k}</td>
-                        <td style={{padding:'4px 8px',color:e.color,fontWeight:700,whiteSpace:'nowrap'}}>{e.label}</td>
-                        <td style={{padding:'4px 8px',color:S.muted}}>{[v.detalle, v.email].filter(Boolean).join(' · ')}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {!finding&&findRows.some(([,v])=>!['ok','manual','live'].includes(v.estado))&&(
-                <div style={{fontSize:9,color:S.muted,marginTop:6}}>Los que fallan se pueden arrastrar a mano como siempre.</div>
-              )}
+          <div style={{marginTop:10,maxHeight:360,overflowY:'auto',overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:9}}>
+              <thead>
+                <tr style={{color:S.muted,textAlign:'left',letterSpacing:1,textTransform:'uppercase'}}>
+                  <th style={{padding:'4px 8px 4px 0',fontWeight:700}}>SKU</th>
+                  <th style={{padding:'4px 8px',fontWeight:700}}>Disco</th>
+                  <th style={{padding:'4px 8px',fontWeight:700}}>ZIP</th>
+                  <th style={{padding:'4px 8px',fontWeight:700}}>Género</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.keys(invoice).map(k => {
+                  const inv = invoice[k];
+                  const f = find[k];
+                  const live = isLiveKey(k);
+                  // ZIP: el estado de Find ZIPs si lo hay; si no, lo que haya soltado.
+                  const est = f && f.estado !== 'manual' && f.estado !== 'live'
+                    ? (RD_FIND_ESTADOS[f.estado] || RD_FIND_ESTADOS.error)
+                    : zipMatch[k] ? { label: 'ZIP', color: S.accent }
+                    : live ? RD_FIND_ESTADOS.live
+                    : { label: 'sin ZIP', color: '#ff8800' };
+                  const detalle = f && f.estado !== 'manual' && f.estado !== 'live' ? [f.detalle, f.email].filter(Boolean).join(' · ') : '';
+                  return (
+                    <tr key={k} style={{borderTop:`1px solid ${S.border}`,opacity:live?0.55:1}}>
+                      <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{inv.sku}</td>
+                      <td style={{padding:'4px 8px',color:S.muted,maxWidth:260,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={inv.name}>{inv.name}</td>
+                      <td style={{padding:'4px 8px'}} title={detalle}>
+                        <span style={{color:est.color,fontWeight:700,whiteSpace:'nowrap'}}>{est.label}</span>
+                        {detalle&&<span style={{color:S.muted}}> · {detalle}</span>}
+                      </td>
+                      <td style={{padding:'4px 8px',whiteSpace:'nowrap'}}>
+                        {live
+                          ? <span style={{color:S.muted}}>en tienda — fuera del CSV</span>
+                          : zipMatch[k] && !genero.leido(k)
+                            ? <span style={{color:S.muted}}>leyendo SALESPAPER…</span>
+                            : <SelectorGenero clave={k} genero={genero} />}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!finding&&findRows.some(([,v])=>!['ok','manual','live'].includes(v.estado))&&(
+              <div style={{fontSize:9,color:S.muted,marginTop:6}}>Los que fallan se pueden arrastrar a mano como siempre.</div>
+            )}
+            <div style={{fontSize:9,color:S.muted,marginTop:6,lineHeight:1.6}}>
+              Género: preseleccionado si el SALESPAPER trae uno que resuelve; si no, vacío. Vacío y «sin género» entran sin género; lo que el SALESPAPER traiga y no resuelva va a la cola.
             </div>
-          )}
+          </div>
         </div>
       )}
       {zipFiles.length>0&&<div style={{ maxHeight:80, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=>{const k=rdKey(catnoFromFilename(f.name));const hit=invoice&&invoice[k];return <span key={i} style={{ background:hit?S.border:'#3a1a00', padding:'2px 8px', borderRadius:10, color:hit?S.text:'#ff8800' }}>{catnoFromFilename(f.name)}{hit?'':' ?'}</span>;})}</div>}
@@ -4422,8 +4474,6 @@ function RubadubImporter() {
             <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:64,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>GBP→EUR</span>
             <input type="number" step="0.01" value={fx} onChange={e=>setFx(Math.max(0.01,parseFloat(e.target.value)||1))} style={{width:64,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
-            <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Genre</span>
-            <input type="text" value={genre} onChange={e=>setGenre(e.target.value)} placeholder="vacío = sin género" title="Se aplica a TODOS los discos cuyo ZIP no traiga género. Vacío: entran sin género." style={{width:120,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none'}} />
           </div>
           <div style={{fontSize:9,color:S.muted,marginBottom:10}}>→ e.g. £{sampleCost} × {fx} × {(1+margin/100).toFixed(2)} → €{(Math.ceil(sampleCost*fx*(1+margin/100))-0.01).toFixed(2)}</div>
           <Btn ch={`🚀 Process ${invCount} Invoiced Records → Upload to R2`} onClick={process} full />
@@ -10764,6 +10814,75 @@ function tagsDeGenero(valorCrudo, ctx = {}) {
   }
 
   return { tags: [...new Set(tags)], desconocidos, resuelto: !!g };
+}
+
+// ── COLUMNA DE GENERO POR DISCO ────────────────────────────────
+// Un desplegable por fila, antes de procesar, en lugar de un campo "Genre" que
+// se aplicaba a toda la tanda: eso era inventar el genero de todo lo que el
+// distribuidor no traia. Pensado para cualquier importer:
+//
+//   const genero = useGeneroPorDisco();
+//   genero.anotarCrudo(clave, valorDelDistribuidor)   // al leer SALESPAPER, API…
+//   <SelectorGenero clave={clave} genero={genero} />   // en la fila
+//   ...genero.tags(clave, valorDelDistribuidor, { sku, title })   // en process()
+//
+// Las opciones son los canonicos del modulo (genres.mjs) mas "sin genero". Si
+// el valor del distribuidor resuelve, sale preseleccionado; si no, vacio. Lo
+// elegido pasa por tagsDeGenero() como cualquier otro valor.
+const GENERO_SIN = 'sin';
+const GENEROS_CANONICOS = [...new Set(GENRES.map(g => g.seccion))].flatMap(generosDeSeccion);
+
+function generoSugerido(crudo) {
+  const partes = String(crudo || '').split(/[\/,;|]/).map(x => x.trim()).filter(Boolean);
+  return resolveGenre(partes)?.id || '';
+}
+
+// eleccion: undefined = nadie ha tocado la fila; '' = vacio; GENERO_SIN; o un id.
+function tagsGeneroElegido(eleccion, crudo, ctx = {}) {
+  const sugerido = generoSugerido(crudo);
+  // Sin tocar, o dejando lo sugerido: manda el valor del distribuidor, como
+  // siempre — con sus subgeneros, y lo que no resuelva a la cola.
+  if (eleccion === undefined || eleccion === sugerido) return tagsDeGenero(crudo, ctx).tags;
+  // Se eligio otra cosa. Lo que el distribuidor trae y no resuelve va IGUAL a la
+  // cola: es informacion sobre ese valor, no sobre la decision de este disco.
+  if (crudo) tagsDeGenero(crudo, ctx);
+  if (!eleccion || eleccion === GENERO_SIN) return [];
+  const g = GENRES.find(x => x.id === eleccion);
+  return g ? tagsDeGenero(g.label, ctx).tags : [];
+}
+
+function useGeneroPorDisco() {
+  const [elegido, setElegido] = useState({});   // clave -> '' | GENERO_SIN | id
+  const [crudos, setCrudos]   = useState({});   // clave -> valor del distribuidor ('' = leido, sin genero)
+  const elegir = useCallback((k, v) => setElegido(p => ({ ...p, [k]: v })), []);
+  const anotarCrudo = useCallback((k, crudo) =>
+    setCrudos(p => (k in p && p[k] === crudo) ? p : { ...p, [k]: crudo || '' }), []);
+  const reset = useCallback(() => { setElegido({}); setCrudos({}); }, []);
+  return {
+    elegir, anotarCrudo, reset,
+    leido: (k) => k in crudos,
+    crudo: (k) => crudos[k] || '',
+    sugerido: (k) => generoSugerido(crudos[k]),
+    valor: (k) => (k in elegido ? elegido[k] : generoSugerido(crudos[k])),
+    tags: (k, crudo, ctx) => tagsGeneroElegido(elegido[k], crudo, ctx),
+  };
+}
+
+function SelectorGenero({ clave, genero, disabled }) {
+  const sugerido = genero.sugerido(clave);
+  const crudo = genero.crudo(clave);
+  const valor = genero.valor(clave);
+  return (
+    <span style={{display:'inline-flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+      <select value={valor} disabled={disabled} onChange={e => genero.elegir(clave, e.target.value)}
+        style={{background:S.bg,border:`1px solid ${valor ? S.border : '#ff880066'}`,color:valor && valor !== GENERO_SIN ? S.text : S.muted,borderRadius:2,padding:'3px 6px',fontSize:10,fontFamily:'inherit',outline:'none'}}>
+        <option value="">—</option>
+        {GENEROS_CANONICOS.map(g => <option key={g.id} value={g.id}>{g.label}{g.id === sugerido ? ' ·' : ''}</option>)}
+        <option value={GENERO_SIN}>sin género</option>
+      </select>
+      {crudo && !sugerido && <span title="No resuelve: va a la cola de géneros" style={{fontSize:9,color:'#ff8800'}}>“{crudo}” → cola</span>}
+    </span>
+  );
 }
 
 /**

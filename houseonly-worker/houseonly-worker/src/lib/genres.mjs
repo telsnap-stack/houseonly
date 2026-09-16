@@ -38,6 +38,13 @@ export const GENRES = [
     { raw:'Jungle', tipo:'sub' }, { raw:'Liquid Funk', tipo:'sub' },
     { raw:'Hardcore Drum & Bass', tipo:'sub' },
   ]},
+  // Seccion 'house' = el catalogo principal, no porque sea house: la seccion D&B
+  // solo lista genre:drumandbass, asi que en 'dnb' seria una pildora sin discos.
+  // Solo el nombre canonico como alias; las grafias que aparezcan pasaran por la
+  // cola antes de añadirse.
+  { id:'bassmusic', label:'Bass Music', seccion:'house', orden:7, alias:[
+    { raw:'Bass Music', tipo:'canonico' },
+  ]},
   { id:'deephouse', label:'Deep House', seccion:'house', orden:2, padre:'house', alias:[
     { raw:'Deep House', tipo:'canonico' }, { raw:'Deephouse', tipo:'misma' },
   ]},
