@@ -10645,6 +10645,24 @@ function PreorderImporter() {
                   <button onClick={()=>setMailPick({})} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                   <button onClick={()=>{setMailRows(null);setMailPick({});}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Volver a parsear</button>
                 </div>
+                {/* Completar texto: los discos del archivo que YA estan en tienda y
+                    cuya descripcion esta vacia. Manda solo la prosa del correo por
+                    el mismo product-media que usa Completar media — sin imagen y
+                    sin audio, asi que no toca nada mas. El panel arranca con un
+                    dry-run y no escribe hasta que se pulsa. */}
+                {(()=>{
+                  const conProsa = mailRows.filter(r => r._live && String(r._desc || '').trim().length > 30);
+                  return conProsa.length > 0 && (
+                    <CompletarMediaPanel
+                      titulo="Completar texto"
+                      filas={conProsa.map(r => ({
+                        sku: r.catno,
+                        titulo: `${r.artist ? r.artist + ' — ' : ''}${r.title || r.catno}`,
+                        imageUrl: '', tracks: [],
+                        notasHtml: `<p>${String(r._desc).replace(/\n\n+/g, '</p><p>').replace(/\n/g, '<br/>')}</p>`,
+                      }))} />
+                  );
+                })()}
                 {(()=>{const d=mailRows.filter(r=>(r._ordSrcs||[]).length>1); return d.length>0&&(
                   <div style={{marginBottom:8,padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}66`,borderRadius:3,fontSize:10,color:S.danger,lineHeight:1.6}}>
                     <b>{d.length} pedido{d.length===1?'':'s'} por duplicado a dos distribuidores</b> — llegarán dos veces:
@@ -11201,7 +11219,7 @@ const MEDIA_ESTADOS = {
   'error':      { label: 'error',          color: '#ff4040' },
 };
 
-function CompletarMediaPanel({ filas }) {
+function CompletarMediaPanel({ filas, titulo = 'Completar media' }) {
   const [secreto] = useMailSecret();
   const [estados, setEstados] = useState({});    // sku -> resultado del worker
   const [permisos, setPermisos] = useState(null);
@@ -11244,7 +11262,7 @@ function CompletarMediaPanel({ filas }) {
   return (
     <div style={{marginBottom:12,padding:'10px 14px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:4}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
-        <div style={{fontSize:10,color:S.text,fontWeight:700}}>Media de los discos en tienda {busy==='leyendo'&&<span style={{color:S.muted,fontWeight:400}}>· comprobando en Shopify…</span>}</div>
+        <div style={{fontSize:10,color:S.text,fontWeight:700}}>{titulo === 'Completar texto' ? 'Texto de los discos en tienda' : 'Media de los discos en tienda'} {busy==='leyendo'&&<span style={{color:S.muted,fontWeight:400}}>· comprobando en Shopify…</span>}</div>
         <Btn ch={busy==='real'?'Completando…':`Completar (${pendientes.length})`} onClick={()=>completar(pendientes, false)} disabled={!secreto||!!busy||!pendientes.length} />
       </div>
       {!secreto&&<div style={{fontSize:9,color:'#ff8800',marginBottom:6}}>Entra en el admin con el secreto para ver y completar la media.</div>}

@@ -105,11 +105,15 @@ export async function handleProductMedia(request: Request, env: ShopifyAdminEnv,
     const tieneTexto = !!textoVisible(p.descriptionHtml);
     const base = { sku, producto: p.title, tieneImagen, tieneAudio, tieneTexto };
 
-    if (tieneImagen && tieneAudio && !forzar) { resultados.push({ ...base, estado: 'completo' }); continue; }
+    // "Completo" es con TEXTO tambien. Antes bastaban portada y audio, asi que un
+    // disco con las dos y sin descripcion se daba por hecho y no habia forma de
+    // rellenarlo: es el caso de los 71 pre-orders vivos sin texto.
+    const puedePonerTexto = !tieneTexto && !!textoVisible(notasHtml);
+    if (tieneImagen && tieneAudio && !puedePonerTexto && !forzar) { resultados.push({ ...base, estado: 'completo' }); continue; }
 
     const ponerImagen = !!imageUrl && (!tieneImagen || forzar);
     const ponerAudio = tracks.length > 0 && (!tieneAudio || forzar);
-    const ponerTexto = !tieneTexto && !!textoVisible(notasHtml);
+    const ponerTexto = puedePonerTexto;
     const hara = [ponerImagen && (tieneImagen ? 'sustituir portada' : 'portada'),
                   ponerAudio && (tieneAudio ? 'sustituir audio' : 'audio'),
                   ponerTexto && 'texto'].filter(Boolean);
