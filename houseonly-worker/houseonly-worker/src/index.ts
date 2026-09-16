@@ -57,7 +57,9 @@ const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': '*',
+  // `*` NO cubre Authorization: la spec obliga a nombrarla (MDN,
+  // Access-Control-Allow-Headers). Chrome lo tolera hoy; Firefox no.
+  'Access-Control-Allow-Headers': '*, Authorization',
 };
 
 const clean = (s: string) =>
@@ -85,6 +87,21 @@ async function getSpotifyToken(env: Env): Promise<string> {
   } catch {
     return '';
   }
+}
+
+// Bearer de admin comparado en tiempo constante (patron de la documentacion de
+// Workers, "protect against timing attacks"): sin retorno temprano por longitud,
+// que filtraria la del secreto.
+function bearerAdminValido(request: Request, env: Env): boolean {
+  const m = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
+  const secreto = env.BOOTSTRAP_AUTH_SECRET || '';
+  if (!m || !secreto) return false;
+  const enc = new TextEncoder();
+  const dado = enc.encode(m[1]);
+  const real = enc.encode(secreto);
+  return dado.byteLength === real.byteLength
+    ? crypto.subtle.timingSafeEqual(dado, real)
+    : !crypto.subtle.timingSafeEqual(dado, dado);
 }
 
 function jsonRes(data: any, status = 200): Response {
@@ -1550,8 +1567,10 @@ export default {
     // can fetch → await blob → save → next, downloading strictly one at a time.
     //
     // Locked to DBH release_zip only: id must be all-digits, prefix hardcoded.
-    // Not an open proxy. No auth needed (public asset); no Shopify/Discogs touch.
+    // Not an open proxy. No Shopify/Discogs touch.
+    // Bearer de admin: sin el, el worker servia de proxy a cualquiera.
     if (action === 'dbh-zip' && request.method === 'GET') {
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
       const id = url.searchParams.get('id') || '';
       if (!/^\d+$/.test(id)) {
         return jsonRes({ ok: false, error: 'id must be numeric' }, 400);
@@ -1936,6 +1955,8 @@ export default {
     // cover images from mothertonguerecords.com — the browser can't fetch
     // those URLs (no CORS headers), but the Worker can.
     if (action === 'mirror' && request.method === 'POST') {
+      // Bearer de admin: escribe en R2.
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
       let body: any = {};
       try {
         body = await request.json();
@@ -1960,6 +1981,8 @@ export default {
     // biography. The human (Eduardo) picks/edits before publishing — this is a
     // draft aid, not an unreviewed source of truth.
     if (action === 'story-context' && request.method === 'POST') {
+      // Bearer de admin: cada llamada gasta credito de Anthropic.
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
       if (!env.ANTHROPIC_API_KEY) return jsonRes({ error: 'ANTHROPIC_API_KEY not configured' }, 500);
       let body: any = {};
       try { body = await request.json(); } catch { return jsonRes({ error: 'invalid json' }, 400); }
@@ -2879,6 +2902,9 @@ export default {
     // ── POST: upload file to R2 ──────────────────────────────
     if (request.method === 'POST') {
       if (action === 'upload') {
+        // Bearer de admin: sin el, cualquiera escribia cualquier clave de R2,
+        // incluidas portadas y audio de productos publicados.
+        if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
         try {
           const fd   = await request.formData();
           const file = fd.get('file') as File;
