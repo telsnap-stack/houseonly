@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { GENRES, generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -144,8 +144,10 @@ function parseProduct({ node }) {
 // "Jungle / Drum 'n' Bass", y esos discos se colaban entre el house.
 const DNB_TAG = genreTag(DNB_GENRE_ID);
 
-async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false, dnb=false } = {}) {
-  const after = cursor ? `, after: "${cursor}"` : '';
+// Las clausulas que definen una seccion de la tienda. Las comparten la rejilla
+// (fetchShopifyProducts) y la comprobacion de pildoras (hayDiscosEnSeccion), para
+// que "hay discos" signifique exactamente lo que la rejilla va a mostrar.
+function clausulasDeSeccion({ filterTags = [], forthcoming = false, dnb = false } = {}) {
   // Build a tag-AND query string for server-side filtering. Each filterTag is a
   // raw tag value like "label:Word and Sound" or "year:2025".
   //
@@ -169,6 +171,25 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
     // Main catalogue: hide every D&B record from the house genres.
     clauses.push(`-tag:'${DNB_TAG}'`);
   }
+  return clauses;
+}
+
+// ¿Hay al menos un disco con este tag en esta seccion? Cache por sesion; si la
+// consulta falla, false: ante la duda la pildora no sale.
+const hayDiscosCache = new Map();
+function hayDiscosEnSeccion(tag, { forthcoming = false, dnb = false } = {}) {
+  const k = clausulasDeSeccion({ filterTags: [tag], forthcoming, dnb }).join(' AND ');
+  if (!hayDiscosCache.has(k)) {
+    hayDiscosCache.set(k, shopifyQuery(`{ products(first: 1, query: ${JSON.stringify(k)}) { edges { node { id } } } }`)
+      .then(d => (d?.products?.edges?.length || 0) > 0)
+      .catch(() => false));
+  }
+  return hayDiscosCache.get(k);
+}
+
+async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse=true, filterTags=[], forthcoming=false, dnb=false } = {}) {
+  const after = cursor ? `, after: "${cursor}"` : '';
+  const clauses = clausulasDeSeccion({ filterTags, forthcoming, dnb });
   const queryArg = `, query: ${JSON.stringify(clauses.join(' AND '))}`;
   const sortArg = `, sortKey: ${sortKey}, reverse: ${reverse ? 'true' : 'false'}`;
   const data = await shopifyQuery(`{
@@ -2624,7 +2645,19 @@ function Filters({ filters, onChange }) {
   // no de recorrer el catalogo. Por eso en la rejilla de house no puede
   // aparecer drum & bass —ni al reves—, y por eso ninguna opcion puede dar cero:
   // se ofrece exactamente lo que existe en esta seccion.
-  const generos = generosDeSeccion(filters.dnb ? 'dnb' : 'house');
+  // Pildoras, no generos: los 'con-discos' solo salen si esta seccion tiene al
+  // menos un disco con su tag (ver genres.mjs). Ninguna pildora puede dar cero.
+  const seccion = filters.dnb ? 'dnb' : 'house';
+  const [conDiscos, setConDiscos] = useState(() => new Set());
+  useEffect(() => {
+    let vivo = true;
+    const candidatos = generosDeSeccion(seccion).filter(g => g.pildora === 'con-discos');
+    Promise.all(candidatos.map(g => hayDiscosEnSeccion(g.tag, { forthcoming: !!filters.forthcoming, dnb: !!filters.dnb })
+      .then(hay => (hay ? g.id : null))))
+      .then(ids => { if (vivo) setConDiscos(new Set(ids.filter(Boolean))); });
+    return () => { vivo = false; };
+  }, [seccion, filters.forthcoming, filters.dnb]);
+  const generos = pildorasDeSeccion(seccion, conDiscos);
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
       <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ appearance:'none', WebkitAppearance:'none', background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
