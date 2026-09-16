@@ -1634,6 +1634,18 @@ export default {
     //
     // El worker NO parsea: guarda y sirve. El parseo de campos vive en App.jsx,
     // en un solo sitio, que es la regla del proyecto.
+    // ── LOGIN DEL ADMIN ────────────────────────────────────
+    //   GET ?action=admin-check   Bearer → 200 {ok:true} | 401
+    //
+    // La pantalla de login del admin comprueba aqui el secreto en vez de
+    // compararlo con una contraseña escrita en el bundle (que es publico).
+    // Mismo Bearer y misma comparacion en tiempo constante que los endpoints
+    // que escriben. No devuelve nada mas: solo si el secreto vale.
+    if (action === 'admin-check' && request.method === 'GET') {
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
+      return jsonRes({ ok: true });
+    }
+
     if (action === 'emails-ingest' && request.method === 'POST') {
       const auth = request.headers.get('authorization') || '';
       const m = auth.match(/^Bearer\s+(.+)$/i);
