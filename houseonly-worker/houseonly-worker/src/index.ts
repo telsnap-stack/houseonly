@@ -13,6 +13,8 @@ interface Env {
   // El worker NO parsea nada de esto: el parseo vive en App.jsx y punto. Aqui
   // solo se guarda y se sirve.
   EMAILS: KVNamespace;
+  // STOCK_LEDGER: registro de ?action=stock-add, compartido con staging.
+  STOCK_LEDGER: KVNamespace;
   // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
   // Claves: entity:{slug}, alias:a:/alias:l:{norm}, ignore:*, children:*,
   // review:{kind}:{norm}, y mas adelante follow:/fanout:.
@@ -839,10 +841,6 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 // See src/lib/shopify-admin.ts for full docs.
 
 import { shopifyAdminGraphQL, getShopifyAdminToken } from './lib/shopify-admin';
-// Ajuste de inventario para llegadas de stock (?action=inventory-adjust). Las
-// tres ya existen y estan en produccion: sync.ts las usa para descontar stock
-// cuando entra una venta de Discogs.
-import { findVariantBySku, getPrimaryLocationId, adjustInventory } from './lib/shopify-admin';
 import {
   handleSyncBootstrap,
   handleSyncStatus,
@@ -872,6 +870,7 @@ import {
   handleGenreReviewAdd,
 } from './lib/entities';
 import { sendScoutReport } from './lib/scout-mail';
+import { handleStockAdd } from './lib/stock-add';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1869,73 +1868,12 @@ export default {
       return jsonRes({ ok: true, results });
     }
 
-    // ── FASE 3B: AJUSTE DE INVENTARIO (llegada de stock) ────
-    //
-    // Para los restocks: un disco que ya es producto vivo (se creo al pedirlo)
-    // y del que ahora llega la caja. Por CSV no se puede hacer bien — Shopify
-    // FIJA el qty en vez de sumarlo, lo que borraria el saldo negativo de
-    // oversell que ES el registro de demanda del pre-order, y las columnas
-    // vacias del CSV sobrescriben como vacias, cargandose portada y body. Por
-    // eso el importer deja esas filas fuera del CSV y se resuelven aqui.
-    //
-    //   POST ?action=inventory-adjust  Bearer
-    //     {items:[{sku, delta}], dry?:true, reason?}
-    //
-    // delta, NO absoluto: -1 + 2 = 1 disponible y la copia pre-vendida sigue
-    // debiendose. Con clave de idempotencia, asi que reintentar no duplica.
-    if (action === 'inventory-adjust' && request.method === 'POST') {
-      const auth = request.headers.get('authorization') || '';
-      const m = auth.match(/^Bearer\s+(.+)$/i);
-      if (!m || m[1] !== env.BOOTSTRAP_AUTH_SECRET) {
-        return jsonRes({ error: 'unauthorized' }, 401);
-      }
-      let body: any;
-      try { body = await request.json(); } catch { return jsonRes({ error: 'bad json' }, 400); }
-      const items = Array.isArray(body?.items) ? body.items : [];
-      if (!items.length) return jsonRes({ error: 'items required' }, 400);
-      // Dry por defecto DELIBERADAMENTE: este endpoint si muta Shopify, y el
-      // coste de un dry de mas es cero frente al de un live por accidente.
-      const dry = body?.dry !== false;
-      const reason = String(body?.reason || 'received');
-
-      const results: any[] = [];
-      const adjustments: any[] = [];
-      let locationId = '';
-      try { locationId = await getPrimaryLocationId(env); }
-      catch (e: any) { return jsonRes({ error: `no location: ${e.message}` }, 500); }
-
-      for (const it of items) {
-        const sku = String(it?.sku || '').trim();
-        const delta = Number(it?.delta);
-        if (!sku || !Number.isFinite(delta) || delta === 0) {
-          results.push({ sku, ok: false, error: 'sku y delta distinto de 0 requeridos' });
-          continue;
-        }
-        const variant = await findVariantBySku(env, sku);
-        if (!variant?.inventoryItemId) {
-          results.push({ sku, ok: false, error: 'sin variante con ese SKU en Shopify' });
-          continue;
-        }
-        results.push({ sku, ok: true, delta, inventoryItemId: variant.inventoryItemId });
-        adjustments.push({ inventoryItemId: variant.inventoryItemId, locationId, delta });
-      }
-
-      if (dry) {
-        return jsonRes({ ok: true, dry: true, locationId, results,
-                         note: 'nada aplicado — manda dry:false para aplicarlo' });
-      }
-      if (!adjustments.length) {
-        return jsonRes({ ok: false, dry: false, results, error: 'ningun SKU resoluble' }, 400);
-      }
-      // La clave de idempotencia se deriva del contenido del ajuste, asi que
-      // reenviar exactamente lo mismo no vuelve a sumar.
-      const fingerprint = adjustments.map((a) => `${a.inventoryItemId}:${a.delta}`).sort().join('|');
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(fingerprint));
-      const idempotencyKey = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 40);
-
-      const applied = await adjustInventory(env, adjustments, idempotencyKey, reason);
-      return jsonRes({ ok: applied.ok, dry: false, results, applied, idempotencyKey },
-                     applied.ok ? 200 : 500);
+    // ── ADD STOCK (llegada de factura a productos ya en la tienda) ──
+    //   POST ?action=stock-add  Bearer  — ver src/lib/stock-add.ts
+    // Sustituye a inventory-adjust, que no tenia registro por factura ni
+    // decia cantidades antes/despues, y no lo usaba la app.
+    if (action === 'stock-add' && request.method === 'POST') {
+      return await handleStockAdd(request, env, bearerAdminValido(request, env));
     }
 
     // ── FASE 3.5B: AUTO-LIST MODE (dry/live) ────────────────

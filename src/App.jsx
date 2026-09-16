@@ -309,6 +309,11 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
 // variant SKU only. Returns a Set for O(1) exact-match lookup.
 async function fetchLiveHandles() {
   const set = new Set();
+  // Clave normalizada -> SKU tal cual esta en Shopify. "Add stock" necesita el
+  // SKU EXACTO (el worker no adivina), y la factura puede escribirlo distinto
+  // ("WPA-4/ UR-079" frente a "WPA-4/UR-079"). Va colgado del Set para no
+  // cambiar lo que devuelve a los demas.
+  set.skuReal = new Map();
   let cursor = null;
   let safety = 25; // up to 25 × 250 = 6250 products
   while (safety-- > 0) {
@@ -333,8 +338,13 @@ async function fetchLiveHandles() {
       // may only be reachable by one of the two.
       const h = rdKey(e.node.handle);
       if (h) set.add(h);
-      const sku = rdKey(e.node.variants?.edges?.[0]?.node?.sku);
+      const skuTal = e.node.variants?.edges?.[0]?.node?.sku || '';
+      const sku = rdKey(skuTal);
       if (sku) set.add(sku);
+      if (skuTal) for (const k of [h, sku].filter(Boolean)) {
+        const v = set.skuReal.get(k);
+        set.skuReal.set(k, v && v !== skuTal ? null : skuTal);   // null = ambiguo
+      }
     }
     if (!pageInfo.hasNextPage) break;
     cursor = pageInfo.endCursor;
@@ -3899,7 +3909,10 @@ async function parseRubadubInvoicePdf(pdfBlob) {
   // Por columnas si hay cabecera (factura y presupuesto, ver parseRubadubColumns).
   // El parser de lineas de abajo queda para un PDF sin cabecera reconocible.
   const porColumnas = parseRubadubColumns(pages);
-  if (porColumnas) return porColumnas;
+  // El numero del documento, para "Add stock": la idempotencia va por factura.
+  // Fuera de las claves (no enumerable) para no aparecer como un disco mas.
+  const documento = documentoRubadub(pages);
+  if (porColumnas) { Object.defineProperty(porColumnas, '_documento', { value: documento, enumerable: false }); return porColumnas; }
 
   // qty + body + optional HS + £net + £total
   const LINE = /^(\d+)\s+(.+?)\s+(?:(\d{4}\.\d{2}\.\d{2})\s+)?£([\d.,]+)\s+£([\d.,]+)$/;
@@ -3946,6 +3959,7 @@ async function parseRubadubInvoicePdf(pdfBlob) {
     const name = parts.length > 1 ? parts.slice(0, -1).join(' ') : body;
     out[key] = { sku: sku.trim(), name: name.trim(), qty: qty || 1, cost: isNaN(cost) ? null : cost };
   }
+  Object.defineProperty(out, '_documento', { value: documento, enumerable: false });
   return out;
 }
 
@@ -3957,6 +3971,19 @@ async function parseRubadubInvoicePdf(pdfBlob) {
 // "UR-079" en la factura SI-286408 (se tomaba la ultima palabra de la linea) y
 // como "EP" en el presupuesto, y asi no casaba con el catno del email.
 // null si no hay cabecera reconocible; entonces manda el parser de lineas.
+// "Invoice #: SI-286408" (factura) o "Quote#: 384148" (presupuesto), de la
+// primera pagina.
+function documentoRubadub(pages) {
+  for (const r of (pages[0] || [])) {
+    const t = r.cells.map(c => c.str).join(' ');
+    const fac = t.match(/Invoice\s*#\s*:\s*([A-Z]{1,4}-?\d{3,})/i);
+    if (fac) return { tipo: 'factura', numero: fac[1].toUpperCase() };
+    const pre = t.match(/Quote\s*#\s*:\s*(\d{3,})/i);
+    if (pre) return { tipo: 'presupuesto', numero: pre[1] };
+  }
+  return { tipo: '', numero: '' };
+}
+
 function parseRubadubColumns(pages) {
   const NOMBRES = { 'qty': 'qty', 'sku': 'sku', 'item name': 'name', 'hs code': 'hs', 'item net': 'net', 'total net': 'total' };
   let cols = null;              // [{campo, x}] ordenadas por x
@@ -4067,6 +4094,7 @@ function RubadubImporter() {
   // portada en el ZIP (FE005, FE008, UR-029r, WPA-4/ UR-079: solo MP3) y casi
   // nunca notas. invoice key -> { coverUrl, desc, email }
   const [delCorreo, setDelCorreo] = useState({});
+  const [documento, setDocumento] = useState(null);   // {tipo:'factura'|'presupuesto', numero} del PDF
   const [finding, setFinding]   = useState(false);
   const [findPhase, setFindPhase] = useState('');
   const [findError, setFindError] = useState('');
@@ -4082,7 +4110,7 @@ function RubadubImporter() {
     if (pdfs[0]) {
       setPdfFile(pdfs[0]);
       setFind({}); setFindError(''); setDelCorreo({}); genero.reset();
-      try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
+      try { const inv = await parseRubadubInvoicePdf(pdfs[0]); setInvoice(inv); setDocumento(inv._documento || null); }
       catch (e) { setError('Could not read invoice PDF: ' + e.message); }
       // An invoiced record may already be a live product — typically one this
       // shop created as a pre-order weeks earlier, when the record was ordered.
@@ -4596,21 +4624,12 @@ function RubadubImporter() {
             </div>
           )}
           {liveRows.length>0&&(
-            <div style={{marginBottom:12,padding:'10px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4}}>
-              <div style={{fontSize:10,color:'#ff8800',fontWeight:700,marginBottom:4}}>
-                {liveRows.length} ya en tienda — llegada de stock: súmale inventario a mano
-              </div>
-              <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
-                Estos discos ya son productos vivos (los creaste al pedirlos). <b style={{color:S.text}}>Se quedan fuera del CSV</b>: Shopify empareja solo por Handle, así que dejarlos viajar o duplicaría el producto o lo sobrescribiría — el qty se fija en vez de sumarse, y las columnas vacías borrarían portada y descripción. Añádeles el inventario en Shopify y deja que la graduación del worker les quite <code style={{fontFamily:'monospace'}}>forthcoming</code> sola.
-              </div>
-              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-                {liveRows.map((r,i)=>(
-                  <span key={i} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:10,padding:'2px 8px',fontSize:9,fontFamily:'monospace',color:S.text}}>
-                    {r._catno} · +{r['Variant Inventory Qty']}
-                  </span>
-                ))}
-              </div>
-            </div>
+            <AddStockPanel source="rd" documento={documento}
+              filas={liveRows.map(r => {
+                const k = rdKey(r._catno);
+                const real = liveHandles?.skuReal?.get(k);
+                return { sku: real || r._catno, delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}` };
+              }).filter(f => f.delta > 0)} />
           )}
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
@@ -11027,6 +11046,103 @@ function exigirColaAutenticada() {
  * llevaba por delante los valores desconocidos sin decir nada. Si la cola
  * falla, no hay CSV: el error se ve y la importacion se repite.
  */
+// ── ADD STOCK (comun a los importers) ─────────────────────────
+// Llegada de una factura a discos que YA son productos en la tienda: se suma el
+// inventario por el worker (?action=stock-add) en vez de mandarlos en el CSV,
+// que FIJA la cantidad y borraria el saldo de oversell. El worker registra que
+// factura sumo que SKU, asi que pulsar dos veces con la misma factura no suma
+// dos veces — lo dice. Uso:
+//   <AddStockPanel filas={[{sku, delta, titulo}]} documento={{tipo, numero}} source="rd" />
+// `sku` tiene que ser el SKU exacto de Shopify (fetchLiveHandles().skuReal).
+const STOCK_ESTADOS = {
+  'sumaria':     { label: 'sumaría',       color: S.text },
+  'sumado':      { label: 'sumado',        color: '#c8ff00' },
+  'ya-aplicado': { label: 'ya aplicado',   color: '#585858' },
+  'en-curso':    { label: 'intento sin cerrar', color: '#ff8800' },
+  'error':       { label: 'error',         color: '#ff4040' },
+};
+
+function AddStockPanel({ filas, documento, source }) {
+  const [secreto] = useMailSecret();
+  const [numero, setNumero] = useState(documento?.numero || '');
+  useEffect(() => { setNumero(documento?.numero || ''); }, [documento?.numero]);
+  const [busy, setBusy] = useState('');
+  const [resp, setResp] = useState(null);     // respuesta del worker
+  const [err, setErr] = useState('');
+  const esFactura = documento?.tipo !== 'presupuesto';
+  const ref = numero.trim().toUpperCase();
+  const listo = !!filas.length && !!ref && esFactura && !!secreto;
+
+  const lanzar = async (dry, items) => {
+    if (!listo || busy) return;
+    if (!dry && !window.confirm(`Sumar inventario en Shopify (tienda real) para ${items.length} disco(s) con la factura ${ref}?\n\n` +
+        items.map(i => `${i.sku}: +${i.delta}`).join('\n'))) return;
+    setBusy(dry ? 'dry' : 'real'); setErr('');
+    try {
+      const r = await fetchAdmin(`${WORKER_URL}?action=stock-add`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice: ref, source, dry, items: items.map(({ sku, delta }) => ({ sku, delta })) }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setErr(d.error || `El worker respondió ${r.status}`); if (d.permisos) setResp({ permisos: d.permisos, resultados: [] }); }
+      else setResp(d);
+    } catch (e) { setErr(e.message); }
+    setBusy('');
+  };
+
+  const porSku = new Map((resp?.resultados || []).map(x => [x.sku, x]));
+  const fmt = (x) => (x.antes != null && x.despues != null) ? `${x.antes} → ${x.despues}` : '';
+  return (
+    <div style={{marginBottom:12,padding:'10px 14px',background:'#1a1000',border:'1px solid #ff880044',borderRadius:4}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
+        <div style={{fontSize:10,color:'#ff8800',fontWeight:700}}>{filas.length} ya en tienda — llegada de stock</div>
+        <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+          <span style={{fontSize:9,color:S.muted}}>factura</span>
+          <input value={numero} onChange={e=>setNumero(e.target.value)} placeholder="SI-…" style={{width:110,background:S.bg,border:`1px solid ${ref?S.border:'#ff880066'}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
+          <Btn ch={busy==='dry'?'Simulando…':'Simular (dry-run)'} variant="ghost" onClick={()=>lanzar(true, filas)} disabled={!listo||!!busy} />
+          <Btn ch={busy==='real'?'Sumando…':`Add stock (${filas.length})`} onClick={()=>lanzar(false, filas)} disabled={!listo||!!busy} />
+        </div>
+      </div>
+      <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
+        Fuera del CSV (fijaría la cantidad y borraría el saldo de oversell). Se <b style={{color:S.text}}>suma</b> el inventario en Shopify; la misma factura no suma dos veces.
+        {!esFactura&&<b style={{color:'#ff8800'}}> Esto es un presupuesto: el stock se suma con la factura.</b>}
+        {!secreto&&<b style={{color:'#ff8800'}}> Entra en el admin con el secreto para poder sumar.</b>}
+      </div>
+      {resp?.permisos&&(
+        <div style={{fontSize:9,color:resp.permisos.write_inventory?S.muted:S.danger,marginBottom:6}}>
+          App de Admin del worker: write_inventory {resp.permisos.write_inventory?'✓':'✗ FALTA'} · read_inventory {resp.permisos.read_inventory?'✓':'✗'} · read_locations {resp.permisos.read_locations?'✓':'✗'}
+          {resp.ubicacion?.name?` · ubicación: ${resp.ubicacion.name}`:''}{resp.dry?' · simulación, no se ha tocado nada':''}
+        </div>
+      )}
+      {err&&<div style={{fontSize:10,color:S.danger,marginBottom:6}}>{err}</div>}
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:9}}>
+          <tbody>
+            {filas.map(f => {
+              const x = porSku.get(f.sku);
+              const e = x ? (STOCK_ESTADOS[x.estado] || STOCK_ESTADOS.error) : null;
+              return (
+                <tr key={f.sku} style={{borderTop:`1px solid ${S.border}`}}>
+                  <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{f.sku}</td>
+                  <td style={{padding:'4px 8px',color:S.muted,maxWidth:220,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={f.titulo}>{f.titulo}</td>
+                  <td style={{padding:'4px 8px',color:S.text,whiteSpace:'nowrap'}}>+{f.delta}</td>
+                  <td style={{padding:'4px 8px'}}>
+                    {e&&<span style={{color:e.color,fontWeight:700,whiteSpace:'nowrap'}}>{e.label}</span>}
+                    {x&&<span style={{color:S.muted}}>{fmt(x)?` ${fmt(x)}`:''}{x.aplicadoEn&&x.estado==='ya-aplicado'?` · ${x.aplicadoEn.slice(0,16).replace('T',' ')}`:''}{x.motivo?` · ${x.motivo}`:''}</span>}
+                  </td>
+                  <td style={{padding:'4px 0 4px 8px',textAlign:'right'}}>
+                    <button onClick={()=>lanzar(false, [f])} disabled={!listo||!!busy} title="Sumar solo este disco" style={{background:'none',border:`1px solid ${S.border}`,color:listo?S.text:S.muted,cursor:listo&&!busy?'pointer':'default',fontSize:8,padding:'2px 8px',borderRadius:2,fontFamily:'inherit',whiteSpace:'nowrap'}}>solo este</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 async function descargarCsvDeImporter(contenido, nombreFichero, source, opciones = {}) {
   const r = await volcarColaDeGeneros(source);
   if (!r.ok) {
