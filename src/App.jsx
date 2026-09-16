@@ -4048,13 +4048,76 @@ function rdSplitName(name) {
 }
 
 // Invoice key -> dropped ZIP File. Filename -> catno as W&S names them, then
-// matchKeysWithSuffix (exact, then a known format suffix).
-function rdZipsForInvoice(invoice, zipFiles) {
-  const zipByKey = {};
-  zipFiles.forEach(f => { const k = rdKey(catnoFromFilename(f.name)); if (k) zipByKey[k] = f; });
-  const out = {};
-  for (const [k, zk] of matchKeysWithSuffix(Object.keys(invoice || {}), Object.keys(zipByKey))) out[k] = zipByKey[zk];
-  return out;
+// matchKeysWithSuffix (exact, then a known format suffix). `asignados`
+// (nombre de fichero -> clave de la factura) son las asignaciones a mano del
+// desplegable y mandan sobre lo automatico.
+function rdZipsForInvoice(invoice, zipFiles, asignados = {}) {
+  return emparejarZipsRd(invoice, zipFiles, asignados).porClave;
+}
+
+// Lo mismo, pero diciendo que paso con CADA ZIP: los que no casan salen con su
+// catno, su clave y el motivo, y con sugerencias de discos parecidos que aun no
+// tienen ZIP. Antes un ZIP que no casaba solo bajaba la cuenta, sin decir cual
+// ni por que, y dos ZIP con la misma clave se pisaban en silencio.
+function emparejarZipsRd(invoice, zipFiles, asignados = {}) {
+  const claves = Object.keys(invoice || {});
+  const porClave = {};
+  const sinCasar = [];
+  // 1. Asignaciones a mano (solo si la clave destino existe en la factura).
+  const manuales = new Set();
+  for (const f of zipFiles) {
+    const k = asignados[f.name];
+    if (k && invoice?.[k] && !porClave[k]) { porClave[k] = f; manuales.add(f.name); }
+  }
+  // 2. Automatico con el resto.
+  const zipPorClave = {};
+  for (const f of zipFiles) {
+    if (manuales.has(f.name)) continue;
+    const catno = catnoFromFilename(f.name);
+    const k = rdKey(catno);
+    if (!k) { sinCasar.push({ file: f, catno, clave: '', motivo: 'del nombre del fichero no sale ningún catno' }); continue; }
+    if (zipPorClave[k]) {
+      sinCasar.push({ file: f, catno, clave: k, motivo: `da la misma clave que ${zipPorClave[k].name}; solo se usa uno` });
+      continue;
+    }
+    zipPorClave[k] = f;
+  }
+  const libres = claves.filter(k => !porClave[k]);
+  const casados = matchKeysWithSuffix(libres, Object.keys(zipPorClave));
+  const usadas = new Set();
+  for (const [k, zk] of casados) { porClave[k] = zipPorClave[zk]; usadas.add(zk); }
+  for (const [zk, f] of Object.entries(zipPorClave)) {
+    if (usadas.has(zk)) continue;
+    const catno = catnoFromFilename(f.name);
+    const ocupada = claves.includes(zk) && porClave[zk];
+    sinCasar.push({
+      file: f, catno, clave: zk,
+      motivo: ocupada
+        ? `su clave ${zk} es la de ${invoice[zk].sku}, que ya tiene otro ZIP (${porClave[zk].name})`
+        : `su clave ${zk} no coincide con ningún SKU de la factura, ni añadiéndole un sufijo de formato (${FORMAT_SUFFIXES.join(', ')})`,
+    });
+  }
+  // Sugerencias: discos sin ZIP con la clave mas parecida.
+  const sinZip = claves.filter(k => !porClave[k]);
+  for (const x of sinCasar) {
+    x.sugerencias = x.clave
+      ? sinZip.map(k => ({ k, d: distanciaEdicion(k, x.clave) }))
+          .filter(o => o.d <= Math.max(2, Math.floor(Math.max(o.k.length, x.clave.length) / 3)))
+          .sort((a, b) => a.d - b.d).slice(0, 3).map(o => o.k)
+      : [];
+  }
+  return { porClave, sinCasar, manuales };
+}
+
+function distanciaEdicion(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
 }
 
 // Estados de "Find ZIPs", por catno de la factura. Los seis de resultado mas
@@ -4094,7 +4157,8 @@ function RubadubImporter() {
   // portada en el ZIP (FE005, FE008, UR-029r, WPA-4/ UR-079: solo MP3) y casi
   // nunca notas. invoice key -> { coverUrl, desc, email }
   const [delCorreo, setDelCorreo] = useState({});
-  const [documento, setDocumento] = useState(null);   // {tipo:'factura'|'presupuesto', numero} del PDF
+  const [documento, setDocumento] = useState(null);
+  const [asignados, setAsignados] = useState({});    // nombre de ZIP -> clave de la factura, a mano   // {tipo:'factura'|'presupuesto', numero} del PDF
   const [finding, setFinding]   = useState(false);
   const [findPhase, setFindPhase] = useState('');
   const [findError, setFindError] = useState('');
@@ -4137,7 +4201,7 @@ function RubadubImporter() {
     let vivo = true;
     (async () => {
       let JSZip = null;
-      for (const [k, f] of Object.entries(rdZipsForInvoice(invoice, zipFiles))) {
+      for (const [k, f] of Object.entries(rdZipsForInvoice(invoice, zipFiles, asignados))) {
         if (!vivo) return;
         if (salespaperLeido.current.has(f)) { genero.anotarCrudo(k, salespaperLeido.current.get(f)); continue; }
         let crudo = '';
@@ -4152,7 +4216,7 @@ function RubadubImporter() {
       }
     })();
     return () => { vivo = false; };
-  }, [invoice, zipFiles, genero.anotarCrudo]);
+  }, [invoice, zipFiles, asignados, genero.anotarCrudo]);
 
   // ── Find ZIPs ──────────────────────────────────────────────
   // Rubadub no manda promopacks con la factura: el ZIP de cada disco esta en su
@@ -4166,7 +4230,7 @@ function RubadubImporter() {
     if (!invoice || !mailSecret.trim() || finding) return;
     const keys = Object.keys(invoice);
     const esLive = (k) => !!liveHandles && liveHandles.has(rdKey(invoice[k].sku));
-    const conZip = rdZipsForInvoice(invoice, zipFiles);
+    const conZip = rdZipsForInvoice(invoice, zipFiles, asignados);
     // Los discos en tienda NO se excluyen sin mas: si a su producto en Shopify le
     // falta portada o audio, su ZIP es justo lo que necesita "Completar". Solo se
     // dejan fuera los que Shopify ya tiene completos (o los que no se pueden
@@ -4329,7 +4393,7 @@ function RubadubImporter() {
       // per SKU comes from the same matcher the missing-ZIP notice uses, so the
       // preview and the result can never disagree.
       const keys = Object.keys(invoice);
-      const zipForKey = rdZipsForInvoice(invoice, zipFiles);
+      const zipForKey = rdZipsForInvoice(invoice, zipFiles, asignados);
       const total = keys.length;
       const processed = [];
 
@@ -4524,7 +4588,8 @@ function RubadubImporter() {
   // Cover-less de verdad: los catnos de la factura que no casan con ningun ZIP,
   // con el mismo emparejador que usa process(). Antes era facturas − ZIPs
   // sueltos, que bajaba al soltar ZIPs que no eran de la factura.
-  const zipMatch = invoice ? rdZipsForInvoice(invoice, zipFiles) : {};
+  const emparejado = invoice ? emparejarZipsRd(invoice, zipFiles, asignados) : { porClave: {}, sinCasar: [], manuales: new Set() };
+  const zipMatch = emparejado.porClave;
   const sinZip = invoice ? Object.keys(invoice).filter(k => !zipMatch[k]) : [];
   const isLiveKey = (k) => !!liveHandles && liveHandles.has(rdKey(invoice[k].sku));
   const findRows = Object.entries(find);
@@ -4538,15 +4603,40 @@ function RubadubImporter() {
         <div style={{ fontSize:28, marginBottom:6 }}>💿</div>
         <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Suelta aquí el PDF de Rubadub (y ZIPs a mano si hace falta)</div>
         <div style={{ display:'flex', gap:8, justifyContent:'center', flexWrap:'wrap' }}>
-          <input ref={pdfRef} type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
-          <input ref={zipRef} type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
+          <input ref={pdfRef} type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>{ const fs=[...e.target.files]; e.target.value=''; fs[0]&&assignFiles(fs); }} />
+          <input ref={zipRef} type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>{ const fs=[...e.target.files]; e.target.value=''; assignFiles(fs); }} />
           <button onClick={()=>pdfRef.current.click()} style={{ background:pdfFile?S.accent:S.border, border:'none', color:pdfFile?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{pdfFile?`✓ Invoice (${invCount})`:'+ Invoice PDF'}</button>
           <button onClick={()=>zipRef.current.click()} style={{ background:zipFiles.length?S.accent:S.border, border:'none', color:zipFiles.length?'#080808':S.muted, cursor:'pointer', fontSize:9, padding:'6px 14px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>{zipFiles.length?`✓ ${zipFiles.length} ZIPs`:'+ ZIPs'}</button>
-          {zipFiles.length>0&&<button onClick={()=>setZipFiles([])} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear ZIPs</button>}
+          {zipFiles.length>0&&<button onClick={()=>{ setZipFiles([]); setAsignados({}); }} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Clear ZIPs</button>}
         </div>
       </div>
       {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:4}}>Invoice: {invCount} records parsed (SKU + £ cost + qty)</div>}
-      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>ZIPs: {zipFiles.length} · casan con la factura: {invCount - sinZip.length} · cover-less: {sinZip.length}</div>}
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>ZIPs: {zipFiles.length} · casan con la factura: {invCount - sinZip.length} · cover-less: {sinZip.length}{emparejado.sinCasar.length?` · sin casar: ${emparejado.sinCasar.length}`:''}{emparejado.manuales.size?` · asignados a mano: ${emparejado.manuales.size}`:''}</div>}
+      {invoice&&emparejado.sinCasar.length>0&&(
+        <div style={{marginBottom:12,padding:10,borderRadius:3,border:'1px solid #ff440066',background:'#1a0500'}}>
+          <div style={{fontSize:10,color:'#ff8800',fontWeight:700,marginBottom:6}}>{emparejado.sinCasar.length} ZIP sin casar con la factura — no se usarán salvo que los asignes</div>
+          {emparejado.sinCasar.map(x => (
+            <div key={x.file.name} style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',fontSize:9,padding:'4px 0',borderTop:`1px solid ${S.border}`}}>
+              <span style={{fontFamily:'monospace',color:S.text}}>{x.file.name}</span>
+              <span style={{color:S.muted}}>catno «{x.catno}» · {x.motivo}</span>
+              <select value="" onChange={e=>{ const k=e.target.value; if (k) setAsignados(prev=>({ ...prev, [x.file.name]: k })); }}
+                style={{marginLeft:'auto',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'3px 6px',fontSize:10,fontFamily:'inherit',maxWidth:280}}>
+                <option value="">Asignar a…</option>
+                {x.sugerencias.length>0&&<optgroup label="Parecidos sin ZIP">{x.sugerencias.map(k=><option key={'s'+k} value={k}>{invoice[k].sku} — {invoice[k].name}</option>)}</optgroup>}
+                <optgroup label="Todos los discos de la factura">
+                  {Object.keys(invoice).map(k=><option key={k} value={k}>{invoice[k].sku}{zipMatch[k]?' (ya tiene ZIP)':''} — {invoice[k].name}</option>)}
+                </optgroup>
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+      {invoice&&emparejado.manuales.size>0&&(
+        <div style={{marginBottom:10,fontSize:9,color:S.muted}}>
+          Asignados a mano: {Object.entries(asignados).filter(([n])=>emparejado.manuales.has(n)).map(([n,k])=>`${n} → ${invoice[k]?.sku}`).join(' · ')}
+          <button onClick={()=>setAsignados({})} style={{marginLeft:8,background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:8,padding:'1px 6px',borderRadius:2,fontFamily:'inherit'}}>deshacer</button>
+        </div>
+      )}
       {invoice&&(
         <div style={{marginBottom:12,padding:10,borderRadius:3,border:`1px solid ${sinZip.length?'#ff880066':S.border}`,background:sinZip.length?'#1a0a00':S.surf}}>
           {sinZip.length ? (
