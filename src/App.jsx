@@ -2850,18 +2850,22 @@ function notesPassQualityCheck(rawText, cleanedText) {
 
 // Build the canonical description HTML for a product. Used by all importers
 // so every product gets the same clean, SEO-friendly format.
+/** ¿El texto del distribuidor ya trae su propia lista de cortes? */
+function yaTraeTracklist(texto) {
+  const t = String(texto || '');
+  if (/track\s*list(ing)?\s*:?/i.test(t)) return true;
+  // Tres o mas lineas que empiezan por A1/B2/1./2) — una lista, la llame como la llame.
+  const lineas = (t.match(/^\s*(?:[ABCD]\d|\d{1,2})\s*[.):-]/gim) || []).length;
+  return lineas >= 3;
+}
+
 function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes }) {
   const parts = [];
 
-  // Lead paragraph: facts in prose, with keywords for SEO.
-  const leadBits = [];
-  if (artist && title) leadBits.push(`<strong>${title}</strong> by ${artist}`);
-  else if (title)      leadBits.push(`<strong>${title}</strong>`);
-  if (label)           leadBits.push(`released on ${label}`);
-  if (year)            leadBits.push(`(${year})`);
-  if (leadBits.length) {
-    parts.push(`<p>${leadBits.join(' ')}.</p>`);
-  }
+  // Ya NO se escribe la frase de cabecera ("X by Y released on Z (año)"): el
+  // artista, el titulo, el sello y el año estan impresos JUSTO ENCIMA de la
+  // descripcion en la ficha, y repetirlos era ruido en el 90% del catalogo.
+  void artist; void title; void label; void year;
 
   // Source notes — included only if they pass quality checks
   const cleaned = cleanSourceNotes(sourceNotes);
@@ -2874,8 +2878,12 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
     parts.push(...paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`));
   }
 
-  // Tracklist — formatted as ordered list when we have it
-  if (tracks && tracks.length) {
+  // Tracklist — solo si las notas del distribuidor no traen ya la suya. Cuando
+  // la traen, la nuestra quedaba debajo diciendo lo mismo: 93 productos del
+  // catalogo tienen el tracklist dos veces por esto.
+  // El <script id="tracks"> NO se toca: vive fuera de esta funcion y de ahi lee
+  // el reproductor.
+  if (tracks && tracks.length && !yaTraeTracklist(sourceNotes)) {
     const items = tracks.map(t => {
       // Track may be {name, url} (from importer ZIP) or {t, d} (legacy)
       const label = t.name || t.t || '';
@@ -2885,8 +2893,8 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
     parts.push(`<p><strong>Tracklist</strong></p><ol>${items}</ol>`);
   }
 
-  // Closing line: format + shipping. Universal across the catalogue.
-  parts.push(`<p>12" vinyl. Worldwide shipping from House Only.</p>`);
+  // La coletilla de envio ya no se escribe: estaba en 1227 productos diciendo lo
+  // mismo, y la tienda ya lo dice en la cabecera y en el pie.
 
   return parts.join('');
 }
@@ -10642,6 +10650,14 @@ function EntitiesPanel() {
         <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
           Worker BOOTSTRAP_AUTH_SECRET for <strong>staging</strong>. Held in memory only — gone on refresh.
         </div>
+        {/* El mismo secreto arma la cola de generos. Un importer no puede
+            generar su CSV sin ella, asi que conviene decirlo aqui y no
+            descubrirlo al soltar un ZIP. */}
+        <div style={{fontSize:10,color:'#ff8800',marginBottom:12,lineHeight:1.5,border:`1px solid ${S.border}`,borderLeft:'2px solid #ff8800',borderRadius:2,padding:'8px 10px'}}>
+          <strong>Genre queue: not connected.</strong> The importers need it: a record whose genre
+          doesn&apos;t resolve sends the value here instead of writing a junk tag. Until you connect,
+          no importer will generate a CSV.
+        </div>
         <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
           onKeyDown={e=>e.key==='Enter'&&loadAll()} placeholder="BOOTSTRAP_AUTH_SECRET"
           style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
@@ -10728,7 +10744,13 @@ function EntitiesPanel() {
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <div style={{fontSize:10,color:S.muted}}>{rows.length} rows in queue · {(WORKER_URL.match(/\/\/([^/]+)/) || [])[1]}</div>
+        <div style={{fontSize:10,color:S.muted}}>
+          {rows.length} rows in queue · {(WORKER_URL.match(/\/\/([^/]+)/) || [])[1]}
+          {' · '}
+          <span style={{color:entitiesSecret?S.accent:'#ff8800',fontWeight:700}}>
+            {entitiesSecret ? 'genre queue connected — importers can run' : 'genre queue NOT connected — importers will refuse to export'}
+          </span>
+        </div>
         <div style={{display:'flex',gap:6}}>
           <Btn ch={busy?'…':'↻ Recompute candidates'} variant="ghost" onClick={manualRecompute} disabled={busy||loading} />
           <Btn ch={loading?'…':'↻ Reload'} variant="ghost" onClick={()=>loadAll()} disabled={busy||loading} />
