@@ -3727,7 +3727,7 @@ async function parseRubadubInvoicePdf(pdfBlob) {
   const arrayBuffer = await pdfBlob.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const rawLines = [];
-  const pages = [];   // [[{y, cells:[{x,str}]}]] — para el formato de presupuesto
+  const pages = [];   // [[{y, cells:[{x,str}]}]] — para leer por columnas
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
@@ -3743,13 +3743,10 @@ async function parseRubadubInvoicePdf(pdfBlob) {
     pages.push(ys.filter(y => cellsByLine[y]).map(y => ({ y, cells: cellsByLine[y].sort((a, b) => a.x - b.x) })));
   }
 
-  // El PRESUPUESTO de Rubadub ("Telsnap. S.L. Quote") pone las columnas en otro
-  // orden: Qty · SKU · Item name · Item net · Total net, y sin HS Code. Leido
-  // como factura, el SKU salia de la ultima palabra del titulo ("EP"). Se
-  // reconoce por la cabecera y se lee por columnas, que ademas aguanta SKUs con
-  // espacio ("WPA-4/ UR-079"). La factura sigue por su camino, ya validado.
-  const quote = parseRubadubQuoteColumns(pages);
-  if (quote) return quote;
+  // Por columnas si hay cabecera (factura y presupuesto, ver parseRubadubColumns).
+  // El parser de lineas de abajo queda para un PDF sin cabecera reconocible.
+  const porColumnas = parseRubadubColumns(pages);
+  if (porColumnas) return porColumnas;
 
   // qty + body + optional HS + £net + £total
   const LINE = /^(\d+)\s+(.+?)\s+(?:(\d{4}\.\d{2}\.\d{2})\s+)?£([\d.,]+)\s+£([\d.,]+)$/;
@@ -3799,41 +3796,67 @@ async function parseRubadubInvoicePdf(pdfBlob) {
   return out;
 }
 
-// Presupuesto por columnas. null si el PDF no tiene cabecera con SKU antes que
-// Item name (o sea, si es una factura).
-function parseRubadubQuoteColumns(pages) {
-  let cols = null;
-  const out = {};
+// Factura o presupuesto de Rubadub, leidos por COLUMNAS a partir de la cabecera.
+// Las dos plantillas llevan las mismas columnas en distinto orden:
+//   factura      Qty · Item name · SKU · HS Code · Item net · Total net
+//   presupuesto  Qty · SKU · Item name · Item net · Total net
+// Leer por posicion aguanta SKUs con espacio: "WPA-4/ UR-079" salia como
+// "UR-079" en la factura SI-286408 (se tomaba la ultima palabra de la linea) y
+// como "EP" en el presupuesto, y asi no casaba con el catno del email.
+// null si no hay cabecera reconocible; entonces manda el parser de lineas.
+function parseRubadubColumns(pages) {
+  const NOMBRES = { 'qty': 'qty', 'sku': 'sku', 'item name': 'name', 'hs code': 'hs', 'item net': 'net', 'total net': 'total' };
+  let cols = null;              // [{campo, x}] ordenadas por x
+  const filas = [];
+  let prev = null;
   for (const rows of pages) {
     let desde = Infinity;
     for (const r of rows) {
-      const x = (t) => r.cells.find(c => c.str.toLowerCase() === t)?.x;
-      const qx = x('qty'), sx = x('sku'), nx = x('item name'), ux = x('item net'), tx = x('total net');
-      if ([qx, sx, nx, ux, tx].every(v => v != null)) {
-        if (!(sx < nx)) return null;                 // factura: SKU tras el nombre
-        cols = { sx, nx, ux, tx }; desde = r.y; break;
+      const hallados = r.cells.filter(c => NOMBRES[c.str.toLowerCase()]).map(c => ({ campo: NOMBRES[c.str.toLowerCase()], x: c.x }));
+      const campos = new Set(hallados.map(h => h.campo));
+      if (['qty', 'sku', 'name', 'net', 'total'].every(f => campos.has(f))) {
+        cols = hallados.sort((a, b) => a.x - b.x); desde = r.y; prev = null; break;
       }
     }
     if (!cols) continue;
     for (const r of rows) {
       if (r.y >= desde) continue;
-      const entre = (a, b) => r.cells.filter(c => c.x >= a - 3 && c.x < b - 3).map(c => c.str).join(' ').trim();
-      const qty = entre(-Infinity, cols.sx);
-      const sku = entre(cols.sx, cols.nx);
-      const name = entre(cols.nx, cols.ux);
-      const net = entre(cols.ux, cols.tx);
-      if (!/^\d+$/.test(qty) || !sku || !/^£[\d.,]+$/.test(net)) continue;
-      if (/Z-?EU|SHIPPING|POSTAGE|CARRIAGE/i.test(sku)) continue;
-      const key = rdKey(sku);
-      if (!key) continue;
-      const cost = parseFloat(net.slice(1).replace(/,/g, ''));
-      // El mismo SKU en dos lineas (WO-KJHBCS en el presupuesto del 14-09) son
-      // dos pedidos: se suman, no se pisan.
-      if (out[key]) { out[key].qty += parseInt(qty, 10); continue; }
-      out[key] = { sku, name, qty: parseInt(qty, 10) || 1, cost: isNaN(cost) ? null : cost };
+      const celda = {};
+      cols.forEach((c, i) => {
+        const hasta = i + 1 < cols.length ? cols[i + 1].x - 3 : Infinity;
+        const desdeX = i === 0 ? -Infinity : c.x - 3;
+        celda[c.campo] = r.cells.filter(t => t.x >= desdeX && t.x < hasta).map(t => t.str).join(' ').trim();
+      });
+      const esFila = /^\d+$/.test(celda.qty) && celda.sku && /^£[\d.,]+$/.test(celda.net);
+      if (!esFila) {
+        // Linea de continuacion: la cola de un SKU partido ("DMSR8602-" / "1")
+        // o de un nombre largo. Solo se engancha a la fila de justo encima.
+        // Una linea con importes (Subtotal, Zero rated, Total…) nunca lo es.
+        if (prev && !celda.qty && !celda.net && !r.cells.some(t => t.str.includes('£'))) {
+          if (celda.sku && /[-/]$/.test(prev.sku)) prev.sku += celda.sku;
+          if (celda.name) prev.name = `${prev.name} ${celda.name}`.trim();
+        }
+        else prev = null;
+        continue;
+      }
+      if (/Z-?EU|SHIPPING|POSTAGE|CARRIAGE/i.test(celda.sku)) { prev = null; continue; }
+      const cost = parseFloat(celda.net.slice(1).replace(/,/g, ''));
+      prev = { sku: celda.sku, name: celda.name, qty: parseInt(celda.qty, 10) || 1, cost: isNaN(cost) ? null : cost };
+      // Las claves se calculan al final, con las colas de SKU partido ya pegadas.
+      filas.push(prev);
     }
   }
-  return cols ? out : null;
+  if (!cols) return null;
+  const res = {};
+  for (const f of filas) {
+    const key = rdKey(f.sku);
+    if (!key) continue;
+    // El mismo SKU en dos lineas (WO-KJHBCS en el presupuesto del 14-09) son
+    // dos pedidos: se suman, no se pisan.
+    if (res[key]) { res[key].qty += f.qty; continue; }
+    res[key] = { ...f };
+  }
+  return res;
 }
 
 // Split a Rubadub "Artist - Title" item name into {artist, title}. Rubadub uses
@@ -3879,7 +3902,10 @@ function RubadubImporter() {
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
   const [fx, setFx]             = useState(1.15);    // GBP→EUR
-  const [genre, setGenre]       = useState('Deep House');
+  // Vacio por defecto. Con "Deep House" aqui, todo disco cuyo ZIP no traia
+  // SALESPAPER (6 de cada 7 de Rubadub) salia como Deep House: un genero
+  // inventado que, al resolver, ni siquiera pasaba por la cola.
+  const [genre, setGenre]       = useState('');
   const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
   const [mailSecret, setMailSecret] = useMailSecret();  // compartido con Pre-order
   const [find, setFind]         = useState({});     // invoice key -> {estado, detalle, email}
@@ -4229,11 +4255,11 @@ function RubadubImporter() {
   return (
     <div>
       <p style={{ fontSize:10, color:S.muted, margin:'0 0 14px', lineHeight:1.6 }}>
-        Rubadub (UK) import. Rubadub supplies no promopacks — drop the <strong>Rubadub invoice PDF</strong> (SKU + dealer £ cost + qty) plus the <strong>ZIPs sourced from Word &amp; Sound</strong> (or other distributors). The invoice is the spine: every invoiced record gets a row — matched by SKU it gets cover + audio, the rest come through cover-less (add art in Shopify). Prices = dealer £ × FX × margin.
+        Rubadub (UK). Suelta la <strong>factura o el presupuesto en PDF</strong> (SKU, coste £ y cantidad): manda el PDF, y cada disco que trae sale en el CSV. Los ZIP con portada y audio no vienen con la factura: <strong>Find ZIPs</strong> busca cada catno en los emails de Rubadub archivados en el worker —su anuncio o, si no tiene, un digest— y los baja aquí directamente. Los que no encuentre se pueden arrastrar a mano; sin ZIP, el disco entra sin portada ni audio. Precio = coste £ × FX × margen.
       </p>
       <div onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();assignFiles([...e.dataTransfer.files]);}} style={{ border:`2px dashed ${ready?S.accent:S.border}`, borderRadius:3, padding:'20px', textAlign:'center', marginBottom:14, transition:'border 0.15s' }}>
         <div style={{ fontSize:28, marginBottom:6 }}>💿</div>
-        <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Drag Rubadub invoice PDF + W&amp;S ZIPs here</div>
+        <div style={{ fontSize:11, color:ready?S.accent:S.muted, fontWeight:700, letterSpacing:1, textTransform:'uppercase', marginBottom:10 }}>Suelta aquí el PDF de Rubadub (y ZIPs a mano si hace falta)</div>
         <div style={{ display:'flex', gap:8, justifyContent:'center', flexWrap:'wrap' }}>
           <input ref={pdfRef} type="file" accept=".pdf,.PDF" style={{ display:'none' }} onChange={e=>e.target.files[0]&&assignFiles([...e.target.files])} />
           <input ref={zipRef} type="file" accept=".zip" multiple style={{ display:'none' }} onChange={e=>assignFiles([...e.target.files])} />
@@ -4264,7 +4290,7 @@ function RubadubImporter() {
               <button onClick={findZips} disabled={finding||!mailSecret.trim()} style={{background:finding||!mailSecret.trim()?S.border:S.accent,border:'none',color:finding||!mailSecret.trim()?S.muted:'#080808',cursor:finding?'wait':'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
                 {finding?(findPhase||'Buscando…'):'Find ZIPs'}
               </button>
-              <span style={{fontSize:9,color:S.muted}}>busca el email de anuncio de cada catno en el archivo del worker y baja su ZIP aquí{!mailSecret?' · mismo secreto que el Archivo de emails':''}</span>
+              <span style={{fontSize:9,color:S.muted}}>busca cada catno en los emails archivados (anuncio o digest) y baja su ZIP aquí{!mailSecret?' · mismo secreto que el Archivo de emails':''}</span>
             </div>
           )}
           {findError&&<div style={{marginTop:8,fontSize:10,color:S.danger}}>{findError}</div>}
@@ -4300,7 +4326,7 @@ function RubadubImporter() {
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>GBP→EUR</span>
             <input type="number" step="0.01" value={fx} onChange={e=>setFx(Math.max(0.01,parseFloat(e.target.value)||1))} style={{width:64,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Genre</span>
-            <input type="text" value={genre} onChange={e=>setGenre(e.target.value)} style={{width:120,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none'}} />
+            <input type="text" value={genre} onChange={e=>setGenre(e.target.value)} placeholder="vacío = sin género" title="Se aplica a TODOS los discos cuyo ZIP no traiga género. Vacío: entran sin género." style={{width:120,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none'}} />
           </div>
           <div style={{fontSize:9,color:S.muted,marginBottom:10}}>→ e.g. £{sampleCost} × {fx} × {(1+margin/100).toFixed(2)} → €{(Math.ceil(sampleCost*fx*(1+margin/100))-0.01).toFixed(2)}</div>
           <Btn ch={`🚀 Process ${invCount} Invoiced Records → Upload to R2`} onClick={process} full />
