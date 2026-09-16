@@ -4623,14 +4623,18 @@ function RubadubImporter() {
               Comprobando cuáles ya existen en la tienda…
             </div>
           )}
-          {liveRows.length>0&&(
-            <AddStockPanel source="rd" documento={documento}
-              filas={liveRows.map(r => {
-                const k = rdKey(r._catno);
-                const real = liveHandles?.skuReal?.get(k);
-                return { sku: real || r._catno, delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}` };
-              }).filter(f => f.delta > 0)} />
-          )}
+          {liveRows.length>0&&(()=>{
+            // Discos en tienda: el SKU tal cual esta en Shopify (el worker no adivina).
+            const skuDe = (r) => liveHandles?.skuReal?.get(rdKey(r._catno)) || r._catno;
+            const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
+            return (<>
+              <AddStockPanel source="rd" documento={documento}
+                filas={liveRows.map(r => ({ sku: skuDe(r), delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: titulo(r) })).filter(f => f.delta > 0)} />
+              <CompletarMediaPanel
+                filas={liveRows.map(r => ({ sku: skuDe(r), titulo: titulo(r), imageUrl: r._coverUrl || '', tracks: r._tracks || [],
+                  notasHtml: String(r['Body (HTML)'] || '').replace(/<script[^>]*id="tracks"[^>]*>[\s\S]*?<\/script>/gi, '') }))} />
+            </>);
+          })()}
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -11046,6 +11050,104 @@ function exigirColaAutenticada() {
  * llevaba por delante los valores desconocidos sin decir nada. Si la cola
  * falla, no hay CSV: el error se ve y la importacion se repite.
  */
+// ── COMPLETAR MEDIA (comun a los importers) ───────────────────
+// Discos que ya estan en la tienda pero sin portada o sin audio: con lo que el
+// importer ya subio a R2 (portada, MP3, prosa), el worker (?action=product-media)
+// les pone SOLO lo que falta — imagen y/o <script id="tracks"> — sin tocar
+// precio, inventario, tags ni estado. Un disco con portada y audio no se toca
+// salvo "Forzar" confirmado. Uso:
+//   <CompletarMediaPanel filas={[{sku, titulo, imageUrl, tracks, notasHtml}]} />
+const MEDIA_ESTADOS = {
+  'haria':      { label: 'le falta',       color: '#ff8800' },
+  'completado': { label: 'completado',     color: '#c8ff00' },
+  'completo':   { label: 'ya completo',    color: '#585858' },
+  'sin-media':  { label: 'sin con qué',    color: '#ff8800' },
+  'error':      { label: 'error',          color: '#ff4040' },
+};
+
+function CompletarMediaPanel({ filas }) {
+  const [secreto] = useMailSecret();
+  const [estados, setEstados] = useState({});    // sku -> resultado del worker
+  const [permisos, setPermisos] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+  const clave = filas.map(f => `${f.sku}|${f.imageUrl}|${(f.tracks || []).length}`).join(',');
+
+  const llamar = async (dry, items) => {
+    const r = await fetchAdmin(`${WORKER_URL}?action=product-media`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry, items: items.map(f => ({ sku: f.sku, imageUrl: f.imageUrl || '', tracks: f.tracks || [], notasHtml: f.notasHtml || '', forzar: !!f.forzar })) }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d.permisos) setPermisos(d.permisos);
+    if (!r.ok) throw new Error(d.error || `El worker respondió ${r.status}`);
+    setEstados(prev => ({ ...prev, ...Object.fromEntries((d.resultados || []).map(x => [x.sku, x])) }));
+  };
+
+  // Al aparecer: que tiene cada producto en Shopify (dry-run, no escribe).
+  useEffect(() => {
+    if (!secreto || !filas.length) return;
+    let vivo = true;
+    setBusy('leyendo'); setErr('');
+    llamar(true, filas).catch(e => vivo && setErr(e.message)).finally(() => vivo && setBusy(''));
+    return () => { vivo = false; };
+  }, [clave, secreto]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const completar = async (items, forzar) => {
+    if (busy || !items.length) return;
+    const texto = items.map(f => `${f.sku}: ${(estados[f.sku]?.hara || []).join(', ') || (forzar ? 'sustituir portada y audio' : '')}`).join('\n');
+    if (!window.confirm(`${forzar ? 'FORZAR — sustituir portada y audio de un disco que YA los tiene' : 'Completar media'} en Shopify (tienda real):\n\n${texto}\n\nSolo imagen y descripción; no toca precio, inventario, tags ni estado.`)) return;
+    setBusy('real'); setErr('');
+    try { await llamar(false, items.map(f => ({ ...f, forzar }))); }
+    catch (e) { setErr(e.message); }
+    setBusy('');
+  };
+
+  const pendientes = filas.filter(f => estados[f.sku]?.estado === 'haria');
+  if (!filas.length) return null;
+  return (
+    <div style={{marginBottom:12,padding:'10px 14px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:4}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
+        <div style={{fontSize:10,color:S.text,fontWeight:700}}>Media de los discos en tienda {busy==='leyendo'&&<span style={{color:S.muted,fontWeight:400}}>· comprobando en Shopify…</span>}</div>
+        <Btn ch={busy==='real'?'Completando…':`Completar (${pendientes.length})`} onClick={()=>completar(pendientes, false)} disabled={!secreto||!!busy||!pendientes.length} />
+      </div>
+      {!secreto&&<div style={{fontSize:9,color:'#ff8800',marginBottom:6}}>Entra en el admin con el secreto para ver y completar la media.</div>}
+      {permisos&&!permisos.write_products&&<div style={{fontSize:9,color:S.danger,marginBottom:6}}>La app de Admin del worker no tiene write_products: no se puede completar.</div>}
+      {err&&<div style={{fontSize:10,color:S.danger,marginBottom:6}}>{err}</div>}
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:9}}>
+          <tbody>
+            {filas.map(f => {
+              const x = estados[f.sku];
+              const e = x ? (MEDIA_ESTADOS[x.estado] || MEDIA_ESTADOS.error) : null;
+              const tieneMedia = !!f.imageUrl || (f.tracks || []).length > 0;
+              const marca = (ok) => ok ? '✓' : '✗';
+              return (
+                <tr key={f.sku} style={{borderTop:`1px solid ${S.border}`}}>
+                  <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{f.sku}</td>
+                  <td style={{padding:'4px 8px',color:S.muted,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={f.titulo}>{f.titulo}</td>
+                  <td style={{padding:'4px 8px',color:S.muted,whiteSpace:'nowrap'}} title="En Shopify / en el ZIP del importer">
+                    {x&&x.tieneImagen!==undefined?`Shopify: portada ${marca(x.tieneImagen)} audio ${marca(x.tieneAudio)}`:''}
+                    <span> · ZIP: portada {marca(!!f.imageUrl)} · {(f.tracks||[]).length} pistas</span>
+                  </td>
+                  <td style={{padding:'4px 8px'}}>
+                    {e&&<span style={{color:e.color,fontWeight:700,whiteSpace:'nowrap'}}>{e.label}</span>}
+                    {x&&<span style={{color:S.muted}}>{x.hara?` ${x.hara.join(', ')}`:''}{x.hizo?` ${x.hizo.join(', ')}`:''}{x.motivo?` · ${x.motivo}`:''}</span>}
+                  </td>
+                  <td style={{padding:'4px 0 4px 8px',textAlign:'right',whiteSpace:'nowrap'}}>
+                    {x?.estado==='haria'&&<button onClick={()=>completar([f], false)} disabled={!!busy} style={{background:'none',border:`1px solid ${S.accent}`,color:S.accent,cursor:busy?'default':'pointer',fontSize:8,padding:'2px 8px',borderRadius:2,fontFamily:'inherit'}}>Completar</button>}
+                    {x?.estado==='completo'&&tieneMedia&&<button onClick={()=>completar([f], true)} disabled={!!busy} title="Sustituir portada y audio aunque ya los tenga" style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:busy?'default':'pointer',fontSize:8,padding:'2px 8px',borderRadius:2,fontFamily:'inherit'}}>Forzar…</button>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── ADD STOCK (comun a los importers) ─────────────────────────
 // Llegada de una factura a discos que YA son productos en la tienda: se suma el
 // inventario por el worker (?action=stock-add) en vez de mandarlos en el CSV,
