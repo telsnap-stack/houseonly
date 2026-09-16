@@ -13,7 +13,18 @@
  * so it never duplicates and never misses one. The .html it writes is the raw
  * email HTML body — exactly what the importer's builders parse.
  *
- * CHANGES vs previous version (2026-09-16):
+ * CHANGES vs previous version (2026-09-16, tarde):
+ *  - FIX: el backfill no llegaba al correo antiguo de Rubadub. Miraba solo
+ *    newer_than:30d y como mucho las 300 conversaciones MAS RECIENTES por
+ *    distribuidor; Rubadub manda tanto que 300 no pasaban del 17-08. Asi se
+ *    quedo fuera, por ejemplo, el anuncio de MEOW01 (24-07), que Find ZIPs daba
+ *    como "sin correo". backfillDistributorEmails() recorre ahora el correo por
+ *    SEMANAS desde BACKFILL_DESDE hasta hoy, sin tope de 30 dias, con
+ *    presupuesto de 5 minutos y reanudando donde lo dejo (Propiedades del
+ *    script). Ejecutalo hasta que el log diga "Backfill completo".
+ *  - El diario mira 100 conversaciones por fuente en vez de 50.
+ *
+ * CHANGES vs version of 2026-09-16 (mañana):
  *  - FIX: los digests grandes se archivaban en TEXTO PLANO. Con un HTML de
  *    ~1,1 MB, GmailMessage.getBody() devuelve la parte text/plain y no la
  *    text/html. Medido con "Rubadub New Releases Shipping This Week" del 14-09:
@@ -110,42 +121,100 @@ function setup() {
   Logger.log('Setup OK. Now add a daily time trigger for saveDistributorEmails.');
 }
 
-// Daily entry point (used by the time trigger). Scans the newest 50 threads
-// per source — plenty for a day, cheap to run.
+// Daily entry point (used by the time trigger). Scans the newest 100 threads
+// per source from the last 30 days — Rubadub alone sends ~10-15 a day.
 function saveDistributorEmails() {
-  runArchive_(50);
-}
-
-// One-off backfill: scans up to 300 threads per source to pick up older mail
-// the 50-thread daily window never reaches (e.g. per-releases from 2+ weeks
-// ago on a chatty sender like Rubadub). Run it manually from the dropdown.
-// If it hits Apps Script's 6-minute limit, just Run it again — the filename
-// dedup makes re-runs resume where they left off.
-function backfillDistributorEmails() {
-  runArchive_(300);
-}
-
-function runArchive_(maxThreads) {
-  var folder = getFolder_();
-  var label = getOrCreateLabel_();
-  var totalSaved = 0;
-
+  var folder = getFolder_(), label = getOrCreateLabel_(), totalSaved = 0;
   for (var s = 0; s < SOURCES.length; s++) {
-    var src = SOURCES[s];
-    // NO -label filter here: the label excludes the whole thread, so a reply
-    // arriving AFTER the thread was first archived (e.g. Eduardo's order Fwd,
-    // sent hours/days later) would never be saved. Dedup is done per-message
-    // by filename instead. in:anywhere → also captures mail already in Trash.
-    var query = '(' + src.query + ') newer_than:30d in:anywhere';
-    // GmailApp.search pages in chunks of up to 100; loop until maxThreads.
-    var threads = [];
-    for (var off = 0; off < maxThreads; off += 100) {
-      var page = GmailApp.search(query, off, Math.min(100, maxThreads - off));
-      threads = threads.concat(page);
-      if (page.length < Math.min(100, maxThreads - off)) break;
-    }
+    totalSaved += archivarBusqueda_(folder, label, SOURCES[s],
+      '(' + SOURCES[s].query + ') newer_than:30d in:anywhere', 100, null).saved;
+  }
+  Logger.log('Done. Saved %s new file(s).', totalSaved);
+}
 
+// Backfill por semanas, sin tope de 30 dias ni de 300 conversaciones. Empieza en
+// BACKFILL_DESDE y llega hasta hoy; guarda por donde va en las Propiedades del
+// script y se para a los 5 minutos (Apps Script corta a los 6). Ejecutalo a mano
+// hasta que el log diga "Backfill completo". Repetirlo no duplica: cada mensaje
+// se deduplica por nombre de fichero.
+// Lo que Gmail ya borro de la Papelera (30 dias) no se puede recuperar.
+var BACKFILL_DESDE = '2026-01-01';
+var BACKFILL_PRESUPUESTO_MS = 5 * 60 * 1000;
+
+function backfillDistributorEmails() {
+  var inicio = Date.now();
+  var props = PropertiesService.getScriptProperties();
+  var folder = getFolder_(), label = getOrCreateLabel_(), totalSaved = 0;
+  var semana = props.getProperty('backfill_semana') || BACKFILL_DESDE;   // yyyy-MM-dd
+  var hoy = fmtDate_(new Date());
+
+  while (semana <= hoy) {
+    var fin = sumaDias_(semana, 7);
+    var fuente = Number(props.getProperty('backfill_fuente') || '0');
+    for (var s = fuente; s < SOURCES.length; s++) {
+      // Tambien antes de cada busqueda: las semanas sin correo no pasan por el
+      // bucle de mensajes, pero buscar tambien gasta tiempo.
+      if (Date.now() - inicio > BACKFILL_PRESUPUESTO_MS) {
+        props.setProperty('backfill_semana', semana);
+        props.setProperty('backfill_fuente', String(s));
+        Logger.log('Pausa por tiempo antes de %s, semana %s. Guardados %s. Vuelve a ejecutarla.', SOURCES[s].prefix, semana, totalSaved);
+        return;
+      }
+      var q = '(' + SOURCES[s].query + ') after:' + semana.replace(/-/g, '/') +
+              ' before:' + fin.replace(/-/g, '/') + ' in:anywhere';
+      var r = archivarBusqueda_(folder, label, SOURCES[s], q, 500, inicio);
+      totalSaved += r.saved;
+      if (r.cortado) {
+        // A medias en esta fuente y semana: la proxima vez se repite entera (el
+        // dedup por nombre salta lo ya guardado).
+        props.setProperty('backfill_semana', semana);
+        props.setProperty('backfill_fuente', String(s));
+        Logger.log('Pausa por tiempo en %s, semana %s. Guardados %s. Vuelve a ejecutarla.', SOURCES[s].prefix, semana, totalSaved);
+        return;
+      }
+      props.setProperty('backfill_fuente', String(s + 1));
+    }
+    semana = fin;
+    props.setProperty('backfill_semana', semana);
+    props.setProperty('backfill_fuente', '0');
+    Logger.log('Semana hasta %s hecha. Guardados en esta ejecucion: %s', fin, totalSaved);
+  }
+  Logger.log('Backfill completo hasta hoy. Guardados en esta ejecucion: %s.', totalSaved);
+}
+
+// Para volver a empezar el backfill desde BACKFILL_DESDE.
+function reiniciarBackfill() {
+  PropertiesService.getScriptProperties().deleteProperty('backfill_semana');
+  PropertiesService.getScriptProperties().deleteProperty('backfill_fuente');
+  Logger.log('Backfill reiniciado: empezara en %s.', BACKFILL_DESDE);
+}
+
+function sumaDias_(isoFecha, dias) {
+  var p = isoFecha.split('-');
+  var d = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + dias));
+  return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+}
+
+// Archiva los mensajes de una busqueda. Devuelve {saved, cortado}: cortado si
+// se acabo el presupuesto de tiempo (solo cuando se pasa `inicio`).
+function archivarBusqueda_(folder, label, src, query, maxThreads, inicio) {
+  var totalSaved = 0;
+  // NO -label filter here: the label excludes the whole thread, so a reply
+  // arriving AFTER the thread was first archived (e.g. Eduardo's order Fwd,
+  // sent hours/days later) would never be saved. Dedup is done per-message
+  // by filename instead. in:anywhere → also captures mail already in Trash.
+  // GmailApp.search pages in chunks of up to 100; loop until maxThreads.
+  var threads = [];
+  for (var off = 0; off < maxThreads; off += 100) {
+    var page = GmailApp.search(query, off, Math.min(100, maxThreads - off));
+    threads = threads.concat(page);
+    if (page.length < Math.min(100, maxThreads - off)) break;
+  }
+  if (threads.length >= maxThreads) Logger.log('AVISO — %s: la busqueda llego al tope de %s conversaciones; puede faltar correo: %s', src.prefix, maxThreads, query);
+
+  {   // (bloque del bucle de hilos, igual que antes)
     for (var t = 0; t < threads.length; t++) {
+      if (inicio != null && Date.now() - inicio > BACKFILL_PRESUPUESTO_MS) return { saved: totalSaved, cortado: true };
       var messages = threads[t].getMessages();
       for (var m = 0; m < messages.length; m++) {
         var msg = messages[m];
@@ -184,10 +253,10 @@ function runArchive_(maxThreads) {
           }
         }
       }
-      threads[t].addLabel(label);                 // skip this thread next run
+      threads[t].addLabel(label);                 // marker only (see above)
     }
   }
-  Logger.log('Done. Saved %s new file(s).', totalSaved);
+  return { saved: totalSaved, cortado: false };
 }
 
 // One-off: las copias de Drive que se guardaron en texto plano antes de este
