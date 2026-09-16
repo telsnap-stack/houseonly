@@ -871,6 +871,7 @@ import {
 } from './lib/entities';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd } from './lib/stock-add';
+import { handleProductMedia } from './lib/product-media';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1874,6 +1875,12 @@ export default {
     // decia cantidades antes/despues, y no lo usaba la app.
     if (action === 'stock-add' && request.method === 'POST') {
       return await handleStockAdd(request, env, bearerAdminValido(request, env));
+    }
+
+    // ── COMPLETAR MEDIA (portada y audio de discos ya en la tienda) ──
+    //   POST ?action=product-media  Bearer  — ver src/lib/product-media.ts
+    if (action === 'product-media' && request.method === 'POST') {
+      return await handleProductMedia(request, env, bearerAdminValido(request, env));
     }
 
     // ── FASE 3.5B: AUTO-LIST MODE (dry/live) ────────────────
