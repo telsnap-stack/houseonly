@@ -528,7 +528,7 @@ async function resizeImageIfNeeded(blob, maxDim = 2000, quality = 0.92) {
 const FALTA_SECRETO_ADMIN = 'Falta el secreto de admin: conecta la pestaña Entities con el BOOTSTRAP_AUTH_SECRET y repite.';
 let avisadoFaltaSecretoAdmin = false;
 async function fetchAdmin(url, opts = {}, secretoLocal = '') {
-  const secreto = secretoLocal || entitiesSecret;
+  const secreto = secretoLocal || entitiesSecret || mailSecretStore.v;
   const headers = { ...(opts.headers || {}), ...(secreto ? { 'Authorization': `Bearer ${secreto}` } : {}) };
   const r = await fetch(url, { ...opts, headers });
   if (r.status === 401) {
@@ -8001,7 +8001,7 @@ function confidenceColor(conf) {
 }
 
 function DiscogsReviewPanel() {
-  const [secret, setSecret]       = useState('');
+  const [secret, setSecret]       = useState(() => mailSecretStore.v);   // el del login del admin
   const [authed, setAuthed]       = useState(false);
   const [records, setRecords]     = useState([]);
   const [loading, setLoading]     = useState(false);
@@ -8249,7 +8249,7 @@ function NewsletterSectionList({ title, sub, items, included, large, toggleInclu
 }
 
 function NewsletterPanel() {
-  const [secret, setSecret]   = useState('');
+  const [secret, setSecret]   = useState(() => mailSecretStore.v);   // el del login del admin
   const [authed, setAuthed]   = useState(false);
   const [days, setDays]       = useState(7);
   const [subject, setSubject] = useState('New this week at House Only');
@@ -8965,6 +8965,17 @@ async function scanZipDir(dirHandle, onProgress) {
 // El secreto sigue sin persistirse — se pierde al recargar, nunca va en el
 // bundle —, pero ahora se comparte entre tabs: pegarlo en uno vale para el otro.
 const mailSecretStore = { v: '', subs: new Set() };
+
+// El secreto con el que se entra al admin (LoginScreen, validado por el worker
+// en ?action=admin-check). Se guarda UNA vez, en memoria —se pierde al recargar,
+// nunca se persiste ni va en el bundle— y sirve para todo: el archivo de emails
+// y Find ZIPs (mailSecretStore), la cola de entidades y generos y las subidas a
+// R2 (entitiesSecret), y como valor inicial de los paneles que lo piden aparte.
+function establecerSecretoAdmin(secreto) {
+  mailSecretStore.v = secreto;
+  mailSecretStore.subs.forEach(f => f(secreto));
+  entitiesSecret = secreto;
+}
 function useMailSecret() {
   const [v, setV] = useState(mailSecretStore.v);
   useEffect(() => {
@@ -11211,7 +11222,7 @@ const WHY_EN = {
 };
 
 function EntitiesPanel() {
-  const [secret, setSecret]   = useState('');
+  const [secret, setSecret]   = useState(() => mailSecretStore.v);   // el del login del admin
   const [authed, setAuthed]   = useState(false);
   const [view, setView]       = useState('bulk');
   const [kindTab, setKindTab] = useState('artist');
@@ -11900,15 +11911,37 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
 
 // ── LOGIN ──────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
-  const [pw,setPw]=useState(''); const [err,setErr]=useState(false);
-  const attempt=()=>{if(pw==='waxlab2024') onLogin(); else {setErr(true);setTimeout(()=>setErr(false),1500);}};
+  // Antes: una contraseña escrita aqui, o sea en el bundle, que es publico. Ahora
+  // se pide el secreto de admin y lo valida el worker (?action=admin-check,
+  // comparacion en tiempo constante). Si vale, queda en memoria para toda la
+  // sesion del admin (establecerSecretoAdmin).
+  const [secreto, setSecreto] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const entorno = WORKER_URL.includes('staging') ? 'staging' : 'producción';
+  const attempt = async () => {
+    const s = secreto.trim();
+    if (!s || busy) return;
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=admin-check`, { headers: { 'Authorization': `Bearer ${s}` } });
+      if (r.ok) { establecerSecretoAdmin(s); onLogin(); return; }
+      setErr(r.status === 401 ? 'Secreto incorrecto' : `El worker respondió ${r.status}`);
+    } catch (e) {
+      setErr(`Sin conexión con el worker: ${e.message}`);
+    }
+    setBusy(false);
+  };
   return (
     <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div style={{width:280,background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:32}}>
-        <div style={{fontSize:9,letterSpacing:3,color:S.muted,textTransform:'uppercase',marginBottom:24}}>Admin Access</div>
-        <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&attempt()} placeholder="Password" style={{width:'100%',background:S.bg,border:`1px solid ${err?S.danger:S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
-        <Btn ch="Enter" onClick={attempt} full />
-        {err&&<div style={{fontSize:10,color:S.danger,marginTop:8,textAlign:'center'}}>Incorrect password</div>}
+      <div style={{width:300,background:S.surf,border:`1px solid ${S.border}`,borderRadius:3,padding:32}}>
+        <div style={{fontSize:9,letterSpacing:3,color:S.muted,textTransform:'uppercase',marginBottom:12}}>Admin Access</div>
+        <div style={{fontSize:10,color:S.muted,lineHeight:1.5,marginBottom:16}}>
+          Secreto de admin de <b style={{color:S.text}}>{entorno}</b> (BOOTSTRAP_AUTH_SECRET). Se queda en memoria hasta recargar; no se guarda.
+        </div>
+        <input type="password" value={secreto} onChange={e=>setSecreto(e.target.value)} onKeyDown={e=>e.key==='Enter'&&attempt()} placeholder="BOOTSTRAP_AUTH_SECRET" autoComplete="off" style={{width:'100%',background:S.bg,border:`1px solid ${err?S.danger:S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={busy?'Comprobando…':'Enter'} onClick={attempt} disabled={busy||!secreto.trim()} full />
+        {err&&<div style={{fontSize:10,color:S.danger,marginTop:8,textAlign:'center'}}>{err}</div>}
       </div>
     </div>
   );
