@@ -3826,6 +3826,32 @@ function rdSplitName(name) {
   return { artist: '', title: String(name || '').trim() };
 }
 
+// Invoice key -> dropped ZIP File. Filename -> catno as W&S names them, then
+// matchKeysWithSuffix (exact, then a known format suffix).
+function rdZipsForInvoice(invoice, zipFiles) {
+  const zipByKey = {};
+  zipFiles.forEach(f => { const k = rdKey(catnoFromFilename(f.name)); if (k) zipByKey[k] = f; });
+  const out = {};
+  for (const [k, zk] of matchKeysWithSuffix(Object.keys(invoice || {}), Object.keys(zipByKey))) out[k] = zipByKey[zk];
+  return out;
+}
+
+// Estados de "Find ZIPs", por catno de la factura. Los seis de resultado mas
+// los de paso; nada se queda sin estado.
+const RD_FIND_ESTADOS = {
+  'ok':          { label: 'encontrado',             color: '#c8ff00' },
+  'sin-correo':  { label: 'sin correo',             color: '#ff4040' },
+  'solo-digest': { label: 'solo en un digest',      color: '#ff8800' },
+  'sin-enlace':  { label: 'correo sin enlace',      color: '#ff8800' },
+  'caducado':    { label: 'enlace caducado',        color: '#ff4040' },
+  'no-zip':      { label: 'no era un ZIP',          color: '#ff4040' },
+  'error':       { label: 'fallo',                  color: '#ff4040' },
+  'buscando':    { label: 'buscando…',              color: '#585858' },
+  'bajando':     { label: 'bajando…',               color: '#585858' },
+  'manual':      { label: 'ZIP ya soltado',         color: '#585858' },
+  'live':        { label: 'en tienda — no se busca', color: '#585858' },
+};
+
 function RubadubImporter() {
   const [pdfFile, setPdfFile]   = useState(null);   // invoice PDF (SKU + cost + qty)
   const [invoice, setInvoice]   = useState(null);   // parsed { key: {sku,name,qty,cost} }
@@ -3838,6 +3864,14 @@ function RubadubImporter() {
   const [fx, setFx]             = useState(1.15);    // GBP→EUR
   const [genre, setGenre]       = useState('Deep House');
   const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
+  const [mailSecret, setMailSecret] = useMailSecret();  // compartido con Pre-order
+  const [find, setFind]         = useState({});     // invoice key -> {estado, detalle, email}
+  const [finding, setFinding]   = useState(false);
+  const [findPhase, setFindPhase] = useState('');
+  const [findError, setFindError] = useState('');
+  // El campo del secreto se queda mientras se escribe; solo se omite si ya venia
+  // pegado de Pre-order al abrir el tab.
+  const [pideSecreto] = useState(() => !mailSecretStore.v);
   const pdfRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -3846,6 +3880,7 @@ function RubadubImporter() {
     const zips = files.filter(f => /\.zip$/i.test(f.name));
     if (pdfs[0]) {
       setPdfFile(pdfs[0]);
+      setFind({}); setFindError('');
       try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
       catch (e) { setError('Could not read invoice PDF: ' + e.message); }
       // An invoiced record may already be a live product — typically one this
@@ -3866,6 +3901,114 @@ function RubadubImporter() {
     });
   };
 
+  // ── Find ZIPs ──────────────────────────────────────────────
+  // Rubadub no manda promopacks con la factura: el ZIP de cada disco esta en su
+  // email de anuncio, tras "Download Zip". Para cada catno de la factura sin ZIP
+  // se busca su anuncio INDIVIDUAL en el archivo del worker, se toma el enlace
+  // de SU bloque (no el primero del email), se resuelve y se baja por el proxy
+  // directamente al importer, nombrado por la clave de la factura — los
+  // promopacks de Rubadub no llevan el catno dentro, asi que el nombre lo pone
+  // quien descarga.
+  const findZips = async () => {
+    if (!invoice || !mailSecret.trim() || finding) return;
+    const keys = Object.keys(invoice);
+    const esLive = (k) => !!liveHandles && liveHandles.has(rdKey(invoice[k].sku));
+    const conZip = rdZipsForInvoice(invoice, zipFiles);
+    const buscar = keys.filter(k => !conZip[k] && !esLive(k));
+    const estado = {};
+    keys.forEach(k => { estado[k] = conZip[k] ? { estado: 'manual' } : esLive(k) ? { estado: 'live' } : { estado: 'buscando' }; });
+    setFind(estado);
+    const set = (k, v) => setFind(prev => ({ ...prev, [k]: v }));
+    if (!buscar.length) return;
+    setFinding(true); setFindError('');
+
+    // Lee y parsea emails en tandas de 8; devuelve rdKey(catno) -> [{row, e}].
+    const leer = async (lista, fase) => {
+      const out = new Map();
+      for (let i = 0; i < lista.length; i += 8) {
+        setFindPhase(`${fase} ${Math.min(i + 8, lista.length)}/${lista.length}`);
+        const tanda = await Promise.all(lista.slice(i, i + 8).map(async e => ({ e, html: await mailFetchBody(mailSecret, e.name) })));
+        for (const { e, html } of tanda) {
+          let rows = [];
+          try { rows = parseDistributorEmail(html, { emailDate: parseLocalDate(e.date) || new Date() }); }
+          catch { /* un email raro no tumba la busqueda */ }
+          for (const row of rows) {
+            if (row.source !== 'rd' || !row.catno) continue;
+            const k = rdKey(row.catno);
+            if (!out.has(k)) out.set(k, []);
+            out.get(k).push({ row, e });
+          }
+        }
+      }
+      return out;
+    };
+
+    try {
+      setFindPhase('leyendo el índice del archivo');
+      const idx = await mailFetchIndex(mailSecret);
+      const rd = idx.filter(e => e.prefix === 'RD' && e.kind === 'material');
+
+      // 1. Anuncios individuales (revisiones incluidas; digests y Fwd/Re, no).
+      const porCatno = await leer(rd.filter(e => !e.digest), 'leyendo anuncios');
+      const casados = matchKeysWithSuffix(buscar, [...porCatno.keys()]);
+
+      // 2. Lo que no tiene anuncio propio: ¿sale al menos en un digest? Solo se
+      // leen si hace falta — pesan 1,5 MB cada uno.
+      const sinCorreo = buscar.filter(k => !casados.has(k));
+      if (sinCorreo.length) {
+        const porDigest = await leer(rd.filter(e => e.digest), 'buscando en digests');
+        const enDigest = matchKeysWithSuffix(sinCorreo, [...porDigest.keys()]);
+        for (const k of sinCorreo) {
+          const d = enDigest.has(k) ? porDigest.get(enDigest.get(k))[0] : null;
+          set(k, d ? { estado: 'solo-digest', email: d.e.subject } : { estado: 'sin-correo' });
+        }
+      }
+
+      // 3. De cada catno, el anuncio con enlace mas reciente.
+      const conEnlace = [];
+      for (const [k, ck] of casados) {
+        const c = porCatno.get(ck).slice()
+          .sort((a, b) => (b.row._zipLinks.length > 0) - (a.row._zipLinks.length > 0) || (b.e.date || '').localeCompare(a.e.date || ''))[0];
+        if (!c.row._zipLinks.length) set(k, { estado: 'sin-enlace', email: c.e.subject,
+          detalle: c.row._zipShared ? `su enlace es el mismo que el de ${c.row._zipShared.join(', ')}` : '' });
+        else conEnlace.push({ k, c });
+      }
+
+      // 4. Resolver y bajar, de uno en uno: cada promopack puede pasar de 100 MB.
+      setFindPhase('resolviendo enlaces');
+      const res = await resolveZipLinks(mailSecret, conEnlace.flatMap(x => x.c.row._zipLinks));
+      for (let i = 0; i < conEnlace.length; i++) {
+        const { k, c } = conEnlace[i];
+        const email = c.e.subject;
+        const links = c.row._zipLinks.map(u => res.get(u));
+        const bueno = links.find(y => y && (y.kind === 'dropbox' || y.kind === 'tvassets'));
+        if (!bueno) {
+          const y = links[0];
+          let host = '';
+          try { host = y?.dest ? new URL(y.dest).hostname : ''; } catch { /* dest raro */ }
+          set(k, host
+            ? { estado: 'no-zip', email, detalle: `el enlace lleva a ${host}, no a Dropbox` }
+            : { estado: 'error', email, detalle: y?.error || 'el tracker de Mailchimp no redirige a ningún sitio' });
+          continue;
+        }
+        setFindPhase(`bajando ${i + 1}/${conEnlace.length}`);
+        set(k, { estado: 'bajando', email });
+        const got = await fetchZipViaProxy(mailSecret, bueno.dest);
+        if (!got.ok) { set(k, { estado: got.estado, email, detalle: got.detalle }); continue; }
+        const file = new File([got.blob], `${k}.zip`, { type: 'application/zip' });
+        setZipFiles(prev => [...prev.filter(f => f.name !== file.name), file]);
+        set(k, { estado: 'ok', email, detalle: `${(got.blob.size / 1048576).toFixed(1)} MB` });
+      }
+    } catch (e) {
+      // Nada a medias en silencio: lo que seguia pendiente pasa a fallo.
+      setFindError(e.message);
+      setFind(prev => Object.fromEntries(Object.entries(prev).map(([k, v]) =>
+        [k, v.estado === 'buscando' || v.estado === 'bajando' ? { ...v, estado: 'error', detalle: e.message } : v])));
+    } finally {
+      setFinding(false); setFindPhase('');
+    }
+  };
+
   const process = async () => {
     if (!invoice) return;
     setError(''); setStatus('processing'); setResults([]);
@@ -3873,32 +4016,11 @@ function RubadubImporter() {
       setProgress({ done:0, total:0, current:'Loading libraries…' });
       const JSZip = await loadJSZip();
 
-      // Index ZIPs by normalized catno (filename → catno, same as W&S).
-      const zipByKey = {};
-      zipFiles.forEach(f => { const k = rdKey(catnoFromFilename(f.name)); if (k) zipByKey[k] = f; });
-
-      // SPINE = the invoice. Every invoiced disc gets a row, ZIP or not.
+      // SPINE = the invoice. Every invoiced disc gets a row, ZIP or not. The ZIP
+      // per SKU comes from the same matcher the missing-ZIP notice uses, so the
+      // preview and the result can never disagree.
       const keys = Object.keys(invoice);
-
-      // Resolve a ZIP per invoice SKU. Exact catno match first; if none, fall
-      // back to a format-suffix match — W&S filenames sometimes carry a trailing
-      // format token the Rubadub SKU omits ("AOS-111" ↔ "aos111lp", "EB004" ↔
-      // "EB004S"). Only ZIPs not already claimed by an exact match are eligible,
-      // and only when the leftover is a known format token, so e.g. "AOS-432-J"
-      // (…432J) never steals the "AOS-432Z" (…432Z) ZIP.
-      const FORMAT_SUFFIXES = ['LP','EP','S','RE','X','R','12','7','CD'];
-      const zipForKey = {};
-      const claimed = new Set();
-      for (const k of keys) { if (zipByKey[k]) { zipForKey[k] = zipByKey[k]; claimed.add(k); } }
-      for (const k of keys) {
-        if (zipForKey[k]) continue;
-        const hit = Object.keys(zipByKey).find(zk => {
-          if (claimed.has(zk)) return false;
-          const [a, b] = zk.length > k.length ? [zk, k] : [k, zk];
-          return a.startsWith(b) && FORMAT_SUFFIXES.includes(a.slice(b.length));
-        });
-        if (hit) { zipForKey[k] = zipByKey[hit]; claimed.add(hit); }
-      }
+      const zipForKey = rdZipsForInvoice(invoice, zipFiles);
       const total = keys.length;
       const processed = [];
 
@@ -4069,6 +4191,13 @@ function RubadubImporter() {
   const invCount = invoice ? Object.keys(invoice).length : 0;
   const ready = !!invoice;
   const sampleCost = invoice ? (Object.values(invoice).find(r=>typeof r.cost==='number')?.cost || 9.99) : 9.99;
+  // Cover-less de verdad: los catnos de la factura que no casan con ningun ZIP,
+  // con el mismo emparejador que usa process(). Antes era facturas − ZIPs
+  // sueltos, que bajaba al soltar ZIPs que no eran de la factura.
+  const zipMatch = invoice ? rdZipsForInvoice(invoice, zipFiles) : {};
+  const sinZip = invoice ? Object.keys(invoice).filter(k => !zipMatch[k]) : [];
+  const isLiveKey = (k) => !!liveHandles && liveHandles.has(rdKey(invoice[k].sku));
+  const findRows = Object.entries(find);
 
   return (
     <div>
@@ -4087,7 +4216,54 @@ function RubadubImporter() {
         </div>
       </div>
       {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:4}}>Invoice: {invCount} records parsed (SKU + £ cost + qty)</div>}
-      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>ZIPs: {zipFiles.length} · cover-less: {Math.max(0, invCount - zipFiles.length)}</div>}
+      {invoice&&<div style={{fontSize:9,color:S.muted,marginBottom:8}}>ZIPs: {zipFiles.length} · casan con la factura: {invCount - sinZip.length} · cover-less: {sinZip.length}</div>}
+      {invoice&&(
+        <div style={{marginBottom:12,padding:10,borderRadius:3,border:`1px solid ${sinZip.length?'#ff880066':S.border}`,background:sinZip.length?'#1a0a00':S.surf}}>
+          {sinZip.length ? (
+            <div style={{fontSize:10,color:'#ff8800',lineHeight:1.6,marginBottom:8}}>
+              <b>{sinZip.length} de {invCount} sin ZIP</b> — entrarán sin portada ni audio:{' '}
+              <span style={{fontFamily:'monospace'}}>{sinZip.map(k => `${invoice[k].sku}${isLiveKey(k)?' (en tienda)':''}`).join(', ')}</span>
+            </div>
+          ) : (
+            <div style={{fontSize:10,color:S.accent,marginBottom:findRows.length?8:0}}>Todos los discos de la factura tienen ZIP.</div>
+          )}
+          {sinZip.length>0&&(
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+              {pideSecreto&&(
+                <input type="password" value={mailSecret} onChange={e=>setMailSecret(e.target.value)}
+                  onKeyDown={e=>{if(e.key==='Enter')findZips();}} placeholder="BOOTSTRAP_AUTH_SECRET"
+                  style={{flex:'1 1 220px',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'6px 10px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
+              )}
+              <button onClick={findZips} disabled={finding||!mailSecret.trim()} style={{background:finding||!mailSecret.trim()?S.border:S.accent,border:'none',color:finding||!mailSecret.trim()?S.muted:'#080808',cursor:finding?'wait':'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
+                {finding?(findPhase||'Buscando…'):'Find ZIPs'}
+              </button>
+              <span style={{fontSize:9,color:S.muted}}>busca el email de anuncio de cada catno en el archivo del worker y baja su ZIP aquí{!mailSecret?' · mismo secreto que el Archivo de emails':''}</span>
+            </div>
+          )}
+          {findError&&<div style={{marginTop:8,fontSize:10,color:S.danger}}>{findError}</div>}
+          {findRows.length>0&&(
+            <div style={{marginTop:10,maxHeight:260,overflowY:'auto',overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:9}}>
+                <tbody>
+                  {findRows.map(([k, v]) => {
+                    const e = RD_FIND_ESTADOS[v.estado] || RD_FIND_ESTADOS.error;
+                    return (
+                      <tr key={k} style={{borderTop:`1px solid ${S.border}`}}>
+                        <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{invoice?.[k]?.sku || k}</td>
+                        <td style={{padding:'4px 8px',color:e.color,fontWeight:700,whiteSpace:'nowrap'}}>{e.label}</td>
+                        <td style={{padding:'4px 8px',color:S.muted}}>{[v.detalle, v.email].filter(Boolean).join(' · ')}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!finding&&findRows.some(([,v])=>!['ok','manual','live'].includes(v.estado))&&(
+                <div style={{fontSize:9,color:S.muted,marginTop:6}}>Los que fallan se pueden arrastrar a mano como siempre.</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {zipFiles.length>0&&<div style={{ maxHeight:80, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=>{const k=rdKey(catnoFromFilename(f.name));const hit=invoice&&invoice[k];return <span key={i} style={{ background:hit?S.border:'#3a1a00', padding:'2px 8px', borderRadius:10, color:hit?S.text:'#ff8800' }}>{catnoFromFilename(f.name)}{hit?'':' ?'}</span>;})}</div>}
       {status==='idle'&&ready&&(
         <div style={{marginBottom:10}}>
@@ -7970,7 +8146,10 @@ const RD_DIGEST_PRESALES = /All\s+Rubadub\s+Pre-?sales|WEEKLY\s+ROUND\s*UP/i;
 // plaintext renders them — and images become inline [[IMG:url]] markers, which
 // keeps every link and image positioned in the text for window attribution.
 function rdHtmlToText(input) {
-  if (!/<[a-z!/][^>]*>/i.test(input)) return input;   // already plain text
+  // Ya es texto plano. El Apps Script archiva asi los digests grandes, con
+  // saltos CRLF, y el \r colgando al final de "Cat: M052\r" hacia fallar la
+  // linea de campo: los digests parseaban a CERO releases.
+  if (!/<[a-z!/][^>]*>/i.test(input)) return input.replace(/\r/g, '');
   let s = input.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, '');
   s = s.replace(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi, ' [[IMG:$1]] ');
   s = s.replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
@@ -8165,6 +8344,17 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
     // not recoverable by regex, the operator must use the mailchi.mp archive.
     const dropbox = after.match(/https:\/\/www\.dropbox\.com\/scl\/fo\/[^\s)"'<]+/);
     const zipUrl = dropbox ? rdCleanDropbox(dropbox[0]) : '';
+    // Los enlaces del promopack DE ESTE bloque, no los del email entero. En el
+    // archivo van tras el tracker de Mailchimp, y un email de varios discos
+    // lleva uno por disco justo debajo de su ficha (LOG88 y LOG86, las tres de
+    // Phonogramme). Coger todos los del email y quedarse con el primer Dropbox
+    // le dio a LOG86 el ZIP de LOG88. Se filtra por la etiqueta, que es fija en
+    // el archivo real: "Download Zip" (Rubadub) y "Download promopack" /
+    // "Promopack: download" (TV); el resto de la ventana son clips, stocklist y
+    // el pie, que en el ultimo bloque tambien cae en `after`.
+    const zipLinks = [...after.matchAll(/([^\n()]{0,60})\((https:\/\/[^)\s]+)\)/g)]
+      .filter(m => /download\s*(zip|promo)|promopack/i.test(m[1]))
+      .map(m => m[2].replace(/&amp;/g, '&'));
     if (!zipUrl) {
       warnings.push(/list-manage\.com\/track\/click/i.test(after)
         ? 'el enlace del ZIP es un redirect de Mailchimp (digest): ábrelo en el archivo mailchi.mp y pega ese HTML'
@@ -8236,10 +8426,30 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
       forthcoming,
       _gbp: esTV ? null : (gbp || null),
       _desc: prosa,
+      _zipLinks: zipLinks,      // enlaces "Download Zip" de este bloque (tracker o directos)
       _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,
     });
   });
+
+  // Un mismo enlace en bloques de discos DISTINTOS no es de ninguno. Pasa en el
+  // texto plano de los digests (BLNK029 y UTTU200 llevan el tracker identico) y
+  // bajarlo le daria a uno el ZIP del otro. Se quita de los dos y se dice. El
+  // mismo disco listado dos veces (TOMTOM002) no cuenta.
+  const dueños = new Map();
+  for (const r of rows) for (const u of r._zipLinks) {
+    if (!dueños.has(u)) dueños.set(u, new Set());
+    dueños.get(u).add(rdKey(r.catno));
+  }
+  const catnoDe = new Map(rows.map(r => [rdKey(r.catno), r.catno]));
+  for (const r of rows) {
+    const compartidos = r._zipLinks.filter(u => dueños.get(u).size > 1);
+    if (!compartidos.length) continue;
+    const propio = rdKey(r.catno);
+    r._zipLinks = r._zipLinks.filter(u => dueños.get(u).size === 1);
+    r._zipShared = [...new Set(compartidos.flatMap(u => [...dueños.get(u)]))].filter(k => k !== propio).map(k => catnoDe.get(k));
+    r._warnings.push(`el enlace del ZIP es el mismo que el de ${r._zipShared.join(', ')} — no se usa, baja este a mano`);
+  }
 
   return rows;
 }
@@ -8435,6 +8645,173 @@ async function scanZipDir(dirHandle, onProgress) {
   return { idx, vistos };
 }
 
+// ── ARCHIVO DE EMAILS: ACCESO COMUN ────────────────────────────
+// Lo usan el tab Pre-order y el de Rubadub ("Find ZIPs"). Vivia dentro de
+// Pre-order y el importer de Rubadub no podia llegar a nada de esto.
+//
+// El secreto sigue sin persistirse — se pierde al recargar, nunca va en el
+// bundle —, pero ahora se comparte entre tabs: pegarlo en uno vale para el otro.
+const mailSecretStore = { v: '', subs: new Set() };
+function useMailSecret() {
+  const [v, setV] = useState(mailSecretStore.v);
+  useEffect(() => {
+    mailSecretStore.subs.add(setV);
+    return () => { mailSecretStore.subs.delete(setV); };
+  }, []);
+  const set = useCallback((x) => {
+    mailSecretStore.v = x;
+    mailSecretStore.subs.forEach(f => f(x));
+  }, []);
+  return [v, set];
+}
+
+// Indice del archivo ya clasificado. Lanza con un mensaje que dice contra que.
+async function mailFetchIndex(secret) {
+  let r;
+  try {
+    r = await fetch(`${WORKER_URL}?action=emails-list`, { headers: { 'Authorization': `Bearer ${secret}` } });
+  } catch (e) {
+    // Un fallo de red llega como un escueto "Failed to fetch" sin decir contra que.
+    throw new Error(`${e.message} — al llamar a ${WORKER_URL}?action=emails-list`);
+  }
+  if (r.status === 401) throw new Error('Secreto incorrecto.');
+  if (!r.ok) throw new Error(`El worker devolvió ${r.status}.`);
+  return ((await r.json()).emails || []).map(triageEmail);
+}
+
+// Cuerpo de un email. Cache de sesion: el mismo anuncio lo leen Pre-order y
+// Rubadub, y cada Find ZIPs relee el archivo entero.
+const mailBodyCache = new Map();
+async function mailFetchBody(secret, name) {
+  if (mailBodyCache.has(name)) return mailBodyCache.get(name);
+  try {
+    const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(name)}`,
+                          { headers: { 'Authorization': `Bearer ${secret}` } });
+    if (!r.ok) return '';
+    const html = (await r.json()).html || '';
+    mailBodyCache.set(name, html);
+    return html;
+  } catch { return ''; }
+}
+
+// Fecha del email mas reciente archivado, por distribuidor (pedidos incluidos).
+// Sirve para ver de un vistazo si el Apps Script ha dejado de empujar: estuvo
+// parado del 28-08 al 16-09 sin que nada lo dijera.
+const MAIL_DISTRIBUIDOR = { RD: 'Rubadub', RDORD: 'Rubadub', TV: 'Triple Vision', TVORD: 'Triple Vision',
+                            WS: 'W&S', WSORD: 'W&S', DBH: 'DBH' };
+function mailFreshness(idx) {
+  const out = {};
+  for (const e of idx || []) {
+    const d = MAIL_DISTRIBUIDOR[e.prefix];
+    if (d && e.date && (!out[d] || e.date > out[d])) out[d] = e.date;
+  }
+  return out;
+}
+
+// Host del worker + frescura del archivo por distribuidor. Ambar a partir de 4
+// dias sin email nuevo: ningun distribuidor activo calla tanto, asi que eso es
+// el Apps Script parado, no silencio del distribuidor.
+function MailArchiveStatus({ idx }) {
+  const fresh = mailFreshness(idx);
+  const hoy = parseLocalDate(new Date().toLocaleDateString('en-CA'));
+  const dias = (iso) => Math.round((hoy - parseLocalDate(iso)) / 86400000);
+  return (
+    <p style={{fontSize:9,color:S.muted,margin:'0 0 10px',fontFamily:'monospace',wordBreak:'break-all',lineHeight:1.7}}>
+      worker: <span style={{color:S.accent}}>{WORKER_URL.replace('https://','')}</span>
+      {idx && Object.entries(fresh).map(([d, iso]) => {
+        const n = dias(iso);
+        const viejo = n > 3;
+        return (
+          <span key={d} title={viejo ? `Sin emails de ${d} desde hace ${n} días: ¿se ha parado el push del Apps Script?` : ''}>
+            {' · '}{d} <span style={{color: viejo ? '#ff8800' : S.text, fontWeight: viejo ? 700 : 400}}>{iso.slice(8,10)}-{iso.slice(5,7)}{viejo ? ` (${n} d)` : ''}</span>
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+// Enlaces de promopack → URL descargable. Los directos (Dropbox, bucket de TV)
+// ya lo son; los del tracker de Mailchimp los sigue el worker, POR TANDAS de 40
+// y sin truncar (el tope de 60 dejaba sin ZIP a casi todo).
+//   -> Map url -> { dest, kind }   kind: dropbox | tvassets | otro | error
+async function resolveZipLinks(secret, urls, onAvance) {
+  const out = new Map();
+  const pend = [];
+  for (const u of new Set(urls)) {
+    if (/^https:\/\/www\.dropbox\.com\/scl\/fo\//i.test(u)) out.set(u, { dest: rdCleanDropbox(u), kind: 'dropbox' });
+    else if (/digitaloceanspaces\.com\/.*promopack/i.test(u)) out.set(u, { dest: u, kind: 'tvassets' });
+    else pend.push(u);
+  }
+  for (let i = 0; i < pend.length; i += 40) {
+    const tanda = pend.slice(i, i + 40);
+    try {
+      const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: tanda }),
+      });
+      if (!r.ok) throw new Error(`resolve-links ${r.status}`);
+      for (const x of (await r.json()).results || []) out.set(x.url, { dest: x.dest, kind: x.kind, error: x.error });
+    } catch (e) {
+      // Una tanda fallida no tumba las demas, pero tampoco se calla.
+      for (const u of tanda) if (!out.has(u)) out.set(u, { dest: '', kind: 'error', error: e.message });
+    }
+    if (onAvance) onAvance(Math.min(i + 40, pend.length), pend.length);
+  }
+  return out;
+}
+
+// Baja un promopack por el proxy del worker. Nunca con anchor-click: Dropbox
+// redirige a una pagina intermedia y el navegador abandona el admin.
+//   -> { ok:true, blob } | { ok:false, estado:'caducado'|'no-zip'|'error', detalle }
+// El proxy da 410 en dos casos distintos y solo el texto los separa.
+async function fetchZipViaProxy(secret, url) {
+  let res;
+  try {
+    res = await fetch(`${WORKER_URL}?action=zip-proxy&url=${encodeURIComponent(url)}`,
+                      { headers: { 'Authorization': `Bearer ${secret}` } });
+  } catch (e) { return { ok: false, estado: 'error', detalle: e.message }; }
+  if (res.ok) {
+    try {
+      const blob = await res.blob();      // espera al fichero COMPLETO
+      return blob.size ? { ok: true, blob } : { ok: false, estado: 'no-zip', detalle: 'respuesta vacía' };
+    } catch (e) { return { ok: false, estado: 'error', detalle: `cortado a medias: ${e.message}` }; }
+  }
+  let err = '';
+  try { err = (await res.json()).error || ''; } catch { /* sin cuerpo JSON */ }
+  if (res.status === 410 && /caducado/i.test(err)) return { ok: false, estado: 'caducado', detalle: err };
+  if (res.status === 410) return { ok: false, estado: 'no-zip', detalle: err };
+  if (res.status === 401) return { ok: false, estado: 'error', detalle: 'secreto incorrecto' };
+  return { ok: false, estado: 'error', detalle: `HTTP ${res.status}${err ? ` · ${err}` : ''}` };
+}
+
+// Casar claves rdKey de una espina (la factura) con claves candidatas (ZIPs,
+// catnos de email). Exacto primero; si no, sufijo de formato — los ficheros y
+// los emails a veces llevan un token que el SKU de Rubadub omite ("AOS-111" ↔
+// "aos111lp", "EB004" ↔ "EB004S"). Solo candidatas no reclamadas por un exacto,
+// y solo si lo que sobra es un formato conocido: asi "AOS-432-J" (…432J) nunca
+// se lleva lo de "AOS-432Z" (…432Z).
+//   -> Map spineKey -> candKey
+const FORMAT_SUFFIXES = ['LP','EP','S','RE','X','R','12','7','CD'];
+function matchKeysWithSuffix(spineKeys, candKeys) {
+  const cands = [...new Set(candKeys)];
+  const candSet = new Set(cands);
+  const out = new Map();
+  const claimed = new Set();
+  for (const k of spineKeys) if (candSet.has(k)) { out.set(k, k); claimed.add(k); }
+  for (const k of spineKeys) {
+    if (out.has(k)) continue;
+    const hit = cands.find(zk => {
+      if (claimed.has(zk)) return false;
+      const [a, b] = zk.length > k.length ? [zk, k] : [k, zk];
+      return a.startsWith(b) && FORMAT_SUFFIXES.includes(a.slice(b.length));
+    });
+    if (hit) { out.set(k, hit); claimed.add(hit); }
+  }
+  return out;
+}
+
 // ── TRIAGE DEL ARCHIVO DE EMAILS ───────────────────────────────
 // El Apps Script archiva cada email del distribuidor como
 // {PREFIJO}__{asunto}__{fecha}.html y lo empuja al worker. Aqui se clasifica
@@ -8551,7 +8928,7 @@ function PreorderImporter() {
   // Archivo de emails servido por el worker. El secreto se pega una vez y vive
   // solo aqui — nunca se empaqueta en el bundle, que es publico. Mismo criterio
   // que DiscogsReviewPanel.
-  const [mailSecret, setMailSecret] = useState('');
+  const [mailSecret, setMailSecret] = useMailSecret();
   const [mailIdx, setMailIdx]       = useState(null);  // null = sin cargar
   const [mailState, setMailState]   = useState(loadMailState);
   const [mailBusy, setMailBusy]     = useState('');
@@ -8808,17 +9185,16 @@ function PreorderImporter() {
             setDownloadProgress(i + 1);
             continue;
           }
-          const res = await fetch(`${WORKER_URL}?action=zip-proxy&url=${encodeURIComponent(url)}`,
-                                  { headers: { 'Authorization': `Bearer ${mailSecret}` } });
-          if (!res.ok) {
-            // 502 aqui suele ser un enlace caducado: el token st= de Dropbox es
-            // efimero y hay que recoger el enlace fresco del email.
+          const got = await fetchZipViaProxy(mailSecret, url);
+          if (!got.ok) {
+            // caducado = el token st= de Dropbox dura horas; hay que recoger el
+            // enlace fresco del email.
             failed++;
             setDownloadStats({ ok, missing, failed });
             setDownloadProgress(i + 1);
             continue;
           }
-          const blob = await res.blob();      // espera al fichero COMPLETO
+          const blob = got.blob;
           const blobUrl = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = blobUrl;
@@ -8898,19 +9274,10 @@ function PreorderImporter() {
     const out = new Map();
     const urls = [...new Set(filas.flatMap(r => r._trackers || []))];
     if (!urls.length) return out;
-    const mapa = new Map();
-    for (let i = 0; i < urls.length; i += 40) {
-      try {
-        const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${mailSecret}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: urls.slice(i, i + 40) }),
-        });
-        if (r.ok) for (const x of (await r.json()).results || []) mapa.set(x.url, x);
-      } catch { /* una tanda fallida no tumba las demas */ }
-      setMailProgress(x => x.total ? { ...x, fase: `resolviendo enlaces ${Math.min(i + 40, urls.length)}/${urls.length}` } : x);
-      if (onAvance) onAvance(Math.min(i + 40, urls.length), urls.length);
-    }
+    const mapa = await resolveZipLinks(mailSecret, urls, (hechos, total) => {
+      setMailProgress(x => x.total ? { ...x, fase: `resolviendo enlaces ${hechos}/${total}` } : x);
+      if (onAvance) onAvance(hechos, total);
+    });
     for (const row of filas) {
       const hit = (row._trackers || []).map(u => mapa.get(u))
         .find(x => x && (x.kind === 'dropbox' || x.kind === 'tvassets'));
@@ -8966,20 +9333,12 @@ function PreorderImporter() {
     if (!s.trim()) { setMailError('Pega el BOOTSTRAP_AUTH_SECRET de producción.'); return; }
     setMailBusy('lista'); setMailError('');
     try {
-      const r = await fetch(`${WORKER_URL}?action=emails-list`, {
-        headers: { 'Authorization': `Bearer ${s}` },
-      });
-      if (r.status === 401) throw new Error('Secreto incorrecto.');
-      if (!r.ok) throw new Error(`El worker devolvió ${r.status}.`);
-      const d = await r.json();
-      const emails = d.emails || [];
+      const emails = await mailFetchIndex(s);
       if (!emails.length) setMailError('El worker respondió bien pero no tiene ningún email guardado todavía.');
-      setMailIdx(emails.map(triageEmail));
+      setMailIdx(emails);
       setMailSecret(s);
     } catch (e) {
-      // Un fallo de red en fetch() llega como un escueto "Failed to fetch" sin
-      // decir contra que. Añadir la URL ahorra la mitad del diagnostico.
-      setMailError(`${e.message} — al llamar a ${WORKER_URL}?action=emails-list`);
+      setMailError(e.message);
       setMailIdx(null);
     }
     finally { setMailBusy(''); }
@@ -9009,13 +9368,7 @@ function PreorderImporter() {
     const nMaterial = mailIdx.filter(e => e.kind === 'material' && ['RD','TV'].includes(e.prefix)).length;
     setMailProgress({ done: 0, total: nSeñales + nMaterial, fase: 'leyendo pedidos' });
     const paso = () => setMailProgress(x => ({ ...x, done: x.done + 1 }));
-    const H = { 'Authorization': `Bearer ${mailSecret}` };
-    const traer = async (name) => {
-      try {
-        const r = await fetch(`${WORKER_URL}?action=emails-get&name=${encodeURIComponent(name)}`, { headers: H });
-        return r.ok ? ((await r.json()).html || '') : '';
-      } catch { return ''; }
-    };
+    const traer = (name) => mailFetchBody(mailSecret, name);
 
     // ── 1. Señal de pedido, una lectura por distribuidor ──────
     // Cada uno la deja en otro formato, pero todos producen lo mismo: por catno,
@@ -9064,8 +9417,11 @@ function PreorderImporter() {
     setMailProgress(x => ({ ...x, fase: 'parseando anuncios' }));
     const rank = (e) => (e.digest ? 0 : e.revision ? 1 : 2);
     const best = new Map();
-    for (let i = 0; i < material.length; i += 8) {
-      const tanda = await Promise.all(material.slice(i, i + 8).map(async (e) => {
+    // Anuncios antes que digests, para que "el digest solo completa" no dependa
+    // del orden del indice.
+    const enOrden = [...material].sort((a, b) => Number(a.digest) - Number(b.digest));
+    for (let i = 0; i < enOrden.length; i += 8) {
+      const tanda = await Promise.all(enOrden.slice(i, i + 8).map(async (e) => {
         const html = await traer(e.name);
         paso();
         return { e, html };
@@ -9077,16 +9433,25 @@ function PreorderImporter() {
         for (const row of rows) {
           if (!row.catno) continue;
           const k = rdKey(row.catno);
+          // Un digest solo completa lo que ya salio de otro email; no abre filas.
+          // Desde que los digests en texto plano parsean (antes el \r los dejaba
+          // en cero) traen ~3.000 bloques de catalogo que nadie ha pedido.
+          if (b.e.digest && !best.has(k)) continue;
           const sig = señales.get(b.e.name);
           const pedidoRd = !!sig && orderMatchesRelease(sig.target, row);
-          // Los trackers del email, para resolverlos luego de golpe.
-          const trackers = [...String(b.html || '').matchAll(/https:\/\/[a-z0-9.-]*list-manage\.com\/[^\s"'<)]+/gi)]
-            .map(m2 => m2[0].replace(/&amp;/g, '&')).slice(0, 12);
+          // Los enlaces "Download Zip" DE ESTE bloque (parseDistributorEmail).
+          // Antes eran todos los trackers del email, y un email de varios discos
+          // le daba a cada uno el primer Dropbox que resolviera — el de LOG88 a
+          // LOG86, el de UNI10-002 a UNI10-001 y -003, que no tienen.
+          const trackers = row._zipLinks || [];
           const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
                          _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers };
           const prev = best.get(k);
           if (!prev || cand._rank > prev._rank || (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
-            best.set(k, { ...cand, _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null });
+            // Una revision (ART-UPDATE…) gana por fecha pero suele venir sin
+            // enlace: entonces se conserva el del anuncio al que corrige.
+            best.set(k, { ...cand, _trackers: trackers.length ? trackers : (prev?._trackers || []),
+                          _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null });
           } else if (cand._ordered && prev) {
             best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
           }
@@ -9655,6 +10020,7 @@ function PreorderImporter() {
           </summary>
           <div style={{padding:'0 14px 14px'}}>
             {mailError&&<div style={{marginBottom:10,padding:8,background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:2,fontSize:10,color:S.danger,lineHeight:1.5}}>{mailError}</div>}
+            {mailIdx&&<MailArchiveStatus idx={mailIdx} />}
 
             {mailIdx===null?(
               <>
