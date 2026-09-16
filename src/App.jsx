@@ -4063,6 +4063,10 @@ function RubadubImporter() {
   const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
   const [mailSecret, setMailSecret] = useMailSecret();  // compartido con Pre-order
   const [find, setFind]         = useState({});     // invoice key -> {estado, detalle, email}
+  // Lo que el email de cada disco aporta y el promopack no: Rubadub no mete la
+  // portada en el ZIP (FE005, FE008, UR-029r, WPA-4/ UR-079: solo MP3) y casi
+  // nunca notas. invoice key -> { coverUrl, desc, email }
+  const [delCorreo, setDelCorreo] = useState({});
   const [finding, setFinding]   = useState(false);
   const [findPhase, setFindPhase] = useState('');
   const [findError, setFindError] = useState('');
@@ -4077,7 +4081,7 @@ function RubadubImporter() {
     const zips = files.filter(f => /\.zip$/i.test(f.name));
     if (pdfs[0]) {
       setPdfFile(pdfs[0]);
-      setFind({}); setFindError(''); genero.reset();
+      setFind({}); setFindError(''); setDelCorreo({}); genero.reset();
       try { setInvoice(await parseRubadubInvoicePdf(pdfs[0])); }
       catch (e) { setError('Could not read invoice PDF: ' + e.message); }
       // An invoiced record may already be a live product — typically one this
@@ -4197,6 +4201,18 @@ function RubadubImporter() {
         ];
         const c = candidatos[0];
         if (!c) { set(k, { estado: 'sin-correo' }); continue; }
+        // Portada y prosa, cada una de la mejor fuente que la tenga: el email
+        // que trae el ZIP puede ser un digest sin imagenes y el anuncio propio,
+        // sin enlace, tener la portada. Anuncio propio antes que digest.
+        const fuentes = [...propios.slice().sort(reciente), ...digests.slice().sort(reciente)];
+        const conPortada = fuentes.find(x => x.row.coverUrl);
+        const conProsa = fuentes.find(x => x.row._desc);
+        if (conPortada || conProsa) {
+          setDelCorreo(prev => ({ ...prev, [k]: {
+            coverUrl: conPortada?.row.coverUrl || '', desc: conProsa?.row._desc || '',
+            email: (conPortada || conProsa).e.subject,
+          } }));
+        }
         if (!c.row._zipLinks.length) {
           set(k, { estado: 'sin-enlace', email: c.e.subject,
                    detalle: c.row._zipShared ? `su enlace es el mismo que el de ${c.row._zipShared.join(', ')}` : '' });
@@ -4314,6 +4330,28 @@ function RubadubImporter() {
             }
           } catch (e) { itemError = e.message; }
         }
+
+        // Lo que el ZIP no trae, del email del disco (Find ZIPs). Portada: se
+        // sube a R2 por mirror, nunca enlazada a Mailchimp; si falla, se dice en
+        // la fila. Descripcion: la prosa del email, que el parser ya extrae.
+        const correo = delCorreo[key];
+        if (!coverUrl && correo?.coverUrl) {
+          setProgress({ done:i, total, current:`${inv.sku} — portada del email…` });
+          try {
+            const ext = (correo.coverUrl.split('?')[0].match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg').toLowerCase().replace('jpeg', 'jpg');
+            const r = await fetchAdmin(`${WORKER_URL}?action=mirror`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: correo.coverUrl, key: `covers/${safeKey}.${ext}` }),
+            }, mailSecret);
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d.url) coverUrl = d.url;
+            else itemError = [itemError, `portada del email sin subir: ${d.error || `HTTP ${r.status}`}`].filter(Boolean).join(' · ');
+          } catch (e) {
+            itemError = [itemError, `portada del email sin subir: ${e.message}`].filter(Boolean).join(' · ');
+          }
+        }
+        if (!desc && correo?.desc) desc = correo.desc;
 
         const { artist, title } = rdSplitName(inv.name);
         const label = pdfLabel || '';
@@ -4500,6 +4538,9 @@ function RubadubImporter() {
                       <td style={{padding:'4px 8px'}} title={detalle}>
                         <span style={{color:est.color,fontWeight:700,whiteSpace:'nowrap'}}>{est.label}</span>
                         {detalle&&<span style={{color:S.muted}}> · {detalle}</span>}
+                        {delCorreo[k]&&(delCorreo[k].coverUrl||delCorreo[k].desc)&&(
+                          <span style={{color:S.muted}} title={delCorreo[k].email}> · del email: {[delCorreo[k].coverUrl&&'portada', delCorreo[k].desc&&'texto'].filter(Boolean).join(' y ')}</span>
+                        )}
                       </td>
                       <td style={{padding:'4px 8px',whiteSpace:'nowrap'}}>
                         {live
@@ -8623,22 +8664,20 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
         : 'sin enlace de Dropbox — descarga el promopack a mano');
     }
 
-    // Cover only exists in the HTML part. Mailchimp puts content images under
-    // _compresseds/; gallery.mailchimp.com is the header logo, never the sleeve.
-    const imgs = [...`${before}${after}`.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].map(m => m[1]);
-    // Cada distribuidor sirve la portada desde su sitio: Rubadub por Mailchimp
-    // bajo _compresseds/ (gallery.mailchimp.com es el logo de cabecera, nunca la
-    // funda), y Triple Vision desde su bucket, con el sufijo _front.
-    // Rubadub sirve la portada desde mcusercontent, unas veces bajo
-    // _compresseds/ (14 de 51 emails) y otras bajo images/ (37). Ceñirse a la
-    // primera dejaba sin portada a tres cuartas partes del catalogo. El logo de
-    // cabecera NO se cuela: vive en gallery.mailchimp.com, otro host.
-    // Comprobado que las de images/ son portadas y no plantilla: ninguna se
-    // repite en mas de dos emails, y esos dos son el anuncio y su correccion.
-    const coverUrl = imgs.find(u => /mcusercontent\.com\/.*_compresseds\//i.test(u))
-                  || imgs.find(u => /mcusercontent\.com\/.*\/images\//i.test(u))
-                  || imgs.find(u => /digitaloceanspaces\.com\/.*_front[-.]/i.test(u))
-                  || '';
+    // Portada: la imagen INMEDIATAMENTE ANTERIOR a la ficha del disco, dentro de
+    // su propia ventana (entre el bloque anterior y este). Asi van Rubadub y
+    // Triple Vision: imagen, Artist/Title/Cat…, tracklist, "Download Zip".
+    // Antes se buscaba en before+after y se preferia `_compresseds/` a
+    // `images/`: si la portada propia era images/ y la del disco siguiente
+    // _compresseds/, se llevaba la del siguiente (UTTU199 con la de UTTU195,
+    // M055 con la de M056). Medido sobre el archivo: ninguna portada queda
+    // detras de su ficha, asi que mirar solo antes no pierde ninguna.
+    // Hosts de portada: Rubadub sirve desde mcusercontent (images/ o
+    // _compresseds/; gallery.mailchimp.com es el logo de cabecera, nunca la
+    // funda), Triple Vision desde su bucket con el sufijo _front.
+    const esPortada = (u) => /mcusercontent\.com\/.*(_compresseds\/|\/images\/)/i.test(u)
+                          || /digitaloceanspaces\.com\/.*_front[-.]/i.test(u);
+    const coverUrl = [...propio.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].map(m => m[1]).filter(esPortada).pop() || '';
 
     // ── Triple Vision o Rubadub ───────────────────────────────
     // Se distingue por el nombre del campo del catalogo, no por un parametro:
@@ -8669,7 +8708,19 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
     // y Rubadub EN NINGUN SITIO salvo el propio email — 6 de sus 7 promopacks
     // no traen ni txt ni pdf. Asi que aqui se rescata la prosa del email, que
     // es la unica fuente que tiene ese distribuidor.
-    const prosa = descFromProse(before, after, b.fields);
+    // Prosa DE ESTE disco. En un email de varios, la ventana anterior termina
+    // con la prosa del disco de arriba y la posterior sigue hasta la portada del
+    // de abajo: coger "el trozo mas largo de las dos" desplazaba la descripcion
+    // un bloque (medido: 848 de 3.039 nombraban solo al artista de otro disco).
+    // Ahora: detras, desde la ficha hasta la portada del disco siguiente; delante,
+    // el email entero si trae un solo disco, y si trae varios solo lo que hay
+    // entre su portada y su ficha (lo anterior es la entradilla del email).
+    const portadaSiguiente = idx < blocks.length - 1
+      ? [...after.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].find(m => esPortada(m[1])) : null;
+    const prosaDetras = portadaSiguiente ? after.slice(0, portadaSiguiente.index) : after;
+    const portadaPropia = [...propio.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].filter(m => esPortada(m[1])).pop();
+    const prosaDelante = blocks.length === 1 ? before : (portadaPropia ? propio.slice(portadaPropia.index) : '');
+    const prosa = descFromProse(prosaDelante, prosaDetras, b.fields);
 
     rows.push({
       catno: b.fields.catalog || b.fields.cat,
@@ -9081,7 +9132,9 @@ async function fetchZipViaProxy(secret, url) {
 // y solo si lo que sobra es un formato conocido: asi "AOS-432-J" (…432J) nunca
 // se lleva lo de "AOS-432Z" (…432Z).
 //   -> Map spineKey -> candKey
-const FORMAT_SUFFIXES = ['LP','EP','S','RE','X','R','12','7','CD'];
+// DUB: la factura de Rubadub dice "AD002dub" y W&S y el email dicen "AD002"
+// (154854-AD002.zip), y es el mismo disco — confirmado por Eduardo.
+const FORMAT_SUFFIXES = ['LP','EP','S','RE','X','R','12','7','CD','DUB'];
 function matchKeysWithSuffix(spineKeys, candKeys) {
   const cands = [...new Set(candKeys)];
   const candSet = new Set(cands);
