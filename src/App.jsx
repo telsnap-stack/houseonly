@@ -10038,8 +10038,12 @@ function PreorderImporter() {
         }));
       } finally { setMailLinking(null); }
     }
+    // `_desc` es la prosa del correo de anuncio, y hasta ahora se tiraba aqui:
+    // el manifest guardaba todo menos ella, y al crear el producto la
+    // descripcion salia del ZIP o de ningun sitio. 71 pre-orders vivos no tienen
+    // texto por esto. Se queda en el manifest para que process() pueda usarla.
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
-                                _live, _qty, _ready, _ordSrcs, _trackers, _desc, ...row }) => row);
+                                _live, _qty, _ready, _ordSrcs, _trackers, ...row }) => row);
     setManifest(prev => {
       const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
@@ -10356,7 +10360,9 @@ function PreorderImporter() {
           }
         }
 
-        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc });
+        // El ZIP manda cuando trae texto —es el del sello—; si no, la prosa del
+        // correo de anuncio, que para eso se extrajo.
+        const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: zipDesc || m._desc || '' });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         // Tags: the forthcoming markers + release date are what the Part-1
