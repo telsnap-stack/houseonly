@@ -3727,17 +3727,29 @@ async function parseRubadubInvoicePdf(pdfBlob) {
   const arrayBuffer = await pdfBlob.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const rawLines = [];
+  const pages = [];   // [[{y, cells:[{x,str}]}]] — para el formato de presupuesto
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
     const byLine = {};
+    const cellsByLine = {};
     for (const it of content.items) {
       const y = Math.round(it.transform[5]);
       (byLine[y] = byLine[y] || []).push(it.str);
+      if (it.str.trim()) (cellsByLine[y] = cellsByLine[y] || []).push({ x: it.transform[4], str: it.str.trim() });
     }
     const ys = Object.keys(byLine).map(Number).sort((a, b) => b - a);
     for (const y of ys) rawLines.push(byLine[y].join(' ').replace(/\s+/g, ' ').trim());
+    pages.push(ys.filter(y => cellsByLine[y]).map(y => ({ y, cells: cellsByLine[y].sort((a, b) => a.x - b.x) })));
   }
+
+  // El PRESUPUESTO de Rubadub ("Telsnap. S.L. Quote") pone las columnas en otro
+  // orden: Qty · SKU · Item name · Item net · Total net, y sin HS Code. Leido
+  // como factura, el SKU salia de la ultima palabra del titulo ("EP"). Se
+  // reconoce por la cabecera y se lee por columnas, que ademas aguanta SKUs con
+  // espacio ("WPA-4/ UR-079"). La factura sigue por su camino, ya validado.
+  const quote = parseRubadubQuoteColumns(pages);
+  if (quote) return quote;
 
   // qty + body + optional HS + £net + £total
   const LINE = /^(\d+)\s+(.+?)\s+(?:(\d{4}\.\d{2}\.\d{2})\s+)?£([\d.,]+)\s+£([\d.,]+)$/;
@@ -3787,6 +3799,43 @@ async function parseRubadubInvoicePdf(pdfBlob) {
   return out;
 }
 
+// Presupuesto por columnas. null si el PDF no tiene cabecera con SKU antes que
+// Item name (o sea, si es una factura).
+function parseRubadubQuoteColumns(pages) {
+  let cols = null;
+  const out = {};
+  for (const rows of pages) {
+    let desde = Infinity;
+    for (const r of rows) {
+      const x = (t) => r.cells.find(c => c.str.toLowerCase() === t)?.x;
+      const qx = x('qty'), sx = x('sku'), nx = x('item name'), ux = x('item net'), tx = x('total net');
+      if ([qx, sx, nx, ux, tx].every(v => v != null)) {
+        if (!(sx < nx)) return null;                 // factura: SKU tras el nombre
+        cols = { sx, nx, ux, tx }; desde = r.y; break;
+      }
+    }
+    if (!cols) continue;
+    for (const r of rows) {
+      if (r.y >= desde) continue;
+      const entre = (a, b) => r.cells.filter(c => c.x >= a - 3 && c.x < b - 3).map(c => c.str).join(' ').trim();
+      const qty = entre(-Infinity, cols.sx);
+      const sku = entre(cols.sx, cols.nx);
+      const name = entre(cols.nx, cols.ux);
+      const net = entre(cols.ux, cols.tx);
+      if (!/^\d+$/.test(qty) || !sku || !/^£[\d.,]+$/.test(net)) continue;
+      if (/Z-?EU|SHIPPING|POSTAGE|CARRIAGE/i.test(sku)) continue;
+      const key = rdKey(sku);
+      if (!key) continue;
+      const cost = parseFloat(net.slice(1).replace(/,/g, ''));
+      // El mismo SKU en dos lineas (WO-KJHBCS en el presupuesto del 14-09) son
+      // dos pedidos: se suman, no se pisan.
+      if (out[key]) { out[key].qty += parseInt(qty, 10); continue; }
+      out[key] = { sku, name, qty: parseInt(qty, 10) || 1, cost: isNaN(cost) ? null : cost };
+    }
+  }
+  return cols ? out : null;
+}
+
 // Split a Rubadub "Artist - Title" item name into {artist, title}. Rubadub uses
 // both ASCII hyphen and en-dash. First " - "/" – " is the separator.
 function rdSplitName(name) {
@@ -3810,7 +3859,6 @@ function rdZipsForInvoice(invoice, zipFiles) {
 const RD_FIND_ESTADOS = {
   'ok':          { label: 'encontrado',             color: '#c8ff00' },
   'sin-correo':  { label: 'sin correo',             color: '#ff4040' },
-  'solo-digest': { label: 'solo en un digest',      color: '#ff8800' },
   'sin-enlace':  { label: 'correo sin enlace',      color: '#ff8800' },
   'caducado':    { label: 'enlace caducado',        color: '#ff4040' },
   'no-zip':      { label: 'no era un ZIP',          color: '#ff4040' },
@@ -3917,30 +3965,40 @@ function RubadubImporter() {
       const idx = await mailFetchIndex(mailSecret);
       const rd = idx.filter(e => e.prefix === 'RD' && e.kind === 'material');
 
-      // 1. Anuncios individuales (revisiones incluidas; digests y Fwd/Re, no).
+      // 1. Anuncios individuales (revisiones incluidas; Fwd/Re, no).
       const porCatno = await leer(rd.filter(e => !e.digest), 'leyendo anuncios');
-      const casados = matchKeysWithSuffix(buscar, [...porCatno.keys()]);
+      const indiv = matchKeysWithSuffix(buscar, [...porCatno.keys()]);
+      const tieneEnlace = (k) => indiv.has(k) && porCatno.get(indiv.get(k)).some(c => c.row._zipLinks.length);
 
-      // 2. Lo que no tiene anuncio propio: ¿sale al menos en un digest? Solo se
-      // leen si hace falta — pesan 1,5 MB cada uno.
-      const sinCorreo = buscar.filter(k => !casados.has(k));
-      if (sinCorreo.length) {
-        const porDigest = await leer(rd.filter(e => e.digest), 'buscando en digests');
-        const enDigest = matchKeysWithSuffix(sinCorreo, [...porDigest.keys()]);
-        for (const k of sinCorreo) {
-          const d = enDigest.has(k) ? porDigest.get(enDigest.get(k))[0] : null;
-          set(k, d ? { estado: 'solo-digest', email: d.e.subject } : { estado: 'sin-correo' });
-        }
-      }
+      // 2. Digests, solo para lo que no tiene anuncio propio con enlace: pesan
+      // 1,5 MB cada uno. Los imports de Rubadub no tienen anuncio propio, solo
+      // salen en "Imports Shipping Today" — 12 de 20 en el presupuesto del
+      // 14-09. Es seguro porque el enlace es el del bloque del disco y el
+      // parser descarta los que comparten dos discos.
+      const faltan = buscar.filter(k => !tieneEnlace(k));
+      const porDigest = faltan.length ? await leer(rd.filter(e => e.digest), 'leyendo digests') : new Map();
+      const enDigest = matchKeysWithSuffix(faltan, [...porDigest.keys()]);
 
-      // 3. De cada catno, el anuncio con enlace mas reciente.
+      // 3. Por catno: anuncio propio con enlace > digest con enlace > lo que
+      // haya sin enlace. Dentro de cada grupo, el email mas reciente.
       const conEnlace = [];
-      for (const [k, ck] of casados) {
-        const c = porCatno.get(ck).slice()
-          .sort((a, b) => (b.row._zipLinks.length > 0) - (a.row._zipLinks.length > 0) || (b.e.date || '').localeCompare(a.e.date || ''))[0];
-        if (!c.row._zipLinks.length) set(k, { estado: 'sin-enlace', email: c.e.subject,
-          detalle: c.row._zipShared ? `su enlace es el mismo que el de ${c.row._zipShared.join(', ')}` : '' });
-        else conEnlace.push({ k, c });
+      const reciente = (a, b) => (b.e.date || '').localeCompare(a.e.date || '');
+      for (const k of buscar) {
+        const propios = indiv.has(k) ? porCatno.get(indiv.get(k)) : [];
+        const digests = enDigest.has(k) ? porDigest.get(enDigest.get(k)) : [];
+        const candidatos = [
+          ...propios.filter(c => c.row._zipLinks.length).sort(reciente),
+          ...digests.filter(c => c.row._zipLinks.length).sort(reciente),
+          ...[...propios, ...digests].filter(c => !c.row._zipLinks.length).sort(reciente),
+        ];
+        const c = candidatos[0];
+        if (!c) { set(k, { estado: 'sin-correo' }); continue; }
+        if (!c.row._zipLinks.length) {
+          set(k, { estado: 'sin-enlace', email: c.e.subject,
+                   detalle: c.row._zipShared ? `su enlace es el mismo que el de ${c.row._zipShared.join(', ')}` : '' });
+          continue;
+        }
+        conEnlace.push({ k, c });
       }
 
       // 4. Resolver y bajar, de uno en uno: cada promopack puede pasar de 100 MB.
@@ -3966,7 +4024,7 @@ function RubadubImporter() {
         if (!got.ok) { set(k, { estado: got.estado, email, detalle: got.detalle }); continue; }
         const file = new File([got.blob], `${k}.zip`, { type: 'application/zip' });
         setZipFiles(prev => [...prev.filter(f => f.name !== file.name), file]);
-        set(k, { estado: 'ok', email, detalle: `${(got.blob.size / 1048576).toFixed(1)} MB` });
+        set(k, { estado: 'ok', email, detalle: `${(got.blob.size / 1048576).toFixed(1)} MB${c.e.digest ? ' · desde digest' : ''}` });
       }
     } catch (e) {
       // Nada a medias en silencio: lo que seguia pendiente pasa a fallo.
@@ -8701,29 +8759,55 @@ function MailArchiveStatus({ idx }) {
 // y sin truncar (el tope de 60 dejaba sin ZIP a casi todo).
 //   -> Map url -> { dest, kind }   kind: dropbox | tvassets | otro | error
 async function resolveZipLinks(secret, urls, onAvance) {
+  // Directo: ya descargable. Dropbox vale en las dos formas: la actual
+  // (/scl/fo/) y la antigua (/sh/), que el proxy baja igual con dl=1 —
+  // comprobado, firma PK. El worker solo clasifica la primera como dropbox.
+  const directo = (u) =>
+    /^https:\/\/www\.dropbox\.com\/(scl\/fo|sh)\//i.test(u) ? { dest: rdCleanDropbox(u), kind: 'dropbox' }
+    : /digitaloceanspaces\.com\/.*promopack/i.test(u) ? { dest: u, kind: 'tvassets' }
+    : null;
+  const esTracker = (u) => /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i.test(u);
+
   const out = new Map();
-  const pend = [];
-  for (const u of new Set(urls)) {
-    if (/^https:\/\/www\.dropbox\.com\/scl\/fo\//i.test(u)) out.set(u, { dest: rdCleanDropbox(u), kind: 'dropbox' });
-    else if (/digitaloceanspaces\.com\/.*promopack/i.test(u)) out.set(u, { dest: u, kind: 'tvassets' });
-    else pend.push(u);
-  }
-  for (let i = 0; i < pend.length; i += 40) {
-    const tanda = pend.slice(i, i + 40);
-    try {
-      const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls: tanda }),
-      });
-      if (!r.ok) throw new Error(`resolve-links ${r.status}`);
-      for (const x of (await r.json()).results || []) out.set(x.url, { dest: x.dest, kind: x.kind, error: x.error });
-    } catch (e) {
-      // Una tanda fallida no tumba las demas, pero tampoco se calla.
-      for (const u of tanda) if (!out.has(u)) out.set(u, { dest: '', kind: 'error', error: e.message });
+  const todas = [...new Set(urls)];
+  // origen -> URL que falta por seguir. El worker sigue UN salto, y los digests
+  // encadenan tracker -> tracker -> Dropbox (FE005 en el digest del 14-09):
+  // se vuelve a pedir lo que siga siendo un tracker, hasta 3 veces.
+  let pend = new Map();
+  for (const u of todas) { const d = directo(u); if (d) out.set(u, d); else pend.set(u, u); }
+  const total = pend.size;
+  let hechos = 0;
+  for (let salto = 0; salto < 3 && pend.size; salto++) {
+    const siguiente = new Map();
+    const orig = [...pend.keys()];
+    for (let i = 0; i < orig.length; i += 40) {
+      const tanda = orig.slice(i, i + 40);
+      const res = new Map();
+      try {
+        const r = await fetch(`${WORKER_URL}?action=resolve-links`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: tanda.map(o => pend.get(o)) }),
+        });
+        if (!r.ok) throw new Error(`resolve-links ${r.status}`);
+        for (const x of (await r.json()).results || []) res.set(x.url, x);
+        for (const o of tanda) {
+          const x = res.get(pend.get(o));
+          if (!x) { out.set(o, { dest: '', kind: 'error', error: 'sin respuesta del worker' }); continue; }
+          const d = x.dest && directo(x.dest);
+          if (d) out.set(o, d);
+          else if (x.dest && esTracker(x.dest)) siguiente.set(o, x.dest);
+          else out.set(o, { dest: x.dest, kind: x.kind, error: x.error });
+        }
+      } catch (e) {
+        // Una tanda fallida no tumba las demas, pero tampoco se calla.
+        for (const o of tanda) if (!out.has(o)) out.set(o, { dest: '', kind: 'error', error: e.message });
+      }
+      if (salto === 0) { hechos = Math.min(i + 40, orig.length); if (onAvance) onAvance(hechos, total); }
     }
-    if (onAvance) onAvance(Math.min(i + 40, pend.length), pend.length);
+    pend = siguiente;
   }
+  for (const [o, u] of pend) out.set(o, { dest: u, kind: 'error', error: 'demasiados saltos de tracker' });
   return out;
 }
 
