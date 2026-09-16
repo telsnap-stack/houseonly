@@ -80,6 +80,20 @@ function extractTagMeta(tags) {
   return { genre, year, label };
 }
 
+/**
+ * Separa el bloque de tracklist del resto de la descripcion. Devuelve los
+ * titulos de los cortes y el HTML sin ese bloque.
+ */
+function cleanHtmlParaLista(bodyHtml) {
+  const html = String(bodyHtml || '');
+  const bloque = html.match(/(?:<p>\s*<strong>\s*Track\s*list(?:ing)?\s*<\/strong>\s*<\/p>\s*)?<ol[\s\S]*?<\/ol>/i);
+  if (!bloque) return { items: [], resto: html };
+  const items = [...bloque[0].matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)]
+    .map(m => htmlToText(m[1]))
+    .filter(Boolean);
+  return { items, resto: html.replace(bloque[0], '') };
+}
+
 function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
@@ -88,7 +102,9 @@ function parseProduct({ node }) {
   const bodyHtml = node.descriptionHtml || '';
   // El mismo paso a texto que usa el prerender: quitar etiquetas Y decodificar
   // entidades. Hacerlo solo a medias es lo que imprimia "&amp;" en la ficha.
-  const desc  = htmlToText(bodyHtml);
+  // El bloque del tracklist sale del texto: o lo pinta la lista de arriba, o no
+  // estaba. Dejarlo dentro lo repetiria en prosa.
+  const desc  = htmlToText(cleanHtmlParaLista(bodyHtml).resto);
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
   // as an artist. Treat it as no-artist (blank) so it can be corrected in
@@ -100,6 +116,16 @@ function parseProduct({ node }) {
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
+
+  // Cuando NO hay JSON pero la descripcion trae un <ol>, la lista vive solo en
+  // el texto. htmlToText la aplanaba en una linea corrida —"Tracklist A1 Tsg
+  // Meltdown A2 Early Morning…"— asi que se saca aparte y la ficha la pinta
+  // como lista. Son pocos discos, pero es su unica lista.
+  let descTracks = [];
+  if (!tracks.length) {
+    const ol = cleanHtmlParaLista(bodyHtml);
+    descTracks = ol.items;
+  }
   const catalog = v?.sku||'';
   const title = node.title||'';
   // Forthcoming/pre-order support: the `forthcoming` tag marks a release that
@@ -128,7 +154,7 @@ function parseProduct({ node }) {
     month: new Date().getMonth()+1,
     price: parseFloat(v?.price?.amount||18.99),
     stock: v?.quantityAvailable??10,
-    coverUrl: img?.url||null, tracks, desc, g:'135deg,#1a1a2e,#16213e',
+    coverUrl: img?.url||null, tracks, descTracks, desc, g:'135deg,#1a1a2e,#16213e',
     tags, releaseDate,
   };
 }
@@ -2097,6 +2123,17 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
                 </div>
                 <BackorderRequestForm release={r} />
                 {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, margin:'20px 0 16px' }}>{r.desc}</p>}
+                {/* Sin reproductor pero con lista en el texto: se pinta como
+                    lista, que es lo que es. Antes salia corrida dentro de la
+                    descripcion. */}
+                {tracks.length === 0 && (r.descTracks||[]).length > 0 && (
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>Tracklist</div>
+                    {(r.descTracks||[]).map((t,i)=>(
+                      <div key={i} style={{ fontSize:11, color:S.muted, padding:'4px 0', borderBottom:`1px solid ${S.border}` }}>{t}</div>
+                    ))}
+                  </div>
+                )}
                 {tracks.length > 0
                   ? <TrackPlayer tracks={tracks} release={r} />
                   : (r.tracks||[]).length > 0 && (
@@ -2114,6 +2151,17 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             ) : (
               <>
                 {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
+                {/* Sin reproductor pero con lista en el texto: se pinta como
+                    lista, que es lo que es. Antes salia corrida dentro de la
+                    descripcion. */}
+                {tracks.length === 0 && (r.descTracks||[]).length > 0 && (
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>Tracklist</div>
+                    {(r.descTracks||[]).map((t,i)=>(
+                      <div key={i} style={{ fontSize:11, color:S.muted, padding:'4px 0', borderBottom:`1px solid ${S.border}` }}>{t}</div>
+                    ))}
+                  </div>
+                )}
                 {tracks.length > 0
                   ? <TrackPlayer tracks={tracks} release={r} />
                   : (r.tracks||[]).length > 0 && (
@@ -2850,13 +2898,37 @@ function notesPassQualityCheck(rawText, cleanedText) {
 
 // Build the canonical description HTML for a product. Used by all importers
 // so every product gets the same clean, SEO-friendly format.
-/** ¿El texto del distribuidor ya trae su propia lista de cortes? */
-function yaTraeTracklist(texto) {
+/**
+ * Localiza la lista de cortes que el distribuidor escribio en prosa y cuenta
+ * cuantos trae. Devuelve null si no hay ninguna.
+ *
+ * Cuenta las marcas de cara —A1, B2, C1…— que es como las escriben todos. Si el
+ * texto dice "Tracklist" pero no lleva marcas contables, se devuelve la posicion
+ * con cortes 0: sirve para saber que hay lista, no para recortarla a ciegas.
+ */
+function localizaTracklistEnProsa(texto) {
   const t = String(texto || '');
-  if (/track\s*list(ing)?\s*:?/i.test(t)) return true;
-  // Tres o mas lineas que empiezan por A1/B2/1./2) — una lista, la llame como la llame.
-  const lineas = (t.match(/^\s*(?:[ABCD]\d|\d{1,2})\s*[.):-]/gim) || []).length;
-  return lineas >= 3;
+  const cab = t.search(/track\s*list(ing)?\s*:?/i);
+  // Las marcas de cara, como las escriben los distribuidores de verdad: "A1",
+  // "B2", pero tambien "A." y "AA —", que es la convencion de Pampa y de media
+  // Europa. Contando solo [A-F]\d se quedaban 40 discos sin poder recortar.
+  const marcas = t.match(/(?:^|\s)(?:[A-F]{1,2}\d{1,2}\b|[A-F]{1,2}\s*[.–\-:]\s+)/g) || [];
+  if (cab < 0 && marcas.length < 3) return null;
+  return { desde: cab, cortes: marcas.length };
+}
+
+/**
+ * Quita del texto la lista en prosa, desde su cabecera hasta el final del
+ * parrafo. Solo se llama cuando el numero de cortes coincide con el JSON.
+ */
+function recortaTracklistEnProsa(texto, desde) {
+  if (desde < 0) return texto;
+  const antes = String(texto).slice(0, desde).trimEnd();
+  const resto = String(texto).slice(desde);
+  // Si tras la lista viene otro parrafo, se conserva.
+  const corte = resto.indexOf('\n\n');
+  const despues = corte >= 0 ? resto.slice(corte).trimStart() : '';
+  return [antes, despues].filter(Boolean).join('\n\n');
 }
 
 function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes }) {
@@ -2865,10 +2937,28 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
   // Ya NO se escribe la frase de cabecera ("X by Y released on Z (año)"): el
   // artista, el titulo, el sello y el año estan impresos JUSTO ENCIMA de la
   // descripcion en la ficha, y repetirlos era ruido en el 90% del catalogo.
-  void artist; void title; void label; void year;
+  void artist; void label; void year;
 
-  // Source notes — included only if they pass quality checks
-  const cleaned = cleanSourceNotes(sourceNotes);
+  const hayJson = !!(tracks && tracks.length);
+  let cleaned = cleanSourceNotes(sourceNotes);
+
+  // ── LA LISTA DE CORTES, UNA SOLA VEZ ──────────────────────────────
+  // Con JSON, el reproductor ES la lista: ni nuestro <ol> ni la prosa del
+  // distribuidor. Pero la prosa solo se recorta si sus cortes CUADRAN con los
+  // del JSON; si no cuadran, puede estar diciendo algo que el JSON no tiene
+  // (una cara extra, un bonus) y borrarla seria perder informacion. En ese caso
+  // se deja y se avisa.
+  if (hayJson) {
+    const prosa = localizaTracklistEnProsa(cleaned);
+    if (prosa) {
+      if (prosa.cortes === tracks.length) {
+        cleaned = recortaTracklistEnProsa(cleaned, prosa.desde);
+      } else {
+        console.warn(`[tracklist] "${String(title || '').slice(0, 40)}": la lista en prosa tiene ${prosa.cortes} cortes y el JSON ${tracks.length} — se deja como esta`);
+      }
+    }
+  }
+
   const sospechosas = suspectLigatureDamage(cleaned);
   if (sospechosas.length) {
     console.warn(`[ligaduras] "${String(title || '').slice(0, 40)}": ${sospechosas.join(', ')} — revisar antes de subir`);
@@ -2878,24 +2968,13 @@ function buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes 
     parts.push(...paragraphs.map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`));
   }
 
-  // Tracklist — solo si las notas del distribuidor no traen ya la suya. Cuando
-  // la traen, la nuestra quedaba debajo diciendo lo mismo: 93 productos del
-  // catalogo tienen el tracklist dos veces por esto.
-  // El <script id="tracks"> NO se toca: vive fuera de esta funcion y de ahi lee
-  // el reproductor.
-  if (tracks && tracks.length && !yaTraeTracklist(sourceNotes)) {
-    const items = tracks.map(t => {
-      // Track may be {name, url} (from importer ZIP) or {t, d} (legacy)
-      const label = t.name || t.t || '';
-      const dur   = t.d ? ` <span style="opacity:.6">(${t.d})</span>` : '';
-      return `<li>${label}${dur}</li>`;
-    }).join('');
-    parts.push(`<p><strong>Tracklist</strong></p><ol>${items}</ol>`);
-  }
+  // Sin JSON no hay cortes que listar: el <ol> salia del MISMO array que el
+  // JSON, asi que "sin JSON" es "sin cortes". Si el distribuidor trajo su lista
+  // en prosa, esa es la unica que hay y se queda donde esta.
+  // El <script id="tracks"> no se escribe aqui: lo monta cada importer aparte.
 
   // La coletilla de envio ya no se escribe: estaba en 1227 productos diciendo lo
   // mismo, y la tienda ya lo dice en la cabecera y en el pie.
-
   return parts.join('');
 }
 
