@@ -24,6 +24,16 @@
  */
 
 /**
+ * RESOLVER y SER PILDORA son dos cosas distintas.
+ *   - Resolver: el importer convierte el valor del distribuidor en genre:<id>.
+ *     Todo genero de la lista resuelve desde el dia que entra.
+ *   - Pildora: sale en el desplegable de la tienda. Regla: NINGUNA pildora
+ *     puede dar cero discos.
+ * `pildora: 'con-discos'` marca un genero nuevo cuya pildora solo aparece
+ * cuando la seccion tiene al menos un disco con su tag (lo comprueba la tienda
+ * con la misma consulta que la rejilla). Sin el campo, la pildora sale siempre:
+ * son los generos que ya tienen catalogo.
+ *
  * `tipo` de cada alias:
  *   'misma' → dice lo mismo que el canonico, o no dice nada. El barrido lo BORRA.
  *   'sub'   → nombra algo mas concreto y es dato real. Se CONSERVA en el
@@ -42,7 +52,7 @@ export const GENRES = [
   // solo lista genre:drumandbass, asi que en 'dnb' seria una pildora sin discos.
   // Solo el nombre canonico como alias; las grafias que aparezcan pasaran por la
   // cola antes de añadirse.
-  { id:'bassmusic', label:'Bass Music', seccion:'house', orden:7, alias:[
+  { id:'bassmusic', label:'Bass Music', seccion:'house', orden:7, pildora:'con-discos', alias:[
     { raw:'Bass Music', tipo:'canonico' },
   ]},
   { id:'deephouse', label:'Deep House', seccion:'house', orden:2, padre:'house', alias:[
@@ -172,7 +182,16 @@ export function generosDeSeccion(seccion) {
   return GENRES.filter(g => g.seccion === seccion)
     .slice()
     .sort((a, b) => (a.orden || 99) - (b.orden || 99))
-    .map(g => ({ id: g.id, label: g.label, tag: genreTag(g.id) }));
+    .map(g => ({ id: g.id, label: g.label, tag: genreTag(g.id), pildora: g.pildora || 'siempre' }));
+}
+
+/**
+ * Las pildoras de una seccion: los generos que resuelven MENOS los
+ * 'con-discos' que no esten en `conDiscos` (Set de ids con al menos un disco en
+ * esa seccion). Sin el Set, esos no salen: ante la duda, nunca una pildora a cero.
+ */
+export function pildorasDeSeccion(seccion, conDiscos = new Set()) {
+  return generosDeSeccion(seccion).filter(g => g.pildora !== 'con-discos' || conDiscos.has(g.id));
 }
 
 /** La seccion de D&B, definida por el genero canonico y no por una lista de tags. */
