@@ -4563,7 +4563,8 @@ function RubadubImporter() {
     // products with matching handles" checkbox irrelevant for them: there is
     // no row to match, so neither answer can damage the existing product.
     const kept = results.filter(r => !r._alreadyLive);
-    if (!kept.length) return;
+    // Sin filas nuevas no hay CSV (el boton ya no se muestra; esto es por si acaso).
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos de la factura ya están en la tienda. Usa Add stock y Completar media.'); return; }
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
@@ -4741,7 +4742,9 @@ function RubadubImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}{liveRows.length>0?` · ${liveRows.length} ya en tienda`:''}</span></div>
-            <Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} />
+            {results.length - liveRows.length > 0
+              ? <Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} />
+              : <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {liveRows.length} discos ya están en la tienda. Para ellos, Add stock y Completar media (abajo).</span>}
           </div>
           {liveHandles===null&&(
             <div style={{marginBottom:10,padding:'8px 12px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,fontSize:10,color:S.muted}}>
@@ -4779,7 +4782,9 @@ function RubadubImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}>{results.length - liveRows.length > 0
+              ? <Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} />
+              : <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {liveRows.length} discos ya están en la tienda. Para ellos, Add stock y Completar media (abajo).</span>}</div>
         </div>
       )}
     </div>
