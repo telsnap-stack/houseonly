@@ -489,11 +489,34 @@ async function resizeImageIfNeeded(blob, maxDim = 2000, quality = 0.92) {
   return resized;
 }
 
+// ── ENDPOINTS DE ADMIN DEL WORKER ─────────────────────────────
+// upload, mirror, story-context y dbh-zip estaban abiertos: cualquiera podia
+// escribir cualquier clave en R2 —portadas y audio de productos vivos—, gastar
+// credito de Anthropic o usar el worker de proxy. Pasan a pedir el Bearer de
+// admin. El secreto es el que ya se haya pegado en esta pestaña: el de Entities,
+// o el que pase quien llama (Pre-order tiene el suyo). La pantalla de login
+// unica llegara despues y alimentara lo mismo.
+//
+// Un 401 no puede quedarse en silencio: varios importers tragan los errores de
+// portada y siguen. Por eso, ademas de lanzar, se avisa UNA vez por sesion.
+const FALTA_SECRETO_ADMIN = 'Falta el secreto de admin: conecta la pestaña Entities con el BOOTSTRAP_AUTH_SECRET y repite.';
+let avisadoFaltaSecretoAdmin = false;
+async function fetchAdmin(url, opts = {}, secretoLocal = '') {
+  const secreto = secretoLocal || entitiesSecret;
+  const headers = { ...(opts.headers || {}), ...(secreto ? { 'Authorization': `Bearer ${secreto}` } : {}) };
+  const r = await fetch(url, { ...opts, headers });
+  if (r.status === 401) {
+    if (!avisadoFaltaSecretoAdmin) { avisadoFaltaSecretoAdmin = true; alert(FALTA_SECRETO_ADMIN); }
+    throw new Error(FALTA_SECRETO_ADMIN);
+  }
+  return r;
+}
+
 async function uploadToR2(blob, key, mimeType) {
   const fd = new FormData();
   fd.append('file', new File([blob], key.split('/').pop(), { type: mimeType }));
   fd.append('key', key);
-  const r = await fetch(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
+  const r = await fetchAdmin(`${WORKER_URL}?action=upload`, { method: 'POST', body: fd });
   if (!r.ok) throw new Error(`R2 upload failed: ${r.status}`);
   const d = await r.json();
   if (d.error) throw new Error(d.error);
@@ -5449,7 +5472,7 @@ function MotherTongueImporter() {
           if (!url) return '';
           const urlExt = (url.match(/\.(jpg|jpeg|png|webp)(\?|$)/i) || [,'jpg'])[1].toLowerCase();
           const ext = urlExt === 'jpeg' ? 'jpg' : urlExt;
-          const r = await fetch(`${WORKER_URL}?action=mirror`, {
+          const r = await fetchAdmin(`${WORKER_URL}?action=mirror`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, key: `covers/${safeKey}.${ext}` }),
@@ -5976,7 +5999,7 @@ function RushHourImporter() {
             setProgress({ done:i, total, current:`${catno} — fetching inline cover…` });
             // Pick extension from URL (usually .jpg.webp or .jpg). Default to .jpg.
             const ext = (meta.coverImageUrl.match(/\.(jpe?g|png|webp)(?:[?#]|$)/i) || [,'jpg'])[1].toLowerCase();
-            const r = await fetch(`${WORKER_URL}?action=mirror`, {
+            const r = await fetchAdmin(`${WORKER_URL}?action=mirror`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ url: meta.coverImageUrl, key: `covers/${safeKey}.${ext}` }),
@@ -7218,7 +7241,7 @@ function StoriesGenerator() {
     if (!selected) return;
     setCtxLoading(true); setCtxErr(''); setCtxOptions([]);
     try {
-      const res = await fetch(`${WORKER_URL}?action=story-context`, {
+      const res = await fetchAdmin(`${WORKER_URL}?action=story-context`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -8835,7 +8858,7 @@ function PreorderImporter() {
           // DBH: proxy through the Worker so we can await the full blob. If the
           // release has no ZIP yet the proxy returns JSON {ok:false,missing:true};
           // a real ZIP comes back as application/zip.
-          const res = await fetch(`${WORKER_URL}?action=dbh-zip&id=${dbhId}`);
+          const res = await fetchAdmin(`${WORKER_URL}?action=dbh-zip&id=${dbhId}`, {}, mailSecret);
           const ctype = res.headers.get('content-type') || '';
           if (!res.ok || ctype.includes('application/json')) {
             missing++;
@@ -9470,11 +9493,11 @@ function PreorderImporter() {
           setProgress({ done:i, total, current:`${catno} — espejando portada del email…` });
           const ext = (m.coverUrl.split('?')[0].match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg').toLowerCase();
           try {
-            const r = await fetch(`${WORKER_URL}?action=mirror`, {
+            const r = await fetchAdmin(`${WORKER_URL}?action=mirror`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ url: m.coverUrl, key: `covers/${safeKey}.${ext}` }),
-            });
+            }, mailSecret);
             const data = r.ok ? await r.json().catch(() => ({})) : {};
             // Si el espejo falla se cae al enlace directo: una portada prestada
             // es mejor que ninguna, pero se avisa para poder arreglarlo.
