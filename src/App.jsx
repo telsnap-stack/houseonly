@@ -88,6 +88,9 @@ function parseProduct({ node }) {
   const bodyHtml = node.descriptionHtml || '';
   // El mismo paso a texto que usa el prerender: quitar etiquetas Y decodificar
   // entidades. Hacerlo solo a medias es lo que imprimia "&amp;" en la ficha.
+  // Las tres reglas de limpieza viven en el modulo compartido, para que la ficha
+  // y el prerender digan lo mismo del mismo disco sin reimportar nada.
+  const limpia = descripcionDeProducto(bodyHtml);
   const desc  = limpia.texto;
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
@@ -101,9 +104,6 @@ function parseProduct({ node }) {
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
 
-  // Las tres reglas de limpieza viven en el modulo compartido, para que la ficha
-  // y el prerender digan lo mismo del mismo disco sin reimportar nada.
-  const limpia = descripcionDeProducto(bodyHtml);
   const descTracks = limpia.cortesDelTexto;
   const catalog = v?.sku||'';
   const title = node.title||'';
