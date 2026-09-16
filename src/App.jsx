@@ -5,7 +5,7 @@ import { useState, useRef, useEffect, useMemo, createContext, useContext, useCal
 import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
-import { htmlToText } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
+import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { generosDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
@@ -80,20 +80,6 @@ function extractTagMeta(tags) {
   return { genre, year, label };
 }
 
-/**
- * Separa el bloque de tracklist del resto de la descripcion. Devuelve los
- * titulos de los cortes y el HTML sin ese bloque.
- */
-function cleanHtmlParaLista(bodyHtml) {
-  const html = String(bodyHtml || '');
-  const bloque = html.match(/(?:<p>\s*<strong>\s*Track\s*list(?:ing)?\s*<\/strong>\s*<\/p>\s*)?<ol[\s\S]*?<\/ol>/i);
-  if (!bloque) return { items: [], resto: html };
-  const items = [...bloque[0].matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)]
-    .map(m => htmlToText(m[1]))
-    .filter(Boolean);
-  return { items, resto: html.replace(bloque[0], '') };
-}
-
 function parseProduct({ node }) {
   const v    = node.variants.edges[0]?.node;
   const img  = node.images.edges[0]?.node;
@@ -102,9 +88,7 @@ function parseProduct({ node }) {
   const bodyHtml = node.descriptionHtml || '';
   // El mismo paso a texto que usa el prerender: quitar etiquetas Y decodificar
   // entidades. Hacerlo solo a medias es lo que imprimia "&amp;" en la ficha.
-  // El bloque del tracklist sale del texto: o lo pinta la lista de arriba, o no
-  // estaba. Dejarlo dentro lo repetiria en prosa.
-  const desc  = htmlToText(cleanHtmlParaLista(bodyHtml).resto);
+  const desc  = limpia.texto;
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
   // as an artist. Treat it as no-artist (blank) so it can be corrected in
@@ -117,15 +101,10 @@ function parseProduct({ node }) {
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
 
-  // Cuando NO hay JSON pero la descripcion trae un <ol>, la lista vive solo en
-  // el texto. htmlToText la aplanaba en una linea corrida —"Tracklist A1 Tsg
-  // Meltdown A2 Early Morning…"— asi que se saca aparte y la ficha la pinta
-  // como lista. Son pocos discos, pero es su unica lista.
-  let descTracks = [];
-  if (!tracks.length) {
-    const ol = cleanHtmlParaLista(bodyHtml);
-    descTracks = ol.items;
-  }
+  // Las tres reglas de limpieza viven en el modulo compartido, para que la ficha
+  // y el prerender digan lo mismo del mismo disco sin reimportar nada.
+  const limpia = descripcionDeProducto(bodyHtml);
+  const descTracks = limpia.cortesDelTexto;
   const catalog = v?.sku||'';
   const title = node.title||'';
   // Forthcoming/pre-order support: the `forthcoming` tag marks a release that
