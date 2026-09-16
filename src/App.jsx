@@ -4069,7 +4069,7 @@ const RD_FIND_ESTADOS = {
   'buscando':    { label: 'buscando…',              color: '#585858' },
   'bajando':     { label: 'bajando…',               color: '#585858' },
   'manual':      { label: 'ZIP ya soltado',         color: '#585858' },
-  'live':        { label: 'en tienda — no se busca', color: '#585858' },
+  'live':        { label: 'en tienda — no se busca', color: '#585858' },   // el detalle dice por que
 };
 
 function RubadubImporter() {
@@ -4167,13 +4167,47 @@ function RubadubImporter() {
     const keys = Object.keys(invoice);
     const esLive = (k) => !!liveHandles && liveHandles.has(rdKey(invoice[k].sku));
     const conZip = rdZipsForInvoice(invoice, zipFiles);
+    // Los discos en tienda NO se excluyen sin mas: si a su producto en Shopify le
+    // falta portada o audio, su ZIP es justo lo que necesita "Completar". Solo se
+    // dejan fuera los que Shopify ya tiene completos (o los que no se pueden
+    // comprobar, y se dice por que). El CSV los sigue excluyendo a todos.
+    const liveSinZip = keys.filter(k => !conZip[k] && esLive(k));
     const buscar = keys.filter(k => !conZip[k] && !esLive(k));
+    const skuEnShopify = (k) => liveHandles?.skuReal?.get(k) || invoice[k].sku;
     const estado = {};
-    keys.forEach(k => { estado[k] = conZip[k] ? { estado: 'manual' } : esLive(k) ? { estado: 'live' } : { estado: 'buscando' }; });
+    keys.forEach(k => { estado[k] = conZip[k] ? { estado: 'manual' } : esLive(k) ? { estado: 'buscando', detalle: 'en tienda: comprobando en Shopify' } : { estado: 'buscando' }; });
     setFind(estado);
     const set = (k, v) => setFind(prev => ({ ...prev, [k]: v }));
-    if (!buscar.length) return;
+    if (!buscar.length && !liveSinZip.length) return;
     setFinding(true); setFindError('');
+
+    if (liveSinZip.length) {
+      setFindPhase('comprobando en Shopify los discos en tienda');
+      try {
+        const r = await fetchAdmin(`${WORKER_URL}?action=product-media`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry: true, items: liveSinZip.map(k => ({ sku: skuEnShopify(k) })) }),
+        }, mailSecret);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `el worker respondió ${r.status}`);
+        const porSku = new Map((d.resultados || []).map(x => [x.sku, x]));
+        for (const k of liveSinZip) {
+          const x = porSku.get(skuEnShopify(k));
+          if (x?.estado === 'completo') {
+            set(k, { estado: 'live', detalle: 'Shopify ya tiene portada y audio' });
+          } else if (x && x.tieneImagen !== undefined) {
+            const falta = [!x.tieneImagen && 'portada', !x.tieneAudio && 'audio'].filter(Boolean).join(' y ');
+            set(k, { estado: 'buscando', detalle: `en tienda sin ${falta}` });
+            buscar.push(k);
+          } else {
+            set(k, { estado: 'live', detalle: `no se pudo comprobar en Shopify: ${x?.motivo || 'sin respuesta para ese SKU'}` });
+          }
+        }
+      } catch (e) {
+        for (const k of liveSinZip) set(k, { estado: 'live', detalle: `no se pudo comprobar en Shopify: ${e.message}` });
+      }
+      if (!buscar.length) { setFinding(false); setFindPhase(''); return; }
+    }
 
     // Lee y parsea emails en tandas de 8; devuelve rdKey(catno) -> [{row, e}].
     const leer = async (lista, fase) => {
@@ -4558,7 +4592,8 @@ function RubadubImporter() {
                     : zipMatch[k] ? { label: 'ZIP', color: S.accent }
                     : live ? RD_FIND_ESTADOS.live
                     : { label: 'sin ZIP', color: '#ff8800' };
-                  const detalle = f && f.estado !== 'manual' && f.estado !== 'live' ? [f.detalle, f.email].filter(Boolean).join(' · ') : '';
+                  // Tambien en 'live': ahi el detalle es el porque no se busca.
+                  const detalle = f && f.estado !== 'manual' ? [f.detalle, f.email].filter(Boolean).join(' · ') : '';
                   return (
                     <tr key={k} style={{borderTop:`1px solid ${S.border}`,opacity:live?0.55:1}}>
                       <td style={{padding:'4px 8px 4px 0',fontFamily:'monospace',color:S.text,whiteSpace:'nowrap'}}>{inv.sku}</td>
