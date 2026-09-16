@@ -33,6 +33,14 @@
       "binding": "EMAILS",
       "id": "e4966f4a96e84c578bfd96b1d12bdf63"
     },
+    // STOCK_LEDGER: que factura ya sumo que SKU (?action=stock-add). Compartido
+    // entre prod y staging A PROPOSITO: los dos workers escriben en la MISMA
+    // tienda de Shopify, asi que una factura sumada desde staging no puede
+    // volver a sumarse desde prod.
+    {
+      "binding": "STOCK_LEDGER",
+      "id": "5f287546e0de4afba433739084064f9a"
+    },
     // ENTITIES: artistas y sellos canonicos (docs/entities.md). Separado de
     // WISHLIST a proposito: aqui se hace list({prefix}) a menudo, que recorre
     // el namespace entero, y WISHLIST ya mezcla wl:, sess:, authstate: y mas.
@@ -76,6 +84,10 @@
         {
           "binding": "EMAILS",
           "id": "e4966f4a96e84c578bfd96b1d12bdf63"
+        },
+        {
+          "binding": "STOCK_LEDGER",
+          "id": "5f287546e0de4afba433739084064f9a"
         },
         {
           "binding": "ENTITIES",
