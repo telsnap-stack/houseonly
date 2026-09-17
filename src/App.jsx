@@ -352,41 +352,6 @@ async function fetchLiveHandles() {
   return set;
 }
 
-// Catalogo vivo, pero distinguiendo pre-orders del resto. fetchLiveHandles solo
-// dice si un catno existe; aqui hace falta saber SI ADEMAS es un pre-order,
-// porque una fila de factura que casa con un pre-order no es un duplicado a
-// evitar sino una graduacion: hay que dejarla pasar y avisar de que el CSV
-// tiene que subirse con "Overwrite products with matching handles", o Shopify
-// la ignora en silencio.
-// Devuelve rdKey(catno) -> 'forthcoming' | 'live'.
-async function fetchForthcomingKeys() {
-  const out = new Map();
-  let cursor = null;
-  let safety = 25;
-  while (safety-- > 0) {
-    const after = cursor ? `, after: "${cursor}"` : '';
-    const data = await shopifyQuery(`{
-      products(first: 250${after}) {
-        pageInfo { hasNextPage endCursor }
-        edges { node { handle tags variants(first: 1) { edges { node { sku } } } } }
-      }
-    }`);
-    const { edges, pageInfo } = data.products;
-    for (const e of edges) {
-      const estado = (e.node.tags || []).includes('forthcoming') ? 'forthcoming' : 'live';
-      for (const v of [e.node.handle, e.node.variants?.edges?.[0]?.node?.sku]) {
-        const k = rdKey(v);
-        // 'forthcoming' gana: si el mismo catno aparece por handle y por SKU,
-        // lo que importa es que sea un pre-order.
-        if (k && (estado === 'forthcoming' || !out.has(k))) out.set(k, estado);
-      }
-    }
-    if (!pageInfo.hasNextPage) break;
-    cursor = pageInfo.endCursor;
-  }
-  return out;
-}
-
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
 // where the record may not be in our paginated `records` array yet.
 async function fetchShopifyProductByHandle(handle) {
@@ -3193,11 +3158,11 @@ function ZipImporter() {
   // fila en el CSV, asi que ese disco NO se actualiza en Shopify — y hasta
   // ahora el importer no lo decia: procesaba los que podia y callaba el resto.
   const [missingZips, setMissingZips] = useState([]);
-  // Cuales de las filas ya existen como pre-order. Esas van a GRADUAR, que es
-  // lo que se quiere, pero solo si el CSV se sube con "Overwrite products with
-  // matching handles" — si no, Shopify ignora la fila en silencio.
-  const [graduating, setGraduating] = useState([]);
-  const [liveTags, setLiveTags] = useState(null);   // null = sin consultar
+  // Discos de la factura que ya son productos (pre-orders incluidos): fuera del
+  // CSV, se suman con Add stock. Antes los pre-orders viajaban en el CSV para
+  // "graduar" con Overwrite, que FIJA la cantidad y borraba lo pre-vendido; el
+  // tag forthcoming lo quita la graduacion del worker por fecha.
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
   const excelRef = useRef(null);
@@ -3213,8 +3178,13 @@ function ZipImporter() {
     });
   };
 
+  // W&S no pone el numero dentro del Excel (InvRef va vacio): va en el nombre,
+  // "264564.xlsx" o "53725_263599.xlsx".
+  const numeroWs = (excelFile?.name || '').match(/(\d{5,})(?!.*\d{5,})/)?.[1] || '';
+  const documento = { tipo: 'factura', numero: claveDocumento('WS', numeroWs), placeholder: 'WS-…' };
+
   const process = async () => {
-    if (!excelFile || !zipFiles.length) return;
+    if (!excelFile) return;
     setError(''); setStatus('processing'); setResults([]);
     try {
       setProgress({ done:0, total:0, current:'Loading libraries…' });
@@ -3232,27 +3202,22 @@ function ZipImporter() {
       const matchedZips = zipFiles.filter(f => rowMap[catnoFromFilename(f.name)]);
       const total = matchedZips.length;
 
+      // Que discos ya estan en la tienda. Va antes que lo demas: un disco en
+      // tienda sin ZIP no es un hueco, es una reposicion (Add stock).
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
+
       // Lo que la factura pide y no se ha soltado. Se calcula ANTES de procesar
       // para que salga aunque el procesado falle a mitad.
       const conZip = new Set(matchedZips.map(f => rdKey(catnoFromFilename(f.name))));
-      const faltan = Object.values(rowMap)
-        .filter(r => !conZip.has(rdKey(String(r.ArtNo || ''))))
+      const sinZip = Object.values(rowMap).filter(r => String(r.ArtNo || '').trim() && !conZip.has(rdKey(String(r.ArtNo || ''))));
+      const faltan = sinZip
+        .filter(r => !estaEnTienda(vivos, String(r.ArtNo)))
         .map(r => ({ catno: String(r.ArtNo || '').trim(),
-                     titulo: String(r.Titel || r.Title || r.Interpret || '').trim() }))
-        .filter(r => r.catno);
+                     titulo: String(r.Titel || r.Title || r.Interpret || '').trim() }));
       setMissingZips(faltan);
 
-      // Y cuales de los que SI van a viajar ya existen como pre-order. Se
-      // consulta el catalogo vivo con los tags, que es lo que distingue un
-      // pre-order de un producto normal.
-      let vivos = liveTags;
-      if (!vivos) {
-        vivos = await fetchForthcomingKeys().catch(() => new Map());
-        setLiveTags(vivos);
-      }
-      setGraduating(matchedZips
-        .map(f => catnoFromFilename(f.name))
-        .filter(c => vivos.get(rdKey(c)) === 'forthcoming'));
       const processed = [];
       for (let i = 0; i < matchedZips.length; i++) {
         const zipFile = matchedZips[i];
@@ -3361,6 +3326,7 @@ function ZipImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         processed.push({
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _alreadyLive: estaEnTienda(vivos, catno),
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year)].filter(Boolean).join(', '),
@@ -3380,6 +3346,14 @@ function ZipImporter() {
         });
         setProgress({ done:i+1, total, current:'' });
       }
+      // Reposiciones sin promopack: solo cantidad, para Add stock.
+      for (const r of sinZip.filter(r => estaEnTienda(vivos, String(r.ArtNo)))) {
+        processed.push({
+          _catno: String(r.ArtNo).toUpperCase().trim(), _title: String(r.Title || ''), _artist: String(r.Artist || ''),
+          _coverUrl: '', _tracks: [], _error: '', _alreadyLive: true,
+          'Body (HTML)': '', 'Variant Inventory Qty': String(r.Qty || '1'),
+        });
+      }
       setResults(processed);
       autoRecomputeEntities('W&S');
       setSkippedCount(zipFiles.length - matchedZips.length);
@@ -3390,12 +3364,17 @@ function ZipImporter() {
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // La factura ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'ws', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_ws.csv', 'ws');
@@ -3405,6 +3384,7 @@ function ZipImporter() {
   const covered=results.filter(r=>r._coverUrl).length;
   const withAudio=results.filter(r=>r._tracks?.length>0).length;
   const errors=results.filter(r=>r._error).length;
+  const enTienda=results.filter(r=>r._alreadyLive).length;
 
   return (
     <div>
@@ -3421,14 +3401,14 @@ function ZipImporter() {
         </div>
       </div>
       {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>)}</div>}
-      {status==='idle'&&excelFile&&zipFiles.length>0&&(
+      {status==='idle'&&excelFile&&(
         <div style={{marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
             <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
             <span style={{fontSize:9,color:S.muted}}>→ e.g. €11 × {(1+margin/100).toFixed(2)} = €{(11*(1+margin/100)).toFixed(2)}</span>
           </div>
-          <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
+          <Btn ch={zipFiles.length?`🚀 Process ${zipFiles.length} Releases → Upload to R2`:'🚀 Process (sin ZIPs: solo reposiciones)'} onClick={process} full />
         </div>
       )}
       {status==='processing'&&(
@@ -3452,7 +3432,7 @@ function ZipImporter() {
       {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
-            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span></div>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}{enTienda>0?` · ${enTienda} ya en tienda`:''}</span></div>
             {/* Lo que la factura pide y no viaja en el CSV. Sin ZIP no hay fila, y
                     sin fila ese disco NO se actualiza en Shopify. Antes se
                     procesaba lo que se podia y el resto se callaba. */}
@@ -3472,23 +3452,10 @@ function ZipImporter() {
                 </div>
               </div>
             )}
-            {graduating.length>0&&(
-              <div style={{marginBottom:12,padding:'10px 14px',background:'#001a0d',border:`1px solid ${S.accent}66`,borderRadius:4}}>
-                <div style={{fontSize:10,color:S.accent,fontWeight:700,marginBottom:4}}>
-                  {graduating.length} vienen de Forthcoming — marca «Overwrite» al subir el CSV
-                </div>
-                <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
-                  Ya existen como pre-order y esta importación es su llegada: se les quita <code style={{fontFamily:'monospace'}}>forthcoming</code> y entran con el inventario de la factura. Pero Shopify empareja por Handle y, si <b style={{color:S.text}}>no</b> marcas <i>Overwrite products with matching handles</i>, <b style={{color:S.text}}>ignora esas filas en silencio</b> y se quedan en Forthcoming con stock 0.
-                </div>
-                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-                  {graduating.map((c,i2)=>(
-                    <span key={i2} style={{background:S.bg,border:`1px solid ${S.accent}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:S.accent}}>{c}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="ws" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3507,7 +3474,7 @@ function ZipImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -3599,6 +3566,13 @@ async function parseTvInvoicePdf(pdfBlob) {
   // "FOKUZLP 003"), a dot (".1"/".2"), a hyphen suffix ("-2024"), or trailing "_".
   const catRe = /^([A-Z0-9]+(?:\.\d+)?(?:LP)?(?:[\s-][0-9][\w.]*)?[A-Z0-9]*_?)/i;
   const eu = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.')); // "8,89" / "1.234,56"
+  // Numero de factura: la linea "Invoice number:" y, un par de lineas mas abajo
+  // (en medio va la direccion), el numero solo: "202632312". La shelf list y el
+  // presupuesto no llevan esa linea: sin numero, Add stock lo pide a mano.
+  const lineas = text.split('\n');
+  const iNum = lineas.findIndex(l => /^Invoice number:?$/i.test(l.trim()));
+  const numero = iNum >= 0 ? (lineas.slice(iNum + 1, iNum + 5).find(l => /^\d{6,}$/.test(l.trim())) || '').trim() : '';
+  Object.defineProperty(out, '_documento', { value: numero ? { tipo: 'factura', numero: claveDocumento('TV', numero), placeholder: 'TV-…' } : null, enumerable: false });
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     const m = lineRe.exec(line);
@@ -3625,6 +3599,7 @@ function TripleVisionImporter() {
   const [results, setResults]     = useState([]);
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const pdfRef  = useRef(null);
   const metaRef = useRef(null);
   const zipRef  = useRef(null);
@@ -3655,6 +3630,10 @@ function TripleVisionImporter() {
     if (!invoice || !metaRecords) return;
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       setProgress({ done:0, total:0, current:'Loading libraries…' });
       const JSZip = await loadJSZip();
 
@@ -3741,7 +3720,7 @@ function TripleVisionImporter() {
 
         processed.push({
           _catno: key, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
-          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile, _alreadyLive: estaEnTienda(vivos, key),
           'Handle': handle, 'Title': title || key, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -3768,15 +3747,22 @@ function TripleVisionImporter() {
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
+  const documento = invoice?._documento || null;   // {tipo, numero} del PDF, si lo trae
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'tv', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_tv.csv', 'tv');
@@ -3833,8 +3819,10 @@ function TripleVisionImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="tv" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3854,7 +3842,7 @@ function TripleVisionImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -4753,18 +4741,7 @@ function RubadubImporter() {
               Comprobando cuáles ya existen en la tienda…
             </div>
           )}
-          {liveRows.length>0&&(()=>{
-            // Discos en tienda: el SKU tal cual esta en Shopify (el worker no adivina).
-            const skuDe = (r) => liveHandles?.skuReal?.get(rdKey(r._catno)) || r._catno;
-            const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
-            return (<>
-              <AddStockPanel source="rd" documento={documento}
-                filas={liveRows.map(r => ({ sku: skuDe(r), delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: titulo(r) })).filter(f => f.delta > 0)} />
-              <CompletarMediaPanel
-                filas={liveRows.map(r => ({ sku: skuDe(r), titulo: titulo(r), imageUrl: r._coverUrl || '', tracks: r._tracks || [],
-                  notasHtml: String(r['Body (HTML)'] || '').replace(/<script[^>]*id="tracks"[^>]*>[\s\S]*?<\/script>/gi, '') }))} />
-            </>);
-          })()}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rd" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -4855,6 +4832,7 @@ function KudosImporter() {
   const [minRetail, setMinRetail] = useState(9.99);
   const [stdW, setStdW]     = useState(500);
   const [dblW, setDblW]     = useState(900);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const pickRef = useRef(null);
   const jsonRef = useRef(null);
 
@@ -4881,6 +4859,9 @@ function KudosImporter() {
       parsed.push({ sku, upc:(row[ci.upc]||'').trim(), format:ci.format>=0?(row[ci.format]||'').trim():'', title:ci.title>=0?(row[ci.title]||'').trim():'', artist:ci.artist>=0?(row[ci.artist]||'').trim():'', requested:ci.requested>=0?parseInt(row[ci.requested])||0:1, fulfilled:ci.fulfilled>=0?parseInt(row[ci.fulfilled])||0:1, isBlack:/BLACK/i.test(row[ci.sku]||'') });
     }
     setPickingRows(parsed); setPickFile(filename); setStep2Ready(true);
+    // Que discos del picking ya estan en la tienda (reposiciones).
+    setLiveHandles(null);
+    cargarEnTienda().then(setLiveHandles);
   }
 
   function loadEnrichment(text, filename) {
@@ -4906,75 +4887,101 @@ function KudosImporter() {
     return {api:e,fmt};
   }
 
+  // Una fila por disco del picking, con las claves comunes de los importers
+  // (_catno, _title, _artist, _coverUrl, _tracks, 'Variant SKU', 'Variant
+  // Inventory Qty', 'Body (HTML)'), para marcar los que ya estan en tienda. Las
+  // etiquetas NO van aqui: resolver el genero apunta los desconocidos para la
+  // cola, y esto se calcula en cada render; se ponen solo al exportar.
+  const m=margin/100;
+  function filaKudos(r) {
+    const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
+    const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
+    // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
+    // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
+    // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
+    // tratan igual.
+    const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
+    const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+    const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
+    const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
+    const formatDisplay=fmt?fmt.display:r.format;
+    const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
+    // Floor applies only to single 12" releases. 7" can legitimately retail below the
+    // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
+    const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
+    const flooredRetail = rawRetail > 0
+      ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
+      : 0;
+    const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
+    const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
+    const grams=is2LP?String(dblW):String(stdW);
+    let bodyHtml='';
+    let audioTracksJson = '';
+    if(api){
+      // Build tracklist for the helper: include duration in `d` field
+      const tracksForHelper = api.tracks
+        ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).map(t=>({
+            name: decodeHtml(t.title),
+            d: t.duration || ''
+          }))
+        : [];
+      // Build inline audio tracks JSON (separate from description, for the modal player)
+      if(api.tracks){
+        const audioArr = Object.values(api.tracks)
+          .sort((a,b)=>a.sequence-b.sequence)
+          .filter(t=>t.audio_clip)
+          .map(t=>({ name: decodeHtml(t.title), url: t.audio_clip.replace(/\.ka$/,'.mp3') }));
+        if(audioArr.length){
+          audioTracksJson = '<script type="application/json" id="tracks">'+JSON.stringify(audioArr)+'<\/script>';
+        }
+      }
+      // Year — try common API fields
+      const releaseYear = api.release_date ? new Date(api.release_date).getFullYear()
+                        : api.year ? parseInt(api.year)
+                        : undefined;
+      bodyHtml = buildDescriptionHtml({
+        artist, title, label,
+        year: releaseYear,
+        tracks: tracksForHelper,
+        // Las notas vienen de la misma API con entidades HTML que el resto.
+        sourceNotes: decodeHtml(api.b2c_notes || api.b2b_notes || ''),
+      }) + audioTracksJson;
+    } else {
+      bodyHtml = buildDescriptionHtml({ artist, title, label });
+    }
+    const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
+    const tracksMedia = api&&api.tracks
+      ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).filter(t=>t.audio_clip)
+          .map(t=>({ name: decodeHtml(t.title), d: t.duration || '', url: t.audio_clip.replace(/\.ka$/,'.mp3') }))
+      : [];
+    return {
+      _r: r, _catno: r.sku, _title: title, _artist: artist, _label: label, _genero: [genre,subgenre].filter(Boolean).join(', '),
+      _coverUrl: imgUrl, _tracks: tracksMedia, _handle: handle, _grams: grams, _retail: retailP, _cost: costEUR,
+      _alreadyLive: estaEnTienda(liveHandles, r.sku),
+      'Variant SKU': r.sku, 'Variant Inventory Qty': String(r.fulfilled), 'Body (HTML)': bodyHtml||'<p></p>',
+    };
+  }
+
   async function exportShopify() {
     // Sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
-    const m=margin/100;
+    if (liveHandles===null) { alert('Todavía se está comprobando qué discos ya están en la tienda. Espera un momento y repite.'); return; }
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = filas.filter(x => !x._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const csvRows=[cols];
-    pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).forEach(r=>{
-      const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
-      const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
-      // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
-      // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
-      // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
-      // tratan igual.
-      const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
-      const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
-      const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
-      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
-      const formatDisplay=fmt?fmt.display:r.format;
-      const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
-      // Floor applies only to single 12" releases. 7" can legitimately retail below the
-      // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
-      const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
-      const flooredRetail = rawRetail > 0
-        ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
-        : 0;
-      const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
-      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
-      const grams=is2LP?String(dblW):String(stdW);
-      let bodyHtml='';
-      let audioTracksJson = '';
-      if(api){
-        // Build tracklist for the helper: include duration in `d` field
-        const tracksForHelper = api.tracks
-          ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).map(t=>({
-              name: decodeHtml(t.title),
-              d: t.duration || ''
-            }))
-          : [];
-        // Build inline audio tracks JSON (separate from description, for the modal player)
-        if(api.tracks){
-          const audioArr = Object.values(api.tracks)
-            .sort((a,b)=>a.sequence-b.sequence)
-            .filter(t=>t.audio_clip)
-            .map(t=>({ name: decodeHtml(t.title), url: t.audio_clip.replace(/\.ka$/,'.mp3') }));
-          if(audioArr.length){
-            audioTracksJson = '<script type="application/json" id="tracks">'+JSON.stringify(audioArr)+'<\/script>';
-          }
-        }
-        // Year — try common API fields
-        const releaseYear = api.release_date ? new Date(api.release_date).getFullYear()
-                          : api.year ? parseInt(api.year)
-                          : undefined;
-        bodyHtml = buildDescriptionHtml({
-          artist, title, label,
-          year: releaseYear,
-          tracks: tracksForHelper,
-          // Las notas vienen de la misma API con entidades HTML que el resto.
-          sourceNotes: decodeHtml(api.b2c_notes || api.b2b_notes || ''),
-        }) + audioTracksJson;
-      } else {
-        bodyHtml = buildDescriptionHtml({ artist, title, label });
-      }
+    kept.forEach(x=>{
+      const r=x._r;
       // El genero y el subgenero de Kudos son dos campos de la misma API: se
       // juntan y se resuelven de una vez, para que "House" + "Deep House" no
       // escriba dos tags que dicen lo mismo.
-      const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);tags.push(...tagsDeGenero([genre,subgenre].filter(Boolean).join(', '), { sku: r.sku, title }).tags);
-      const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
-      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
+      const tags=['vinyl','kudos'];if(x._label)tags.push('label:'+x._label);tags.push(...tagsDeGenero(x._genero, { sku: r.sku, title: x._title }).tags);
+      const imgUrl=x._coverUrl, title=x._title, artist=x._artist;
+      csvRows.push([x._handle,title+' - '+artist,x['Body (HTML)'],artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,x._grams,'shopify',String(r.fulfilled),'continue','manual',x._retail,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',x._cost,'active']);
     });
+    // El picking ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'kudos', filas: kept }))) return;
     const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
@@ -4983,6 +4990,11 @@ function KudosImporter() {
   }
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
+  const filas = useMemo(() => importable.map(filaKudos), [pickingRows, enrichment, fx, margin, minRetail, stdW, dblW, liveHandles]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const enTienda = filas.filter(x => x._alreadyLive).length;
+  // El numero va en el nombre del fichero: "K235566 Picking Summary.csv".
+  const documento = { tipo: 'factura', etiqueta: 'picking', placeholder: 'KUDOS-K…',
+    numero: claveDocumento('KUDOS', (pickFile || '').match(/\b(K\d{5,})\b/i)?.[1] || '') };
   const excluded    = pickingRows.filter(r=>r.isBlack).length;
   const unfulfilled = pickingRows.filter(r=>!r.isBlack&&r.fulfilled<=0).length;
   const enrichedCount = importable.filter(r=>getEnriched(r)).length;
@@ -5039,7 +5051,9 @@ function KudosImporter() {
             </div>
           ))}
           <div style={{flex:1}} />
-          <Btn ch="⬇ Export Shopify CSV" onClick={exportShopify} disabled={importable.length===0} />
+          {filas.length>0&&enTienda===filas.length
+            ? <span style={{fontSize:9,color:S.muted,maxWidth:300,lineHeight:1.5}}>Sin CSV: los {enTienda} discos ya están en la tienda. Add stock y Completar media (abajo).</span>
+            : <Btn ch={`⬇ Export Shopify CSV (${filas.length-enTienda})`} onClick={exportShopify} disabled={importable.length===0||liveHandles===null} />}
         </div>
       )}
 
@@ -5051,8 +5065,10 @@ function KudosImporter() {
           <span>2000Black: <b style={{color:S.danger}}>{excluded}</b></span>
           <span>Unfulfilled: <b style={{color:'#ff8800'}}>{unfulfilled}</b></span>
           <span>Enriched: <b style={{color:S.accent}}>{enrichedCount}/{importable.length}</b></span>
+          <span>Ya en tienda: <b style={{color:enTienda>0?'#ff8800':S.muted}}>{liveHandles===null?'…':enTienda}</b>{enTienda>0?' (fuera del CSV)':''}</span>
         </div>
       )}
+      {pickFile && <EnTiendaBloque results={filas} live={liveHandles} documento={documento} source="kudos" />}
 
       {/* Table */}
       {pickingRows.length > 0 && (
@@ -5117,6 +5133,7 @@ function DBHImporter() {
   const [results, setResults]   = useState([]);
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const csvRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -5199,6 +5216,10 @@ function DBHImporter() {
     setError(''); setStatus('processing'); setResults([]);
 
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const JSZip = await loadJSZip();
       const total = csvRows.length;
       const processed = [];
@@ -5221,7 +5242,6 @@ function DBHImporter() {
         const ppu     = parseFloat(row['PPU'] || 0);
         const rawPrice = ppu * (1 + margin / 100);
         const price   = (Math.ceil(rawPrice) - 0.01).toFixed(2);
-        const qtyOrdered = parseInt(row['QTY Ordered'] || 1);
         const format  = row['Format'] || '';
         const is2LP   = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
         const grams   = is2LP ? '900' : '500';
@@ -5283,7 +5303,7 @@ function DBHImporter() {
         processed.push({
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _isPresale: isPresale, _zipFound: !!zipFile,
+          _isPresale: isPresale, _zipFound: !!zipFile, _alreadyLive: estaEnTienda(vivos, catno),
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -5298,7 +5318,9 @@ function DBHImporter() {
           'Variant SKU': catno,
           'Variant Grams': grams,
           'Variant Inventory Tracker': 'shopify',
-          'Variant Inventory Qty': String(qtyOrdered),
+          // Lo que llega en ESTE envio. "QTY Ordered" daba de alta, en un envio
+          // parcial, unidades que no habian llegado.
+          'Variant Inventory Qty': String(qtyShipped),
           'Variant Inventory Policy': 'continue',
           'Variant Fulfillment Service': 'manual',
           'Variant Price': price,
@@ -5328,15 +5350,24 @@ function DBHImporter() {
     }
   };
 
+  // El numero del pedido va en el nombre: "DBH-Music_Order_89005-2026-09-17.csv".
+  const documento = { tipo: 'factura', etiqueta: 'pedido', placeholder: 'DBH-…',
+    numero: claveDocumento('DBH', (csvFile || '').match(/Order_(\d+)/i)?.[1] || '') };
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'dbh', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'dbh_shopify_import.csv', 'dbh');
@@ -5429,9 +5460,11 @@ function DBHImporter() {
                 {errors>0?` · ${errors} errors`:''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
 
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="dbh" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
@@ -5457,7 +5490,7 @@ function DBHImporter() {
           </div>
 
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -5501,6 +5534,8 @@ function MotherTongueImporter() {
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [documento, setDocumento] = useState(null);       // {tipo, numero} del PDF
   const pdfRef    = useRef(null);
   const htmlRef   = useRef(null);
   const folderRef = useRef(null);
@@ -5655,6 +5690,15 @@ function MotherTongueImporter() {
         items.push({ catno, qty, dealerPrice });
       }
     }
+    // "FACTURA n°. 962/2026 de 2026-08-28" es la llegada; "ORDEN n°. 481/2026"
+    // es el pedido y no suma stock.
+    const cabecera = lines.map(l => l.text).join('\n');
+    const fac = cabecera.match(/FACTURA\s*n[°º]?\.?\s*(\d+)\s*\/\s*(\d{4})/i);
+    const ord = cabecera.match(/ORDEN\s*n[°º]?\.?\s*(\d+)\s*\/\s*(\d{4})/i);
+    const documento = fac ? { tipo: 'factura', numero: claveDocumento('MT', `${fac[1]}-${fac[2]}`) }
+                    : ord ? { tipo: 'presupuesto', numero: claveDocumento('MT-ORDEN', `${ord[1]}-${ord[2]}`) }
+                    : null;
+    Object.defineProperty(items, '_documento', { value: documento, enumerable: false });
     return items;
   }
 
@@ -5955,6 +5999,7 @@ function MotherTongueImporter() {
     try {
       const items = await parseInvoicePDF(file);
       setInvoiceItems(items);
+      setDocumento(items._documento ? { ...items._documento, placeholder: 'MT-…' } : null);
       setPdfFile(file.name);
       setStatus('idle');
     } catch (e) {
@@ -6010,6 +6055,10 @@ function MotherTongueImporter() {
     if (!invoiceItems.length) { setError('Need invoice PDF first'); return; }
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const total = invoiceItems.length;
       const processed = [];
       for (let i = 0; i < invoiceItems.length; i++) {
@@ -6156,7 +6205,7 @@ function MotherTongueImporter() {
           _catno: item.catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _hasMeta: hasMeta, _hasAssets: !!(assets.covers.length || assets.audio.length),
-          _draft: productStatus === 'draft',
+          _draft: productStatus === 'draft', _alreadyLive: estaEnTienda(vivos, item.catno),
           'Handle': handle,
           'Title': title || item.catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -6199,15 +6248,21 @@ function MotherTongueImporter() {
     }
   };
 
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'mt', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
@@ -6351,8 +6406,10 @@ function MotherTongueImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="mt" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
@@ -6377,7 +6434,7 @@ function MotherTongueImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -6426,6 +6483,8 @@ function RushHourImporter() {
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [documento, setDocumento] = useState(null);       // {tipo, numero} del orderNumber
   const jsonRef = useRef(null);
   const zipRef  = useRef(null);
 
@@ -6450,6 +6509,8 @@ function RushHourImporter() {
     // Filter out malformed rows (need at least slug + dealerPrice + qty)
     const valid = arr.filter(it => it.slug && it.dealerPrice > 0 && it.qty > 0);
     if (!valid.length) throw new Error('JSON has no items with slug + dealerPrice + qty');
+    const numero = !Array.isArray(data) && /^\d+$/.test(String(data.orderNumber || '')) ? String(data.orderNumber) : '';
+    Object.defineProperty(valid, '_documento', { value: numero ? { tipo: 'factura', etiqueta: 'pedido', numero: claveDocumento('RH', numero) } : null, enumerable: false });
     return valid;
   }
 
@@ -6520,6 +6581,7 @@ function RushHourImporter() {
     try {
       const items = await parseOrderJSON(file);
       setOrderItems(items);
+      setDocumento(items._documento ? { ...items._documento, placeholder: 'RH-…' } : null);
       setJsonFile(file.name);
       setStatus('idle');
     } catch (e) {
@@ -6549,6 +6611,10 @@ function RushHourImporter() {
     if (!orderItems.length) { setError('Need order JSON first'); return; }
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const JSZip = await loadJSZip();
       const total = orderItems.length;
       const processed = [];
@@ -6670,7 +6736,7 @@ function RushHourImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         processed.push({
-          _catno: catno, _title: title, _artist: artist,
+          _catno: catno, _title: title, _artist: artist, _alreadyLive: estaEnTienda(vivos, catno),
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _draft: false,
           'Handle': handle,
@@ -6715,15 +6781,21 @@ function RushHourImporter() {
     }
   };
 
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'rh', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
@@ -6834,8 +6906,10 @@ function RushHourImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rh" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:S.border}`,borderRadius:3,overflow:'hidden'}}>
@@ -6859,7 +6933,7 @@ function RushHourImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -11305,7 +11379,7 @@ function CompletarMediaPanel({ filas }) {
 // puede descargar: anotado, o el usuario acepta seguir sin anotar.
 // Presupuestos y documentos sin numero no se anotan: no son la llegada.
 async function anotarCsvEnLibroDeStock({ documento, source, filas }) {
-  if (documento?.tipo !== 'factura' || !documento?.numero || !filas.length) return true;
+  if (!documento || documento.tipo === 'presupuesto' || !documento.numero || !filas.length) return true;
   const items = filas.map(r => ({ sku: String(r['Variant SKU'] || '').trim(), delta: parseInt(r['Variant Inventory Qty'], 10) || 0 }))
     .filter(i => i.sku);
   try {
@@ -11317,7 +11391,7 @@ async function anotarCsvEnLibroDeStock({ documento, source, filas }) {
     if (!r.ok) throw new Error(d.error || `el worker respondió ${r.status}`);
     return true;
   } catch (e) {
-    return window.confirm(`No se pudo anotar la factura ${documento.numero} en el libro de stock (${e.message}).\n\n` +
+    return window.confirm(`No se pudo anotar el documento ${documento.numero} en el libro de stock (${e.message}).\n\n` +
       `Si descargas igualmente y luego estos discos aparecen "en tienda", Add stock podría volver a sumar su cantidad.\n\n¿Descargar el CSV de todas formas?`);
   }
 }
@@ -11351,7 +11425,7 @@ function AddStockPanel({ filas, documento, source }) {
 
   const lanzar = async (dry, items) => {
     if (!listo || busy) return;
-    if (!dry && !window.confirm(`Sumar inventario en Shopify (tienda real) para ${items.length} disco(s) con la factura ${ref}?\n\n` +
+    if (!dry && !window.confirm(`Sumar inventario en Shopify (tienda real) para ${items.length} disco(s) con el documento ${ref}?\n\n` +
         items.map(i => `${i.sku}: +${i.delta}`).join('\n'))) return;
     setBusy(dry ? 'dry' : 'real'); setErr('');
     try {
@@ -11373,8 +11447,8 @@ function AddStockPanel({ filas, documento, source }) {
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
         <div style={{fontSize:10,color:'#ff8800',fontWeight:700}}>{filas.length} ya en tienda — llegada de stock</div>
         <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
-          <span style={{fontSize:9,color:S.muted}}>factura</span>
-          <input value={numero} onChange={e=>setNumero(e.target.value)} placeholder="SI-…" style={{width:110,background:S.bg,border:`1px solid ${ref?S.border:'#ff880066'}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
+          <span style={{fontSize:9,color:S.muted}}>{documento?.etiqueta || 'factura'}</span>
+          <input value={numero} onChange={e=>setNumero(e.target.value)} placeholder={documento?.placeholder || 'nº de factura'} style={{width:110,background:S.bg,border:`1px solid ${ref?S.border:'#ff880066'}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
           <Btn ch={busy==='dry'?'Simulando…':'Simular (dry-run)'} variant="ghost" onClick={()=>lanzar(true, filas)} disabled={!listo||!!busy} />
           <Btn ch={busy==='real'?'Sumando…':`Add stock (${filas.length})`} onClick={()=>lanzar(false, filas)} disabled={!listo||!!busy} />
         </div>
@@ -11417,6 +11491,52 @@ function AddStockPanel({ filas, documento, source }) {
       </div>
     </div>
   );
+}
+
+// ── DISCOS YA EN TIENDA (comun a los importers) ──────────────
+// Cada importer marca `_alreadyLive` en sus filas con el catalogo vivo. Esas
+// filas NO viajan en el CSV (fijaria la cantidad y pisaria el producto): se
+// suman con Add stock y se completan con Completar media. Filas con las claves
+// de siempre: _catno, _title, _artist, _coverUrl, _tracks, 'Variant Inventory
+// Qty', 'Body (HTML)'.
+//
+// Si la consulta del catalogo falla no se bloquea el import, pero se dice: sin
+// ella el CSV puede llevar discos que ya existen.
+async function cargarEnTienda() {
+  try { return await fetchLiveHandles(); }
+  catch (e) { const s = new Set(); s.skuReal = new Map(); s.error = e?.message || 'error'; return s; }
+}
+const estaEnTienda = (live, catno) => !!live && live.has(rdKey(catno));
+
+// El numero de un documento como clave del libro de stock ("962/2026" no vale).
+const claveDocumento = (prefijo, numero) =>
+  numero ? `${prefijo}-${String(numero).toUpperCase().replace(/[^A-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}` : '';
+
+function EnTiendaBloque({ results, live, documento, source }) {
+  const liveRows = results.filter(r => r._alreadyLive);
+  // El SKU tal cual esta en Shopify: el worker no adivina.
+  const skuDe = (r) => live?.skuReal?.get(rdKey(r._catno)) || r._catno;
+  const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
+  return (<>
+    {live?.error&&(
+      <div style={{marginBottom:10,padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:4,fontSize:10,color:S.danger}}>
+        No se pudo comprobar qué discos ya están en la tienda ({live.error}). El CSV puede llevar discos que ya existen: vuelve a procesar antes de importarlo.
+      </div>
+    )}
+    {liveRows.length>0&&(<>
+      <AddStockPanel source={source} documento={documento}
+        filas={liveRows.map(r => ({ sku: skuDe(r), delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: titulo(r) })).filter(f => f.delta > 0)} />
+      <CompletarMediaPanel
+        filas={liveRows.map(r => ({ sku: skuDe(r), titulo: titulo(r), imageUrl: r._coverUrl || '', tracks: r._tracks || [],
+          notasHtml: String(r['Body (HTML)'] || '').replace(/<script[^>]*id="tracks"[^>]*>[\s\S]*?<\/script>/gi, '') }))} />
+    </>)}
+  </>);
+}
+
+function BotonCsvImporter({ results, onClick }) {
+  const n = results.filter(r => !r._alreadyLive).length;
+  if (n > 0) return <Btn ch={`⬇ Download Shopify CSV (${n})`} onClick={onClick} />;
+  return <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {results.length} discos ya están en la tienda. Para ellos, Add stock y Completar media.</span>;
 }
 
 async function descargarCsvDeImporter(contenido, nombreFichero, source, opciones = {}) {
