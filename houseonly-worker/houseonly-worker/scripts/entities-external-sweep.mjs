@@ -21,7 +21,8 @@
  *      normaliza igual. Siempre a revision fila a fila.
  *
  * Y de cada entidad de MusicBrainz: sus url-rels y, si enlaza a Wikidata, los
- * IDs de Mixcloud, SoundCloud, YouTube, RA, Songkick, Bandsintown y NTS de alli.
+ * IDs de Mixcloud, SoundCloud, YouTube, RA, Songkick, Bandsintown, NTS y Bandcamp
+ * de alli. Bandcamp se guarda pero no se publica (HIDDEN_FIELDS en external.ts).
  * El MBID sale SOLO de MusicBrainz: el P434 de Wikidata de DJ Koze apunta a
  * "Stefan Kozalla", que es otra entidad de MB.
  *
@@ -271,6 +272,7 @@ const WD_PROPS = {
   P3478: v => `https://www.songkick.com/artists/${v}`,
   P7195: v => `https://www.bandsintown.com/a/${v}`,
   P7353: v => `https://www.nts.live/artists/${v}`,
+  P3283: v => `https://${v}.bandcamp.com/`,
 };
 
 async function wikidataUrls(qid) {
