@@ -12356,7 +12356,6 @@ function EntitiesPanel() {
 const LINK_FIELD_LABEL = {
   mixcloud:'Mixcloud', soundcloud:'SoundCloud', youtube:'YouTube', ra:'RA',
   songkick:'Songkick', bandsintown:'Bandsintown', nts:'NTS',
-  bandcamp:'Bandcamp (stored, never shown)',
 };
 const LINK_WHY = {
   'no-discogs':'name match only — no record of ours proves it',
