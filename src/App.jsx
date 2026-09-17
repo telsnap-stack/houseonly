@@ -480,6 +480,24 @@ async function shopifyCheckout(cartItems, session=null) {
 // ── WORKER / R2 ────────────────────────────────────────────────
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://houseonly-worker.emontagut.workers.dev';
 
+/**
+ * La capa de entidades SIEMPRE la de produccion, tambien desde staging.
+ *
+ * Staging tiene su propio KV de ENTITIES a proposito, y para la tienda esta
+ * bien: un seguidor de staging no es un seguidor de verdad. Pero los importers
+ * no son la tienda: el CSV que generan se sube a la UNICA tienda de Shopify que
+ * existe. Resolviendo contra staging pasa lo que paso el 2026-09-16 con Rubadub
+ * y el 2026-09-17 con DBH: el slug canonico que viaja en el metafield es el de
+ * una entidad que en produccion no existe, los nombres nuevos entran en la cola
+ * de staging —donde nadie los mira— y el disco sale en la tienda con el artista
+ * sin enlace y sin boton de Follow.
+ *
+ * Mismo criterio que REVIEW_WORKER_URL, que apunta a produccion desde el
+ * cutover de la fase 3.5 y por la misma razon: una cola que decide sobre el
+ * catalogo real vive donde vive el catalogo real.
+ */
+const ENTITIES_WORKER_URL = 'https://houseonly-worker.emontagut.workers.dev';
+
 // Resize an image blob to fit within maxDim x maxDim, preserving aspect ratio.
 // Returns the original blob untouched if it's already within bounds. Used to
 // prevent Shopify's ~25 megapixel rejection (covers above ~5000px are common
@@ -3394,7 +3412,7 @@ function ZipImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(results);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'ZIP');
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
@@ -3775,7 +3793,7 @@ function TripleVisionImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(results);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Triple Vision');
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
@@ -4569,7 +4587,7 @@ function RubadubImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(kept);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Rubadub');
     const rows = ent.rows;
     const CSV_KEYS = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
@@ -4974,7 +4992,7 @@ function KudosImporter() {
       csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
     });
     const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Kudos');
     const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
         await descargarCsvDeImporter(csv, 'shopify-kudos-'+new Date().toISOString().slice(0,10)+'.csv', 'kudos', { bom:true, tipo:'text/csv;charset=utf-8' });
     autoRecomputeEntities('Kudos');
@@ -5333,7 +5351,7 @@ function DBHImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(results);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'DBH');
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
@@ -6204,7 +6222,7 @@ function MotherTongueImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(results);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Mother Tongue');
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
@@ -6720,7 +6738,7 @@ function RushHourImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     const ent = await withEntityColumns(results);
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Rush Hour');
     const rows = ent.rows;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
@@ -10470,7 +10488,7 @@ function PreorderImporter() {
     // Aqui el sello NO sale de los tags: los monta tagsForRow() al escribir,
     // y el valor bueno esta en _label desde el parseo.
     const ent = await withEntityColumns(kept, { labelOf: r => r._label });
-    if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
+    avisoDeEntidades(ent, 'Pre-order');
     const rows = ent.rows;
     const CSV_KEYS = Object.keys(rows[0]).filter(k=>!k.startsWith('_'));
     const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>{
@@ -11434,7 +11452,7 @@ async function mandarGenerosALaCola(valores, source) {
   if (!valores.length) return { ok: true, enviados: 0 };
   if (!entitiesSecret) return { ok: false, motivo: 'sin secreto de admin', enviados: 0 };
   try {
-    const r = await fetch(`${WORKER_URL}?action=genre-review-add`, {
+    const r = await fetch(`${ENTITIES_WORKER_URL}?action=genre-review-add`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${entitiesSecret}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ source, values: valores }),
@@ -11454,7 +11472,7 @@ async function recomputeEntitiesQueue(secretOverride) {
   for (const kind of ['artist', 'label']) {
     let cursor = null;
     for (let i = 0; i < 60; i++) {
-      const r = await fetch(`${WORKER_URL}?action=entity-review-recompute`, {
+      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-recompute`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${sec}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, limit: 150, cursor }),
@@ -11482,7 +11500,7 @@ async function recomputeEntitiesQueue(secretOverride) {
 async function resolveEntityRaws(kind, items, secret) {
   const out = new Map();
   for (let i = 0; i < items.length; i += 100) {
-    const r = await fetch(`${WORKER_URL}?action=entity-resolve`, {
+    const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-resolve`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind, source: 'importer', items: items.slice(i, i + 100) }),
@@ -11492,9 +11510,44 @@ async function resolveEntityRaws(kind, items, secret) {
     // Lo que no resuelve —'review' o 'ignored'— vuelve con slugs vacios y se
     // queda como celda vacia. El producto sube igual: una importacion NO espera
     // a la cola de revision.
-    for (const res of d.results || []) out.set(res.raw, res.slugs || []);
+    //
+    // El `status` se guarda porque 'review' e 'ignored' NO son lo mismo para
+    // quien mira la pantalla: 'Various Artists' esta ignorado a proposito y no
+    // hay nada que aprobar, mientras que un nombre en revision es un artista de
+    // verdad que se quedara sin enlace y sin boton de Follow hasta que alguien
+    // lo apruebe. Contarlos juntos era avisar de todo y no avisar de nada.
+    for (const res of d.results || []) out.set(res.raw, { slugs: res.slugs || [], status: res.status });
   }
   return out;
+}
+
+/**
+ * Lo que hay que decir en pantalla despues de resolver las entidades de un CSV.
+ *
+ * Existe porque el silencio de aqui costo caro: un nombre que entra en la cola
+ * de revision sale en la tienda sin enlace a su ficha y SIN boton de Follow, y
+ * eso no se ve al generar el CSV ni al subirlo —solo semanas despues, cuando
+ * alguien se fija en que a un disco nuevo no se le puede seguir el artista.
+ * Medido el 2026-09-17 sobre el catalogo real: 37 artistas en esa situacion.
+ *
+ * Los ignorados a proposito —'Various Artists', 'Unknown Artist'— no se cuentan:
+ * no hay nada que aprobar y avisar de ellos era enseñar a ignorar el aviso.
+ */
+function avisoDeEntidades(ent, importer) {
+  if (ent.reason) {
+    alert(`CSV generated WITHOUT entity columns: ${ent.reason}\n\n`
+      + 'The records will go up with no artist or label entity, so they will show '
+      + 'no link and no Follow button until the Entities tab fills them in.');
+    return;
+  }
+  const a = ent.enColaArtistas || [], l = ent.enColaSellos || [];
+  if (!a.length && !l.length) return;
+  const lista = arr => arr.slice(0, 12).join(' · ') + (arr.length > 12 ? ` … +${arr.length - 12}` : '');
+  alert(`${importer}: ${a.length + l.length} new name${a.length + l.length === 1 ? '' : 's'} went to the `
+    + 'Entities review queue. Until you approve them there, their records show the name as plain '
+    + 'text — no entity page, no Follow button.\n'
+    + (a.length ? `\nArtists (${a.length}): ${lista(a)}` : '')
+    + (l.length ? `\nLabels (${l.length}): ${lista(l)}` : ''));
 }
 
 /**
@@ -11509,7 +11562,7 @@ async function resolveEntityRaws(kind, items, secret) {
  * funcion accesoria es peor que un CSV sin metafield.
  */
 async function withEntityColumns(rows, opts = {}) {
-  const out = { rows, reason: '', resolved: 0, pending: 0 };
+  const out = { rows, reason: '', resolved: 0, pending: 0, enColaArtistas: [], enColaSellos: [] };
   if (!rows || !rows.length) return out;
   if (!entitiesSecret) {
     out.reason = 'the Entities tab is not connected in this session (no Bearer)';
@@ -11533,9 +11586,13 @@ async function withEntityColumns(rows, opts = {}) {
     const aMap = await resolveEntityRaws('artist', artists, entitiesSecret);
     const lMap = await resolveEntityRaws('label', labels, entitiesSecret);
 
+    for (const [mapa, lista] of [[aMap, out.enColaArtistas], [lMap, out.enColaSellos]]) {
+      for (const [raw, res] of mapa) if (res?.status === 'review' && !lista.includes(raw)) lista.push(raw);
+    }
+
     out.rows = rows.map(r => {
-      const a = aMap.get(String(vendorOf(r) || '').trim()) || [];
-      const l = lMap.get(String(labelOf(r) || '').trim()) || [];
+      const a = aMap.get(String(vendorOf(r) || '').trim())?.slugs || [];
+      const l = lMap.get(String(labelOf(r) || '').trim())?.slugs || [];
       if (a.length) out.resolved++; else out.pending++;
       return { ...r, ...entityCsvColumns(a, l) };
     });
@@ -11560,13 +11617,17 @@ async function withEntityColumnsArray(cols, rows) {
   }));
   const ent = await withEntityColumns(asObjects);
   const A = csvHeader('artist'), L = csvHeader('label');
+  // Las dos listas de la cola viajan tal cual: el aviso en pantalla es el mismo
+  // para los ocho importers, y este no puede ser el unico que se calle.
+  const cola = { enColaArtistas: ent.enColaArtistas, enColaSellos: ent.enColaSellos };
   if (ent.reason || !ent.rows.length || !(A in ent.rows[0])) {
-    return { cols, rows, reason: ent.reason };
+    return { cols, rows, reason: ent.reason, ...cola };
   }
   return {
     cols: [...cols, A, L],
     rows: rows.map((row, i) => [...row, ent.rows[i][A] || '', ent.rows[i][L] || '']),
     reason: '',
+    ...cola,
   };
 }
 
@@ -11625,7 +11686,7 @@ function EntitiesPanel() {
         let cursor = null;
         for (let i = 0; i < 60; i++) {
           const qs = `&kind=${kind}&limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-          const r = await fetch(`${WORKER_URL}?action=entity-review-list${qs}`, {
+          const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-list${qs}`, {
             headers: { 'Authorization': `Bearer ${useSecret}` },
           });
           if (r.status === 401) { setError('Unauthorized — check the secret.'); setAuthed(false); setLoading(false); return; }
@@ -11640,7 +11701,7 @@ function EntitiesPanel() {
       setRows(all);
       // La cola de generos va aparte: se revisa igual pero no son entidades.
       try {
-        const rg = await fetch(`${WORKER_URL}?action=entity-review-list&kind=genre&limit=500`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
+        const rg = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-list&kind=genre&limit=500`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
         if (rg.ok) { const dg = await rg.json(); setGen((dg.records || []).sort((x, y) => (y.count || 0) - (x.count || 0))); }
       } catch { /* la cola de generos no puede tumbar la de entidades */ }
       setAuthed(true);
@@ -11714,7 +11775,7 @@ function EntitiesPanel() {
     for (let i = 0; i < chosen.length; i += APPROVE_CHUNK) {
       const chunk = chosen.slice(i, i + APPROVE_CHUNK);
       try {
-        const r = await fetch(`${WORKER_URL}?action=entity-review-approve-bulk`, {
+        const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve-bulk`, {
           method: 'POST', headers: hdrs(),
           body: JSON.stringify({ kind: kindTab, items: chunk.map(x => ({ norm: x.norm, display: disp[rk(x)] })) }),
         });
@@ -11751,7 +11812,7 @@ function EntitiesPanel() {
   async function approveOne(r, body) {
     setBusy(true); setError('');
     try {
-      const res = await fetch(`${WORKER_URL}?action=entity-review-approve`, {
+      const res = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-approve`, {
         method: 'POST', headers: hdrs(),
         body: JSON.stringify({ kind: r.kind, norm: r.norm, ...body }),
       });
@@ -11765,7 +11826,7 @@ function EntitiesPanel() {
   async function rejectOne(r) {
     setBusy(true);
     try {
-      await fetch(`${WORKER_URL}?action=entity-review-reject`, {
+      await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-reject`, {
         method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: r.kind, norm: r.norm }),
       });
       setRows(rows.filter(x => rk(x) !== rk(r)));
@@ -11786,7 +11847,9 @@ function EntitiesPanel() {
       <div style={{maxWidth:420}}>
         <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>Entities · Admin Secret</div>
         <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
-          Worker BOOTSTRAP_AUTH_SECRET for <strong>staging</strong>. Held in memory only — gone on refresh.
+          Worker BOOTSTRAP_AUTH_SECRET for <strong>production</strong> — this queue is the
+          production one wherever the admin is loaded from, because the CSV it feeds goes to the
+          one real Shopify store. Held in memory only — gone on refresh.
         </div>
         {/* El mismo secreto arma la cola de generos. Un importer no puede
             generar su CSV sin ella, asi que conviene decirlo aqui y no
@@ -11810,7 +11873,7 @@ function EntitiesPanel() {
   async function loadEntities() {
     setEntsBusy(true); setError('');
     try {
-      const r = await fetch(`${WORKER_URL}?action=entity-index`);
+      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-index`);
       if (!r.ok) { setError(`Entities failed (HTTP ${r.status})`); return; }
       const d = await r.json();
       setEnts(d.entities || []);
@@ -11826,7 +11889,7 @@ function EntitiesPanel() {
   async function ignorarGenero(norm) {
     setBusy(true); setError(''); setMsg('');
     try {
-      const r = await fetch(`${WORKER_URL}?action=entity-review-reject`, {
+      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-review-reject`, {
         method: 'POST', headers: hdrs(), body: JSON.stringify({ kind: 'genre', norm }),
       });
       if (!r.ok) { setError(`Ignore failed (HTTP ${r.status})`); return; }
@@ -11839,7 +11902,7 @@ function EntitiesPanel() {
   async function renameEntity(slug, display) {
     setBusy(true); setError(''); setMsg('');
     try {
-      const r = await fetch(`${WORKER_URL}?action=entity-edit-display`, {
+      const r = await fetch(`${ENTITIES_WORKER_URL}?action=entity-edit-display`, {
         method: 'POST', headers: hdrs(), body: JSON.stringify({ slug, display }),
       });
       const d = await r.json().catch(() => ({}));
@@ -11883,7 +11946,7 @@ function EntitiesPanel() {
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
         <div style={{fontSize:10,color:S.muted}}>
-          {rows.length} rows in queue · {(WORKER_URL.match(/\/\/([^/]+)/) || [])[1]}
+          {rows.length} rows in queue · {(ENTITIES_WORKER_URL.match(/\/\/([^/]+)/) || [])[1]}
           {' · '}
           <span style={{color:entitiesSecret?S.accent:'#ff8800',fontWeight:700}}>
             {entitiesSecret ? 'genre queue connected — importers can run' : 'genre queue NOT connected — importers will refuse to export'}
