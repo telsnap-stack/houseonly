@@ -154,38 +154,6 @@ describe("filterAgainstRecord y applyApproval", () => {
 	});
 });
 
-describe("bandcamp: se guarda, no se publica, no estorba", () => {
-	it("reconoce la raiz de la cuenta y no un album de un sello", () => {
-		expect(parseLinkUrl("https://djkoze.bandcamp.com/")).toEqual({ field: "bandcamp", value: "djkoze" });
-		expect(parseLinkUrl("https://pamparecords.bandcamp.com/music")).toEqual({ field: "bandcamp", value: "pamparecords" });
-		expect(parseLinkUrl("https://pamparecords.bandcamp.com/album/knock-knock")).toBeNull();
-		expect(parseLinkUrl("https://daily.bandcamp.com/")).toBeNull();
-		expect(externalUrl("bandcamp", "djkoze")).toBe("https://djkoze.bandcamp.com/");
-	});
-
-	it("dos Bandcamp no sacan la fila del bloque, y el bloque los deja sin decidir", async () => {
-		await wipe();
-		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
-		await seedEntity("omar-s", "Omar S", ["artist"]);
-		const row = omarRow();
-		row.candidates[0].links.bandcamp = [lv("https://omars.bandcamp.com/"), lv("https://fxhe.bandcamp.com/")];
-		expect(computeExternalBucket(row)).toEqual({ bucket: "confirmed" });
-
-		await handleExternalReviewPut(req("external-review-put", { items: [row] }), env as any);
-		await handleExternalReviewApproveBulk(req("external-review-approve-bulk", { slugs: ["omar-s"] }), env as any);
-		const rec = await getExternal(env as any, "omar-s");
-		expect(rec!.ra).toBe("dj/omars");
-		expect(rec!.bandcamp).toBeUndefined();
-		expect(rec!.rejected.bandcamp).toBeUndefined();
-
-		// El siguiente barrido los vuelve a pedir, ya solo ellos, fila a fila.
-		await handleExternalReviewPut(req("external-review-put", { items: [row] }), env as any);
-		const again = JSON.parse((await env.ENTITIES.get("extreview:omar-s"))!);
-		expect(Object.keys(again.candidates[0].links)).toEqual(["bandcamp"]);
-		expect(again.bucket).toBe("review");
-	});
-});
-
 describe("handlers", () => {
 	beforeEach(async () => {
 		await wipe();

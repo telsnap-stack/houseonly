@@ -20,16 +20,8 @@
 import { getEntity, type EntitiesEnv } from './entities';
 
 /** Campos de enlace. El MBID y el Wikidata no son enlaces: son la identidad. */
-export const LINK_FIELDS = ['mixcloud', 'soundcloud', 'youtube', 'ra', 'songkick', 'bandsintown', 'nts', 'bandcamp'] as const;
+export const LINK_FIELDS = ['mixcloud', 'soundcloud', 'youtube', 'ra', 'songkick', 'bandsintown', 'nts'] as const;
 export type LinkField = typeof LINK_FIELDS[number];
-
-/**
- * Se guardan pero NUNCA se enseñan en el portal ni en la ficha (decision de
- * Eduardo, 2026-09-17). Por eso tampoco pesan en la cola: dos Bandcamp para la
- * misma entidad (DJ Koze tiene djkoze y djkozeofficial) no sacan la fila del
- * bloque; se quedan sin decidir y el siguiente barrido los pide fila a fila.
- */
-export const HIDDEN_FIELDS: readonly LinkField[] = ['bandcamp'];
 
 const K = {
   external: (slug: string) => `external:${slug}`,
@@ -84,7 +76,6 @@ export interface ExternalRecord {
   songkick?: string;
   bandsintown?: string;
   nts?: string;
-  bandcamp?: string;            // guardado, nunca publicado: ver HIDDEN_FIELDS
   approved: Record<string, { at: number; via: 'bulk' | 'row' }>;
   // Valores descartados por campo ('mbid' incluido). El barrido no los vuelve
   // a proponer: el Pampa de Monaco se descarta una vez, no cada semana.
@@ -132,12 +123,6 @@ export function parseLinkUrl(url: string): { field: LinkField; value: string } |
     const id = (segs[1] || '').match(/^(\d+)/);
     return id ? { field: 'bandsintown', value: id[1] } : null;
   }
-  // Solo la raiz de la cuenta: un /album/ en el Bandcamp de un sello es del
-  // sello, no del artista del disco.
-  const bc = host.match(/^([a-z0-9-]+)\.bandcamp\.com$/);
-  if (bc && !['daily', 'www'].includes(bc[1]) && (segs.length === 0 || (segs.length === 1 && first === 'music'))) {
-    return { field: 'bandcamp', value: bc[1] };
-  }
   if (host === 'nts.live' && first === 'artists' && segs[1]) {
     return { field: 'nts', value: `artists/${segs[1]}` };
   }
@@ -158,7 +143,6 @@ export function externalUrl(field: LinkField, value: string): string {
     case 'songkick': return `https://www.songkick.com/artists/${value}`;
     case 'bandsintown': return `https://www.bandsintown.com/a/${value}`;
     case 'nts': return `https://www.nts.live/${value}`;
-    case 'bandcamp': return `https://${value}.bandcamp.com/`;
   }
 }
 
@@ -193,12 +177,7 @@ export function computeExternalBucket(row: Pick<ExternalReview, 'candidates'>): 
   const c = row.candidates;
   if (c.length !== 1) return { bucket: 'review', bucketWhy: c.length > 1 ? 'multi-mb' : 'no-discogs' };
   if (c[0].why !== 'discogs-id') return { bucket: 'review', bucketWhy: 'no-discogs' };
-  const offered = LINK_FIELDS.filter(f => (c[0].links[f] || []).length > 0);
-  const conflicts = offered.filter(f => c[0].links[f]!.length > 1);
-  if (conflicts.some(f => !HIDDEN_FIELDS.includes(f))) return { bucket: 'review', bucketWhy: 'conflict' };
-  // Si lo unico que queda por decidir es un conflicto oculto, el bloque no lo
-  // resolveria nunca (lo deja sin decidir): a mano.
-  if (conflicts.length && conflicts.length === offered.length) return { bucket: 'review', bucketWhy: 'conflict' };
+  for (const f of LINK_FIELDS) if ((c[0].links[f] || []).length > 1) return { bucket: 'review', bucketWhy: 'conflict' };
   return { bucket: 'confirmed' };
 }
 
@@ -239,7 +218,6 @@ export function applyApproval(
   fields: Partial<Record<LinkField, string>>,
   via: 'bulk' | 'row',
   now: number,
-  undecided: LinkField[] = [],   // campos que no se aprueban NI se descartan
 ): ExternalRecord {
   const cand = row.candidates.find(c => c.mbid === mbid);
   if (!cand) throw new Error('mbid is not a candidate of this row');
@@ -261,7 +239,6 @@ export function applyApproval(
   }
 
   for (const f of LINK_FIELDS) {
-    if (undecided.includes(f)) continue;
     const offered = cand.links[f] || [];
     const chosen = fields[f];
     if (chosen !== undefined && !offered.some(v => v.value === chosen)) {
@@ -431,13 +408,9 @@ export async function handleExternalReviewApproveBulk(request: Request, env: Ent
     if (computeExternalBucket(row).bucket !== 'confirmed') { results.push({ slug, ok: false, error: 'not confirmed' }); continue; }
     const c = row.candidates[0];
     const fields: Partial<Record<LinkField, string>> = {};
-    const undecided: LinkField[] = [];
-    for (const f of LINK_FIELDS) {
-      if (c.links[f]?.length === 1) fields[f] = c.links[f]![0].value;
-      else if ((c.links[f]?.length || 0) > 1) undecided.push(f);   // solo puede pasar en HIDDEN_FIELDS
-    }
+    for (const f of LINK_FIELDS) if (c.links[f]?.length === 1) fields[f] = c.links[f]![0].value;
     try {
-      const rec = applyApproval(await getExternal(env, slug), row, c.mbid, fields, 'bulk', Date.now(), undecided);
+      const rec = applyApproval(await getExternal(env, slug), row, c.mbid, fields, 'bulk', Date.now());
       await env.ENTITIES.put(K.external(slug), JSON.stringify(rec));
       await env.ENTITIES.delete(K.review(slug));
       results.push({ slug, ok: true });
