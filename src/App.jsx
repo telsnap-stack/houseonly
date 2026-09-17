@@ -5,7 +5,7 @@ import { useState, useRef, useEffect, useMemo, createContext, useContext, useCal
 import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/houseonly-worker/src/lib/entity-metafields.ts";
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
-import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
+import { htmlToText, descripcionDeProducto, prosaDeCorreo } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
@@ -8904,7 +8904,13 @@ function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) 
       source: esTV ? 'tv' : 'rd',
       forthcoming,
       _gbp: esTV ? null : (gbp || null),
-      _desc: prosa,
+      // La ventana de texto se limpia AQUI, en el origen, y no al escribir el
+      // producto: asi lo que se ve en la pantalla del importer es exactamente
+      // lo que va a salir en la ficha. Sin esto la ventana arrastraba la
+      // cabecera del mensaje reenviado —con la direccion del distribuidor y la
+      // del destinatario—, el saludo del mailing y el tracklist. Si debajo de
+      // todo eso no queda prosa, `_desc` se queda vacio, que es la verdad.
+      _desc: prosaDeCorreo(prosa),
       _zipLinks: zipLinks,      // enlaces "Download Zip" de este bloque (tracker o directos)
       _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,

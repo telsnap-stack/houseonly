@@ -108,3 +108,142 @@ export function descripcionDeProducto(bodyHtml) {
   }
   return { texto: texto.trim(), cortesDelTexto, prosaRecortada, cortesJson };
 }
+
+// ── LA PROSA DE UN CORREO DE ANUNCIO ────────────────────────────────
+//
+// `parseDistributorEmail` saca de cada bloque la ventana de texto que rodea a
+// la ficha del disco. Esa ventana NO es una descripcion: arrastra el saludo, la
+// cabecera del anuncio repetida, y en los reenvios la cabecera del mensaje
+// entera —con la direccion de correo del distribuidor Y la del destinatario—.
+// Escribir eso en el producto publica dos direcciones privadas en la tienda.
+//
+// Medido sobre los 517 correos del archivo el 2026-09-17: de 19 discos con
+// ventana de texto, solo 13 tenian prosa de verdad debajo de toda esa capa.
+
+/** `---------- Forwarded message ---------` y las cuatro cabeceras que le siguen. */
+const RE_REENVIO = /-{3,}\s*Forwarded message\s*-{3,}/gi;
+const RE_CABECERA_CORREO = /^\s*(From|Date|Subject|To|Sent|Cc|Bcc)\s*:.*$/gim;
+
+/** Cualquier direccion, escrita a pelo o como la deja el HTML del cliente. */
+const RE_EMAIL = /\(?\s*mailto:[^\s)]+\s*\)?|[<(]?\b[\w.+-]+@[\w-]+\.[\w.-]+\b[>)]?/gi;
+
+/** `Hello Eduardo Montagut,` — el saludo del mailing, con o sin nombre. */
+const RE_SALUDO = /\b(?:hello|hi|hey|dear)\b[^,.!\n]{0,40}[,!]/gi;
+
+/**
+ * La linea de anuncio del distribuidor: `OUT SOON ON RAWAX: RV10 - RICARDO
+ * VILLALOBOS - MONOSTEREO (12")`. DBH la manda hasta tres veces seguidas y no
+ * dice nada que la ficha no diga ya.
+ */
+// El titulo lleva puntos dentro —`Gottwood Future Ltd. (12")`— asi que la
+// ventana no puede cortarse en el primer punto; se limita por longitud.
+const RE_ANUNCIO = /(?:DBH-Music\s*[-–]\s*)?\b(?:out\s+soon|new\s+release)\b[^\n]{0,140}?\(\s*\d+\s*["”']\s*\)/gi;
+
+/**
+ * `DBH Music welcomes GIOTTWAX to the distribution family!` — eso habla del
+ * acuerdo con el distribuidor, no del disco. Solo la FAMILIA DE DISTRIBUCION:
+ * «RAWAX welcomes Mad Rey to the artist family» si es texto del sello sobre su
+ * fichaje, y ese se queda.
+ */
+const RE_BIENVENIDA = /\b[\w\s-]{0,30}welcomes\b[^\n]{0,80}?\bto the distribution family\b[!.]?/gi;
+
+/** `Price correction - CITB019 - ...`: es un aviso de precio, no una descripcion. */
+/**
+ * Avisos de logistica que llegan en el mismo hueco que la prosa: `Price
+ * correction - CITB019 - ...`, `NEW DATE: VIBEZ93031 - ... (06-11-2026)`. Son
+ * mensajes para el comprador mayorista, no texto de ficha.
+ */
+const RE_AVISO_PRECIO = /\b(?:price\s+correction|new\s+date|date\s+change|postponed)\b[^\n]*/gi;
+
+/**
+ * Corta el tracklist del final. Mismo criterio que `descripcionDeProducto`: si
+ * hay tres marcas o mas —`A1.`, `B2.`, `01`, `1.`— lo que va de la primera en
+ * adelante es la lista, y la lista la pinta el reproductor.
+ */
+function sinTracklist(texto) {
+  // Tres grafias reales del archivo: `A1. Chess`, `1.No. 1` (sin espacio tras el
+  // punto) y `01 Crystal Fantasy` (cero delante, sin puntuacion). Las tres son
+  // la misma cosa y ninguna es prosa.
+  const marcas = [...texto.matchAll(
+    /(?:^|\s)(?:(?:[A-F]{1,2}\d{1,2}|\d{1,2})\s*[.)–-]\s*|[A-F]{1,2}\d{1,2}\s|0\d\s+(?=[A-Za-z])|[A-F]\s*[.)]\s+(?=[A-Z]))/g)];
+  if (!marcas.length) return texto;
+  const corte = marcas[0].index;
+  // Tres marcas son una lista en cualquier sitio. Dos bastan si estan al final:
+  // un maxi de dos cortes se anuncia `A. … B. …` y eso, pegado detras de la
+  // reseña, es la lista igual (LOG86). Dos marcas en medio de un parrafo no.
+  if (marcas.length < 3 && !(marcas.length === 2 && corte > texto.length * 0.6)) return texto;
+  // Solo si la lista esta en la cola: una marca al principio es texto normal
+  // que empieza por un numero, no una lista.
+  // La lista en la cola se corta. Si empieza casi al principio, lo que queda
+  // delante no llega a descripcion y el `minimo` lo descarta: el bloque entero
+  // ERA la lista. Pasa con los reenvios de Rubadub sin reseña, que traian solo
+  // la cabecera del mensaje y los cortes, y publicaban 'A1. December Blackout
+  // 1.4' como descripcion del disco.
+  return texto.slice(0, corte);
+}
+
+/** Frases repetidas literalmente, que es como llegan los anuncios duplicados. */
+function sinRepetidas(texto) {
+  const vistas = new Set();
+  return texto.split(/(?<=[.!?])\s+/)
+    .filter(f => { const k = f.trim().toLowerCase(); if (!k || vistas.has(k)) return false; vistas.add(k); return true; })
+    .join(' ');
+}
+
+/**
+ * Lo que de verdad se puede publicar de la ventana de texto de un correo.
+ *
+ * Devuelve '' cuando debajo de la capa no queda nada: un bloque que solo trae
+ * saludo y cabecera no es una descripcion corta, es que no hay descripcion, y
+ * escribirla vacia es mejor que escribir ruido.
+ */
+export function prosaDeCorreo(entrada, { minimo = 60 } = {}) {
+  let t = String(entrada || '');
+  t = t.replace(RE_REENVIO, '\n').replace(RE_CABECERA_CORREO, '\n');
+  t = t.replace(RE_EMAIL, ' ');
+  t = t.replace(RE_ANUNCIO, ' ').replace(RE_BIENVENIDA, ' ')
+       .replace(RE_AVISO_PRECIO, ' ').replace(RE_SALUDO, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  t = sinTracklist(t);
+  t = sinRepetidas(t);
+  // Restos de puntuacion que quedan donde se quito un trozo.
+  t = t.replace(/\s+([,.;:])/g, '$1').replace(/^[\s,.;:–-]+/, '').replace(/\s+/g, ' ').trim();
+  // La ventana del correo se corta por longitud, asi que puede terminar a mitad
+  // de palabra —IT57 acababa en 'and thei'—. Se retrocede a la ultima frase
+  // cerrada: una descripcion truncada canta mas que una descripcion mas corta.
+  if (t && !/[.!?…]["”')]?$/.test(t)) {
+    const fin = Math.max(t.lastIndexOf('.'), t.lastIndexOf('!'), t.lastIndexOf('?'));
+    if (fin >= minimo) t = t.slice(0, fin + 1);
+  }
+  return t.length >= minimo ? t : '';
+}
+
+/**
+ * El cuerpo del producto SIN lo que la ficha ya genera por su cuenta: la frase
+ * de cabecera, el tracklist escrito a mano y la coletilla de envio.
+ *
+ * Es el gemelo en HTML de `descripcionDeProducto`, que hace lo mismo pero
+ * devuelve texto. Hace falta al ESCRIBIR: para meter una descripcion de verdad
+ * en un producto viejo no basta con ponerla delante —la cabecera dejaria de
+ * estar al principio y el limpiador de lectura ya no la reconoceria, asi que
+ * saldria publicada—. Hay que quitarla de verdad.
+ *
+ * Lo que NO toca: el `<script id="tracks">` del reproductor y cualquier otra
+ * cosa que haya en el cuerpo. Solo borra los tres bloques que generamos.
+ */
+export function cuerpoSinGenerado(bodyHtml) {
+  let html = String(bodyHtml || '');
+  const cab = html.match(RE_CABECERA);
+  if (cab && /\bby\b|released on/i.test(cab[0])) html = html.slice(cab[0].length);
+  html = html.replace(RE_COLETILLA, '');
+  const bloque = html.match(RE_BLOQUE_OL);
+  if (bloque) html = html.replace(bloque[0], '');
+  return html.trim();
+}
+
+/** Texto plano a un parrafo de HTML, escapando lo que Shopify guardaria mal. */
+export function parrafoHtml(texto) {
+  const t = String(texto || '').trim();
+  if (!t) return '';
+  return `<p>${t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`;
+}
