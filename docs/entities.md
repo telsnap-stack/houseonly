@@ -825,6 +825,8 @@ de entidad es donde se pintan. Lo que falta decidir es de dónde salen los datos
 — a mano en el admin, de Bandsintown o del propio artista — y eso es una
 decisión de producto, no de esquema.
 
+> **Retomado el 2026-09-17**: ver [Fase 7: sets y eventos](#fase-7-sets-y-eventos-por-entidad).
+
 ## Promoción a producción: la secuencia
 
 La v1 está cerrada en staging: entidades, portal, fichas públicas, prerender y
@@ -1123,3 +1125,210 @@ no cambia en absoluto: todo lo añadido vive dentro del admin.
 - **No arregla los datos sucios de origen.** La corrupción de ligaduras
   (`Bano ff ee Pies`, `Forti fi ed Audio`, `O ff   House`, `Synaptic Cli ff s`)
   viene del parseo de PDF y se corrige en el importer, fase 4.
+
+## Fase 7: sets y eventos por entidad
+
+Estado de las fuentes **comprobado el 2026-09-17**: documentación y términos
+oficiales leídos ese día y llamadas reales con cinco entidades de prod. Nada de
+esto sale de memoria; si pasa un tiempo, se vuelve a comprobar antes de construir.
+
+### Alcance: cuántas entidades
+
+| | Medido 17-09 |
+|---|---|
+| Entidades en prod (`entity-index`) | 1525 |
+| Indexables (≥ 3 discos, mismo corte que `MIN_DISCOS_INDEXABLE` del prerender) | **174** (eran 164 el 11-09: el catálogo ha crecido) |
+| Entidades seguidas (`fanout:` distintos) | 9, de 1 solo cliente |
+| **Conjunto a enriquecer** | **≈ 175–183** |
+
+### Las fuentes, una por una
+
+#### Eventos
+
+| Fuente | Acceso hoy | ¿Uso comercial para la tienda? | Veredicto |
+|---|---|---|---|
+| **Bandsintown** | `app_id` obligatorio (sin él: `401 {"message":"Unauthorized"}`). Se saca desde *Bandsintown for Artists → Settings → Get API Key*, y **"Each API Key is linked to a single artist unless authorized otherwise by Bandsintown"**. Para terceros: *"Access … is available for organizations … through our partnership program"* | **No sin contrato.** La API es para artistas y quien los representa; cualquier otro uso pide *"written consent from Bandsintown Inc."*. La página de términos de data applications devuelve 403 a fetch automático | ❌ en 2 semanas. Solo vía partnership |
+| **Songkick** | Formulario de partnership | *"subject to the standard terms of our partnership agreement and a license fee"* | ❌ De pago y con contrato |
+| **Resident Advisor** | Sin API pública. `ra.co/dj/*` devuelve **403** a curl | Términos §4.4(a): prohibido *"any automated system or software to extract content or data … for commercial purposes except where … a written agreement"*; §4.4(f) prohíbe bots/scrapers | ❌ Solo **enlace saliente** a `ra.co/dj/{id}` |
+
+**Conclusión de eventos: hoy no hay ninguna fuente automática utilizable por la
+tienda sin firmar algo.** Para sellos (Deep Jungle, Pampa) ni siquiera existe
+fuente: las tres son de artista.
+
+#### Sets
+
+| Fuente | Acceso hoy | Límites / términos | Veredicto |
+|---|---|---|---|
+| **Mixcloud** | Lectura **sin autenticación ni registro** (*"None to read; OAuth 2.0 to write"*). Búsqueda por `user`/`cloudcast`, `/{user}/cloudcasts/`, oEmbed sin clave (probado) | Rate limit sin cifra publicada; no expone cabeceras `X-RateLimit`. Sin cláusula comercial para lectura; el audio solo por su widget | ✅ |
+| **NTS** | `nts.live/api/v2/…` responde 200 sin clave: `search`, `shows/{alias}`, `shows/{alias}/episodes`, `artists/{id}`. Cada episodio trae `mixcloud` y `audio_sources` (SoundCloud) | **API no documentada.** `robots.txt`: `Allow: /`. Sus T&C solo cubren Supporters; no hay términos de API | ⚠️ Técnicamente sí; puede cambiar sin aviso y no hay permiso explícito |
+| **YouTube Data API** | Clave de Google Cloud. **Cuota cambiada respecto a lo conocido**: *"default quota allocation of 100 `search.list` calls, 100 `videos.insert` calls, and 10,000 units per day combined for all other endpoints"*. `channels.list`, `playlistItems.list`, `videos.list` = 1 unidad | Datos no autorizados: guardar **≤ 30 días** y luego borrar o refrescar. Prohibido vender publicidad en páginas con datos de YouTube salvo que el resto aporte *"independent value"* (una ficha de tienda lo aporta). oEmbed sin clave (probado) | ⚠️ Viable pero **no probado**: no hay clave en esta máquina. 100 búsquedas/día = 174 entidades en 2 días |
+| **SoundCloud API** | Registrar app exige **"a SoundCloud Artist Pro subscription"** (de pago). Client credentials: 50 tokens/12 h por app | Términos: prohibida *"advertising, sponsorship or promotion around User Content"* salvo la del propio uploader; atribución y backlink obligatorios; sin caché persistente | ❌ API. ✅ **oEmbed sin clave** con una URL conocida (probado con `pamparecords`) |
+
+#### Identidad: MusicBrainz + Wikidata (no pedidas, pero son la clave)
+
+El problema de verdad no es "qué API", es **saber que la cuenta es la de esa
+persona**. Buscar por nombre es inútil para eso (ver pruebas). MusicBrainz y
+Wikidata dan los identificadores de las otras fuentes **ya enlazados por humanos**:
+
+- MusicBrainz `?inc=url-rels`: Discogs, Songkick, Bandcamp, RA, SoundCloud (sellos
+  incluidos). Sin clave, UA identificable obligatorio, **1 req/s por IP** (medido
+  en su página de rate limiting). Los Workers salen por IPs compartidas de
+  Cloudflare: **la consulta a MB va en script local, no en el cron.**
+- Wikidata: `P434` MBID, `P6600` RA, `P3478` Songkick, `P3040` SoundCloud,
+  `P2397` YouTube channel, `P1953` Discogs.
+- **Puente con lo que ya tenemos**: MB lista el Discogs artist/label ID. El match
+  de Discogs de nuestros productos (aprobado a mano) da ese ID → buscar en MB
+  por URL de Discogs desambigua sin mirar el nombre.
+
+### Prueba a mano, 17-09
+
+| | Omar S | DJ Koze | Theo Parrish | Deep Jungle (sello) | Pampa (sello) |
+|---|---|---|---|---|---|
+| **MusicBrainz** | `b8311533…` score 100, US. Songkick, 2 Discogs (166506, 466085), web | `dd4458c8…` score 100. Wikidata (`P434`) apunta a `3cec91e6…`, que **no** es una redirección: es otra entidad de MB, *Stefan Kozalla*, su nombre civil. **El MBID sale solo de MusicBrainz, nunca de Wikidata.** RA `djkoze`, Bandcamp, Discogs 8260 | `15388d42…`. Songkick, Bandcamp, Discogs 149 | Label `7e9de698…` GB. Bandcamp, Discogs 31362, **SoundCloud `dubplates-vinyls`** | 2 sellos "Pampa Records": el bueno es `41e0694b…` **DE**; el otro, Argentina. SoundCloud `pamparecords`, Discogs 169006 |
+| **Wikidata** | RA `omars`, Songkick 2437861 | RA `djkoze`, Songkick 165622, IG | RA `theoparrish`, SoundCloud `soundsignature` | — | — |
+| **Mixcloud (usuario)** | Nada suyo: 5 "Omar …" | Nada suyo: "DJ Kozee" ×2 | `TheoParrish` y `theo-parrish` existen, **0 shows** los dos | Nada | "Pampa / Week-end Change" = **otro Pampa** (radio de Mónaco) |
+| **Mixcloud (cloudcasts)** | NTS "Remote Utopias", "Circuits: Omar S Special" + ruido (reggaetón, otro Omar) | FACT 387, RA.145, NTS con Róisín Murphy, XLR8R | NTS 10 (6 h), Do!! You!!!, Sónar 2008 | "Deep Jungle Records - History pt 1/2" + ruido ("Deep in Jungle") | "Pampa Records: label mix", tributos + **5 de Week-end Change (falso)** |
+| **NTS** | Show propio `omar-s`: **8 episodios** con enlace Mixcloud/SoundCloud | Página de artista `378-dj-koze` + episodios invitado | Show propio `theo-parrish`: **11 episodios** | Nada relevante ("Jungle Joe", "Deep Medi") | Nada directo; devuelve artistas del sello (Die Vögel, Isolée, Axel Boman, Robag Wruhme) |
+| **YouTube** | No probado (sin clave) | — | — | — | — |
+| **SoundCloud** | — | — | `soundsignature` (vía Wikidata) | oEmbed OK | oEmbed OK |
+| **RA** | 403 | 403 | 403 | — | — |
+| **Bandsintown** | 401 sin `app_id`; no se prueba con uno inventado (incumple sus términos) | | | | |
+
+**Lo que dicen estas 25 celdas:**
+
+1. **Buscar por nombre no sirve para decidir.** Omar S, DJ Koze y Pampa
+   devuelven sobre todo *otra gente*. Pampa es el caso de libro: nombre corto,
+   dos sellos homónimos en MB y un DJ de radio con el mismo nombre en Mixcloud.
+   Es exactamente el error Discogs que ya llegó a clientes: **todo enlace pasa
+   por la cola**.
+2. **Los DJs no suben sus sets a su cuenta; los suben las radios.** Lo que vale
+   en Mixcloud está en `NTSRadio`, `residentadvisor`, `FACTMixArchive`… El
+   `mixcloud` de una entidad casi nunca será "su usuario", sino una lista de sets
+   aprobados.
+3. **MB/Wikidata aciertan en los tres artistas y en los dos sellos**, y con el
+   Discogs ID se elige el Pampa correcto sin mirar el nombre.
+4. **Sellos: sets sí (label mixes, SoundCloud del sello), eventos no.**
+
+### Decisiones de Eduardo, 2026-09-17
+
+| Tema | Elegido | Descartado |
+|---|---|---|
+| Eventos | **Solo enlaces "Tour dates"** a RA y Songkick | Eventos manuales, eventos de sello, API de Bandsintown (se pide partnership aparte) |
+| NTS | **Solo en el script local de candidatos** | Llamarla desde el cron |
+| YouTube y SoundCloud | **URL pegada a mano + oEmbed**, sin clave | YouTube Data API, API de SoundCloud |
+| Sets de radios (NTS, RA, FACT…) | **Enlazados con la fuente visible**, no incrustados | Embed |
+| Aprobación | **En bloque cuando coincide el Discogs ID**; fila a fila el resto | Todo fila a fila |
+| País | **Por IP** (`request.cf.country`) **con selector persistente** | Solo selector |
+
+Orden de trabajo, un PR a `staging` por paso: (1) esquema y barrido local
+MusicBrainz + Wikidata; (2) sub-vista Links en Entities; **parada** para que
+Eduardo despache la cola; (3) cron de sets; (4) bloques "Listen" y "Tour dates"
+en la estantería y la ficha pública.
+
+> **Pendiente de aclarar antes del paso 3.** "NTS solo en el script local" y
+> "cron de sets (Mixcloud + NTS)" chocan: o el cron llama a la API de NTS, o
+> los sets de NTS se refrescan solo al pasar el script. Se pregunta al llegar.
+
+### Esquema (paso 1, implementado)
+
+Mismo namespace `ENTITIES`. Código: `src/lib/external.ts`.
+
+```
+external:{slug}    → ExternalRecord   lo aprobado, y lo descartado para no repetir
+extreview:{slug}   → ExternalReview   candidatos pendientes
+```
+
+```ts
+ExternalRecord {
+  slug, mbid?, mbKind?: 'artist'|'label', wikidata?, discogs?: string[],
+  mixcloud?, soundcloud?, youtube?, ra?, songkick?, bandsintown?, nts?,
+  approved: { [campo]: { at, via: 'bulk'|'row' } },
+  rejected: { [campo | 'mbid']: string[] },   // no se vuelven a proponer
+  updatedAt,
+}
+
+ExternalReview {
+  slug, display, roles, total, followed,
+  candidates: [{                        // una entidad de MusicBrainz por candidato
+    mbid, mbKind, name, disambiguation?, country?, score?,
+    why: 'discogs-id'|'name',
+    discogs: string[], wikidata?,
+    links: { [campo]: [{ value, url, from: ('mb'|'wikidata')[] }] },
+  }],
+  evidence: [{ kind, discogsId, name, releaseId, sku }],   // qué disco nuestro lo prueba
+  bucket: 'confirmed'|'review',
+  bucketWhy?: 'no-discogs'|'multi-mb'|'conflict',
+  fetchedAt,
+}
+```
+
+**Cada campo guarda un valor corto y la URL se deriva** (`ra` = `dj/omars` o
+`labels/1234`, `songkick` = `2437861`, `youtube` = `UC…` o `@handle`). Así
+`youtube.com/channel/UC…` y `music.youtube.com/channel/UC…` son un valor y no un
+falso conflicto. **La canonicalización la hace el worker** (`parseLinkUrl`) al
+recibir URLs del barrido: el valor es lo que se compara con lo aprobado y lo
+descartado, y sale siempre de la misma función.
+
+**`confirmed`** = un único candidato de MB, alcanzado por el Discogs ID de un
+disco nuestro, y ningún campo con dos valores. El worker lo recalcula al
+recibir la fila y otra vez al aprobar en bloque: no se fía de la pantalla.
+
+### Endpoints (Bearer `BOOTSTRAP_AUTH_SECRET`)
+
+| Action | Método | Cuerpo | Qué |
+|---|---|---|---|
+| `external-review-put` | POST | `{items: [≤50]}` | Lo usa el barrido. Filtra contra `external:` y recalcula el bucket |
+| `external-review-list` | GET | — | Seguidas primero, luego por discos. `counts: {confirmed, review}` |
+| `external-review-approve` | POST | `{slug, mbid, fields: {ra: "dj/omars", …}}` | Fila a fila. Lo no elegido de la fila pasa a `rejected` |
+| `external-review-approve-bulk` | POST | `{slugs: [≤50]}` | Solo `confirmed`. Aprueba el candidato con todos sus enlaces |
+| `external-review-reject` | POST | `{slug}` | Ninguno es: todo a `rejected` |
+| `external-get` | GET | `?slug=` | Depurar |
+
+### Barrido: `scripts/entities-external-sweep.mjs`
+
+Local, dry-run por defecto; `--send` a staging, `--send --prod` a producción;
+`--only a,b` y `--fresh`.
+
+1. **Targets**: `entity-index` con ≥ 3 discos ∪ slugs con `fanout:`. El 17-09:
+   **180** (174 indexables, 9 seguidas, 3 en las dos).
+2. **Discogs ID por nuestros discos**: metafields `artist_slugs`/`label_slugs` →
+   SKU → `listing:{id}` en `SYNC_STATE` (vía `wrangler kv`) → inventario público
+   de `houseonly` → `releases/{id}` público → el artista o sello del release cuyo
+   nombre casa con la entidad. Hasta 3 releases por entidad. El 17-09: 627
+   listings con SKU, 542 SKUs con release.
+3. **MusicBrainz por URL de Discogs** (`/ws/2/url?resource=…&inc=artist-rels`).
+   Si no hay ninguno, búsqueda por nombre (score ≥ 90 y nombre normalizado igual;
+   en sellos se ignora un "Records" final), que siempre va a revisión.
+4. De cada entidad de MB, sus `url-rels` y, si enlaza a Wikidata, las
+   propiedades `P9509` Mixcloud, `P3040` SoundCloud, `P2397` YouTube, `P6600`/`P6601`
+   RA, `P3478` Songkick, `P7195` Bandsintown, `P7353` NTS.
+5. Ritmo: MB 1,1 s, Discogs 2,5 s (25/min sin token), Wikidata 1 s. Caché de
+   disco de 7 días en `$TMPDIR/houseonly-external-sweep`.
+
+Las cinco entidades de prueba, en seco el 17-09, **las cinco por Discogs ID**:
+
+| Entidad | Disco que lo prueba | MBID elegido | Enlaces |
+|---|---|---|---|
+| Omar S | `UAR001` → Discogs 166506 | `b8311533…` Omar-S (US) | RA `dj/omars`, Songkick 2437861 |
+| DJ Koze | `PAMPA005` → 8260 | `dd4458c8…` (no el de Wikidata) | RA `dj/djkoze`, Songkick 165622 |
+| Theo Parrish | `PF762` → 149 | `15388d42…` | RA, Songkick 188726, SoundCloud `soundsignature` |
+| Deep Jungle | `DAT001LP` → label 31362 | `7e9de698…` Deep Jungle Records (GB) | SoundCloud `dubplates-vinyls` |
+| Pampa | `PAMPA005` → label 169006 | `41e0694b…` **el alemán** | SoundCloud `pamparecords` |
+
+Pampa, que por nombre era el caso imposible, sale bien **sin mirar el nombre**.
+
+### País del cliente
+
+`request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
+valor por defecto, y un selector que el cliente puede cambiar y que persiste
+(`localStorage`; en el blob `follow:` si está logueado). Con eventos solo como
+enlaces salientes, el país sirve para ordenar/filtrar lo que se enlaza; se
+concreta en el paso 4.
+
+### Lo que queda fuera, a propósito
+
+- Eventos en la tienda: ni manuales, ni de sello, ni de API. Solo enlaces.
+- API de YouTube y de SoundCloud: URL pegada a mano y oEmbed.
+- NTS desde el worker (ver la nota pendiente arriba).
+- Bandcamp: MB lo trae casi siempre y sería el "Listen" más natural para una
+  tienda de discos, pero no está en el esquema pedido. Se añade si se decide.
