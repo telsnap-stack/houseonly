@@ -1225,9 +1225,8 @@ MusicBrainz + Wikidata; (2) sub-vista Links en Entities; **parada** para que
 Eduardo despache la cola; (3) cron de sets; (4) bloques "Listen" y "Tour dates"
 en la estantería y la ficha pública.
 
-> **Pendiente de aclarar antes del paso 3.** "NTS solo en el script local" y
-> "cron de sets (Mixcloud + NTS)" chocan: o el cron llama a la API de NTS, o
-> los sets de NTS se refrescan solo al pasar el script. Se pregunta al llegar.
+> **Aclarado el 17-09:** el cron solo refresca Mixcloud; NTS únicamente vía el
+> script local.
 
 ### Esquema (paso 1, implementado)
 
@@ -1348,6 +1347,30 @@ metal polacas; `Tommy The Cat`, dos artistas distintos.
 Probado el 17-09 con `wrangler dev` local cargado con las 160 filas reales y el
 panel en Chromium headless: aprobar 2 en bloque, aprobar 1 y descartar 1 fila a
 fila dejan la cola en 101/55, sin errores de consola.
+
+### En producción (17-09)
+
+- Worker de prod **`329500c0`** con los endpoints `external-review-*` (antes
+  `2323997b`, que era `origin/staging` exacto: comprobado contra el source map
+  desplegado). Staging: `e6faad81`.
+- `entities-external-sweep.mjs --send --prod`: **160 filas en la cola de prod**.
+
+| Reparto final | Filas |
+|---|---|
+| **En bloque** (`confirmed`) | **103** |
+| **Fila a fila** (`review`) | **57** — 42 solo por nombre, 8 con varias entidades de MB, 7 con un campo con dos valores |
+| **Sin candidato** (no entran en la cola) | **20** |
+
+Por campo, en el primer candidato: Bandcamp 67, SoundCloud 63, RA 33, YouTube 28,
+Songkick 22, **Mixcloud 2**, Bandsintown 1. O sea: el cron de Mixcloud del paso 3
+va a tener muy poco con qué trabajar.
+
+**Bandcamp** (decisión 17-09): se guarda en `external:` y **nunca se publica**.
+No cuenta como conflicto para el bloque; con dos valores (DJ Koze, Ron Trent,
+Four Tet) el bloque lo deja sin decidir y el siguiente barrido lo pide fila a fila.
+
+**Paso 3, corregido el 17-09**: el cron solo refresca **Mixcloud**. NTS
+únicamente por el script local.
 
 ### País del cliente
 
