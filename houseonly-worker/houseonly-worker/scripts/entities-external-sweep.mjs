@@ -14,7 +14,8 @@
  *   1. Discogs ID de un disco NUESTRO. Producto (metafield artist_slugs /
  *      label_slugs) → SKU → listing de Discogs (SYNC_STATE listing:{id}, via
  *      wrangler) → release publico → el artista/sello del release cuyo nombre
- *      casa con la entidad → MusicBrainz por URL de Discogs. Esto es lo que
+ *      casa con la entidad (se para en el primero que lo prueba; hasta 3) →
+ *      MusicBrainz por URL de Discogs. Esto es lo que
  *      desambigua Pampa (DE) de Pampa (AR) sin mirar el nombre.
  *   2. Sin eso, busqueda por nombre en MusicBrainz, score ≥ 90 y nombre que
  *      normaliza igual. Siempre a revision fila a fila.
@@ -239,7 +240,8 @@ async function discogsEvidence(target, aliases, skus, releaseBySku) {
   for (const { sku, kind } of skus) {
     const releaseId = releaseBySku.get(sku.toUpperCase());
     if (!releaseId || seen.has(releaseId)) continue;
-    if (seen.size >= MAX_RELEASES_PER_ENTITY) break;
+    // Un release que ya lo prueba basta: cada release mas son 2,5 s de Discogs.
+    if (evidence.length || seen.size >= MAX_RELEASES_PER_ENTITY) break;
     seen.add(releaseId);
     const rel = await discogs(`releases/${releaseId}`);
     if (!rel) continue;
