@@ -47,6 +47,10 @@ export const GENRES = [
     { raw:'Jungle / Drum n Bass', tipo:'misma' }, { raw:'Jungle / Drum & Bass', tipo:'misma' },
     { raw:'Jungle', tipo:'sub' }, { raw:'Liquid Funk', tipo:'sub' },
     { raw:'Hardcore Drum & Bass', tipo:'sub' },
+    // Los 4 discos con `Breaks` del catalogo son jungle de los 90 —Ellis Dee,
+    // Mad Dog— y ya resolvian a drum & bass por otro tag. Como 'sub' la palabra
+    // se queda y el valor deja de caer en la cola.
+    { raw:'Breaks', tipo:'sub' }, { raw:'Break', tipo:'sub' },
   ]},
   // Seccion 'house' = el catalogo principal, no porque sea house: la seccion D&B
   // solo lista genre:drumandbass, asi que en 'dnb' seria una pildora sin discos.
@@ -99,6 +103,43 @@ export const GENRES = [
     { raw:'Detroit House', tipo:'sub' }, { raw:'Acid House', tipo:'sub' },
     { raw:'Chicago House', tipo:'sub' }, { raw:'Disco House', tipo:'sub' },
     { raw:'Afro House', tipo:'sub' }, { raw:'Soulful House', tipo:'sub' },
+  ]},
+
+  // ── LO QUE NO ES CLUB ──────────────────────────────────────────────
+  //
+  // Estos tres van DESPUES de `house`, o sea los ultimos de la prioridad, y eso
+  // es la pieza importante: un disco que dice "Jazz" y "House" es house, como
+  // siempre; solo se los llevan los discos que no dicen nada mas.
+  //
+  // Existen porque 99 discos activos no tenian NI UN genero —medido el
+  // 2026-09-17— y por tanto no se llegaba a ellos por ningun filtro de la
+  // tienda. No son sobras: son los discos que se traen a proposito aunque no
+  // encajen con el resto del catalogo. 57 de esos 99 caen en estos tres.
+  //
+  // Casi todos los alias son 'sub' —se CONSERVAN en el producto— porque aqui la
+  // palabra concreta es informacion de verdad: quien busca "boogie" quiere los
+  // de boogie, no los 22 del grupo entero.
+  { id:'electronica', label:'Electronica', seccion:'house', orden:9, pildora:'con-discos', alias:[
+    { raw:'Electronica', tipo:'canonico' }, { raw:'Electronica/Dance', tipo:'misma' },
+    { raw:'Ambient', tipo:'sub' }, { raw:'IDM', tipo:'sub' },
+    { raw:'Modern Classical Music', tipo:'sub' }, { raw:'Modern Classical', tipo:'sub' },
+    // `Electronic` lo escribe Word and Sound en 136 discos y 133 ya tienen
+    // genero propio: en una tienda de electronica no distingue nada. Va aqui,
+    // el ultimo de todo, para que solo se lleve los que no dicen nada mas, y
+    // como 'sub' para que el tag crudo no se borre de esos 136.
+    { raw:'Electronic', tipo:'sub' },
+  ]},
+  { id:'soulfunkdisco', label:'Soul · Funk · Disco', seccion:'house', orden:10, pildora:'con-discos', alias:[
+    { raw:'Soul', tipo:'sub' }, { raw:'Funk', tipo:'sub' }, { raw:'Disco', tipo:'sub' },
+    { raw:'Boogie', tipo:'sub' }, { raw:'RnB', tipo:'sub' }, { raw:'R&B', tipo:'sub' },
+    { raw:'Soul/R&B', tipo:'sub' },
+  ]},
+  { id:'jazz', label:'Jazz', seccion:'house', orden:11, pildora:'con-discos', alias:[
+    { raw:'Jazz', tipo:'canonico' },
+    { raw:'Nu Jazz', tipo:'sub' }, { raw:'Spiritual Jazz', tipo:'sub' },
+    { raw:'Fusion', tipo:'sub' },
+    // Erratas vistas en la cola: dicen lo mismo, no aportan nada, se borran.
+    { raw:'Jazz Eletronic', tipo:'misma' }, { raw:'Jazz Electronic', tipo:'misma' },
   ]},
 ];
 
