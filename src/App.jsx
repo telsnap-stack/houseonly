@@ -966,7 +966,7 @@ function AudioPlayer({ src }) {
   }, []);
   return (
     <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-      {src&&<audio ref={ref} src={src} />}
+      {src&&<audio ref={ref} src={src} crossOrigin="anonymous" />}
       <button onClick={toggle} disabled={!src} style={{ width:32, height:32, borderRadius:'50%', background:src?S.accent:S.border, border:'none', cursor:src?'pointer':'not-allowed', fontSize:12, color:src?'#080808':S.muted, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>{playing?'⏸':'▶'}</button>
       <div style={{ flex:1, height:2, background:S.border, borderRadius:1, overflow:'hidden' }}>
         <div style={{ width:`${prog}%`, height:'100%', background:S.accent, transition:'width 0.1s' }} />
@@ -1256,7 +1256,7 @@ function PlayerProvider({ children, gate }) {
 
   return (
     <PlayerCtx.Provider value={value}>
-      <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onEnded={onEnded} preload="metadata" />
+      <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onEnded={onEnded} preload="metadata" crossOrigin="anonymous" />
       {children}
     </PlayerCtx.Provider>
   );
@@ -7602,6 +7602,17 @@ function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
   // the sticker can sit there without covering anything.
 }
 
+// Todo <audio> que carga snippets de R2 lleva crossOrigin="anonymous": si una
+// copia sin CORS (el reproductor de preview) queda en la cache HTTP y el
+// elemento con crossOrigin la reutiliza, Web Audio recibe ceros y la story sale
+// muda (sospecha con WPA-4/ UR-079, sin confirmar en consola). El query da al
+// export su propia entrada de cache: no reutiliza una copia sin CORS de una
+// sesion anterior a este cambio.
+function exportAudioSrc(url) {
+  if (!url) return '';
+  return url + (url.includes('?') ? '&' : '?') + 'wa=1';
+}
+
 // StoryExporter — master 15s timeline: Shot1 (0-5s), Shot2 (5-10s), Shot3
 // (10-15s), with the chosen track's audio playing under it. Records the canvas
 // + audio via MediaRecorder to a WebM and downloads it. (MP4 conversion is 5B.)
@@ -7723,7 +7734,7 @@ function StoryExporter({ release, track, line }) {
     <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${S.border}` }}>
       <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Export — full story</div>
       <canvas ref={canvasRef} width={W} height={H} style={{ display: 'none' }} />
-      <audio ref={audioRef} src={track?.url || ''} crossOrigin="anonymous" preload="auto" />
+      <audio ref={audioRef} src={exportAudioSrc(track?.url)} crossOrigin="anonymous" preload="auto" />
       <button onClick={exportStory} disabled={busy || !line} style={{ width: 260, background: busy ? S.border : S.accent, color: busy ? S.muted : '#080808', border: 'none', borderRadius: 2, cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase', padding: '12px 0' }}>
         {status === 'recording' ? 'Recording 15s…' : status === 'preparing' ? 'Preparing…' : '⬇ Export story (WebM)'}
       </button>
