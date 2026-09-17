@@ -1361,13 +1361,14 @@ fila dejan la cola en 101/55, sin errores de consola.
 | **Fila a fila** (`review`) | **57** — 42 solo por nombre, 8 con varias entidades de MB, 7 con un campo con dos valores |
 | **Sin candidato** (no entran en la cola) | **20** |
 
-Por campo, en el primer candidato: Bandcamp 67, SoundCloud 63, RA 33, YouTube 28,
-Songkick 22, **Mixcloud 2**, Bandsintown 1. O sea: el cron de Mixcloud del paso 3
+Por campo, en el primer candidato: SoundCloud 63, RA 33, YouTube 28, Songkick 22,
+**Mixcloud 2**, Bandsintown 1. O sea: el cron de Mixcloud del paso 3
 va a tener muy poco con qué trabajar.
 
-**Bandcamp** (decisión 17-09): se guarda en `external:` y **nunca se publica**.
-No cuenta como conflicto para el bloque; con dos valores (DJ Koze, Ron Trent,
-Four Tet) el bloque lo deja sin decidir y el siguiente barrido lo pide fila a fila.
+**Bandcamp: fuera** (cambio de alcance, 17-09). Estuvo unas horas como campo
+guardado y no publicado; se quitó del esquema, de la revisión y de los tests.
+`parseLinkUrl` no lo reconoce, así que una entidad no vuelve a la cola por
+Bandcamp aunque MusicBrainz lo traiga.
 
 **Paso 3, corregido el 17-09**: el cron solo refresca **Mixcloud**. NTS
 únicamente por el script local.
@@ -1383,7 +1384,6 @@ concreta en el paso 4.
 ### Lo que queda fuera, a propósito
 
 - Eventos en la tienda: ni manuales, ni de sello, ni de API. Solo enlaces.
-- API de YouTube y de SoundCloud: URL pegada a mano y oEmbed.
-- NTS desde el worker (ver la nota pendiente arriba).
-- Bandcamp: MB lo trae casi siempre y sería el "Listen" más natural para una
-  tienda de discos, pero no está en el esquema pedido. Se añade si se decide.
+- API de SoundCloud: URL pegada a mano y oEmbed.
+- NTS desde el worker: solo el script local.
+- Bandcamp, en ningún sitio.
