@@ -869,6 +869,14 @@ import {
   handleEntityEditDisplay,
   handleGenreReviewAdd,
 } from './lib/entities';
+import {
+  handleExternalReviewPut,
+  handleExternalReviewList,
+  handleExternalReviewApprove,
+  handleExternalReviewApproveBulk,
+  handleExternalReviewReject,
+  handleExternalGet,
+} from './lib/external';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
@@ -1364,6 +1372,28 @@ export default {
 
     if (action === 'entity-edit-display' && request.method === 'POST') {
       return await handleEntityEditDisplay(request, env);
+    }
+
+    // ── ENLACES EXTERNOS (fase 7) ───────────────────────────
+    // docs/entities.md. Bearer, aditivo. El barrido propone (external-review-put)
+    // y la pestaña Entities → Links dispone.
+    if (action === 'external-review-put' && request.method === 'POST') {
+      return await handleExternalReviewPut(request, env);
+    }
+    if (action === 'external-review-list' && request.method === 'GET') {
+      return await handleExternalReviewList(request, env);
+    }
+    if (action === 'external-review-approve' && request.method === 'POST') {
+      return await handleExternalReviewApprove(request, env);
+    }
+    if (action === 'external-review-approve-bulk' && request.method === 'POST') {
+      return await handleExternalReviewApproveBulk(request, env);
+    }
+    if (action === 'external-review-reject' && request.method === 'POST') {
+      return await handleExternalReviewReject(request, env);
+    }
+    if (action === 'external-get' && request.method === 'GET') {
+      return await handleExternalGet(request, env);
     }
 
     // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.
