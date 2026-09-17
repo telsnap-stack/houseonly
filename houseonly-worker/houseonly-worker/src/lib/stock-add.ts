@@ -162,9 +162,12 @@ export async function handleStockAdd(request: Request, env: StockAddEnv, bearerV
     const clave = claveRegistro(factura, sku);
     const previo = await env.STOCK_LEDGER.get(clave, 'json') as any;
     if (previo?.estado === 'aplicado') {
+      const porCsv = previo.origen === 'csv';
       resultados.push({ sku, estado: 'ya-aplicado', delta: previo.delta, antes: previo.antes, despues: previo.despues,
                         producto: previo.producto, aplicadoEn: previo.at,
-                        motivo: previo.delta !== delta ? `esta factura ya sumó ${previo.delta}; ahora se pedía ${delta}` : '' });
+                        motivo: porCsv
+                          ? `su cantidad (${previo.delta}) la puso el CSV de esta factura, descargado el ${String(previo.at).slice(0, 16).replace('T', ' ')} UTC; si ese CSV no se llegó a importar, corrígelo en Shopify`
+                          : (previo.delta !== delta ? `esta factura ya sumó ${previo.delta}; ahora se pedía ${delta}` : '') });
       continue;
     }
     if (previo?.estado === 'en-curso') {
@@ -235,4 +238,48 @@ export async function handleStockAdd(request: Request, env: StockAddEnv, bearerV
   }
 
   return json({ ok: true, dry, invoice: factura, ubicacion, permisos, resultados });
+}
+
+// ── CSV DE UNA FACTURA → LIBRO DE STOCK ──────────────────────────────────────
+//
+//   POST ?action=stock-csv   Bearer de admin
+//     { invoice: "SI-286408", source?: "rd", items: [{ sku, delta }] }
+//
+// El CSV crea los productos nuevos de una factura con la cantidad de la factura.
+// Si despues ese disco aparece "en tienda" y se pulsa Add stock con la MISMA
+// factura, se sumaria dos veces (MEOW01, 16-09: 2 por el CSV + 2 por Add stock).
+// Por eso el importer anota aqui, ANTES de descargar el CSV, que esa factura ya
+// dio cantidad a esos SKUs. Nunca pisa una entrada existente: si Add stock ya
+// sumo, o el CSV se descargo antes, se deja como esta y se dice.
+export async function handleStockCsv(request: Request, env: StockAddEnv, bearerValido: boolean): Promise<Response> {
+  if (!bearerValido) return json({ error: 'unauthorized' }, 401);
+  let body: any;
+  try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+  const factura = String(body?.invoice || '').trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9._-]{2,40}$/.test(factura)) {
+    return json({ error: 'invoice requerido: el numero de la factura, p. ej. SI-286408' }, 400);
+  }
+  const porSku = new Map<string, number>();
+  for (const it of (Array.isArray(body?.items) ? body.items : [])) {
+    const sku = String(it?.sku || '').trim();
+    const delta = Number(it?.delta);
+    if (sku && Number.isInteger(delta) && delta >= 0 && delta <= 1000) porSku.set(sku, (porSku.get(sku) || 0) + delta);
+  }
+  if (!porSku.size) return json({ error: 'items requerido: [{sku, delta}]' }, 400);
+
+  const at = new Date().toISOString();
+  const resultados: any[] = [];
+  for (const [sku, delta] of porSku) {
+    const clave = claveRegistro(factura, sku);
+    const previo = await env.STOCK_LEDGER.get(clave, 'json') as any;
+    if (previo) {
+      resultados.push({ sku, estado: 'ya-estaba', origen: previo.origen || 'stock-add', delta: previo.delta, at: previo.at });
+      continue;
+    }
+    await env.STOCK_LEDGER.put(clave, JSON.stringify({
+      estado: 'aplicado', origen: 'csv', factura, sku, delta, antes: null, despues: null, at, source: body?.source || '',
+    }));
+    resultados.push({ sku, estado: 'anotado', delta });
+  }
+  return json({ ok: true, invoice: factura, resultados });
 }

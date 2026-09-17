@@ -870,7 +870,7 @@ import {
   handleGenreReviewAdd,
 } from './lib/entities';
 import { sendScoutReport } from './lib/scout-mail';
-import { handleStockAdd } from './lib/stock-add';
+import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
@@ -1875,6 +1875,11 @@ export default {
     // decia cantidades antes/despues, y no lo usaba la app.
     if (action === 'stock-add' && request.method === 'POST') {
       return await handleStockAdd(request, env, bearerAdminValido(request, env));
+    }
+    // El CSV de una factura anota aqui sus SKUs antes de descargarse, para que
+    // Add stock no los sume otra vez con la misma factura.
+    if (action === 'stock-csv' && request.method === 'POST') {
+      return await handleStockCsv(request, env, bearerAdminValido(request, env));
     }
 
     // ── COMPLETAR MEDIA (portada y audio de discos ya en la tienda) ──

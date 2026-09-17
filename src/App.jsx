@@ -4571,6 +4571,8 @@ function RubadubImporter() {
     const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // La factura ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'rd', filas: kept }))) return;
     const CSV_KEYS = Object.keys(rows[0]).filter(k => !k.startsWith('_'));
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_rd.csv', 'rd');
@@ -11293,6 +11295,31 @@ function CompletarMediaPanel({ filas }) {
       </div>
     </div>
   );
+}
+
+// ── CSV DE UNA FACTURA → LIBRO DE STOCK (comun) ───────────────
+// Antes de descargar el CSV de una FACTURA, se anota en el libro de stock
+// (?action=stock-csv) que esa factura ya dio cantidad a esos SKUs. Asi, si luego
+// un disco aparece "en tienda" y se pulsa Add stock con la misma factura, sale
+// "ya aplicado" en vez de sumar otra vez (MEOW01, 16-09). Devuelve true si se
+// puede descargar: anotado, o el usuario acepta seguir sin anotar.
+// Presupuestos y documentos sin numero no se anotan: no son la llegada.
+async function anotarCsvEnLibroDeStock({ documento, source, filas }) {
+  if (documento?.tipo !== 'factura' || !documento?.numero || !filas.length) return true;
+  const items = filas.map(r => ({ sku: String(r['Variant SKU'] || '').trim(), delta: parseInt(r['Variant Inventory Qty'], 10) || 0 }))
+    .filter(i => i.sku);
+  try {
+    const r = await fetchAdmin(`${WORKER_URL}?action=stock-csv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invoice: documento.numero, source, items }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `el worker respondió ${r.status}`);
+    return true;
+  } catch (e) {
+    return window.confirm(`No se pudo anotar la factura ${documento.numero} en el libro de stock (${e.message}).\n\n` +
+      `Si descargas igualmente y luego estos discos aparecen "en tienda", Add stock podría volver a sumar su cantidad.\n\n¿Descargar el CSV de todas formas?`);
+  }
 }
 
 // ── ADD STOCK (comun a los importers) ─────────────────────────
