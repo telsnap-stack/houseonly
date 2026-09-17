@@ -52,8 +52,28 @@ export const GENRES = [
   // solo lista genre:drumandbass, asi que en 'dnb' seria una pildora sin discos.
   // Solo el nombre canonico como alias; las grafias que aparezcan pasaran por la
   // cola antes de añadirse.
+  //
+  // Bass Music va ANTES que Garage a proposito, y eso decide los 7 discos que
+  // llevan los dos: el lote de Tempa, Hardline y HFT100 trae `2-Step`,
+  // `Dubstep`, `Future Garage` y `Garage` a la vez, y un disco resuelve a UN
+  // solo canonico. Medido el 2026-09-17 sobre el catalogo entero: son los
+  // unicos 7, mas SIG028RP que solo dice `Dubstep` y ya era drum & bass.
+  //
+  // `Dubstep` y `2-Step` entran como 'sub': resuelven a Bass Music cuando
+  // llegan sueltos, y el tag crudo SE QUEDA en el producto, asi que el buscador
+  // los encuentra por esas palabras aunque la pildora diga otra cosa.
   { id:'bassmusic', label:'Bass Music', seccion:'house', orden:7, pildora:'con-discos', alias:[
     { raw:'Bass Music', tipo:'canonico' },
+    { raw:'Dubstep', tipo:'sub' }, { raw:'2-Step', tipo:'sub' }, { raw:'2 Step', tipo:'sub' },
+    { raw:'Grime', tipo:'sub' }, { raw:'Bassline', tipo:'sub' },
+  ]},
+  // Garage resuelve desde hoy, pero su pildora no se pinta hasta que haya un
+  // disco que diga Garage SIN decir Dubstep: los 7 que existen se los lleva
+  // Bass Music por prioridad. `pildora:'con-discos'` es justo lo que evita que
+  // salga un desplegable con una entrada a cero.
+  { id:'garage', label:'Garage', seccion:'house', orden:8, pildora:'con-discos', alias:[
+    { raw:'Garage', tipo:'canonico' }, { raw:'UK Garage', tipo:'misma' },
+    { raw:'Future Garage', tipo:'sub' }, { raw:'Speed Garage', tipo:'sub' },
   ]},
   { id:'deephouse', label:'Deep House', seccion:'house', orden:2, padre:'house', alias:[
     { raw:'Deep House', tipo:'canonico' }, { raw:'Deephouse', tipo:'misma' },
