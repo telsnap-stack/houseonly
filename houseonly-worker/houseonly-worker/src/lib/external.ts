@@ -32,6 +32,19 @@ export interface LinkValue {
   value: string;                       // forma canonica, ver parseLinkUrl()
   url: string;
   from: Array<'mb' | 'wikidata'>;      // quien lo afirma
+  // Quien es esa cuenta, resuelto por el barrido. Un ID crudo
+  // (`UCGuRflg2kG0R-RMdxOWPg4g`, `2437861`) no se puede decidir mirandolo.
+  preview?: LinkPreview;
+}
+
+export interface LinkPreview {
+  name?: string;                       // nombre del perfil
+  avatar?: string;                     // URL de la imagen
+  followers?: number;
+  items?: number;                      // pistas, videos, shows
+  last?: string;                       // ISO de la ultima actividad
+  title?: string;                      // titulo de la pagina, cuando es lo unico
+  note?: string;                       // por que no hay datos (RA, Songkick…)
 }
 
 export interface ExternalCandidate {
@@ -46,6 +59,10 @@ export interface ExternalCandidate {
   why: 'discogs-id' | 'name';
   discogs: string[];                   // Discogs IDs que MB lista para esta entidad
   wikidata?: string;
+  // Para decidir hace falta saber QUIEN es: lo que dice MusicBrainz (su
+  // disambiguation y su anotacion) y la descripcion de Wikidata, enteras.
+  annotation?: string;
+  wikidataDescription?: string;
   links: Partial<Record<LinkField, LinkValue[]>>;
 }
 
@@ -58,6 +75,9 @@ export interface ExternalReview {
   candidates: ExternalCandidate[];
   // De donde sale el Discogs ID: que disco nuestro lo prueba.
   evidence: Array<{ kind: 'artist' | 'label'; discogsId: string; name: string; releaseId: number; sku: string }>;
+  // Dos o tres discos nuestros que traen esta entidad, por su titulo: es lo que
+  // hace reconocible a un sello que uno no tiene en la cabeza.
+  records?: Array<{ handle: string; title: string }>;
   bucket: 'confirmed' | 'review';
   bucketWhy?: 'no-discogs' | 'multi-mb' | 'conflict';
   fetchedAt: number;
@@ -76,6 +96,10 @@ export interface ExternalRecord {
   songkick?: string;
   bandsintown?: string;
   nts?: string;
+  // Segundas cuentas legitimas del mismo campo: Ron Trent tiene la suya y la de
+  // su sello. La principal vive en el campo de arriba; estas cuelgan aparte para
+  // que quien lea `soundcloud` siga leyendo una sola.
+  secondary?: Partial<Record<LinkField, string[]>>;
   approved: Record<string, { at: number; via: 'bulk' | 'row' }>;
   // Valores descartados por campo ('mbid' incluido). El barrido no los vuelve
   // a proponer: el Pampa de Monaco se descarta una vez, no cada semana.
@@ -153,7 +177,18 @@ export function externalUrl(field: LinkField, value: string): string {
  * Lo que no es una cuenta reconocible (Spotify, Discogs, una pista suelta) se
  * cae sin mas.
  */
-export function buildLinks(entries: Array<{ url: string; from: 'mb' | 'wikidata' }>): ExternalCandidate['links'] {
+export function buildLinks(
+  entries: Array<{ url: string; from: 'mb' | 'wikidata' }>,
+  previews: Array<{ url: string } & LinkPreview> = [],
+): ExternalCandidate['links'] {
+  // Los perfiles vienen por URL y se casan por valor canonico, para que el de
+  // soundcloud.com/RonTrent y el de soundcloud.com/rontrent sean el mismo.
+  const byValue = new Map<string, LinkPreview>();
+  for (const { url, ...rest } of previews) {
+    const p = parseLinkUrl(url);
+    if (p && Object.values(rest).some(v => v !== undefined && v !== '')) byValue.set(`${p.field}:${p.value}`, rest);
+  }
+
   const links: ExternalCandidate['links'] = {};
   for (const { url, from } of entries) {
     const p = parseLinkUrl(url);
@@ -161,7 +196,10 @@ export function buildLinks(entries: Array<{ url: string; from: 'mb' | 'wikidata'
     const list = links[p.field] || (links[p.field] = []);
     const hit = list.find(v => v.value === p.value);
     if (hit) { if (!hit.from.includes(from)) hit.from.push(from); }
-    else list.push({ value: p.value, url: externalUrl(p.field, p.value), from: [from] });
+    else {
+      const preview = byValue.get(`${p.field}:${p.value}`);
+      list.push({ value: p.value, url: externalUrl(p.field, p.value), from: [from], ...(preview ? { preview } : {}) });
+    }
   }
   return links;
 }
@@ -196,7 +234,8 @@ export function filterAgainstRecord(row: ExternalReview, rec: ExternalRecord | n
     const links: ExternalCandidate['links'] = {};
     for (const f of LINK_FIELDS) {
       if (rec && (rec as any)[f]) continue;
-      const vals = (c.links[f] || []).filter(v => !(rej[f] || []).includes(v.value));
+      const vals = (c.links[f] || []).filter(v =>
+        !(rej[f] || []).includes(v.value) && !(rec?.secondary?.[f] || []).includes(v.value));
       if (vals.length) links[f] = vals;
     }
     return { ...c, links };
@@ -215,7 +254,9 @@ export function applyApproval(
   rec: ExternalRecord | null,
   row: ExternalReview,
   mbid: string,
-  fields: Partial<Record<LinkField, string>>,
+  // Por campo, los valores elegidos: el PRIMERO es el principal y el resto
+  // quedan como secundarios (la cuenta del sello junto a la personal).
+  fields: Partial<Record<LinkField, string | string[]>>,
   via: 'bulk' | 'row',
   now: number,
 ): ExternalRecord {
@@ -240,14 +281,19 @@ export function applyApproval(
 
   for (const f of LINK_FIELDS) {
     const offered = cand.links[f] || [];
-    const chosen = fields[f];
-    if (chosen !== undefined && !offered.some(v => v.value === chosen)) {
-      throw new Error(`${f}: "${chosen}" is not offered by this candidate`);
+    const raw = fields[f];
+    const chosen = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).filter(Boolean);
+    if (new Set(chosen).size !== chosen.length) throw new Error(`${f}: repeated value`);
+    for (const c of chosen) {
+      if (!offered.some(v => v.value === c)) throw new Error(`${f}: "${c}" is not offered by this candidate`);
     }
-    for (const v of offered) {
-      if (v.value === chosen) { (out as any)[f] = chosen; out.approved[f] = { at: now, via }; }
-      else reject(f, v.value);
+    if (chosen.length) {
+      (out as any)[f] = chosen[0];
+      out.approved[f] = { at: now, via };
+      const extra = chosen.slice(1);
+      if (extra.length) out.secondary = { ...(out.secondary || {}), [f]: extra };
     }
+    for (const v of offered) if (!chosen.includes(v.value)) reject(f, v.value);
   }
 
   // Los otros candidatos de la fila quedan descartados, con sus enlaces.
@@ -255,7 +301,7 @@ export function applyApproval(
     if (c.mbid === cand.mbid) continue;
     if (c.mbid !== out.mbid) reject('mbid', c.mbid);
     for (const f of LINK_FIELDS) for (const v of c.links[f] || []) {
-      if ((out as any)[f] !== v.value) reject(f, v.value);
+      if ((out as any)[f] !== v.value && !(out.secondary?.[f] || []).includes(v.value)) reject(f, v.value);
     }
   }
 
@@ -320,9 +366,14 @@ export async function handleExternalReviewPut(request: Request, env: EntitiesEnv
       country: c.country || undefined, score: c.score, why: c.why === 'discogs-id' ? 'discogs-id' as const : 'name' as const,
       discogs: Array.isArray(c.discogs) ? c.discogs.map(String) : [],
       wikidata: c.wikidata || undefined,
+      annotation: c.annotation || undefined,
+      wikidataDescription: c.wikidataDescription || undefined,
       links: buildLinks([
         ...(Array.isArray(c.urls) ? c.urls : []),
         ...LINK_FIELDS.flatMap(f => (c.links?.[f] || []).flatMap((v: LinkValue) => v.from.map(from => ({ url: v.url, from })))),
+      ], [
+        ...(Array.isArray(c.previews) ? c.previews : []),
+        ...LINK_FIELDS.flatMap(f => (c.links?.[f] || []).flatMap((v: LinkValue) => v.preview ? [{ url: v.url, ...v.preview }] : [])),
       ]),
     })).filter((c: ExternalCandidate) => /^[0-9a-f-]{36}$/.test(c.mbid));
     const row = filterAgainstRecord({
@@ -331,6 +382,7 @@ export async function handleExternalReviewPut(request: Request, env: EntitiesEnv
       display: e.display,
       roles: e.roles,
       evidence: Array.isArray(it.evidence) ? it.evidence : [],
+      records: Array.isArray(it.records) ? it.records.slice(0, 3) : undefined,
       fetchedAt: Number(it.fetchedAt) || Date.now(),
     }, await getExternal(env, it.slug));
     if (!row) { await env.ENTITIES.delete(K.review(it.slug)); dropped++; continue; }

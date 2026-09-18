@@ -12,6 +12,7 @@ import {
 	handleExternalReviewApprove,
 	handleExternalReviewApproveBulk,
 	handleExternalReviewReject,
+	buildLinks,
 	type ExternalReview,
 	type ExternalCandidate,
 } from "../src/lib/external";
@@ -154,6 +155,46 @@ describe("filterAgainstRecord y applyApproval", () => {
 	});
 });
 
+describe("perfiles resueltos y segundas cuentas", () => {
+	it("pega cada perfil a su valor, aunque la URL venga escrita de otra forma", () => {
+		const links = buildLinks(
+			[{ url: "https://soundcloud.com/RonTrent", from: "mb" }],
+			[{ url: "https://soundcloud.com/rontrent", name: "Ron Trent", followers: 48000, last: "2026-08-01T00:00:00Z", avatar: "https://i1.sndcdn.com/x.jpg" }],
+		);
+		expect(links.soundcloud![0]).toEqual({
+			value: "rontrent", url: "https://soundcloud.com/rontrent", from: ["mb"],
+			preview: { name: "Ron Trent", followers: 48000, last: "2026-08-01T00:00:00Z", avatar: "https://i1.sndcdn.com/x.jpg" },
+		});
+	});
+
+	it("un perfil vacio no se guarda: mejor sin preview que con uno mudo", () => {
+		const links = buildLinks([{ url: "https://ra.co/dj/omars", from: "mb" }], [{ url: "https://ra.co/dj/omars" }]);
+		expect(links.ra![0].preview).toBeUndefined();
+	});
+
+	it("Ron Trent: las dos cuentas valen, la personal es la principal", () => {
+		const row = omarRow();
+		row.candidates[0].links.soundcloud = [lv("https://soundcloud.com/rontrent"), lv("https://soundcloud.com/prescriptionmusic")];
+		const rec = applyApproval(null, row, row.candidates[0].mbid,
+			{ soundcloud: ["rontrent", "prescriptionmusic"], songkick: "2437861" }, "row", 5);
+		expect(rec.soundcloud).toBe("rontrent");
+		expect(rec.secondary).toEqual({ soundcloud: ["prescriptionmusic"] });
+		expect(rec.rejected.soundcloud).toBeUndefined();
+
+		// Y el siguiente barrido no vuelve a pedir ninguna de las dos.
+		const row2 = omarRow();
+		row2.candidates[0].links.soundcloud = [lv("https://soundcloud.com/rontrent"), lv("https://soundcloud.com/prescriptionmusic")];
+		expect(filterAgainstRecord(row2, rec)).toBeNull();
+	});
+
+	it("no deja repetir un valor ni aprobar uno que no se ofrece", () => {
+		const row = omarRow();
+		row.candidates[0].links.soundcloud = [lv("https://soundcloud.com/rontrent")];
+		expect(() => applyApproval(null, row, row.candidates[0].mbid, { soundcloud: ["rontrent", "rontrent"] }, "row", 5)).toThrow(/repeated/);
+		expect(() => applyApproval(null, row, row.candidates[0].mbid, { soundcloud: ["rontrent", "otra"] }, "row", 5)).toThrow(/not offered/);
+	});
+});
+
 describe("handlers", () => {
 	beforeEach(async () => {
 		await wipe();
@@ -227,6 +268,26 @@ describe("handlers", () => {
 			ra: [{ value: "dj/omars", url: "https://ra.co/dj/omars", from: ["wikidata"] }],
 		});
 		expect(row.bucket).toBe("confirmed");
+	});
+
+	it("put guarda perfiles, discos nuestros y las descripciones", async () => {
+		const { links, ...sinLinks } = omarCand();
+		await handleExternalReviewPut(req("external-review-put", { items: [{
+			...omarRow(),
+			records: [{ handle: "aos891", title: "Something Real ft Desire" }, { handle: "fxhe12", title: "Simple Than Sorry" }, { handle: "a", title: "b" }, { handle: "c", title: "d" }],
+			candidates: [{
+				...sinLinks,
+				annotation: "Detroit producer, runs FXHE Records.",
+				wikidataDescription: "American DJ and record producer",
+				urls: [{ url: "https://www.songkick.com/artists/2437861", from: "mb" }],
+				previews: [{ url: "https://www.songkick.com/artists/2437861", title: "Omar-S tickets and 2026 tour dates", note: "la pagina bloquea peticiones automaticas" }],
+			}],
+		}] }), env as any);
+		const row = JSON.parse((await env.ENTITIES.get("extreview:omar-s"))!);
+		expect(row.records).toHaveLength(3);   // 2-3, no la lista entera
+		expect(row.candidates[0].annotation).toMatch(/FXHE/);
+		expect(row.candidates[0].wikidataDescription).toMatch(/producer/);
+		expect(row.candidates[0].links.songkick[0].preview.title).toMatch(/tour dates/);
 	});
 
 	it("sin Bearer, 401", async () => {

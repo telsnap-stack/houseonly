@@ -25,6 +25,22 @@
  * El MBID sale SOLO de MusicBrainz: el P434 de Wikidata de DJ Koze apunta a
  * "Stefan Kozalla", que es otra entidad de MB.
  *
+ * Y por cada candidato se resuelve QUIEN es cada cuenta —nombre, avatar,
+ * seguidores y ultima actividad—, porque un ID crudo (UCGuRfl…, 2437861) no se
+ * puede decidir mirandolo:
+ *
+ *   - SoundCloud: oEmbed (nombre y avatar) + la pagina publica, que su
+ *     robots.txt permite a agentes normales (solo bloquea a los rastreadores de
+ *     IA y /search, /stream, /you).
+ *   - YouTube: Data API v3 con YOUTUBE_API_KEY — channels.list (1 unidad) y el
+ *     ultimo subido (1 mas). Nada de raspar paginas.
+ *   - Mixcloud: su API publica, sin clave.
+ *   - Songkick y Bandsintown: se intenta el <title> de la pagina. Hoy los dos
+ *     bloquean las peticiones automaticas (406 y 403 de Cloudflare) y la fila lo
+ *     dice, en vez de enseñar un numero suelto.
+ *   - RA: NO se pide. Sus terminos (§4.4) prohiben el acceso automatizado con
+ *     fines comerciales. Solo enlace.
+ *
  * Limites que se respetan:
  *   - MusicBrainz: 1 peticion/segundo por IP y User-Agent identificable.
  *   - Discogs sin token: 25/min (cabecera X-Discogs-Ratelimit). Se espera 2,5 s.
@@ -69,6 +85,7 @@ const UA = 'HouseOnly-EntitySweep/1.0 ( https://houseonly.store )';
 const CACHE_DIR = join(tmpdir(), 'houseonly-external-sweep');
 const CACHE_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAX_RELEASES_PER_ENTITY = 3;
+const MAX_RECORDS_SHOWN = 3;
 const SEND_BATCH = 20;
 
 const argv = process.argv.slice(2);
@@ -159,6 +176,7 @@ const PRODUCTS_QUERY = `
       pageInfo { hasNextPage endCursor }
       nodes {
         handle
+        title
         variants(first: 5) { nodes { sku } }
         artist: metafield(namespace: "houseonly", key: "artist_slugs") { value }
         label: metafield(namespace: "houseonly", key: "label_slugs") { value }
@@ -185,7 +203,7 @@ async function skusBySlug() {
       for (const [kind, mf] of [['artist', p.artist], ['label', p.label]]) {
         for (const slug of (mf?.value || '').split(',').map(s => s.trim()).filter(Boolean)) {
           const list = out.get(slug) || [];
-          for (const sku of skus) list.push({ sku, kind });
+          for (const sku of skus) list.push({ sku, kind, handle: p.handle, title: p.title });
           out.set(slug, list);
         }
       }
@@ -259,6 +277,144 @@ async function discogsEvidence(target, aliases, skus, releaseBySku) {
   return evidence;
 }
 
+// ── QUIEN ES ESA CUENTA ─────────────────────────────────────────────
+
+const UA_BROWSER = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36';
+
+async function cachedText(url, { host, gapMs, headers = {} }) {
+  const file = join(CACHE_DIR, createHash('sha1').update('T' + url).digest('hex') + '.json');
+  if (!FRESH && existsSync(file)) {
+    try {
+      const c = JSON.parse(readFileSync(file, 'utf8'));
+      if (Date.now() - c.at < CACHE_TTL_MS) return c;
+    } catch { /* se vuelve a pedir */ }
+  }
+  const wait = (lastCall[host] || 0) + gapMs - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastCall[host] = Date.now();
+  let out;
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': UA_BROWSER, ...headers } });
+    out = { at: Date.now(), status: r.status, body: r.ok ? (await r.text()).slice(0, 400000) : '' };
+  } catch (e) {
+    out = { at: Date.now(), status: 0, body: '', error: e.message };
+  }
+  writeFileSync(file, JSON.stringify(out));
+  return out;
+}
+
+const pageTitle = html => {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? m[1].replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+};
+
+async function previewSoundcloud(value) {
+  const p = {};
+  const o = await cachedJson(`https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(`https://soundcloud.com/${value}`)}`, { host: 'sc', gapMs: 700 })
+    .catch(() => null);
+  if (o) { p.name = o.author_name || o.title; if (o.thumbnail_url && !/placeholder/.test(o.thumbnail_url)) p.avatar = o.thumbnail_url; }
+  const page = await cachedText(`https://soundcloud.com/${value}`, { host: 'sc', gapMs: 700 });
+  const m = page.body.match(/window\.__sc_hydration\s*=\s*(\[[\s\S]*?\]);/);
+  if (m) {
+    try {
+      const u = JSON.parse(m[1]).filter(x => x.hydratable === 'user').map(x => x.data)[0];
+      if (u) {
+        p.name = u.username || p.name;
+        p.followers = u.followers_count;
+        p.items = u.track_count;
+        p.last = u.last_modified;
+        if (u.avatar_url && !/default_avatar/.test(u.avatar_url)) p.avatar = u.avatar_url;
+      }
+    } catch { /* la pagina ha cambiado de forma */ }
+  } else if (!o) {
+    p.note = `la pagina no se ha podido leer (HTTP ${page.status})`;
+  }
+  return p;
+}
+
+async function previewMixcloud(value) {
+  const u = await cachedJson(`https://api.mixcloud.com/${encodeURIComponent(value)}/`, { host: 'mc', gapMs: 700 }).catch(() => null);
+  if (!u || u.error) return { note: 'la cuenta no existe en Mixcloud' };
+  const p = { name: u.name, followers: u.follower_count, items: u.cloudcast_count, avatar: (u.pictures || {}).thumbnail };
+  const cc = await cachedJson(`https://api.mixcloud.com/${encodeURIComponent(value)}/cloudcasts/?limit=1`, { host: 'mc', gapMs: 700 }).catch(() => null);
+  const last = ((cc || {}).data || [])[0];
+  if (last) p.last = last.created_time;
+  return p;
+}
+
+async function previewYoutube(value) {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) return { note: 'sin YOUTUBE_API_KEY: no se ha resuelto el canal' };
+  const sel = value.startsWith('UC') ? `id=${value}`
+    : value.startsWith('@') ? `forHandle=${encodeURIComponent(value)}`
+    : value.startsWith('user/') ? `forUsername=${encodeURIComponent(value.slice(5))}`
+    : `id=${encodeURIComponent(value)}`;
+  const d = await cachedJson(`https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&${sel}&key=${key}`, { host: 'yt', gapMs: 300 }).catch(() => null);
+  const it = ((d || {}).items || [])[0];
+  if (!it) return { note: 'YouTube no devuelve ese canal' };
+  const p = {
+    name: it.snippet.title,
+    avatar: (it.snippet.thumbnails?.default || {}).url,
+    followers: Number(it.statistics?.subscriberCount) || undefined,
+    items: Number(it.statistics?.videoCount) || undefined,
+  };
+  const uploads = it.contentDetails?.relatedPlaylists?.uploads;
+  if (uploads) {
+    const pl = await cachedJson(`https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=1&playlistId=${uploads}&key=${key}`, { host: 'yt', gapMs: 300 }).catch(() => null);
+    const last = ((pl || {}).items || [])[0];
+    if (last) p.last = last.snippet.publishedAt;
+  }
+  return p;
+}
+
+async function previewPage(url, quien) {
+  const r = await cachedText(url, { host: 'web', gapMs: 1500 });
+  if (r.status === 200 && pageTitle(r.body)) return { title: pageTitle(r.body) };
+  return { note: `${quien} bloquea las peticiones automaticas (HTTP ${r.status || 'sin respuesta'}): solo enlace` };
+}
+
+/** Quien es cada cuenta. Devuelve [{url, ...preview}] para external-review-put. */
+async function resolvePreviews(links) {
+  const out = [];
+  const hechos = new Set();
+  for (const { field, value, url } of links) {
+    // La misma cuenta llega por MusicBrainz y por Wikidata: se resuelve una vez.
+    if (hechos.has(`${field}:${value}`)) continue;
+    hechos.add(`${field}:${value}`);
+    let p = {};
+    if (field === 'soundcloud') p = await previewSoundcloud(value);
+    else if (field === 'mixcloud') p = await previewMixcloud(value);
+    else if (field === 'youtube') p = await previewYoutube(value);
+    else if (field === 'songkick') p = await previewPage(url, 'Songkick');
+    else if (field === 'bandsintown') p = await previewPage(url, 'Bandsintown');
+    else if (field === 'ra') p = { note: 'no se consulta: los terminos de RA prohiben el acceso automatizado' };
+    else if (field === 'nts') p = await previewPage(url, 'NTS');
+    if (Object.keys(p).length) out.push({ url, ...p });
+  }
+  return out;
+}
+
+// Los mismos campos que LINK_FIELDS en src/lib/external.ts. Se deducen de la
+// URL para no repetir aqui el parser del worker.
+function fieldOfUrl(url) {
+  const h = (url.match(/^https?:\/\/(?:www\.|m\.|music\.)?([^/]+)/i) || [])[1] || '';
+  const path = url.replace(/^https?:\/\/[^/]+/, '');
+  if (h === 'soundcloud.com' && /^\/[^/]+\/?$/.test(path)) return { field: 'soundcloud', value: path.replace(/\//g, '').toLowerCase() };
+  if (h === 'mixcloud.com') { const v = path.split('/').filter(Boolean)[0]; return v ? { field: 'mixcloud', value: v } : null; }
+  if (h === 'youtube.com') {
+    const segs = path.split('/').filter(Boolean);
+    if (segs[0] === 'channel' && /^UC[\w-]{22}$/.test(segs[1] || '')) return { field: 'youtube', value: segs[1] };
+    if ((segs[0] || '').startsWith('@')) return { field: 'youtube', value: segs[0].toLowerCase() };
+    if ((segs[0] === 'user' || segs[0] === 'c') && segs[1]) return { field: 'youtube', value: `${segs[0]}/${segs[1]}` };
+    return null;
+  }
+  if (h === 'ra.co' || h === 'residentadvisor.net') return { field: 'ra', value: path.slice(1) };
+  if (h === 'songkick.com') return { field: 'songkick', value: path };
+  if (h === 'bandsintown.com') return { field: 'bandsintown', value: path };
+  if (h === 'nts.live') return { field: 'nts', value: path };
+  return null;
+}
+
 // ── MUSICBRAINZ + WIKIDATA ──────────────────────────────────────────
 
 // Formatos de URL de Wikidata (P1630), comprobados el 2026-09-17.
@@ -274,8 +430,9 @@ const WD_PROPS = {
 };
 
 async function wikidataUrls(qid) {
-  const d = await wikidata(`action=wbgetentities&ids=${qid}&props=claims`);
+  const d = await wikidata(`action=wbgetentities&ids=${qid}&props=claims|descriptions&languages=en`);
   const claims = d?.entities?.[qid]?.claims || {};
+  const description = d?.entities?.[qid]?.descriptions?.en?.value;
   const urls = [];
   for (const [p, fmt] of Object.entries(WD_PROPS)) {
     for (const c of claims[p] || []) {
@@ -283,22 +440,32 @@ async function wikidataUrls(qid) {
       if (typeof v === 'string' && c.rank !== 'deprecated') urls.push({ url: fmt(v), from: 'wikidata' });
     }
   }
-  return urls;
+  return { urls, description };
 }
 
 /** Una entidad de MB → candidato con sus URLs (MB + Wikidata). */
 async function mbCandidate(mbKind, mbid, why, score) {
-  const e = await mb(`${mbKind}/${mbid}?inc=url-rels`);
+  const e = await mb(`${mbKind}/${mbid}?inc=url-rels+annotation`);
   if (!e) return null;
   const rels = e.relations || [];
   const urls = rels.map(r => r.url?.resource).filter(Boolean).map(url => ({ url, from: 'mb' }));
   const discogsIds = rels.map(r => r.url?.resource || '').map(u => u.match(/discogs\.com\/(?:[a-z]{2}\/)?(?:artist|label)\/(\d+)/)?.[1]).filter(Boolean);
   const qid = rels.map(r => r.url?.resource || '').map(u => u.match(/wikidata\.org\/wiki\/(Q\d+)/)?.[1]).find(Boolean);
-  if (qid) urls.push(...await wikidataUrls(qid));
+  let wikidataDescription;
+  if (qid) {
+    const wd = await wikidataUrls(qid);
+    urls.push(...wd.urls);
+    wikidataDescription = wd.description;
+  }
+  // Quien es, con todas las letras: la anotacion de MusicBrainz y la
+  // descripcion de Wikidata, sin recortar.
+  const previews = await resolvePreviews(urls.map(u => ({ ...fieldOfUrl(u.url) || {}, url: u.url })).filter(x => x.field));
   return {
     mbid: e.id, mbKind, name: e.name, disambiguation: e.disambiguation || undefined,
     country: e.country || undefined, score, why, discogs: [...new Set(discogsIds)],
-    wikidata: qid, urls,
+    wikidata: qid, wikidataDescription,
+    annotation: (e.annotation || '').trim() || undefined,
+    urls, previews,
   };
 }
 
@@ -381,8 +548,13 @@ async function main() {
     const aliases = ent.entity?.aliases || [];
     const evidence = await discogsEvidence(target, aliases, skuMap.get(target.slug) || [], relMap);
     const candidates = await candidatesFor(target, aliases, evidence);
+    const vistos = new Set();
+    const records = (skuMap.get(target.slug) || [])
+      .filter(x => x.handle && !vistos.has(x.handle) && vistos.add(x.handle))
+      .slice(0, MAX_RECORDS_SHOWN)
+      .map(x => ({ handle: x.handle, title: x.title }));
     const row = { slug: target.slug, display: target.display, roles: target.roles, total: target.total,
-      followed: !!target.followed, candidates, evidence, fetchedAt: Date.now() };
+      followed: !!target.followed, candidates, evidence, records, fetchedAt: Date.now() };
     rows.push(row);
     const tag = !candidates.length ? '·' : candidates.every(c => c.why === 'discogs-id') ? 'D' : 'N';
     process.stdout.write(`\r  [${i}/${targets.length}] ${tag} ${target.display.slice(0, 40).padEnd(40)}`);
