@@ -13353,7 +13353,73 @@ function embedSrc(st) {
   return null;
 }
 
+/**
+ * El perfil de una entidad, sonando aqui dentro. Lo mismo que con los sets: si
+ * hay que salir de la tienda para escuchar, se pierde al cliente.
+ *   - SoundCloud y Mixcloud: su widget acepta la URL del perfil y suena lo
+ *     ultimo que han subido.
+ *   - YouTube: no hay embed de canal, pero si de su lista de subidas: el id del
+ *     canal empieza por UC y su lista de subidas es el mismo id con UU.
+ *   - NTS no tiene widget: se queda como enlace.
+ * Comprobado el 2026-09-18 con Pampa, Fokuz y Defected.
+ */
+function profileEmbedSrc(l) {
+  if (l.kind === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(l.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (l.kind === 'mixcloud') {
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(`/${l.value}/`)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  if (l.kind === 'youtube' && /^UC[\w-]{22}$/.test(l.value)) {
+    return `https://www.youtube-nocookie.com/embed/videoseries?list=UU${l.value.slice(2)}&autoplay=1&rel=0`;
+  }
+  return null;
+}
+
 const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
+
+/**
+ * Las fechas de Bandsintown, dentro de la ficha. Su script solo se carga cuando
+ * alguien pulsa: no se le mete un tercero a todo el que abra una pagina.
+ *
+ * El widget deduce su app_id del dominio (`js_<host>`), asi que en localhost
+ * devuelve cero fechas y en houseonly.store o en un preview de Pages devuelve
+ * las de verdad. Comprobado el 2026-09-18.
+ */
+function BandsintownDates({ link }) {
+  const [abierto, setAbierto] = useState(false);
+  const caja = useRef(null);
+  useEffect(() => {
+    if (!abierto || !link || !caja.current) return;
+    const a = document.createElement('a');
+    a.className = 'bit-widget-initializer';
+    a.dataset.artistName = `id_${link.value}`;
+    a.dataset.eventsToDisplay = '5';
+    a.dataset.displayLimit = '5';
+    caja.current.appendChild(a);
+    if (!document.querySelector('script[data-bit]')) {
+      const s = document.createElement('script');
+      s.src = 'https://widget.bandsintown.com/main.min.js';
+      s.async = true;
+      s.dataset.bit = '1';
+      document.body.appendChild(s);
+    } else if (window.BITWidget?.init) {
+      window.BITWidget.init();
+    }
+  }, [abierto, link]);
+
+  if (!link) return null;
+  if (!abierto) {
+    return (
+      <button onClick={() => setAbierto(true)}
+        style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
+          padding:'6px 10px', background:'none', color:S.text, fontFamily:'inherit', fontSize:11, cursor:'pointer', marginBottom:8 }}>
+        <span style={{ color:S.accent }}>◆</span> Show tour dates
+      </button>
+    );
+  }
+  return <div ref={caja} style={{ marginBottom:10, background:'#0d0d0d', borderRadius:2 }} />;
+}
 
 function ListenBlock({ listen, compact }) {
   const isMobile = useIsMobile(720);
@@ -13375,6 +13441,39 @@ function ListenBlock({ listen, compact }) {
       <span style={{ color:S.muted, fontSize:9 }}>↗</span>
     </a>
   );
+
+  // Un perfil: boton mientras no se toca, reproductor en cuanto se toca. El que
+  // no tiene widget (NTS) se queda como enlace de siempre.
+  const perfil = l => {
+    const src = profileEmbedSrc(l);
+    if (!src) return chip(l);
+    const clave = `perfil:${l.kind}`;
+    if (playing !== clave) {
+      return (
+        <button key={clave} onClick={() => setPlaying(clave)}
+          style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
+            padding:'6px 10px', background:'none', color:S.text, fontFamily:'inherit', fontSize:11, cursor:'pointer', whiteSpace:'nowrap' }}>
+          <span style={{ color:S.accent }}>{LISTEN_ICON[l.kind] || '•'}</span>
+          {l.label}
+          {l.meta && <span style={{ color:S.muted, fontSize:10 }}>· {l.meta}</span>}
+          <span style={{ color:S.accent, fontSize:10 }}>▶</span>
+        </button>
+      );
+    }
+    return (
+      <div key={clave} style={{ width:'100%' }}>
+        <div style={{ position:'relative', width:'100%', ...(l.kind === 'youtube' ? { aspectRatio:'16 / 9' } : { height: l.kind === 'mixcloud' ? 120 : 166 }), background:'#000' }}>
+          <iframe src={src} title={l.label} loading="lazy" allowFullScreen
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+            style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }} />
+        </div>
+        <div style={{ fontSize:10, color:S.muted, marginTop:4 }}>
+          {l.label}{l.meta ? ` · ${l.meta}` : ''} ·{' '}
+          <a href={l.url} target="_blank" rel="noreferrer" style={{ color:S.muted, textDecoration:'none', borderBottom:`1px solid ${S.border}` }}>open ↗</a>
+        </div>
+      </div>
+    );
+  };
 
   const ficha = st => (
     <div style={{ minWidth:0 }}>
@@ -13443,12 +13542,16 @@ function ListenBlock({ listen, compact }) {
         <div style={{ fontSize:10, color:S.muted, marginBottom:10 }}>+{sets.length - visibles.length} more on their page</div>
       )}
 
-      {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{links.map(chip)}</div>}
+      {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-start' }}>{links.map(perfil)}</div>}
 
       {tour.length > 0 && (
-        <div style={{ marginTop:12 }}>
+        <div style={{ marginTop:14 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
-          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.map(chip)}</div>
+          {/* Las fechas se ven aqui cuando hay Bandsintown aprobado. RA y
+              Songkick se quedan en enlace: RA prohibe el acceso automatizado y
+              el widget de Songkick ya no existe (404 el 18-09). */}
+          <BandsintownDates link={tour.find(t => t.kind === 'bandsintown')} />
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.filter(t => t.kind !== 'bandsintown').map(chip)}</div>
         </div>
       )}
     </section>
