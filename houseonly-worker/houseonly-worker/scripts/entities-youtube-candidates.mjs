@@ -172,6 +172,9 @@ async function main() {
     const r = await worker('sets-review-put', { method: 'POST', body: { items: items.slice(i, i + 20) } });
     written += r.written; dropped += r.dropped; skipped += r.skipped;
   }
+  // list() de KV tarda unos segundos en ver lo recien escrito: sin esta espera
+  // el resumen decia "0 candidatos" justo despues de escribir 21 filas.
+  await sleep(4000);
   const list = await worker('sets-review-list');
   console.log(`\n  enviado: ${written} filas · ${dropped} ya decididas · ${skipped} saltadas`);
   console.log(`  cola de sets en ${TARGET}: ${list.records.length} entidades · ${list.candidates} candidatos\n`);
