@@ -231,8 +231,17 @@ describe("bloque Listen (fase 7D)", () => {
 		expect(l.sets.map(s => s.id)).toEqual(["youtube:7wZ5-lb7bQ4"]);
 		expect(l.links.map(x => x.kind)).toEqual(["youtube", "soundcloud", "mixcloud", "nts"]);
 		expect(l.tour.map(x => x.kind)).toEqual(["ra", "songkick"]);
+		// El valor guardado viaja con el enlace: sin el no hay reproductor.
+		expect(l.links.map(x => x.value)).toEqual(["UCabcdefghijklmnopqrstuv", "soundsignature", "theoparrish", "shows/theo-parrish"]);
 		expect(l.links[0].url).toBe("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
 		expect(l.tour[1].url).toBe("https://www.songkick.com/artists/188726");
+	});
+
+	it("Bandsintown va el primero del tour: es el unico que se puede incrustar", async () => {
+		await external({ bandsintown: "25998", ra: "dj/x", songkick: "123" });
+		const l = (await buildListen(env as any, "theo-parrish"))!;
+		expect(l.tour.map(x => [x.kind, x.value])).toEqual([["bandsintown", "25998"], ["ra", "dj/x"], ["songkick", "123"]]);
+		expect(l.tour[0].url).toBe("https://www.bandsintown.com/a/25998");
 	});
 
 	it("la foto del cron pone fecha al enlace de Mixcloud", async () => {
