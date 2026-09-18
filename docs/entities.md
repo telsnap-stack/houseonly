@@ -1507,7 +1507,28 @@ sus cookies. YouTube va por `youtube-nocookie.com`. Suena **uno cada vez**.
 Debajo de cada set queda un `open ↗` pequeño: es el crédito a la fuente que
 piden SoundCloud y YouTube, y la salida para quien lo prefiera allí.
 
-Los **perfiles y el tour siguen siendo enlaces**: ahí no hay nada que reproducir.
+**Los perfiles también suenan aquí** (18-09): el widget de SoundCloud y el de
+Mixcloud aceptan la URL del perfil y tocan lo último subido; YouTube no tiene
+embed de canal, pero sí de su **lista de subidas** (`UC…` → `UU…`). NTS no tiene
+widget y se queda como enlace. Mismo trato: botón primero, reproductor al pulsar.
+
+**Las fechas, dentro de la ficha.** El widget oficial de Bandsintown se carga
+solo cuando alguien pulsa *Show tour dates*, así que nadie se come un script de
+terceros por abrir una página. Deduce su `app_id` del dominio: en `localhost`
+devuelve cero fechas y en `houseonly.store` o en un preview de Pages, las
+reales. RA y Songkick siguen siendo enlaces: RA prohíbe el acceso automatizado y
+**el widget de Songkick ya no existe** (404 el 18-09).
+
+**Qué artista de Bandsintown es cuál.** `entities-bandsintown-candidates.mjs` lo
+resuelve sin fiarse del nombre: su ficha devuelve el `mbid`, y solo se propone
+cuando ese MBID es el que ya se aprobó. De 40 artistas mirados el 18-09, **21
+coincidieron y 18 eran otro artista con el mismo nombre** (Harmony, Subjects,
+Neroli, The Vanguard Project…). Los 21 están en la cola de Links, en bloque.
+
+> **Esto llama a la API de Bandsintown**, que según sus términos pide
+> consentimiento por escrito. Su propio widget hace las mismas llamadas desde el
+> navegador, pero eso no es permiso. El texto para pedirlo está en
+> `docs/fase7-solicitudes.md` y **sigue sin enviarse**.
 
 Un vídeo que YouTube no deje incrustar se guarda con `embeddable: false` —lo
 comprueba la búsqueda con `videos.list`, 1 unidad por cada 50— y se pinta como
