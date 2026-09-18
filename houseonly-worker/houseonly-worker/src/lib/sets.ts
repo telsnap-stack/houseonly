@@ -18,6 +18,8 @@
 //   setreview:{slug} → SetsReview     candidatos de la busqueda, TTL 30 dias
 
 import { getEntity, type EntitiesEnv } from './entities';
+import { getExternal, externalUrl } from './external';
+import { getMixStat } from './mixcloud';
 
 export type SetSource = 'youtube' | 'soundcloud' | 'mixcloud';
 
@@ -352,4 +354,84 @@ export async function handleSetsReviewReject(request: Request, env: EntitiesEnv)
   await putSets(env, rec);
   await env.ENTITIES.delete(K.review(slug));
   return json({ ok: true });
+}
+
+// ── EL BLOQUE "LISTEN" QUE VE EL CLIENTE (FASE 7D) ──────────────────
+//
+// Nada aqui sale de una API en caliente: todo esta ya aprobado en KV. El orden
+// lo fija esta funcion y es el mismo en la estanteria del portal y en la ficha
+// publica:
+//
+//   1. sets destacados (lo que una persona eligio)
+//   2. canal de YouTube · 3. SoundCloud · 4. Mixcloud · 5. NTS
+//   6. tour dates: RA y Songkick
+//
+// Si una entidad no tiene nada aprobado, devuelve null y **el bloque no se
+// pinta**: un "Listen" vacio es peor que no tenerlo.
+
+export interface ListenLink {
+  kind: 'youtube' | 'soundcloud' | 'mixcloud' | 'nts' | 'ra' | 'songkick';
+  url: string;
+  label: string;        // "YouTube", "SoundCloud"…
+  meta?: string;        // "last show 11 Sep 2026", cuando se sabe
+}
+
+export interface ListenBlock {
+  sets: FeaturedSet[];
+  links: ListenLink[];  // perfiles donde escuchar
+  tour: ListenLink[];   // RA y Songkick, cuando existan
+}
+
+const LISTEN_LABEL: Record<ListenLink['kind'], string> = {
+  youtube: 'YouTube', soundcloud: 'SoundCloud', mixcloud: 'Mixcloud',
+  nts: 'NTS', ra: 'Resident Advisor', songkick: 'Songkick',
+};
+
+// A mano y no con toLocaleDateString: el runtime de Workers dice "11 Sept" y
+// el navegador "11 Sep". Esto se guarda y se compara en los tests, asi que la
+// cadena no puede depender de donde corra.
+const MESES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fecha = (iso?: string) => {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return undefined;
+  return `${d.getUTCDate()} ${MESES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+};
+
+/**
+ * Lo que hay que enseñar de una entidad, o null si no hay nada.
+ * `externalUrl` vive en external.ts: el valor guardado es corto y la URL se
+ * deriva, para que no haya dos formas de escribir el mismo enlace.
+ */
+export async function buildListen(env: EntitiesEnv, slug: string): Promise<ListenBlock | null> {
+  const [ext, rec, mix] = await Promise.all([
+    getExternal(env, slug),
+    getSets(env, slug),
+    getMixStat(env, slug),
+  ]);
+
+  const links: ListenLink[] = [];
+  const tour: ListenLink[] = [];
+  const add = (arr: ListenLink[], kind: ListenLink['kind'], value?: string, meta?: string) => {
+    if (!value) return;
+    arr.push({ kind, url: externalUrl(kind as any, value), label: LISTEN_LABEL[kind], ...(meta ? { meta } : {}) });
+  };
+
+  add(links, 'youtube', ext?.youtube);
+  add(links, 'soundcloud', ext?.soundcloud);
+  // La foto del cron: "last show 11 Sep 2026" convierte un enlace mudo en una
+  // razon para pincharlo.
+  add(links, 'mixcloud', ext?.mixcloud, mix?.last ? `last show ${fecha(mix.last)}` : undefined);
+  add(links, 'nts', ext?.nts);
+  // Las segundas cuentas aprobadas van detras de la principal, no se pierden.
+  for (const [field, extras] of Object.entries(ext?.secondary || {})) {
+    for (const v of extras || []) add(links, field as ListenLink['kind'], v);
+  }
+
+  add(tour, 'ra', ext?.ra);
+  add(tour, 'songkick', ext?.songkick);
+
+  const sets = rec.items;
+  if (!sets.length && !links.length && !tour.length) return null;
+  return { sets, links, tour };
 }

@@ -12402,6 +12402,9 @@ function ExternalLinksView({ kindTab, onCounts }) {
   const [setUrl, setSetUrl]     = useState('');
   const [cands, setCands]       = useState(null);
   const [candSel, setCandSel]   = useState({});
+  // Entidades que alguien sigue y no tienen ni un enlace aprobado: es el unico
+  // agujero que se nota de cara al cliente.
+  const [gaps, setGaps]         = useState(null);
 
   const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
   const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
@@ -12449,12 +12452,14 @@ function ExternalLinksView({ kindTab, onCounts }) {
   async function loadSetsSide(sec) {
     const useSecret = sec ?? secret;
     try {
-      const [ri, rc] = await Promise.all([
+      const [ri, rc, rg] = await Promise.all([
         fetch(`${REVIEW_WORKER_URL}?action=entity-index`),
         fetch(`${REVIEW_WORKER_URL}?action=sets-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
+        fetch(`${REVIEW_WORKER_URL}?action=external-gaps`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
       ]);
       if (ri.ok) setEnts((await ri.json()).entities || []);
       if (rc.ok) setCands((await rc.json()).records || []);
+      if (rg.ok) setGaps(await rg.json());
     } catch { /* la cola de enlaces no depende de esto */ }
   }
 
@@ -12679,6 +12684,22 @@ function ExternalLinksView({ kindTab, onCounts }) {
           <Btn ch="Change secret" variant="ghost" onClick={() => { linksProdSecret = ''; setAuthed(false); setRows(null); onCounts?.(null); }} disabled={busy || loading} />
         </div>
       </div>
+      {gaps && (
+        <div style={{fontSize:10,marginBottom:12,lineHeight:1.5,border:`1px solid ${S.border}`,borderLeft:`2px solid ${gaps.without ? '#ff8800' : S.accent}`,borderRadius:2,padding:'8px 10px'}}>
+          <strong style={{color:gaps.without ? '#ff8800' : S.accent}}>
+            {gaps.without} of {gaps.followed} followed entities have no approved link.
+          </strong>
+          {gaps.without > 0 && (
+            <span style={{color:S.muted}}>
+              {' '}Someone follows them, opens their page and finds nothing to listen to:{' '}
+              {gaps.entities.slice(0, 8).map((e, i) => (
+                <span key={e.slug}>{i ? ' · ' : ''}{e.display}{e.pending ? ' (in the queue)' : ''}</span>
+              ))}
+              {gaps.entities.length > 8 ? ` · and ${gaps.entities.length - 8} more` : ''}
+            </span>
+          )}
+        </div>
+      )}
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
       {progress && (
@@ -13295,6 +13316,81 @@ function ReleaseCard({ p, width = 150 }) {
  * Una estanteria por entidad. Se desliza con el pulgar: `overflow-x:auto` con
  * scroll-snap y sin barra visible en movil, que es donde se usa esto.
  */
+/**
+ * Lo que se puede escuchar de una entidad (fase 7D, docs/entities.md).
+ *
+ * Orden fijo, el mismo en la estanteria y en la ficha: sets destacados primero
+ * —que son los que ha elegido una persona—, luego los perfiles, y el tour
+ * aparte. **Enlaces, nunca reproductores incrustados**: se abre la fuente, que
+ * es donde el artista cobra y donde estan sus datos.
+ *
+ * El worker devuelve `listen: null` cuando no hay nada aprobado, y entonces
+ * este bloque no existe: un "Listen" vacio es peor que no tenerlo.
+ */
+const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
+
+function ListenBlock({ listen, compact }) {
+  const isMobile = useIsMobile(720);
+  if (!listen) return null;
+  const { sets = [], links = [], tour = [] } = listen;
+  if (!sets.length && !links.length && !tour.length) return null;
+
+  // En la estanteria el sitio es poco: dos sets y los perfiles en una linea.
+  const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
+
+  const chip = l => (
+    <a key={`${l.kind}:${l.url}`} href={l.url} target="_blank" rel="noreferrer"
+      style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
+        padding:'6px 10px', color:S.text, textDecoration:'none', fontSize:11, whiteSpace:'nowrap' }}>
+      <span style={{ color:S.accent }}>{LISTEN_ICON[l.kind] || '•'}</span>
+      {l.label}
+      {l.meta && <span style={{ color:S.muted, fontSize:10 }}>· {l.meta}</span>}
+      <span style={{ color:S.muted, fontSize:9 }}>↗</span>
+    </a>
+  );
+
+  return (
+    <section style={{ marginTop: compact ? 12 : 30, textAlign:'left' }}>
+      <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
+
+      {visibles.length > 0 && (
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?240:260}px,1fr))`, gap:10, marginBottom:links.length||tour.length?14:0 }}>
+          {visibles.map(st => (
+            <a key={st.id} href={st.url} target="_blank" rel="noreferrer"
+              style={{ display:'flex', gap:10, alignItems:'center', border:`1px solid ${S.border}`, borderRadius:2,
+                padding:8, color:S.text, textDecoration:'none', minWidth:0 }}>
+              {st.thumbnail
+                ? <img src={st.thumbnail} alt="" width="72" height="54" loading="lazy" style={{ objectFit:'cover', borderRadius:2, background:S.border, flexShrink:0 }} />
+                : <span style={{ width:72, height:54, background:S.border, borderRadius:2, flexShrink:0 }} />}
+              <span style={{ minWidth:0 }}>
+                <span style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
+                  {st.title || st.url}
+                </span>
+                <span style={{ display:'block', fontSize:10, color:S.muted, marginTop:3 }}>
+                  {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
+                </span>
+              </span>
+            </a>
+          ))}
+        </div>
+      )}
+
+      {compact && sets.length > visibles.length && (
+        <div style={{ fontSize:10, color:S.muted, marginBottom:10 }}>+{sets.length - visibles.length} more on their page</div>
+      )}
+
+      {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{links.map(chip)}</div>}
+
+      {tour.length > 0 && (
+        <div style={{ marginTop:12 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.map(chip)}</div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function EntityShelf({ shelf, onNavigate }) {
   const isMobile = useIsMobile(720);
   const w = isMobile ? 136 : 156;
@@ -13315,6 +13411,7 @@ function EntityShelf({ shelf, onNavigate }) {
       <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:12, scrollSnapType:'x mandatory', WebkitOverflowScrolling:'touch' }}>
         {shelf.items.map(p => <ReleaseCard key={p.handle} p={p} width={w} />)}
       </div>
+      <ListenBlock listen={shelf.listen} compact />
     </section>
   );
 }
@@ -13667,6 +13764,8 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigat
       {!data.products?.length && (
         <div style={{ color:S.muted, fontSize:13, marginTop:28 }}>Nothing in stock right now.</div>
       )}
+
+      <ListenBlock listen={data.listen} />
     </div>
   );
 }

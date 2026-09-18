@@ -1489,6 +1489,39 @@ Primera pasada real en producción, 18-09: Defected Records (220.275 seguidores,
 897 shows, último el 11-09) y Mark de Clive-Lowe (6.842, 10 shows, último de
 octubre de 2024 — un dato que por sí solo ya dice cuánto vale ese enlace).
 
+## Fase 7D: el bloque "Listen", y el hueco que deja ver
+
+En la estantería del portal y en la ficha pública, **el mismo orden**:
+
+1. **Sets destacados** — miniatura, título, fuente, quién lo subió y el año.
+2. **Canal de YouTube · SoundCloud · Mixcloud · NTS**, como enlaces de perfil.
+   El de Mixcloud lleva *"last show 11 Sep 2026"* cuando el cron lo sabe.
+3. **Tour dates**, aparte: RA y Songkick, cuando existen.
+
+**Enlaces, nunca reproductores incrustados**: se abre la fuente, que es donde el
+artista cobra. **Si una entidad no tiene nada aprobado, el bloque no existe**
+(`buildListen` devuelve `null`): un "Listen" vacío es peor que no tenerlo.
+
+En la estantería va en versión corta —un set en móvil, dos en escritorio, y un
+*"+N more on their page"*—; en la ficha, todos. Las **segundas cuentas
+aprobadas** (Ron Trent) salen detrás de la principal, que para eso se guardaron.
+
+Medido el 18-09 en el navegador: Theo Parrish sale con sus cuatro sets, su
+SoundCloud y RA + Songkick; DJ Koze con cinco sets; **Mooncraft, que alguien
+sigue y no tiene nada aprobado, no pinta bloque**. En móvil (390 px) no hay
+desbordes horizontales.
+
+### El contador de la pestaña Entities
+
+Arriba de Links, en naranja si no es cero:
+
+> **3 of 9 followed entities have no approved link.** Someone follows them,
+> opens their page and finds nothing to listen to: Mercury · Mooncraft · Play It
+> Again Sam
+
+Dice también cuáles siguen en la cola, porque eso no es un olvido sino trabajo
+pendiente. Sale de `?action=external-gaps`, que cruza `fanout:` con `external:`.
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como

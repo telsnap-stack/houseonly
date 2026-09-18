@@ -14,6 +14,7 @@ import {
 	handleSetsReviewApprove,
 	handleSetsReviewReject,
 	MAX_SETS,
+	buildListen,
 } from "../src/lib/sets";
 
 // URLs reales: el Boiler Room de Theo Parrish, el episodio de Omar S en NTS
@@ -192,5 +193,60 @@ describe("candidatos de la busqueda", () => {
 	it("sin Bearer, 401", async () => {
 		const r = await handleSetsList(new Request("https://w/?action=sets-list&slug=theo-parrish"), env as any);
 		expect(r.status).toBe(401);
+	});
+});
+
+describe("bloque Listen (fase 7D)", () => {
+	beforeEach(seed);
+
+	const external = (extra: any) => env.ENTITIES.put("external:theo-parrish",
+		JSON.stringify({ slug: "theo-parrish", approved: {}, rejected: {}, updatedAt: 1, ...extra }));
+
+	it("sin nada aprobado no hay bloque: un Listen vacio es peor que ninguno", async () => {
+		expect(await buildListen(env as any, "theo-parrish")).toBeNull();
+	});
+
+	it("el orden es sets, YouTube, SoundCloud, Mixcloud, NTS — y el tour aparte", async () => {
+		await external({
+			youtube: "UCabcdefghijklmnopqrstuv", soundcloud: "soundsignature",
+			mixcloud: "theoparrish", nts: "shows/theo-parrish",
+			ra: "dj/theoparrish", songkick: "188726",
+		});
+		await handleSetsAdd(req("sets-add", { slug: "theo-parrish", url: YT }), env as any);
+
+		const l = (await buildListen(env as any, "theo-parrish"))!;
+		expect(l.sets.map(s => s.id)).toEqual(["youtube:7wZ5-lb7bQ4"]);
+		expect(l.links.map(x => x.kind)).toEqual(["youtube", "soundcloud", "mixcloud", "nts"]);
+		expect(l.tour.map(x => x.kind)).toEqual(["ra", "songkick"]);
+		expect(l.links[0].url).toBe("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
+		expect(l.tour[1].url).toBe("https://www.songkick.com/artists/188726");
+	});
+
+	it("la foto del cron pone fecha al enlace de Mixcloud", async () => {
+		await external({ mixcloud: "Defectedrecords" });
+		await env.ENTITIES.put("mixstat:theo-parrish", JSON.stringify({
+			slug: "theo-parrish", username: "Defectedrecords", last: "2026-09-11T12:23:23Z", checkedAt: 1,
+		}));
+		const l = (await buildListen(env as any, "theo-parrish"))!;
+		expect(l.links[0].meta).toBe("last show 11 Sep 2026");
+	});
+
+	it("una segunda cuenta aprobada va detras de la principal, no se pierde", async () => {
+		await external({ soundcloud: "musicandpower", secondary: { soundcloud: ["ron-trent-official"] } });
+		const l = (await buildListen(env as any, "theo-parrish"))!;
+		expect(l.links.map(x => x.url)).toEqual([
+			"https://soundcloud.com/musicandpower",
+			"https://soundcloud.com/ron-trent-official",
+		]);
+	});
+
+	it("solo con sets, o solo con tour, tambien hay bloque", async () => {
+		await handleSetsAdd(req("sets-add", { slug: "theo-parrish", url: MC }), env as any);
+		const a = (await buildListen(env as any, "theo-parrish"))!;
+		expect(a.sets).toHaveLength(1);
+		expect(a.links).toHaveLength(0);
+		await external({ ra: "dj/theoparrish" });
+		const b = (await buildListen(env as any, "theo-parrish"))!;
+		expect(b.tour).toHaveLength(1);
 	});
 });
