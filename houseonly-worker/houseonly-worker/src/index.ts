@@ -869,6 +869,27 @@ import {
   handleEntityEditDisplay,
   handleGenreReviewAdd,
 } from './lib/entities';
+import {
+  handleExternalReviewPut,
+  handleExternalReviewList,
+  handleExternalReviewApprove,
+  handleExternalReviewApproveBulk,
+  handleExternalReviewReject,
+  handleExternalGet,
+  handleExternalGaps,
+} from './lib/external';
+import {
+  handleSetsList,
+  handleSetsAdd,
+  handleSetsRemove,
+  handleSetsOrder,
+  handleSetsReviewList,
+  handleSetsReviewPut,
+  handleSetsReviewApprove,
+  handleSetsReviewReject,
+} from './lib/sets';
+import { handleMixcloudRefresh, refreshMixcloud } from './lib/mixcloud';
+import { handleEventsPut, handleEventsGet } from './lib/events';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
@@ -1364,6 +1385,69 @@ export default {
 
     if (action === 'entity-edit-display' && request.method === 'POST') {
       return await handleEntityEditDisplay(request, env);
+    }
+
+    // ── ENLACES EXTERNOS (fase 7) ───────────────────────────
+    // docs/entities.md. Bearer, aditivo. El barrido propone (external-review-put)
+    // y la pestaña Entities → Links dispone.
+    if (action === 'external-review-put' && request.method === 'POST') {
+      return await handleExternalReviewPut(request, env);
+    }
+    if (action === 'external-review-list' && request.method === 'GET') {
+      return await handleExternalReviewList(request, env);
+    }
+    if (action === 'external-review-approve' && request.method === 'POST') {
+      return await handleExternalReviewApprove(request, env);
+    }
+    if (action === 'external-review-approve-bulk' && request.method === 'POST') {
+      return await handleExternalReviewApproveBulk(request, env);
+    }
+    if (action === 'external-review-reject' && request.method === 'POST') {
+      return await handleExternalReviewReject(request, env);
+    }
+    if (action === 'external-get' && request.method === 'GET') {
+      return await handleExternalGet(request, env);
+    }
+    if (action === 'external-gaps' && request.method === 'GET') {
+      return await handleExternalGaps(request, env);
+    }
+
+    // ── SETS DESTACADOS (fase 7B) ───────────────────────────
+    // docs/entities.md. Bearer. Nada se enseña sin aprobar: los candidatos de
+    // la busqueda viven en setreview: y caducan a los 30 dias.
+    if (action === 'sets-list' && request.method === 'GET') {
+      return await handleSetsList(request, env);
+    }
+    if (action === 'sets-add' && request.method === 'POST') {
+      return await handleSetsAdd(request, env);
+    }
+    if (action === 'sets-remove' && request.method === 'POST') {
+      return await handleSetsRemove(request, env);
+    }
+    if (action === 'sets-order' && request.method === 'POST') {
+      return await handleSetsOrder(request, env);
+    }
+    if (action === 'sets-review-list' && request.method === 'GET') {
+      return await handleSetsReviewList(request, env);
+    }
+    if (action === 'sets-review-put' && request.method === 'POST') {
+      return await handleSetsReviewPut(request, env);
+    }
+    if (action === 'sets-review-approve' && request.method === 'POST') {
+      return await handleSetsReviewApprove(request, env);
+    }
+    if (action === 'sets-review-reject' && request.method === 'POST') {
+      return await handleSetsReviewReject(request, env);
+    }
+    if (action === 'mixcloud-refresh') {
+      return await handleMixcloudRefresh(request, env);
+    }
+    // Fase 7E: las fechas las trae el script y las pinta la tienda. Sin widget.
+    if (action === 'events-put' && request.method === 'POST') {
+      return await handleEventsPut(request, env);
+    }
+    if (action === 'events-get' && request.method === 'GET') {
+      return await handleEventsGet(request, env);
     }
 
     // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.
@@ -2995,6 +3079,19 @@ export default {
       );
       return;
     }
+
+    // Fase 7C: la unica fuente que refresca el cron es Mixcloud, y solo para
+    // entidades con cuenta APROBADA. Va aparte del poll de Discogs: si Mixcloud
+    // falla, las ventas siguen sincronizandose igual.
+    ctx.waitUntil(
+      refreshMixcloud(env).then(
+        (r) => r.checked
+          ? env.ENTITIES.put('meta:mixcloud_last_run', JSON.stringify({ at: new Date(event.scheduledTime).toISOString(), ...r }))
+          : undefined,
+        (err) => env.ENTITIES.put('meta:mixcloud_last_run',
+          JSON.stringify({ at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+      ),
+    );
 
     ctx.waitUntil(
       pollDiscogsForSales(env).then(
