@@ -1459,6 +1459,36 @@ Dentro de Entities → Links, debajo de la cola de enlaces:
   consulta que lo encontró. Se marcan los que valen y *Add selected*; el resto
   de esa fila queda descartado. *None of these* los descarta todos.
 
+## Fase 7C: lo único que refresca el cron es Mixcloud
+
+Decidido el 2026-09-18. **NTS solo se consulta desde el script local**, nunca
+desde el worker; el cron no la toca.
+
+Qué hace, en la pasada de 15 minutos que ya existía (aparte del poll de
+Discogs: si Mixcloud falla, las ventas se sincronizan igual):
+
+- Lee `meta:mixcloud_index`, la lista de entidades con cuenta de Mixcloud
+  **aprobada**. Recorrer `external:` son ~160 lecturas, así que el índice se
+  reconstruye **una vez al día** y el cron lee el índice, no el namespace.
+- Refresca como mucho **5 por pasada**, las que llevan más sin mirarse, y salta
+  las que tienen menos de **12 h**. Hoy solo hay **dos** cuentas aprobadas
+  (`defected` y `mark-de-clive-lowe`), así que en la práctica no hace nada casi
+  nunca.
+- Guarda en `mixstat:{slug}` nombre, avatar, seguidores, número de shows y el
+  **último show** con su fecha y título. Eso es lo que permite que el enlace de
+  la fase 7D diga *"Mixcloud · last show 11 Sep"* en vez de ser un enlace mudo.
+- **Si Mixcloud falla, se conserva la foto anterior** y se anota el error: un
+  enlace con datos viejos es mejor que uno sin nada.
+- **No descarga audio, no incrusta reproductores y no inventa sets.** Los sets
+  destacados los aprueba una persona.
+
+`?action=mixcloud-refresh` (Bearer, `&force=1`) lo dispara a mano, porque
+esperar al cron para comprobar un cambio no es forma de trabajar.
+
+Primera pasada real en producción, 18-09: Defected Records (220.275 seguidores,
+897 shows, último el 11-09) y Mark de Clive-Lowe (6.842, 10 shows, último de
+octubre de 2024 — un dato que por sí solo ya dice cuánto vale ese enlace).
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
