@@ -12357,6 +12357,18 @@ const LINK_FIELD_LABEL = {
   mixcloud:'Mixcloud', soundcloud:'SoundCloud', youtube:'YouTube', ra:'RA',
   songkick:'Songkick', bandsintown:'Bandsintown', nts:'NTS',
 };
+// Seguidores y fechas, legibles de un vistazo: 12.194 y "hace 9 meses" dicen
+// mas que 12194 y una fecha ISO cuando hay que elegir entre dos cuentas.
+const fmtNum = n => (typeof n === 'number' ? n.toLocaleString('en-US') : null);
+const fmtAgo = iso => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const meses = Math.round((Date.now() - d.getTime()) / (30.44 * 864e5));
+  const cuando = meses < 1 ? 'this month' : meses < 24 ? `${meses} months ago` : `${Math.round(meses / 12)} years ago`;
+  return `${d.toISOString().slice(0, 10)} · ${cuando}`;
+};
+
 const LINK_WHY = {
   'no-discogs':'name match only — no record of ours proves it',
   'multi-mb':'several MusicBrainz entities',
@@ -12387,10 +12399,12 @@ function ExternalLinksView({ kindTab, onCounts }) {
 
   // Valores por defecto de una fila de revision: el primer candidato, y en cada
   // campo el valor si es unico. Con dos valores no se elige por nadie.
+  // Por campo, la lista de valores elegidos: el primero es el principal. Con un
+  // solo valor viene elegido; con dos, vacio: eso hay que mirarlo.
   const defaultsFor = (r, mbid) => {
     const c = r.candidates.find(x => x.mbid === mbid) || r.candidates[0];
     const f = {};
-    for (const [k, vals] of Object.entries(c?.links || {})) f[k] = vals.length === 1 ? vals[0].value : '';
+    for (const [k, vals] of Object.entries(c?.links || {})) f[k] = vals.length === 1 ? [vals[0].value] : [];
     return f;
   };
 
@@ -12469,7 +12483,7 @@ function ExternalLinksView({ kindTab, onCounts }) {
 
   async function approveRow(r) {
     const mbid = pick[r.slug];
-    const f = Object.fromEntries(Object.entries(fields[r.slug] || {}).filter(([, v]) => v));
+    const f = Object.fromEntries(Object.entries(fields[r.slug] || {}).filter(([, v]) => v.length));
     setBusy(true); setError(''); setMsg('');
     try {
       const res = await fetch(`${REVIEW_WORKER_URL}?action=external-review-approve`, {
@@ -12477,7 +12491,10 @@ function ExternalLinksView({ kindTab, onCounts }) {
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) setError(`${r.display}: ${d.error || `HTTP ${res.status}`}`);
-      else { drop([r.slug]); setMsg(`✓ ${r.display} — ${Object.keys(f).length} link${Object.keys(f).length === 1 ? '' : 's'}`); }
+      else {
+        const n = Object.values(f).reduce((a, v) => a + v.length, 0);
+        drop([r.slug]); setMsg(`✓ ${r.display} — ${n} link${n === 1 ? '' : 's'}`);
+      }
     } catch (e) { setError(`${r.display}: ${e.message}`); }
     setBusy(false);
   }
@@ -12493,6 +12510,26 @@ function ExternalLinksView({ kindTab, onCounts }) {
     } catch (e) { setError(`${r.display}: ${e.message}`); }
     setBusy(false);
   }
+
+  // Quien es esa cuenta. Sin datos resueltos se dice por que, en vez de dejar
+  // el ID crudo solo.
+  const perfil = v => {
+    const p = v.preview || {};
+    const datos = [fmtNum(p.followers) && `${fmtNum(p.followers)} followers`,
+      fmtNum(p.items) && `${fmtNum(p.items)} uploads`,
+      fmtAgo(p.last) && `last ${fmtAgo(p.last)}`].filter(Boolean);
+    return (
+      <span style={{display:'inline-flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+        {p.avatar && <img src={p.avatar} alt="" width="22" height="22" style={{borderRadius:2,objectFit:'cover',background:S.border}} />}
+        <span style={{color:S.text}}>{p.name || p.title || v.value}</span>
+        {p.name && p.name !== v.value && <span style={{fontFamily:'monospace',fontSize:9}}>{v.value}</span>}
+        {datos.length > 0 && <span>· {datos.join(' · ')}</span>}
+        {p.note && <span style={{color:'#ffd24a'}}>· {p.note}</span>}
+        <a href={v.url} target="_blank" rel="noreferrer"
+          style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+      </span>
+    );
+  };
 
   const a = (href, text) => (
     <a href={href} target="_blank" rel="noreferrer" style={{color:S.text,textDecoration:'none',borderBottom:`1px dotted ${S.muted}`}}>{text}</a>
@@ -12513,6 +12550,24 @@ function ExternalLinksView({ kindTab, onCounts }) {
       {c.disambiguation ? ` · ${c.disambiguation}` : ''}
       {c.discogs?.length ? <> · Discogs {c.discogs.map((id, i) => <span key={id}>{i ? ', ' : ''}{a(`https://www.discogs.com/${c.mbKind}/${id}`, id)}</span>)}</> : ''}
     </span>
+  );
+
+  // De que entidad hablamos, con todas las letras, y por que discos la conocemos.
+  const quienEs = (r, c) => (
+    <>
+      {(c?.disambiguation || c?.wikidataDescription || c?.annotation) && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3,lineHeight:1.5}}>
+          {c.disambiguation && <div>MusicBrainz: {c.disambiguation}</div>}
+          {c.annotation && <div style={{whiteSpace:'pre-wrap'}}>{c.annotation}</div>}
+          {c.wikidataDescription && <div>Wikidata: {c.wikidataDescription}</div>}
+        </div>
+      )}
+      {(r.records || []).length > 0 && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+          ours: {r.records.map((x, i) => <span key={x.handle}>{i ? ' · ' : ''}{a(`https://houseonly.store/products/${x.handle}`, x.title)}</span>)}
+        </div>
+      )}
+    </>
   );
 
   const evidence = r => (r.evidence || []).length > 0 && (
@@ -12604,10 +12659,13 @@ function ExternalLinksView({ kindTab, onCounts }) {
               <div style={{flex:1,minWidth:0}}>
                 {head(r)}
                 <div style={{fontSize:10,color:S.muted,marginTop:3}}>MusicBrainz: {mbLine(c)}</div>
+                {quienEs(r, c)}
                 {evidence(r)}
-                <div style={{fontSize:10,marginTop:4,display:'flex',gap:10,flexWrap:'wrap'}}>
+                <div style={{fontSize:10,marginTop:5,display:'flex',flexDirection:'column',gap:3}}>
                   {Object.entries(c.links || {}).map(([f, vals]) => (
-                    <span key={f} style={{color:S.muted}}>{LINK_FIELD_LABEL[f] || f}: {a(vals[0].url, vals[0].value)}</span>
+                    <div key={f} style={{color:S.muted,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{minWidth:80}}>{LINK_FIELD_LABEL[f] || f}</span>{perfil(vals[0])}
+                    </div>
                   ))}
                   {Object.keys(c.links || {}).length === 0 && <span style={{color:S.muted}}>no links — approves the MusicBrainz ID only</span>}
                 </div>
@@ -12634,6 +12692,7 @@ function ExternalLinksView({ kindTab, onCounts }) {
             <div key={r.slug} style={{background:S.bg,padding:'10px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
               {head(r)}
               <div style={{fontSize:10,color:'#ffd24a',marginTop:3}}>{LINK_WHY[r.bucketWhy] || r.bucketWhy}</div>
+              {quienEs(r, cur)}
               {evidence(r)}
               <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:4}}>
                 {r.candidates.map(c => (
@@ -12645,24 +12704,37 @@ function ExternalLinksView({ kindTab, onCounts }) {
                 ))}
               </div>
               {cur && Object.keys(cur.links || {}).length > 0 && (
-                <div style={{marginTop:8,paddingLeft:18,display:'flex',flexDirection:'column',gap:4}}>
-                  {Object.entries(cur.links).map(([field, vals]) => (
-                    <div key={field} style={{fontSize:10,color:S.muted,display:'flex',gap:10,flexWrap:'wrap',alignItems:'baseline'}}>
-                      <span style={{minWidth:80}}>{LINK_FIELD_LABEL[field] || field}</span>
-                      {vals.map(v => (
-                        <label key={v.value} style={{display:'flex',gap:4,alignItems:'baseline',cursor:'pointer'}}>
-                          <input type="radio" name={`f-${r.slug}-${field}`} checked={f[field] === v.value}
-                            onChange={() => setFields({ ...fields, [r.slug]: { ...f, [field]: v.value } })} />
-                          {a(v.url, v.value)} <span style={{fontSize:9}}>({v.from.join('+')})</span>
-                        </label>
-                      ))}
-                      <label style={{display:'flex',gap:4,alignItems:'baseline',cursor:'pointer'}}>
-                        <input type="radio" name={`f-${r.slug}-${field}`} checked={!f[field]}
-                          onChange={() => setFields({ ...fields, [r.slug]: { ...f, [field]: '' } })} />
-                        none
-                      </label>
-                    </div>
-                  ))}
+                <div style={{marginTop:8,paddingLeft:18,display:'flex',flexDirection:'column',gap:8}}>
+                  {Object.entries(cur.links).map(([field, vals]) => {
+                    const sel = f[field] || [];
+                    // Dos cuentas pueden ser las dos buenas —la personal y la del
+                    // sello—: se marcan las que valgan y la primera manda.
+                    const toggle = (value) => {
+                      const next = sel.includes(value) ? sel.filter(x => x !== value) : [...sel, value];
+                      setFields({ ...fields, [r.slug]: { ...f, [field]: next } });
+                    };
+                    const primero = (value) => setFields({ ...fields, [r.slug]: { ...f, [field]: [value, ...sel.filter(x => x !== value)] } });
+                    return (
+                      <div key={field} style={{fontSize:10,color:S.muted,display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-start'}}>
+                        <span style={{minWidth:80,paddingTop:2}}>{LINK_FIELD_LABEL[field] || field}</span>
+                        <div style={{display:'flex',flexDirection:'column',gap:4,flex:1,minWidth:260}}>
+                          {vals.map(v => (
+                            <div key={v.value} style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                              <label style={{display:'flex',gap:4,alignItems:'center',cursor:'pointer'}}>
+                                <input type="checkbox" checked={sel.includes(v.value)} onChange={() => toggle(v.value)} />
+                              </label>
+                              {perfil(v)}
+                              <span style={{fontSize:9}}>({v.from.join('+')})</span>
+                              {sel.includes(v.value) && (sel[0] === v.value
+                                ? <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>main</span>
+                                : <button onClick={() => primero(v.value)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,borderRadius:2,cursor:'pointer',fontSize:8,letterSpacing:1,textTransform:'uppercase',padding:'2px 5px'}}>make main</button>)}
+                            </div>
+                          ))}
+                          {sel.length === 0 && <span style={{fontSize:9}}>none — nothing kept for this field</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               <div style={{display:'flex',gap:6,marginTop:10}}>

@@ -1373,6 +1373,37 @@ Bandcamp aunque MusicBrainz lo traiga.
 **Paso 3, corregido el 17-09**: el cron solo refresca **Mixcloud**. NTS
 únicamente por el script local.
 
+### Quién es cada cuenta (17-09)
+
+Un ID crudo no se puede decidir: `UCGuRflg2kG0R-RMdxOWPg4g` o `2437861` no
+dicen nada. El barrido resuelve cada candidato y la fila lleva **nombre,
+avatar, seguidores y última actividad**, más un botón **open** por enlace.
+
+| Fuente | Cómo | Qué se ve |
+|---|---|---|
+| **SoundCloud** | oEmbed + la página pública (su `robots.txt` solo bloquea a los rastreadores de IA y `/search`, `/stream`, `/you`) | nombre, avatar, seguidores, pistas, última actividad |
+| **YouTube** | **Data API v3** con `YOUTUBE_API_KEY`: `channels.list` + último subido (2 unidades por canal; nada de raspar) | nombre, avatar, suscriptores, vídeos, último vídeo |
+| **Mixcloud** | su API pública | nombre, avatar, seguidores, shows, último show |
+| **Songkick / Bandsintown** | se intenta el `<title>`; hoy devuelven **406 y 403** a cualquier petición automática | la fila lo dice: *"bloquea las peticiones automáticas: solo enlace"* |
+| **RA** | **no se consulta**: sus términos (§4.4) prohíben el acceso automatizado | *"no se consulta: los términos de RA lo prohíben"* |
+
+Además, para saber de quién hablamos: la **disambiguation y la anotación de
+MusicBrainz** y la **descripción de Wikidata**, enteras, y **2–3 títulos de
+discos nuestros** que traen la entidad, enlazados a la tienda.
+
+Lo que esto resuelve, con casos reales:
+
+- **Ron Trent** tiene dos SoundCloud y los dos son suyos: `musicandpower`
+  (12.194 seguidores, activo en 2025) y `ron-trent-official` (7.425, parado
+  desde 2016). **Se aprueban los dos**, marcando cuál es el principal: el
+  campo `soundcloud` guarda el principal y el resto va a `secondary`, así que
+  quien lea `soundcloud` sigue leyendo una sola cuenta.
+- **Theo Parrish**: `soundsignature` tiene 1.413 seguidores, **0 pistas** y
+  última actividad en **2010**. Ahora se ve antes de aprobarlo.
+
+Caché de 7 días en disco, y la misma cuenta se resuelve una vez aunque llegue
+por MusicBrainz y por Wikidata.
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
