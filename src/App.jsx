@@ -12277,7 +12277,7 @@ function EntitiesPanel() {
         </div>
       )}
 
-      {view==='links' && <ExternalLinksView secret={secret} kindTab={kindTab} onCounts={setLinkCounts} />}
+      {view==='links' && <ExternalLinksView kindTab={kindTab} onCounts={setLinkCounts} />}
       {view==='ents' && (() => {
         const q = entQ.trim().toLowerCase();
         const todas = (ents || []).filter(e => (e.roles || []).includes(kindTab));
@@ -12363,7 +12363,15 @@ const LINK_WHY = {
   'conflict':'a field has two values',
 };
 
-function ExternalLinksView({ secret, kindTab, onCounts }) {
+// El secreto de PRODUCCION, aparte del de la pestaña. En el preview el admin
+// se valida contra el worker de staging, y Links habla con el de produccion:
+// con un solo campo no habia forma de despachar la cola desde ningun sitio.
+// Vive en memoria mientras dure la sesion, como el otro: se pierde al recargar.
+let linksProdSecret = '';
+
+function ExternalLinksView({ kindTab, onCounts }) {
+  const [secret, setSecret]     = useState(linksProdSecret);
+  const [authed, setAuthed]     = useState(!!linksProdSecret);
   const [rows, setRows]         = useState(null);
   const [loading, setLoading]   = useState(false);
   const [busy, setBusy]         = useState(false);
@@ -12375,6 +12383,7 @@ function ExternalLinksView({ secret, kindTab, onCounts }) {
   const [progress, setProgress] = useState(null);
 
   const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
+  const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
 
   // Valores por defecto de una fila de revision: el primer candidato, y en cada
   // campo el valor si es unico. Con dos valores no se elige por nadie.
@@ -12385,11 +12394,17 @@ function ExternalLinksView({ secret, kindTab, onCounts }) {
     return f;
   };
 
-  async function load() {
+  async function load(sec) {
+    const useSecret = sec ?? secret;
     setLoading(true); setError('');
     try {
-      const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-list`, { headers: { 'Authorization': `Bearer ${secret}` } });
-      if (r.status === 401) { setError('Unauthorized on the production worker — Links needs the PRODUCTION BOOTSTRAP_AUTH_SECRET.'); return; }
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
+      if (r.status === 401) {
+        // El de la pestaña es el de staging y aqui no vale: se vuelve a pedir.
+        linksProdSecret = ''; setAuthed(false); onCounts?.(null);
+        setError('Unauthorized — this is the PRODUCTION worker and it wants the production secret.');
+        return;
+      }
       if (!r.ok) { setError(`Links failed (HTTP ${r.status})`); return; }
       const d = await r.json();
       const list = d.records || [];
@@ -12400,11 +12415,12 @@ function ExternalLinksView({ secret, kindTab, onCounts }) {
         else { p0[row.slug] = row.candidates[0]?.mbid; f0[row.slug] = defaultsFor(row, p0[row.slug]); }
       }
       setSel(s0); setPick(p0); setFields(f0);
+      linksProdSecret = useSecret; setAuthed(true);
     } catch (e) { setError(`Links failed — ${e.message}`); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { load(); }, []);   // eslint-disable-line
+  useEffect(() => { if (authed) load(); }, []);   // eslint-disable-line
 
   const all       = rows || [];
   const ofKind    = all.filter(r => (r.roles || []).includes(kindTab));
@@ -12507,6 +12523,27 @@ function ExternalLinksView({ secret, kindTab, onCounts }) {
     </div>
   );
 
+  if (!authed) {
+    return (
+      <div style={{textAlign:'left',maxWidth:460}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>
+          Links · talking to production worker
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+          This queue lives in <strong>production</strong> (<span style={{fontFamily:'monospace'}}>{prodHost}</span>),
+          because that&apos;s where the real entities are. The rest of this tab talks to the worker of
+          whatever environment you opened the admin from, so paste the <strong>production</strong>{' '}
+          <span style={{fontFamily:'monospace'}}>BOOTSTRAP_AUTH_SECRET</span> here. Held in memory only — gone on refresh.
+        </div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&secret&&load()} placeholder="Production secret"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>load()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
   if (loading && !rows) return <div style={{fontSize:10,color:S.muted}}>Loading links…</div>;
 
   return (
@@ -12514,11 +12551,16 @@ function ExternalLinksView({ secret, kindTab, onCounts }) {
     <div style={{textAlign:'left'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:12}}>
         <div style={{fontSize:10,color:S.muted,lineHeight:1.5,maxWidth:560}}>
+          <strong style={{color:S.accent}}>Talking to production worker</strong>{' '}
+          (<span style={{fontFamily:'monospace'}}>{prodHost}</span>).{' '}
           Which RA, Songkick, SoundCloud… account belongs to each entity. Candidates come from
           MusicBrainz and Wikidata via <span style={{fontFamily:'monospace'}}>entities-external-sweep.mjs</span>. Nothing reaches the
           shop until it&apos;s approved here; whatever you leave out is remembered as rejected.
         </div>
-        <Btn ch={loading ? '…' : '↻ Reload'} variant="ghost" onClick={load} disabled={busy || loading} />
+        <div style={{display:'flex',gap:6}}>
+          <Btn ch={loading ? '…' : '↻ Reload'} variant="ghost" onClick={() => load()} disabled={busy || loading} />
+          <Btn ch="Change secret" variant="ghost" onClick={() => { linksProdSecret = ''; setAuthed(false); setRows(null); onCounts?.(null); }} disabled={busy || loading} />
+        </div>
       </div>
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
