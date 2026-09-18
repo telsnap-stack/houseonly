@@ -13436,7 +13436,11 @@ function ListenBlock({ listen, compact }) {
 
   return (
     <section style={{ marginTop: compact ? 12 : 30, textAlign:'left' }}>
-      <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
+      {/* El rotulo solo si hay algo que escuchar: con solo fechas, "Listen"
+          encabezaba un hueco. */}
+      {(visibles.length > 0 || links.length > 0) && (
+        <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
+      )}
 
       {visibles.length > 0 && (
         <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||events.length?14:0 }}>
