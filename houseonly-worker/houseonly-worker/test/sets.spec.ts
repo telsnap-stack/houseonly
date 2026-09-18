@@ -183,6 +183,19 @@ describe("candidatos de la busqueda", () => {
 		expect(rec.rejected).toHaveLength(2);
 	});
 
+	it("un video que YouTube no deja incrustar se guarda marcado", async () => {
+		await handleSetsReviewPut(req("sets-review-put", { items: [{ slug: "theo-parrish", candidates: [
+			{ ...cand(YT, "no se puede incrustar"), embeddable: false },
+			{ ...cand(MC, "este si") },
+		] }] }), env as any);
+		const row = JSON.parse((await env.ENTITIES.get("setreview:theo-parrish"))!);
+		expect(row.candidates.map((c: any) => c.embeddable)).toEqual([false, undefined]);
+
+		await handleSetsReviewApprove(req("sets-review-approve", { slug: "theo-parrish", ids: ["youtube:7wZ5-lb7bQ4"] }), env as any);
+		const rec = await getSets(env as any, "theo-parrish");
+		expect(rec.items[0].embeddable).toBe(false);
+	});
+
 	it("filterCandidates quita duplicados dentro de la misma tanda", () => {
 		const c = (id: string) => ({ id, source: "youtube" as const, url: "u", query: "q", foundAt: 1 });
 		const out = filterCandidates([c("youtube:a"), c("youtube:a"), c("youtube:b")],

@@ -164,7 +164,24 @@ async function main() {
     if (candidates.length) items.push({ slug: t.slug, candidates });
   }
 
-  console.log(`\n  busquedas gastadas: ${usadas} · entidades con candidatos: ${items.length}`);
+  // Un video que YouTube no deja incrustar no puede sonar en la ficha: se
+  // marca aqui (videos.list, 1 unidad por cada 50) y la tienda lo pinta como
+  // enlace. Sale del bote de 10.000 unidades, no del de las 100 busquedas.
+  const todosIds = [...new Set(items.flatMap(it => it.candidates.map(c => c.url.split('v=')[1])))];
+  const noIncrustables = new Set();
+  for (let i = 0; i < todosIds.length; i += 50) {
+    const d = await cachedJson(`https://www.googleapis.com/youtube/v3/videos?part=status&id=${todosIds.slice(i, i + 50).join(',')}&key=${KEY}`);
+    for (const v of d.items || []) if (!v.status?.embeddable) noIncrustables.add(v.id);
+    // Un id que YouTube ni devuelve (borrado, privado) tampoco vale.
+    const devueltos = new Set((d.items || []).map(v => v.id));
+    for (const id of todosIds.slice(i, i + 50)) if (!devueltos.has(id)) noIncrustables.add(id);
+  }
+  for (const it of items) {
+    it.candidates = it.candidates.map(c => noIncrustables.has(c.url.split('v=')[1]) ? { ...c, embeddable: false } : c);
+  }
+
+  console.log(`\n  busquedas gastadas: ${usadas} · entidades con candidatos: ${items.length}`
+    + (noIncrustables.size ? ` · ${noIncrustables.size} no se pueden incrustar` : ''));
   if (!SEND) { console.log('\n  dry-run: no se ha enviado nada. --send --prod para produccion.\n'); return; }
 
   let written = 0, dropped = 0, skipped = 0;

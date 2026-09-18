@@ -13327,15 +13327,42 @@ function ReleaseCard({ p, width = 150 }) {
  * El worker devuelve `listen: null` cuando no hay nada aprobado, y entonces
  * este bloque no existe: un "Listen" vacio es peor que no tenerlo.
  */
+/**
+ * El reproductor de cada fuente, para sonar DENTRO de la ficha. Se decidio el
+ * 2026-09-18: mandar al cliente a YouTube para escuchar un set es mandarlo
+ * fuera de la tienda, y aqui es donde compra discos.
+ *
+ * Son los reproductores OFICIALES de cada sitio —lo que sus terminos piden— y
+ * no se cargan hasta que alguien pulsa play. YouTube va por youtube-nocookie.
+ * `embeddable: false` (lo marca la busqueda con la Data API) cae a enlace: mas
+ * vale un enlace que un recuadro que dice "video no disponible".
+ */
+function embedSrc(st) {
+  if (st.embeddable === false) return null;
+  if (st.source === 'youtube') {
+    const id = (st.id || '').split(':')[1];
+    return id ? `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&modestbranding=1` : null;
+  }
+  if (st.source === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(st.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (st.source === 'mixcloud') {
+    const feed = st.url.replace(/^https?:\/\/(www\.)?mixcloud\.com/, '');
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(feed)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  return null;
+}
+
 const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
 
 function ListenBlock({ listen, compact }) {
   const isMobile = useIsMobile(720);
+  // Que set esta sonando. Uno cada vez: dos reproductores a la vez es ruido.
+  const [playing, setPlaying] = useState(null);
   if (!listen) return null;
   const { sets = [], links = [], tour = [] } = listen;
   if (!sets.length && !links.length && !tour.length) return null;
 
-  // En la estanteria el sitio es poco: dos sets y los perfiles en una linea.
   const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
 
   const chip = l => (
@@ -13349,29 +13376,66 @@ function ListenBlock({ listen, compact }) {
     </a>
   );
 
+  const ficha = st => (
+    <div style={{ minWidth:0 }}>
+      <div style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
+        {st.title || st.url}
+      </div>
+      <div style={{ fontSize:10, color:S.muted, marginTop:3 }}>
+        {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
+        {' · '}
+        {/* El enlace a la fuente se queda, pequeño: es el credito que piden
+            SoundCloud y YouTube, y la salida para quien lo prefiera alli. */}
+        <a href={st.url} target="_blank" rel="noreferrer" style={{ color:S.muted, textDecoration:'none', borderBottom:`1px solid ${S.border}` }}>open ↗</a>
+      </div>
+    </div>
+  );
+
   return (
     <section style={{ marginTop: compact ? 12 : 30, textAlign:'left' }}>
       <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
 
       {visibles.length > 0 && (
-        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?240:260}px,1fr))`, gap:10, marginBottom:links.length||tour.length?14:0 }}>
-          {visibles.map(st => (
-            <a key={st.id} href={st.url} target="_blank" rel="noreferrer"
-              style={{ display:'flex', gap:10, alignItems:'center', border:`1px solid ${S.border}`, borderRadius:2,
-                padding:8, color:S.text, textDecoration:'none', minWidth:0 }}>
-              {st.thumbnail
-                ? <img src={st.thumbnail} alt="" width="72" height="54" loading="lazy" style={{ objectFit:'cover', borderRadius:2, background:S.border, flexShrink:0 }} />
-                : <span style={{ width:72, height:54, background:S.border, borderRadius:2, flexShrink:0 }} />}
-              <span style={{ minWidth:0 }}>
-                <span style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
-                  {st.title || st.url}
-                </span>
-                <span style={{ display:'block', fontSize:10, color:S.muted, marginTop:3 }}>
-                  {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
-                </span>
-              </span>
-            </a>
-          ))}
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||tour.length?14:0 }}>
+          {visibles.map(st => {
+            const src = embedSrc(st);
+            const sonando = playing === st.id && src;
+            return (
+              <div key={st.id} style={{ border:`1px solid ${S.border}`, borderRadius:2, padding:8, minWidth:0 }}>
+                {sonando ? (
+                  <div style={{ position:'relative', width:'100%', ...(st.source === 'youtube'
+                    ? { aspectRatio:'16 / 9' } : { height: st.source === 'mixcloud' ? 120 : 166 }), marginBottom:8, background:'#000' }}>
+                    <iframe
+                      src={src}
+                      title={st.title || st.url}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+                      allowFullScreen
+                      loading="lazy"
+                      style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }}
+                    />
+                  </div>
+                ) : (
+                  // Caratula con boton: el reproductor de terceros no se carga
+                  // hasta que alguien decide escuchar. Sin esto, cada ficha
+                  // arrastra cinco iframes y sus cookies.
+                  <button onClick={() => src && setPlaying(st.id)} disabled={!src}
+                    style={{ position:'relative', display:'block', width:'100%', ...(st.source === 'youtube' ? { aspectRatio:'16 / 9' } : { height: 120 }),
+                      marginBottom:8, padding:0, border:0, borderRadius:2, overflow:'hidden',
+                      background:st.thumbnail?`#000 center/cover no-repeat url(${JSON.stringify(st.thumbnail)})`:S.border,
+                      cursor:src?'pointer':'default' }}
+                    aria-label={src ? `Play ${st.title || 'set'}` : 'Open at the source'}>
+                    {src && (
+                      <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                        <span style={{ width:46, height:46, borderRadius:'50%', background:'rgba(8,8,8,.72)', border:`1px solid ${S.accent}`,
+                          color:S.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, paddingLeft:3 }}>▶</span>
+                      </span>
+                    )}
+                  </button>
+                )}
+                {ficha(st)}
+              </div>
+            );
+          })}
         </div>
       )}
 
