@@ -876,6 +876,7 @@ import {
   handleExternalReviewApproveBulk,
   handleExternalReviewReject,
   handleExternalGet,
+  handleExternalGaps,
 } from './lib/external';
 import {
   handleSetsList,
@@ -1405,6 +1406,9 @@ export default {
     }
     if (action === 'external-get' && request.method === 'GET') {
       return await handleExternalGet(request, env);
+    }
+    if (action === 'external-gaps' && request.method === 'GET') {
+      return await handleExternalGaps(request, env);
     }
 
     // ── SETS DESTACADOS (fase 7B) ───────────────────────────

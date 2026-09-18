@@ -504,3 +504,38 @@ export async function handleExternalGet(request: Request, env: EntitiesEnv): Pro
   if (!slug) return json({ error: 'slug required' }, 400);
   return json({ external: await getExternal(env, slug), review: await getReview(env, slug) });
 }
+
+/**
+ * GET ?action=external-gaps  (Bearer)
+ *
+ * Cuantas entidades SEGUIDAS por algun cliente no tienen ningun enlace
+ * aprobado. Es el unico agujero que se nota de cara al cliente: alguien sigue a
+ * un artista, entra en su ficha y no hay nada que escuchar.
+ */
+export async function handleExternalGaps(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  const followed = new Set<string>();
+  let cursor: string | undefined;
+  for (let i = 0; i < 20; i++) {
+    const l = await env.ENTITIES.list({ prefix: 'fanout:', limit: 1000, cursor });
+    for (const k of l.keys) { const s = k.name.split(':')[1]; if (s) followed.add(s); }
+    if (l.list_complete) break;
+    cursor = l.cursor;
+  }
+
+  const sin: Array<{ slug: string; display: string; pending: boolean }> = [];
+  for (const slug of followed) {
+    const rec = await getExternal(env, slug);
+    if (rec && LINK_FIELDS.some(f => (rec as any)[f])) continue;
+    const e = await getEntity(env, slug);
+    sin.push({
+      slug,
+      display: e?.display || slug,
+      // Si aun esta en la cola, no es un olvido: es trabajo pendiente.
+      pending: !!(await env.ENTITIES.get(K.review(slug))),
+    });
+  }
+  sin.sort((a, b) => a.display.localeCompare(b.display));
+  return json({ followed: followed.size, without: sin.length, entities: sin });
+}
