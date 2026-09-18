@@ -31,6 +31,9 @@ export interface FeaturedSet {
   author?: string;             // canal, usuario o radio que lo subio
   thumbnail?: string;
   publishedAt?: string;
+  // false = YouTube no deja incrustarlo (lo dice videos.list). La ficha lo pinta
+  // como enlace en vez de como reproductor.
+  embeddable?: boolean;
   addedAt: number;
   via: 'manual' | 'search';    // pegado a mano o aprobado de la busqueda
 }
@@ -299,7 +302,9 @@ export async function handleSetsReviewPut(request: Request, env: EntitiesEnv): P
         return {
           id: parsed.id, source: parsed.source, url: parsed.url,
           title: c.title, author: c.author, thumbnail: c.thumbnail,
-          publishedAt: c.publishedAt, query: String(c.query || ''), foundAt: Date.now(),
+          publishedAt: c.publishedAt,
+          ...(c.embeddable === false ? { embeddable: false } : {}),
+          query: String(c.query || ''), foundAt: Date.now(),
         } as SetCandidate;
       })
       .filter(Boolean) as SetCandidate[], rec);

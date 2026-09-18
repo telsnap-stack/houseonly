@@ -1498,8 +1498,24 @@ En la estantería del portal y en la ficha pública, **el mismo orden**:
    El de Mixcloud lleva *"last show 11 Sep 2026"* cuando el cron lo sabe.
 3. **Tour dates**, aparte: RA y Songkick, cuando existen.
 
-**Enlaces, nunca reproductores incrustados**: se abre la fuente, que es donde el
-artista cobra. **Si una entidad no tiene nada aprobado, el bloque no existe**
+**Los sets suenan aquí** (cambio del 2026-09-18): mandar al cliente a YouTube
+para escuchar un set es sacarlo de la tienda, y la tienda es donde compra
+discos. Reproductores **oficiales** de cada fuente —que es lo que piden sus
+términos— y con **carátula primero**: el iframe no se carga hasta que alguien
+pulsa play, así que una ficha con cinco sets no arrastra cinco reproductores ni
+sus cookies. YouTube va por `youtube-nocookie.com`. Suena **uno cada vez**.
+Debajo de cada set queda un `open ↗` pequeño: es el crédito a la fuente que
+piden SoundCloud y YouTube, y la salida para quien lo prefiera allí.
+
+Los **perfiles y el tour siguen siendo enlaces**: ahí no hay nada que reproducir.
+
+Un vídeo que YouTube no deje incrustar se guarda con `embeddable: false` —lo
+comprueba la búsqueda con `videos.list`, 1 unidad por cada 50— y se pinta como
+enlace: más vale eso que un recuadro que diga "vídeo no disponible". De los 43
+sets aprobados el 18-09, **los 43 son incrustables**; 12 tienen restricción por
+país, que el propio reproductor gestiona.
+
+**Si una entidad no tiene nada aprobado, el bloque no existe**
 (`buildListen` devuelve `null`): un "Listen" vacío es peor que no tenerlo.
 
 En la estantería va en versión corta —un set en móvil, dos en escritorio, y un
