@@ -12725,7 +12725,8 @@ function ExternalLinksView({ kindTab, onCounts }) {
                               </label>
                               {perfil(v)}
                               <span style={{fontSize:9}}>({v.from.join('+')})</span>
-                              {sel.includes(v.value) && (sel[0] === v.value
+                              {/* "main" solo dice algo cuando hay mas de una cuenta elegida. */}
+                              {vals.length > 1 && sel.includes(v.value) && (sel[0] === v.value
                                 ? <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>main</span>
                                 : <button onClick={() => primero(v.value)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,borderRadius:2,cursor:'pointer',fontSize:8,letterSpacing:1,textTransform:'uppercase',padding:'2px 5px'}}>make main</button>)}
                             </div>
