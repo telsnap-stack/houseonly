@@ -6,6 +6,7 @@ import {
 	clampDays, clampLimit, afterCursor,
 	MAX_FOLLOWS, FEED_DAYS_DEFAULT, FEED_DAYS_MAX,
 	accountHome, SHELF_MAX, lookupPublic, entityIndex,
+	otrasGrafias,
 } from "../src/lib/follows";
 
 const CID = "7788990011";
@@ -285,11 +286,13 @@ describe("ficha publica de entidad", () => {
 	beforeEach(async () => { await wipe(); });
 
 	it("devuelve la entidad y sus productos, sin ventana", async () => {
-		await entidad("omar-s", "Omar S", ["artist"], { aliases: ["Omar S", "omar s"] });
+		await entidad("omar-s", "Omar S", ["artist"], { aliases: ["Omar S", "omar s", "Omar-S"] });
 		await indice([producto("viejo", 400, ["omar-s"]), producto("nuevo", 2, ["omar-s"]), producto("ajeno", 1, ["otro"])]);
 		const page = await entityPage(env as any, "omar-s");
 		expect(page!.display).toBe("Omar S");
-		expect(page!.aliases).toEqual(["Omar S", "omar s"]);
+		// Solo las grafias que de verdad cambian algo: "Omar S" y "omar s" son su
+		// propio nombre y no se pintan bajo "Also written as".
+		expect(page!.aliases).toEqual(["Omar-S"]);
 		expect(page!.total).toBe(2);
 		expect(page!.products.map(p => p.handle)).toEqual(["nuevo", "viejo"]);
 	});
@@ -536,5 +539,23 @@ describe("entity-lookup: un alias muerto no puede dejar la ficha en blanco", () 
 	it("si ninguno de los dos lleva a una entidad viva, devuelve vacio", async () => {
 		await env.ENTITIES.put("alias:a:fantasma", "no-existe");
 		expect(await lookupPublic(env as any, "artist", "fantasma")).toEqual([]);
+	});
+});
+
+describe("otras grafias (fase 7D)", () => {
+	it("no repite el propio nombre por mayusculas ni espacios", () => {
+		// Theo Parrish en produccion: sus dos alias son su mismo nombre.
+		expect(otrasGrafias("Theo Parrish", ["THEO PARRISH", "Theo Parrish"])).toEqual([]);
+		expect(otrasGrafias("DJ Koze", ["dj koze", "DJKOZE", " DJ  Koze "])).toEqual([]);
+	});
+
+	it("una grafia de verdad se queda, y solo una vez", () => {
+		expect(otrasGrafias("Omar S", ["Omar-S", "omar s", "OMAR-S", "Omar S."]))
+			.toEqual(["Omar-S", "Omar S."]);
+	});
+
+	it("aguanta la basura sin romperse", () => {
+		expect(otrasGrafias("X", ["", "  ", "x"])).toEqual([]);
+		expect(otrasGrafias("X")).toEqual([]);
 	});
 });

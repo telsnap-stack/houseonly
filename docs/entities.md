@@ -1511,6 +1511,37 @@ SoundCloud y RA + Songkick; DJ Koze con cinco sets; **Mooncraft, que alguien
 sigue y no tiene nada aprobado, no pinta bloque**. En móvil (390 px) no hay
 desbordes horizontales.
 
+### El preview habla con staging, y ahí no había nada
+
+Descubierto el 18-09 en `claude-fase7-listen`: la ficha salía **sin bloque**. No
+era el código. El bundle del preview tiene **dos** workers dentro y no hacen lo
+mismo:
+
+- la **tienda y el portal** usan `VITE_WORKER_URL`, que en el preview es
+  **staging**;
+- la pestaña **Links** usa `REVIEW_WORKER_URL`, que es **producción** a
+  propósito, porque allí se decide.
+
+Como las entidades se aprueban en producción, `staging-ENTITIES` tenía **0
+claves** de `external:`, `sets:` y `mixstat:`. `scripts/entities-copiar-a-staging.mjs`
+(dry-run por defecto) copia esos tres prefijos **de prod a staging** —183 claves
+el 18-09— y con `--limpiar-indice` tira las cachés (`entityindex:`, `feedindex:`,
+`meta:mixcloud_index`) para que se reconstruyan. **No copia** `follow:`,
+`fanout:`, `alerttoken:` ni las colas `extreview:`/`setreview:`: los clientes y
+el trabajo pendiente son de producción.
+
+Esto hay que repetirlo cada vez que se quiera ver en el preview algo aprobado
+después. Cuando el frontend llegue a `main`, deja de hacer falta: allí los dos
+workers son el mismo.
+
+### "Also written as" no repite el propio nombre
+
+Theo Parrish tenía como alias `THEO PARRISH` y `Theo Parrish`: su mismo nombre
+dos veces, y la ficha lo pintaba debajo del título como si fueran otra cosa.
+`otrasGrafias()` deja fuera lo que solo cambia en **mayúsculas o espacios**; la
+puntuación sí cuenta, así que `Omar-S` se queda. Con esto, Theo Parrish y DJ
+Koze ya no enseñan la línea.
+
 ### El contador de la pestaña Entities
 
 Arriba de Links, en naranja si no es cero:
