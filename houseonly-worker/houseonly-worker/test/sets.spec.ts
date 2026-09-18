@@ -237,11 +237,24 @@ describe("bloque Listen (fase 7D)", () => {
 		expect(l.tour[1].url).toBe("https://www.songkick.com/artists/188726");
 	});
 
-	it("Bandsintown va el primero del tour: es el unico que se puede incrustar", async () => {
+	it("Bandsintown NO va como enlace: sus fechas se pintan en la lista", async () => {
 		await external({ bandsintown: "25998", ra: "dj/x", songkick: "123" });
 		const l = (await buildListen(env as any, "theo-parrish"))!;
-		expect(l.tour.map(x => [x.kind, x.value])).toEqual([["bandsintown", "25998"], ["ra", "dj/x"], ["songkick", "123"]]);
-		expect(l.tour[0].url).toBe("https://www.bandsintown.com/a/25998");
+		expect(l.tour.map(x => x.kind)).toEqual(["ra", "songkick"]);
+	});
+
+	it("las fechas llegan formateadas y solo las futuras", async () => {
+		const ahora = Date.parse("2026-09-18T00:00:00Z");
+		await env.ENTITIES.put("events:theo-parrish", JSON.stringify({
+			slug: "theo-parrish", source: "bandsintown", fetchedAt: ahora,
+			items: [
+				{ id: "1", date: "2026-09-27T23:00:00", city: "Ibiza", country: "Spain", venue: "Amnesia Ibiza", tickets: "https://x" },
+				{ id: "2", date: "2020-01-01T20:00:00", city: "Detroit", country: "United States", region: "MI", venue: "Viejo" },
+			],
+		}));
+		const l = (await buildListen(env as any, "theo-parrish"))!;
+		expect(l.events).toHaveLength(1);
+		expect(l.events[0]).toMatchObject({ when: "Sun 27 Sep", where: "Ibiza, Spain", venue: "Amnesia Ibiza", tickets: "https://x" });
 	});
 
 	it("la foto del cron pone fecha al enlace de Mixcloud", async () => {

@@ -1512,12 +1512,25 @@ Mixcloud aceptan la URL del perfil y tocan lo último subido; YouTube no tiene
 embed de canal, pero sí de su **lista de subidas** (`UC…` → `UU…`). NTS no tiene
 widget y se queda como enlace. Mismo trato: botón primero, reproductor al pulsar.
 
-**Las fechas, dentro de la ficha.** El widget oficial de Bandsintown se carga
-solo cuando alguien pulsa *Show tour dates*, así que nadie se come un script de
-terceros por abrir una página. Deduce su `app_id` del dominio: en `localhost`
-devuelve cero fechas y en `houseonly.store` o en un preview de Pages, las
-reales. RA y Songkick siguen siendo enlaces: RA prohíbe el acceso automatizado y
-**el widget de Songkick ya no existe** (404 el 18-09).
+**Las fechas, como lista nuestra. Sin widget** (decisión de Eduardo, 18-09, que
+sustituye al widget que hubo unas horas). `entities-events-fetch.mjs` trae de
+Bandsintown lo mínimo que se enseña —fecha, ciudad, país, sala— y lo deja en
+`events:{slug}`; la tienda lo pinta con su propio aspecto y el cliente no sale
+de aquí. La URL de entradas se guarda ya, para la fase siguiente.
+
+Detalles que no son adorno:
+
+- La fecha de Bandsintown es **hora local de la sala y sin zona**
+  (`2026-09-27T23:00:00`). Se trata como fecha de calendario y no se convierte:
+  al hacerlo, el bolo de Ibiza de las 23:00 se movía al día siguiente.
+- El **día del concierto cuenta entero**: a las diez de la mañana todavía se
+  anuncia el bolo de esa noche.
+- Una lista que lleve **más de 14 días sin refrescarse no se enseña**: una fecha
+  caducada hace más daño que no tener fechas.
+- Ocho como mucho por ficha.
+
+RA y Songkick siguen siendo enlaces: RA prohíbe el acceso automatizado en sus
+términos y **el widget de Songkick ya no existe** (404 el 18-09).
 
 **Qué artista de Bandsintown es cuál.** `entities-bandsintown-candidates.mjs` lo
 resuelve sin fiarse del nombre: su ficha devuelve el `mbid`, y solo se propone

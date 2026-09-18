@@ -13378,56 +13378,13 @@ function profileEmbedSrc(l) {
 
 const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
 
-/**
- * Las fechas de Bandsintown, dentro de la ficha. Su script solo se carga cuando
- * alguien pulsa: no se le mete un tercero a todo el que abra una pagina.
- *
- * El widget deduce su app_id del dominio (`js_<host>`), asi que en localhost
- * devuelve cero fechas y en houseonly.store o en un preview de Pages devuelve
- * las de verdad. Comprobado el 2026-09-18.
- */
-function BandsintownDates({ link }) {
-  const [abierto, setAbierto] = useState(false);
-  const caja = useRef(null);
-  useEffect(() => {
-    if (!abierto || !link || !caja.current) return;
-    const a = document.createElement('a');
-    a.className = 'bit-widget-initializer';
-    a.dataset.artistName = `id_${link.value}`;
-    a.dataset.eventsToDisplay = '5';
-    a.dataset.displayLimit = '5';
-    caja.current.appendChild(a);
-    if (!document.querySelector('script[data-bit]')) {
-      const s = document.createElement('script');
-      s.src = 'https://widget.bandsintown.com/main.min.js';
-      s.async = true;
-      s.dataset.bit = '1';
-      document.body.appendChild(s);
-    } else if (window.BITWidget?.init) {
-      window.BITWidget.init();
-    }
-  }, [abierto, link]);
-
-  if (!link) return null;
-  if (!abierto) {
-    return (
-      <button onClick={() => setAbierto(true)}
-        style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
-          padding:'6px 10px', background:'none', color:S.text, fontFamily:'inherit', fontSize:11, cursor:'pointer', marginBottom:8 }}>
-        <span style={{ color:S.accent }}>◆</span> Show tour dates
-      </button>
-    );
-  }
-  return <div ref={caja} style={{ marginBottom:10, background:'#0d0d0d', borderRadius:2 }} />;
-}
-
 function ListenBlock({ listen, compact }) {
   const isMobile = useIsMobile(720);
   // Que set esta sonando. Uno cada vez: dos reproductores a la vez es ruido.
   const [playing, setPlaying] = useState(null);
   if (!listen) return null;
-  const { sets = [], links = [], tour = [] } = listen;
-  if (!sets.length && !links.length && !tour.length) return null;
+  const { sets = [], links = [], tour = [], events = [] } = listen;
+  if (!sets.length && !links.length && !tour.length && !events.length) return null;
 
   const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
 
@@ -13544,14 +13501,32 @@ function ListenBlock({ listen, compact }) {
 
       {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-start' }}>{links.map(perfil)}</div>}
 
-      {tour.length > 0 && (
-        <div style={{ marginTop:14 }}>
+      {(events.length > 0 || tour.length > 0) && (
+        <div style={{ marginTop:16 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
-          {/* Las fechas se ven aqui cuando hay Bandsintown aprobado. RA y
-              Songkick se quedan en enlace: RA prohibe el acceso automatizado y
-              el widget de Songkick ya no existe (404 el 18-09). */}
-          <BandsintownDates link={tour.find(t => t.kind === 'bandsintown')} />
-          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.filter(t => t.kind !== 'bandsintown').map(chip)}</div>
+
+          {/* La lista es NUESTRA: sin widgets y sin sacar al cliente de aqui.
+              Las fechas llegan ya formateadas del worker. */}
+          {events.length > 0 && (
+            <div style={{ border:`1px solid ${S.border}`, borderRadius:2, marginBottom:tour.length?10:0 }}>
+              {events.map((e, i) => (
+                <div key={e.id} style={{ display:'flex', gap:12, alignItems:'baseline', padding:isMobile?'9px 10px':'10px 12px',
+                  borderTop:i?`1px solid ${S.border}`:'none', flexWrap:'wrap' }}>
+                  <span style={{ fontSize:11, color:S.accent, letterSpacing:1, textTransform:'uppercase', whiteSpace:'nowrap', minWidth:isMobile?0:92 }}>
+                    {e.when}
+                  </span>
+                  <span style={{ flex:1, minWidth:0 }}>
+                    <span style={{ display:'block', fontSize:12, color:S.text }}>{e.where}</span>
+                    {e.venue && <span style={{ display:'block', fontSize:10, color:S.muted, marginTop:2 }}>{e.venue}{e.festival ? ' · festival' : ''}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* RA y Songkick, enlaces: RA prohibe el acceso automatizado en sus
+              terminos y el widget de Songkick ya no existe (404 el 18-09). */}
+          {tour.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.map(chip)}</div>}
         </div>
       )}
     </section>
