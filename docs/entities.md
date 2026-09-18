@@ -1404,6 +1404,61 @@ Lo que esto resuelve, con casos reales:
 Caché de 7 días en disco, y la misma cuenta se resuelve una vez aunque llegue
 por MusicBrainz y por Wikidata.
 
+## Fase 7B: sets, con YouTube como fuente principal
+
+Decidido el 2026-09-18. Un follow dice *que* sacas discos; un set dice *cómo*
+suenas. Tres maneras de que un set llegue a la ficha, y **las tres pasan por una
+persona**:
+
+1. **El canal de YouTube de la entidad**, que ya viene de MusicBrainz y se
+   aprueba en la cola como cualquier otro enlace. Hoy hay **25 canales**
+   aprobados. Se enseñará como *Listen on YouTube* en la fase 7D.
+2. **Una URL pegada a mano** en Entities → Links: vídeo de YouTube, pista de
+   SoundCloud o show de Mixcloud. El worker resuelve título, autor y miniatura
+   **por oEmbed, sin clave** (YouTube y SoundCloud) y por la API pública de
+   Mixcloud, que además da la fecha. **Una cuenta no es un set** y se rechaza
+   con ese mensaje: la cuenta es un enlace de entidad, y confundirlas haría que
+   "Listen" enseñara un perfil donde promete un set.
+3. **La búsqueda de YouTube**, que es un **generador de candidatos, no una
+   fuente**.
+
+```
+sets:{slug}      → { items: FeaturedSet[], rejected: string[], updatedAt }
+setreview:{slug} → { candidates: SetCandidate[], fetchedAt }   TTL 30 días
+```
+
+`items` va **en el orden que se enseña**, y ese orden lo pone una persona. Tope
+de **20 sets** por entidad: una ficha con veinte ya no es una selección. Quitar
+un set lo manda a `rejected`, así que la búsqueda no lo vuelve a proponer.
+
+### La búsqueda: `scripts/entities-youtube-candidates.mjs`
+
+- Dos consultas por entidad: **`"{nombre} dj set"`** y **`"{nombre} boiler room"`**.
+- **El cupo manda**: `search.list` tiene su propio bote de **100 llamadas al
+  día**. Dos por entidad = **50 entidades como mucho**; por defecto, 25.
+- **Turnos**: primero las entidades **seguidas**, luego las indexables, y dentro
+  de cada grupo las que llevan más tiempo sin mirarse.
+- Se queda solo con lo que **nombra a la entidad** en el título o en el canal.
+  Sin ese filtro, "Wax dj set" trae media plataforma.
+- Lo que encuentra va a `setreview:` y **caduca solo a los 30 días** si nadie lo
+  aprueba. Nada se enseña sin aprobar.
+
+Probado el 18-09 con las cinco de referencia: Theo Parrish devuelve sus dos
+Boiler Room y el Mixmag Lab; Omar S, su Boiler Room de Nápoles. Y **Pampa
+devuelve a un DJ argentino homónimo**, que es exactamente por qué esto es una
+cola y no una fuente: los sellos dan mucho más ruido que los artistas.
+
+### En la pantalla
+
+Dentro de Entities → Links, debajo de la cola de enlaces:
+
+- **Featured sets**: se elige la entidad, se pega la URL y se ve la lista con
+  miniatura, fuente, autor, fecha y de dónde salió (`from search`), con
+  `↑ first`, `remove` y `open ↗`.
+- **Set candidates from YouTube search**: por entidad, con miniatura y la
+  consulta que lo encontró. Se marcan los que valen y *Add selected*; el resto
+  de esa fila queda descartado. *None of these* los descarta todos.
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
