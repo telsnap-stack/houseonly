@@ -877,6 +877,16 @@ import {
   handleExternalReviewReject,
   handleExternalGet,
 } from './lib/external';
+import {
+  handleSetsList,
+  handleSetsAdd,
+  handleSetsRemove,
+  handleSetsOrder,
+  handleSetsReviewList,
+  handleSetsReviewPut,
+  handleSetsReviewApprove,
+  handleSetsReviewReject,
+} from './lib/sets';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
@@ -1394,6 +1404,34 @@ export default {
     }
     if (action === 'external-get' && request.method === 'GET') {
       return await handleExternalGet(request, env);
+    }
+
+    // ── SETS DESTACADOS (fase 7B) ───────────────────────────
+    // docs/entities.md. Bearer. Nada se enseña sin aprobar: los candidatos de
+    // la busqueda viven en setreview: y caducan a los 30 dias.
+    if (action === 'sets-list' && request.method === 'GET') {
+      return await handleSetsList(request, env);
+    }
+    if (action === 'sets-add' && request.method === 'POST') {
+      return await handleSetsAdd(request, env);
+    }
+    if (action === 'sets-remove' && request.method === 'POST') {
+      return await handleSetsRemove(request, env);
+    }
+    if (action === 'sets-order' && request.method === 'POST') {
+      return await handleSetsOrder(request, env);
+    }
+    if (action === 'sets-review-list' && request.method === 'GET') {
+      return await handleSetsReviewList(request, env);
+    }
+    if (action === 'sets-review-put' && request.method === 'POST') {
+      return await handleSetsReviewPut(request, env);
+    }
+    if (action === 'sets-review-approve' && request.method === 'POST') {
+      return await handleSetsReviewApprove(request, env);
+    }
+    if (action === 'sets-review-reject' && request.method === 'POST') {
+      return await handleSetsReviewReject(request, env);
     }
 
     // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.

@@ -12393,6 +12393,15 @@ function ExternalLinksView({ kindTab, onCounts }) {
   const [pick, setPick]         = useState({});      // review: slug → mbid
   const [fields, setFields]     = useState({});      // review: slug → {field: value|''}
   const [progress, setProgress] = useState(null);
+  // Sets destacados: la entidad que se esta tocando, sus sets y la cola de
+  // candidatos que ha dejado la busqueda de YouTube.
+  const [ents, setEnts]         = useState(null);
+  const [setQ, setSetQ]         = useState('');
+  const [setSlug, setSetSlug]   = useState('');
+  const [sets, setSets]         = useState(null);
+  const [setUrl, setSetUrl]     = useState('');
+  const [cands, setCands]       = useState(null);
+  const [candSel, setCandSel]   = useState({});
 
   const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
   const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
@@ -12430,11 +12439,64 @@ function ExternalLinksView({ kindTab, onCounts }) {
       }
       setSel(s0); setPick(p0); setFields(f0);
       linksProdSecret = useSecret; setAuthed(true);
+      loadSetsSide(useSecret);
     } catch (e) { setError(`Links failed — ${e.message}`); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { if (authed) load(); }, []);   // eslint-disable-line
+  // Los sets van contra la MISMA entidad aprobada, asi que la lista de
+  // entidades sale del indice publico del worker de produccion.
+  async function loadSetsSide(sec) {
+    const useSecret = sec ?? secret;
+    try {
+      const [ri, rc] = await Promise.all([
+        fetch(`${REVIEW_WORKER_URL}?action=entity-index`),
+        fetch(`${REVIEW_WORKER_URL}?action=sets-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
+      ]);
+      if (ri.ok) setEnts((await ri.json()).entities || []);
+      if (rc.ok) setCands((await rc.json()).records || []);
+    } catch { /* la cola de enlaces no depende de esto */ }
+  }
+
+  async function loadSets(slug) {
+    setSetSlug(slug); setSets(null); setSetUrl('');
+    if (!slug) return;
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=sets-list&slug=${encodeURIComponent(slug)}`, { headers: { 'Authorization': `Bearer ${secret}` } });
+      if (r.ok) setSets((await r.json()).sets);
+      else setError(`Sets failed (HTTP ${r.status})`);
+    } catch (e) { setError(`Sets failed — ${e.message}`); }
+  }
+
+  async function setsCall(action, body) {
+    setBusy(true); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=${action}`, { method: 'POST', headers: hdrs, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(d.error || `HTTP ${r.status}`); return null; }
+      if (d.sets) setSets(d.sets);
+      return d;
+    } catch (e) { setError(`Error: ${e.message}`); return null; }
+    finally { setBusy(false); }
+  }
+
+  async function addSet() {
+    const url = setUrl.trim();
+    if (!url || !setSlug) return;
+    const d = await setsCall('sets-add', { slug: setSlug, url });
+    if (d) { setSetUrl(''); setMsg(d.already ? 'Already in the list.' : '✓ added'); }
+  }
+
+  async function approveCands(slug, ids) {
+    const d = await setsCall(ids.length ? 'sets-review-approve' : 'sets-review-reject', ids.length ? { slug, ids } : { slug });
+    if (d) {
+      setCands(cs => (cs || []).filter(c => c.slug !== slug));
+      setMsg(ids.length ? `✓ ${d.added} added to ${slug}` : `${slug}: none of these.`);
+      if (slug === setSlug) loadSets(slug);
+    }
+  }
+
+  useEffect(() => { if (authed) { load(); loadSetsSide(); } }, []);   // eslint-disable-line
 
   const all       = rows || [];
   const ofKind    = all.filter(r => (r.roles || []).includes(kindTab));
@@ -12745,6 +12807,97 @@ function ExternalLinksView({ kindTab, onCounts }) {
             </div>
           );
         })}
+      </div>
+
+      {/* ── Sets destacados ── */}
+      <div style={{marginTop:28,paddingTop:20,borderTop:`1px solid ${S.border}`}}>
+        <div style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+          Featured sets
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+          Paste a <strong>YouTube video, SoundCloud track or Mixcloud show</strong> and it&apos;s resolved by
+          oEmbed — no API key. An account URL is not a set and gets refused. The order here is the order
+          the shop shows; drag isn&apos;t needed, just move them up.
+        </div>
+        <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+          <input value={setQ} onChange={e=>setSetQ(e.target.value)} placeholder="Find an entity…"
+            style={{flex:1,minWidth:180,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+          <select value={setSlug} onChange={e=>loadSets(e.target.value)}
+            style={{flex:1,minWidth:200,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}}>
+            <option value="">— pick an entity —</option>
+            {(ents || []).filter(e => {
+              const q = setQ.trim().toLowerCase();
+              return (e.roles || []).includes(kindTab) && (!q || e.display.toLowerCase().includes(q) || e.slug.includes(q));
+            }).slice(0, 80).map(e => <option key={e.slug} value={e.slug}>{e.display} · {e.total}</option>)}
+          </select>
+        </div>
+        {setSlug && (
+          <div style={{background:S.bg,padding:'10px 12px',borderRadius:2}}>
+            <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+              <input value={setUrl} onChange={e=>setSetUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addSet()}
+                placeholder="https://www.youtube.com/watch?v=… · https://soundcloud.com/user/track · https://www.mixcloud.com/user/show/"
+                style={{flex:1,minWidth:260,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+              <Btn ch={busy?'…':'Add set'} onClick={addSet} disabled={busy||!setUrl.trim()} />
+            </div>
+            {sets === null && <div style={{fontSize:10,color:S.muted}}>Loading…</div>}
+            {sets && sets.items.length === 0 && <div style={{fontSize:10,color:S.muted}}>No sets yet — the Listen block won&apos;t show anything for this entity.</div>}
+            {(sets?.items || []).map((it, i) => (
+              <div key={it.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderTop:i?`1px solid ${S.border}`:'none'}}>
+                <span style={{fontSize:10,color:S.muted,width:16}}>{i + 1}</span>
+                {it.thumbnail && <img src={it.thumbnail} alt="" width="56" height="32" style={{objectFit:'cover',borderRadius:2,background:S.border}} />}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:11,color:S.text}}>{it.title || it.url}</div>
+                  <div style={{fontSize:10,color:S.muted}}>
+                    {it.source}{it.author ? ` · ${it.author}` : ''}{it.publishedAt ? ` · ${it.publishedAt.slice(0,10)}` : ''}
+                    {it.via === 'search' ? ' · from search' : ''}
+                  </div>
+                </div>
+                <a href={it.url} target="_blank" rel="noreferrer" style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+                <button disabled={busy||i===0} onClick={()=>setsCall('sets-order',{slug:setSlug,ids:[it.id,...sets.items.filter(x=>x.id!==it.id).map(x=>x.id)]})}
+                  style={{background:'none',border:`1px solid ${S.border}`,color:i===0?S.border:S.muted,borderRadius:2,cursor:i===0?'default':'pointer',fontSize:9,padding:'2px 6px'}}>↑ first</button>
+                <button disabled={busy} onClick={()=>setsCall('sets-remove',{slug:setSlug,id:it.id})}
+                  style={{background:'none',border:`1px solid ${S.border}`,color:S.danger,borderRadius:2,cursor:'pointer',fontSize:9,padding:'2px 6px'}}>remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Candidatos de la busqueda de YouTube ── */}
+      <div style={{marginTop:24,paddingTop:18,borderTop:`1px solid ${S.border}`}}>
+        <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+          Set candidates from YouTube search · {(cands || []).reduce((n, c) => n + c.candidates.length, 0)}
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+          Proposed by <span style={{fontFamily:'monospace'}}>entities-youtube-candidates.mjs</span>. Search is a
+          generator, not a source: nothing here is shown in the shop until you add it, and anything you
+          leave rots away on its own after 30 days. Checking a video and pressing Add keeps it; the rest
+          of that row is discarded.
+        </div>
+        {(cands || []).length === 0 && <div style={{fontSize:11,color:S.muted,padding:'10px 0'}}>Nothing waiting.</div>}
+        {(cands || []).map(row => (
+          <div key={row.slug} style={{background:S.bg,padding:'10px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a',marginBottom:8}}>
+            <div style={{fontSize:12,color:S.text,marginBottom:6}}>{row.slug}</div>
+            {row.candidates.map(c => (
+              <label key={c.id} style={{display:'flex',alignItems:'center',gap:10,padding:'4px 0',cursor:'pointer'}}>
+                <input type="checkbox" checked={!!candSel[c.id]} onChange={e=>setCandSel({...candSel,[c.id]:e.target.checked})} />
+                {c.thumbnail && <img src={c.thumbnail} alt="" width="56" height="32" style={{objectFit:'cover',borderRadius:2,background:S.border}} />}
+                <span style={{flex:1,minWidth:0}}>
+                  <span style={{fontSize:11,color:S.text,display:'block'}}>{c.title}</span>
+                  <span style={{fontSize:10,color:S.muted}}>{c.author}{c.publishedAt ? ` · ${c.publishedAt.slice(0,10)}` : ''} · found with “{c.query}”</span>
+                </span>
+                <a href={c.url} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()}
+                  style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+              </label>
+            ))}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              <Btn ch={busy?'…':`Add selected (${row.candidates.filter(c=>candSel[c.id]).length})`}
+                onClick={()=>approveCands(row.slug, row.candidates.filter(c=>candSel[c.id]).map(c=>c.id))}
+                disabled={busy||!row.candidates.some(c=>candSel[c.id])} />
+              <Btn ch="None of these" variant="ghost" onClick={()=>approveCands(row.slug, [])} disabled={busy} />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
