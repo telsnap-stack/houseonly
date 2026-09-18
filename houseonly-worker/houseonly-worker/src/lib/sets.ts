@@ -369,8 +369,15 @@ export async function handleSetsReviewReject(request: Request, env: EntitiesEnv)
 // publica:
 //
 //   1. sets destacados (lo que una persona eligio)
-//   2. canal de YouTube · 3. SoundCloud · 4. Mixcloud · 5. NTS
-//   6. tour dates: RA y Songkick
+//   2. canal de YouTube · 3. SoundCloud · 4. Mixcloud
+//   5. las fechas, como lista nuestra
+//
+// **Aqui NO se sacan enlaces a otras webs** (decision de Eduardo, 2026-09-18):
+// la tienda es donde se compran discos. Por eso solo entra lo que se puede
+// REPRODUCIR aqui dentro. Lo que solo seria un enlace —RA, Songkick, NTS, un
+// canal de YouTube que no sea un id UC…— se sigue guardando en external:, pero
+// no se pinta. El unico enlace que queda es el que lleva dentro el reproductor
+// de cada fuente, y ese no se puede quitar sin romper sus terminos.
 //
 // Si una entidad no tiene nada aprobado, devuelve null y **el bloque no se
 // pinta**: un "Listen" vacio es peor que no tenerlo.
@@ -393,8 +400,7 @@ export interface ShownEvent extends LiveEvent {
 
 export interface ListenBlock {
   sets: FeaturedSet[];
-  links: ListenLink[];   // perfiles donde escuchar
-  tour: ListenLink[];    // RA y Songkick: enlaces, no se pueden incrustar
+  links: ListenLink[];   // perfiles que SUENAN aqui: nada de enlaces sueltos
   events: ShownEvent[];  // las fechas, ya formateadas: aqui no hay widget
 }
 
@@ -428,31 +434,28 @@ export async function buildListen(env: EntitiesEnv, slug: string): Promise<Liste
   ]);
 
   const links: ListenLink[] = [];
-  const tour: ListenLink[] = [];
   const add = (arr: ListenLink[], kind: ListenLink['kind'], value?: string, meta?: string) => {
     if (!value) return;
     arr.push({ kind, value, url: externalUrl(kind as any, value), label: LISTEN_LABEL[kind], ...(meta ? { meta } : {}) });
   };
 
-  add(links, 'youtube', ext?.youtube);
+  // Solo el canal por id (UC…): es el unico que tiene lista de subidas y, por
+  // tanto, el unico que suena aqui. Un @handle se queda guardado, sin pintar.
+  add(links, 'youtube', /^UC[\w-]{22}$/.test(ext?.youtube || '') ? ext?.youtube : undefined);
   add(links, 'soundcloud', ext?.soundcloud);
   // La foto del cron: "last show 11 Sep 2026" convierte un enlace mudo en una
   // razon para pincharlo.
   add(links, 'mixcloud', ext?.mixcloud, mix?.last ? `last show ${fecha(mix.last)}` : undefined);
-  add(links, 'nts', ext?.nts);
   // Las segundas cuentas aprobadas van detras de la principal, no se pierden.
   for (const [field, extras] of Object.entries(ext?.secondary || {})) {
+    if (field !== 'soundcloud' && field !== 'mixcloud') continue;   // los que suenan
     for (const v of extras || []) add(links, field as ListenLink['kind'], v);
   }
-
-  // Bandsintown ya no va como enlace: sus fechas se pintan abajo, en `events`.
-  add(tour, 'ra', ext?.ra);
-  add(tour, 'songkick', ext?.songkick);
 
   const sets = rec.items;
   const events: ShownEvent[] = eventsToShow(ev).map(e => ({
     ...e, when: formatEventDate(e.date), where: formatEventPlace(e),
   }));
-  if (!sets.length && !links.length && !tour.length && !events.length) return null;
-  return { sets, links, tour, events };
+  if (!sets.length && !links.length && !events.length) return null;
+  return { sets, links, events };
 }
