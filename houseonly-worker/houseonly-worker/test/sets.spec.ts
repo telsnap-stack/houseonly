@@ -219,7 +219,7 @@ describe("bloque Listen (fase 7D)", () => {
 		expect(await buildListen(env as any, "theo-parrish")).toBeNull();
 	});
 
-	it("el orden es sets, YouTube, SoundCloud, Mixcloud, NTS — y el tour aparte", async () => {
+	it("solo lo que suena aqui: NTS, RA y Songkick no se pintan", async () => {
 		await external({
 			youtube: "UCabcdefghijklmnopqrstuv", soundcloud: "soundsignature",
 			mixcloud: "theoparrish", nts: "shows/theo-parrish",
@@ -229,18 +229,21 @@ describe("bloque Listen (fase 7D)", () => {
 
 		const l = (await buildListen(env as any, "theo-parrish"))!;
 		expect(l.sets.map(s => s.id)).toEqual(["youtube:7wZ5-lb7bQ4"]);
-		expect(l.links.map(x => x.kind)).toEqual(["youtube", "soundcloud", "mixcloud", "nts"]);
-		expect(l.tour.map(x => x.kind)).toEqual(["ra", "songkick"]);
+		expect(l.links.map(x => x.kind)).toEqual(["youtube", "soundcloud", "mixcloud"]);
+		expect((l as any).tour).toBeUndefined();
 		// El valor guardado viaja con el enlace: sin el no hay reproductor.
-		expect(l.links.map(x => x.value)).toEqual(["UCabcdefghijklmnopqrstuv", "soundsignature", "theoparrish", "shows/theo-parrish"]);
+		expect(l.links.map(x => x.value)).toEqual(["UCabcdefghijklmnopqrstuv", "soundsignature", "theoparrish"]);
 		expect(l.links[0].url).toBe("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
-		expect(l.tour[1].url).toBe("https://www.songkick.com/artists/188726");
 	});
 
-	it("Bandsintown NO va como enlace: sus fechas se pintan en la lista", async () => {
-		await external({ bandsintown: "25998", ra: "dj/x", songkick: "123" });
-		const l = (await buildListen(env as any, "theo-parrish"))!;
-		expect(l.tour.map(x => x.kind)).toEqual(["ra", "songkick"]);
+	it("solo con RA, Songkick o NTS no hay bloque: serian enlaces y nada mas", async () => {
+		await external({ ra: "dj/x", songkick: "123", nts: "shows/theo-parrish", bandsintown: "25998" });
+		expect(await buildListen(env as any, "theo-parrish")).toBeNull();
+	});
+
+	it("un canal de YouTube por @handle no suena, asi que no se pinta", async () => {
+		await external({ youtube: "@theoparrish" });
+		expect(await buildListen(env as any, "theo-parrish")).toBeNull();
 	});
 
 	it("las fechas llegan formateadas y solo las futuras", async () => {
@@ -275,13 +278,10 @@ describe("bloque Listen (fase 7D)", () => {
 		]);
 	});
 
-	it("solo con sets, o solo con tour, tambien hay bloque", async () => {
+	it("solo con sets ya hay bloque", async () => {
 		await handleSetsAdd(req("sets-add", { slug: "theo-parrish", url: MC }), env as any);
 		const a = (await buildListen(env as any, "theo-parrish"))!;
 		expect(a.sets).toHaveLength(1);
 		expect(a.links).toHaveLength(0);
-		await external({ ra: "dj/theoparrish" });
-		const b = (await buildListen(env as any, "theo-parrish"))!;
-		expect(b.tour).toHaveLength(1);
 	});
 });

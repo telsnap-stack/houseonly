@@ -13383,27 +13383,16 @@ function ListenBlock({ listen, compact }) {
   // Que set esta sonando. Uno cada vez: dos reproductores a la vez es ruido.
   const [playing, setPlaying] = useState(null);
   if (!listen) return null;
-  const { sets = [], links = [], tour = [], events = [] } = listen;
-  if (!sets.length && !links.length && !tour.length && !events.length) return null;
+  const { sets = [], links = [], events = [] } = listen;
+  if (!sets.length && !links.length && !events.length) return null;
 
   const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
 
-  const chip = l => (
-    <a key={`${l.kind}:${l.url}`} href={l.url} target="_blank" rel="noreferrer"
-      style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
-        padding:'6px 10px', color:S.text, textDecoration:'none', fontSize:11, whiteSpace:'nowrap' }}>
-      <span style={{ color:S.accent }}>{LISTEN_ICON[l.kind] || '•'}</span>
-      {l.label}
-      {l.meta && <span style={{ color:S.muted, fontSize:10 }}>· {l.meta}</span>}
-      <span style={{ color:S.muted, fontSize:9 }}>↗</span>
-    </a>
-  );
-
-  // Un perfil: boton mientras no se toca, reproductor en cuanto se toca. El que
-  // no tiene widget (NTS) se queda como enlace de siempre.
+  // Un perfil: boton mientras no se toca, reproductor en cuanto se toca. Lo que
+  // no tiene reproductor no llega hasta aqui — el worker no lo manda.
   const perfil = l => {
     const src = profileEmbedSrc(l);
-    if (!src) return chip(l);
+    if (!src) return null;
     const clave = `perfil:${l.kind}`;
     if (playing !== clave) {
       return (
@@ -13425,8 +13414,7 @@ function ListenBlock({ listen, compact }) {
             style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }} />
         </div>
         <div style={{ fontSize:10, color:S.muted, marginTop:4 }}>
-          {l.label}{l.meta ? ` · ${l.meta}` : ''} ·{' '}
-          <a href={l.url} target="_blank" rel="noreferrer" style={{ color:S.muted, textDecoration:'none', borderBottom:`1px solid ${S.border}` }}>open ↗</a>
+          {l.label}{l.meta ? ` · ${l.meta}` : ''}
         </div>
       </div>
     );
@@ -13437,12 +13425,11 @@ function ListenBlock({ listen, compact }) {
       <div style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
         {st.title || st.url}
       </div>
+      {/* Sin enlace a la fuente: el credito lo lleva dentro el propio
+          reproductor (nombre del canal, logo y su enlace), que es lo que piden
+          sus terminos, y asi la pagina no saca a nadie fuera. */}
       <div style={{ fontSize:10, color:S.muted, marginTop:3 }}>
         {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
-        {' · '}
-        {/* El enlace a la fuente se queda, pequeño: es el credito que piden
-            SoundCloud y YouTube, y la salida para quien lo prefiera alli. */}
-        <a href={st.url} target="_blank" rel="noreferrer" style={{ color:S.muted, textDecoration:'none', borderBottom:`1px solid ${S.border}` }}>open ↗</a>
       </div>
     </div>
   );
@@ -13452,7 +13439,7 @@ function ListenBlock({ listen, compact }) {
       <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
 
       {visibles.length > 0 && (
-        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||tour.length?14:0 }}>
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||events.length?14:0 }}>
           {visibles.map(st => {
             const src = embedSrc(st);
             const sonando = playing === st.id && src;
@@ -13501,14 +13488,14 @@ function ListenBlock({ listen, compact }) {
 
       {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-start' }}>{links.map(perfil)}</div>}
 
-      {(events.length > 0 || tour.length > 0) && (
+      {events.length > 0 && (
         <div style={{ marginTop:16 }}>
           <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
 
           {/* La lista es NUESTRA: sin widgets y sin sacar al cliente de aqui.
               Las fechas llegan ya formateadas del worker. */}
           {events.length > 0 && (
-            <div style={{ border:`1px solid ${S.border}`, borderRadius:2, marginBottom:tour.length?10:0 }}>
+            <div style={{ border:`1px solid ${S.border}`, borderRadius:2 }}>
               {events.map((e, i) => (
                 <div key={e.id} style={{ display:'flex', gap:12, alignItems:'baseline', padding:isMobile?'9px 10px':'10px 12px',
                   borderTop:i?`1px solid ${S.border}`:'none', flexWrap:'wrap' }}>
@@ -13524,9 +13511,6 @@ function ListenBlock({ listen, compact }) {
             </div>
           )}
 
-          {/* RA y Songkick, enlaces: RA prohibe el acceso automatizado en sus
-              terminos y el widget de Songkick ya no existe (404 el 18-09). */}
-          {tour.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>{tour.map(chip)}</div>}
         </div>
       )}
     </section>

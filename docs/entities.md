@@ -1529,8 +1529,20 @@ Detalles que no son adorno:
   caducada hace más daño que no tener fechas.
 - Ocho como mucho por ficha.
 
-RA y Songkick siguen siendo enlaces: RA prohíbe el acceso automatizado en sus
-términos y **el widget de Songkick ya no existe** (404 el 18-09).
+**Fuera los enlaces salientes** (decisión de Eduardo, 18-09). La tienda es donde
+se compran discos, así que el bloque **solo enseña lo que suena aquí dentro**:
+
+| | |
+|---|---|
+| Se pinta | sets, canal de YouTube por id `UC…`, SoundCloud, Mixcloud, la lista de fechas |
+| Se guarda pero **no** se pinta | RA, Songkick, NTS, un YouTube por `@handle` — solo serían un enlace |
+
+RA y Songkick se quedan guardados por si algún día hay acuerdo; NTS no tiene
+reproductor incrustable y el canal por `@handle` no tiene lista de subidas.
+
+El único enlace que queda en la página es el que lleva **dentro** el propio
+reproductor (nombre del canal, logo, "ver en…"). Ese no se puede quitar: es el
+crédito que exigen SoundCloud y YouTube, y va dentro de su iframe.
 
 **Qué artista de Bandsintown es cuál.** `entities-bandsintown-candidates.mjs` lo
 resuelve sin fiarse del nombre: su ficha devuelve el `mbid`, y solo se propone
