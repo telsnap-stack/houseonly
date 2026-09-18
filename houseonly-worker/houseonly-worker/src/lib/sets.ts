@@ -375,8 +375,12 @@ export async function handleSetsReviewReject(request: Request, env: EntitiesEnv)
 // pinta**: un "Listen" vacio es peor que no tenerlo.
 
 export interface ListenLink {
-  kind: 'youtube' | 'soundcloud' | 'mixcloud' | 'nts' | 'ra' | 'songkick';
+  kind: 'youtube' | 'soundcloud' | 'mixcloud' | 'nts' | 'ra' | 'songkick' | 'bandsintown';
   url: string;
+  // El valor guardado, que es lo que necesita el reproductor de cada sitio: el
+  // id del canal para la lista de subidas, el usuario, el id de Bandsintown.
+  // La URL sola no basta.
+  value: string;
   label: string;        // "YouTube", "SoundCloud"…
   meta?: string;        // "last show 11 Sep 2026", cuando se sabe
 }
@@ -389,7 +393,7 @@ export interface ListenBlock {
 
 const LISTEN_LABEL: Record<ListenLink['kind'], string> = {
   youtube: 'YouTube', soundcloud: 'SoundCloud', mixcloud: 'Mixcloud',
-  nts: 'NTS', ra: 'Resident Advisor', songkick: 'Songkick',
+  nts: 'NTS', ra: 'Resident Advisor', songkick: 'Songkick', bandsintown: 'Bandsintown',
 };
 
 // A mano y no con toLocaleDateString: el runtime de Workers dice "11 Sept" y
@@ -419,7 +423,7 @@ export async function buildListen(env: EntitiesEnv, slug: string): Promise<Liste
   const tour: ListenLink[] = [];
   const add = (arr: ListenLink[], kind: ListenLink['kind'], value?: string, meta?: string) => {
     if (!value) return;
-    arr.push({ kind, url: externalUrl(kind as any, value), label: LISTEN_LABEL[kind], ...(meta ? { meta } : {}) });
+    arr.push({ kind, value, url: externalUrl(kind as any, value), label: LISTEN_LABEL[kind], ...(meta ? { meta } : {}) });
   };
 
   add(links, 'youtube', ext?.youtube);
@@ -433,6 +437,9 @@ export async function buildListen(env: EntitiesEnv, slug: string): Promise<Liste
     for (const v of extras || []) add(links, field as ListenLink['kind'], v);
   }
 
+  // Bandsintown primero: es el unico cuyas fechas se pueden enseñar aqui dentro
+  // (su widget). RA y Songkick no se pueden incrustar y van como enlace.
+  add(tour, 'bandsintown', ext?.bandsintown);
   add(tour, 'ra', ext?.ra);
   add(tour, 'songkick', ext?.songkick);
 
