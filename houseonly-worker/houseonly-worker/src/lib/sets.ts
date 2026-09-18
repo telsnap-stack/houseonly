@@ -20,6 +20,7 @@
 import { getEntity, type EntitiesEnv } from './entities';
 import { getExternal, externalUrl } from './external';
 import { getMixStat } from './mixcloud';
+import { getEvents, eventsToShow, formatEventDate, formatEventPlace, type LiveEvent } from './events';
 
 export type SetSource = 'youtube' | 'soundcloud' | 'mixcloud';
 
@@ -385,10 +386,16 @@ export interface ListenLink {
   meta?: string;        // "last show 11 Sep 2026", cuando se sabe
 }
 
+export interface ShownEvent extends LiveEvent {
+  when: string;         // "Sat 27 Sep"
+  where: string;        // "Ibiza, Spain"
+}
+
 export interface ListenBlock {
   sets: FeaturedSet[];
-  links: ListenLink[];  // perfiles donde escuchar
-  tour: ListenLink[];   // RA y Songkick, cuando existan
+  links: ListenLink[];   // perfiles donde escuchar
+  tour: ListenLink[];    // RA y Songkick: enlaces, no se pueden incrustar
+  events: ShownEvent[];  // las fechas, ya formateadas: aqui no hay widget
 }
 
 const LISTEN_LABEL: Record<ListenLink['kind'], string> = {
@@ -413,10 +420,11 @@ const fecha = (iso?: string) => {
  * deriva, para que no haya dos formas de escribir el mismo enlace.
  */
 export async function buildListen(env: EntitiesEnv, slug: string): Promise<ListenBlock | null> {
-  const [ext, rec, mix] = await Promise.all([
+  const [ext, rec, mix, ev] = await Promise.all([
     getExternal(env, slug),
     getSets(env, slug),
     getMixStat(env, slug),
+    getEvents(env, slug),
   ]);
 
   const links: ListenLink[] = [];
@@ -437,13 +445,14 @@ export async function buildListen(env: EntitiesEnv, slug: string): Promise<Liste
     for (const v of extras || []) add(links, field as ListenLink['kind'], v);
   }
 
-  // Bandsintown primero: es el unico cuyas fechas se pueden enseñar aqui dentro
-  // (su widget). RA y Songkick no se pueden incrustar y van como enlace.
-  add(tour, 'bandsintown', ext?.bandsintown);
+  // Bandsintown ya no va como enlace: sus fechas se pintan abajo, en `events`.
   add(tour, 'ra', ext?.ra);
   add(tour, 'songkick', ext?.songkick);
 
   const sets = rec.items;
-  if (!sets.length && !links.length && !tour.length) return null;
-  return { sets, links, tour };
+  const events: ShownEvent[] = eventsToShow(ev).map(e => ({
+    ...e, when: formatEventDate(e.date), where: formatEventPlace(e),
+  }));
+  if (!sets.length && !links.length && !tour.length && !events.length) return null;
+  return { sets, links, tour, events };
 }
