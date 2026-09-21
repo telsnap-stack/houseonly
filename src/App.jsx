@@ -11754,6 +11754,7 @@ function EntitiesPanel() {
   const [entsBusy, setEntsBusy] = useState(false);
   const [entQ, setEntQ]       = useState('');
   const [entEdit, setEntEdit] = useState(null);   // {slug, value}
+  const [linkCounts, setLinkCounts] = useState(null);   // {total, artist, label} de la vista Links
 
   // Las entidades se cargan al abrir su vista. El hook va aqui arriba, antes
   // del gate del secreto: detras del return temprano cambiaria el numero de
@@ -12003,7 +12004,7 @@ function EntitiesPanel() {
   );
 
   const kindBtn = (k, label) => {
-    const n = viewRows.filter(r => r.kind === k).length;
+    const n = view === 'links' ? (linkCounts ? linkCounts[k] : '…') : viewRows.filter(r => r.kind === k).length;
     return (
       <button onClick={()=>setKindTab(k)} style={{background:'none',border:'none',borderBottom:`2px solid ${kindTab===k?S.accent:'transparent'}`,color:kindTab===k?S.text:S.muted,cursor:'pointer',fontSize:10,fontWeight:kindTab===k?700:400,letterSpacing:1,textTransform:'uppercase',padding:'5px 2px',marginRight:18}}>{label} · {n}</button>
     );
@@ -12051,6 +12052,7 @@ function EntitiesPanel() {
         {viewBtn('otras','Other',otras.length)}
         {viewBtn('generos','Genres',gen.length)}
         {viewBtn('ents','Entities',ents ? ents.length : '…')}
+        {viewBtn('links','Links',linkCounts ? linkCounts.total : '…')}
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
         {kindBtn('artist','Artists')}
@@ -12275,6 +12277,7 @@ function EntitiesPanel() {
         </div>
       )}
 
+      {view==='links' && <ExternalLinksView kindTab={kindTab} onCounts={setLinkCounts} />}
       {view==='ents' && (() => {
         const q = entQ.trim().toLowerCase();
         const todas = (ents || []).filter(e => (e.roles || []).includes(kindTab));
@@ -12335,6 +12338,414 @@ function EntitiesPanel() {
           </div>
         );
       })()}
+    </div>
+  );
+}
+
+// ── ENTITIES → LINKS (fase 7, docs/entities.md) ────────────────────
+// A que cuenta de RA, Songkick, SoundCloud… corresponde cada entidad. Los
+// candidatos los deja scripts/entities-external-sweep.mjs; aqui solo se
+// decide. Dos bloques, en este orden:
+//   - Confirmed: el Discogs ID de un disco nuestro lleva a una sola entidad de
+//     MusicBrainz y ningun campo tiene dos valores. Llegan marcadas y se
+//     aprueban en bloque. El worker lo vuelve a comprobar.
+//   - Review: por nombre, varios candidatos o algun conflicto. Fila a fila.
+// Siempre contra el worker de PRODUCCION (REVIEW_WORKER_URL), se abra el admin
+// desde donde se abra: las entidades de verdad viven alli desde el 2026-09-11,
+// y lo que se apruebe aqui es lo que lee el cron de sets.
+const LINK_FIELD_LABEL = {
+  mixcloud:'Mixcloud', soundcloud:'SoundCloud', youtube:'YouTube', ra:'RA',
+  songkick:'Songkick', bandsintown:'Bandsintown', nts:'NTS',
+};
+// Seguidores y fechas, legibles de un vistazo: 12.194 y "hace 9 meses" dicen
+// mas que 12194 y una fecha ISO cuando hay que elegir entre dos cuentas.
+const fmtNum = n => (typeof n === 'number' ? n.toLocaleString('en-US') : null);
+const fmtAgo = iso => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const meses = Math.round((Date.now() - d.getTime()) / (30.44 * 864e5));
+  const cuando = meses < 1 ? 'this month' : meses < 24 ? `${meses} months ago` : `${Math.round(meses / 12)} years ago`;
+  return `${d.toISOString().slice(0, 10)} · ${cuando}`;
+};
+
+const LINK_WHY = {
+  'no-discogs':'name match only — no record of ours proves it',
+  'multi-mb':'several MusicBrainz entities',
+  'conflict':'a field has two values',
+};
+
+// El secreto de PRODUCCION, aparte del de la pestaña. En el preview el admin
+// se valida contra el worker de staging, y Links habla con el de produccion:
+// con un solo campo no habia forma de despachar la cola desde ningun sitio.
+// Vive en memoria mientras dure la sesion, como el otro: se pierde al recargar.
+let linksProdSecret = '';
+
+function ExternalLinksView({ kindTab, onCounts }) {
+  const [secret, setSecret]     = useState(linksProdSecret);
+  const [authed, setAuthed]     = useState(!!linksProdSecret);
+  const [rows, setRows]         = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const [busy, setBusy]         = useState(false);
+  const [error, setError]       = useState('');
+  const [msg, setMsg]           = useState('');
+  const [sel, setSel]           = useState({});      // confirmed: slug → bool
+  const [pick, setPick]         = useState({});      // review: slug → mbid
+  const [fields, setFields]     = useState({});      // review: slug → {field: value|''}
+  const [progress, setProgress] = useState(null);
+
+  const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
+  const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
+
+  // Valores por defecto de una fila de revision: el primer candidato, y en cada
+  // campo el valor si es unico. Con dos valores no se elige por nadie.
+  // Por campo, la lista de valores elegidos: el primero es el principal. Con un
+  // solo valor viene elegido; con dos, vacio: eso hay que mirarlo.
+  const defaultsFor = (r, mbid) => {
+    const c = r.candidates.find(x => x.mbid === mbid) || r.candidates[0];
+    const f = {};
+    for (const [k, vals] of Object.entries(c?.links || {})) f[k] = vals.length === 1 ? [vals[0].value] : [];
+    return f;
+  };
+
+  async function load(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
+      if (r.status === 401) {
+        // El de la pestaña es el de staging y aqui no vale: se vuelve a pedir.
+        linksProdSecret = ''; setAuthed(false); onCounts?.(null);
+        setError('Unauthorized — this is the PRODUCTION worker and it wants the production secret.');
+        return;
+      }
+      if (!r.ok) { setError(`Links failed (HTTP ${r.status})`); return; }
+      const d = await r.json();
+      const list = d.records || [];
+      setRows(list);
+      const s0 = {}, p0 = {}, f0 = {};
+      for (const row of list) {
+        if (row.bucket === 'confirmed') s0[row.slug] = true;
+        else { p0[row.slug] = row.candidates[0]?.mbid; f0[row.slug] = defaultsFor(row, p0[row.slug]); }
+      }
+      setSel(s0); setPick(p0); setFields(f0);
+      linksProdSecret = useSecret; setAuthed(true);
+    } catch (e) { setError(`Links failed — ${e.message}`); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { if (authed) load(); }, []);   // eslint-disable-line
+
+  const all       = rows || [];
+  const ofKind    = all.filter(r => (r.roles || []).includes(kindTab));
+  const confirmed = ofKind.filter(r => r.bucket === 'confirmed');
+  const review    = ofKind.filter(r => r.bucket !== 'confirmed');
+
+  useEffect(() => {
+    if (!rows) return;
+    onCounts?.({
+      total: rows.length,
+      artist: rows.filter(r => (r.roles || []).includes('artist')).length,
+      label: rows.filter(r => (r.roles || []).includes('label')).length,
+    });
+  }, [rows]);   // eslint-disable-line
+
+  const drop = slugs => setRows(rs => (rs || []).filter(r => !slugs.includes(r.slug)));
+
+  async function approveBulk() {
+    const chosen = confirmed.filter(r => sel[r.slug]).map(r => r.slug);
+    if (!chosen.length) return;
+    setBusy(true); setError(''); setMsg('');
+    setProgress({ done: 0, total: chosen.length });
+    let ok = 0, ko = 0; const failures = [], done = [];
+    for (let i = 0; i < chosen.length; i += 50) {
+      const chunk = chosen.slice(i, i + 50);
+      try {
+        const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-approve-bulk`, {
+          method: 'POST', headers: hdrs, body: JSON.stringify({ slugs: chunk }),
+        });
+        if (!r.ok) { ko += chunk.length; failures.push(`HTTP ${r.status} × ${chunk.length}`); }
+        else {
+          const d = await r.json();
+          for (const res of d.results || []) {
+            if (res.ok) { ok++; done.push(res.slug); } else { ko++; failures.push(`${res.slug}: ${res.error}`); }
+          }
+        }
+      } catch (e) { ko += chunk.length; failures.push(`${e.message} × ${chunk.length}`); }
+      setProgress({ done: Math.min(i + 50, chosen.length), total: chosen.length });
+    }
+    setProgress(null);
+    drop(done);
+    setMsg(`${ok} approved${ko ? ` · ${ko} failed` : ''}.`);
+    if (failures.length) setError(`Failures: ${failures.slice(0, 5).join(' · ')}`);
+    setBusy(false);
+  }
+
+  async function approveRow(r) {
+    const mbid = pick[r.slug];
+    const f = Object.fromEntries(Object.entries(fields[r.slug] || {}).filter(([, v]) => v.length));
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const res = await fetch(`${REVIEW_WORKER_URL}?action=external-review-approve`, {
+        method: 'POST', headers: hdrs, body: JSON.stringify({ slug: r.slug, mbid, fields: f }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) setError(`${r.display}: ${d.error || `HTTP ${res.status}`}`);
+      else {
+        const n = Object.values(f).reduce((a, v) => a + v.length, 0);
+        drop([r.slug]); setMsg(`✓ ${r.display} — ${n} link${n === 1 ? '' : 's'}`);
+      }
+    } catch (e) { setError(`${r.display}: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function rejectRow(r) {
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const res = await fetch(`${REVIEW_WORKER_URL}?action=external-review-reject`, {
+        method: 'POST', headers: hdrs, body: JSON.stringify({ slug: r.slug }),
+      });
+      if (!res.ok) setError(`${r.display}: HTTP ${res.status}`);
+      else { drop([r.slug]); setMsg(`${r.display}: none of these — they won't come back.`); }
+    } catch (e) { setError(`${r.display}: ${e.message}`); }
+    setBusy(false);
+  }
+
+  // Quien es esa cuenta. Sin datos resueltos se dice por que, en vez de dejar
+  // el ID crudo solo.
+  const perfil = v => {
+    const p = v.preview || {};
+    const datos = [fmtNum(p.followers) && `${fmtNum(p.followers)} followers`,
+      fmtNum(p.items) && `${fmtNum(p.items)} uploads`,
+      fmtAgo(p.last) && `last ${fmtAgo(p.last)}`].filter(Boolean);
+    return (
+      <span style={{display:'inline-flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+        {p.avatar && <img src={p.avatar} alt="" width="22" height="22" style={{borderRadius:2,objectFit:'cover',background:S.border}} />}
+        <span style={{color:S.text}}>{p.name || p.title || v.value}</span>
+        {p.name && p.name !== v.value && <span style={{fontFamily:'monospace',fontSize:9}}>{v.value}</span>}
+        {datos.length > 0 && <span>· {datos.join(' · ')}</span>}
+        {p.note && <span style={{color:'#ffd24a'}}>· {p.note}</span>}
+        <a href={v.url} target="_blank" rel="noreferrer"
+          style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+      </span>
+    );
+  };
+
+  const a = (href, text) => (
+    <a href={href} target="_blank" rel="noreferrer" style={{color:S.text,textDecoration:'none',borderBottom:`1px dotted ${S.muted}`}}>{text}</a>
+  );
+
+  const head = r => (
+    <div style={{display:'flex',alignItems:'baseline',gap:8,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,color:S.text}}>{r.display}</span>
+      {r.followed && <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>followed</span>}
+      <span style={{fontSize:10,color:S.muted}}>{(r.roles || []).join(' + ')} · {r.total} record{r.total === 1 ? '' : 's'}</span>
+    </div>
+  );
+
+  const mbLine = c => (
+    <span>
+      {a(`https://musicbrainz.org/${c.mbKind}/${c.mbid}`, c.name)}
+      {c.country ? ` · ${c.country}` : ''}
+      {c.disambiguation ? ` · ${c.disambiguation}` : ''}
+      {c.discogs?.length ? <> · Discogs {c.discogs.map((id, i) => <span key={id}>{i ? ', ' : ''}{a(`https://www.discogs.com/${c.mbKind}/${id}`, id)}</span>)}</> : ''}
+    </span>
+  );
+
+  // De que entidad hablamos, con todas las letras, y por que discos la conocemos.
+  const quienEs = (r, c) => (
+    <>
+      {(c?.disambiguation || c?.wikidataDescription || c?.annotation) && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3,lineHeight:1.5}}>
+          {c.disambiguation && <div>MusicBrainz: {c.disambiguation}</div>}
+          {c.annotation && <div style={{whiteSpace:'pre-wrap'}}>{c.annotation}</div>}
+          {c.wikidataDescription && <div>Wikidata: {c.wikidataDescription}</div>}
+        </div>
+      )}
+      {(r.records || []).length > 0 && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+          ours: {r.records.map((x, i) => <span key={x.handle}>{i ? ' · ' : ''}{a(`https://houseonly.store/products/${x.handle}`, x.title)}</span>)}
+        </div>
+      )}
+    </>
+  );
+
+  const evidence = r => (r.evidence || []).length > 0 && (
+    <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+      proved by {r.evidence.map((e, i) => (
+        <span key={i}>{i ? ' · ' : ''}<span style={{fontFamily:'monospace'}}>{e.sku}</span> → {a(`https://www.discogs.com/release/${e.releaseId}`, `release ${e.releaseId}`)} credits {e.kind} {e.discogsId}</span>
+      ))}
+    </div>
+  );
+
+  if (!authed) {
+    return (
+      <div style={{textAlign:'left',maxWidth:460}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>
+          Links · talking to production worker
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+          This queue lives in <strong>production</strong> (<span style={{fontFamily:'monospace'}}>{prodHost}</span>),
+          because that&apos;s where the real entities are. The rest of this tab talks to the worker of
+          whatever environment you opened the admin from, so paste the <strong>production</strong>{' '}
+          <span style={{fontFamily:'monospace'}}>BOOTSTRAP_AUTH_SECRET</span> here. Held in memory only — gone on refresh.
+        </div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&secret&&load()} placeholder="Production secret"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>load()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  if (loading && !rows) return <div style={{fontSize:10,color:S.muted}}>Loading links…</div>;
+
+  return (
+    // textAlign: el contenedor del admin centra el texto y aqui se leen filas.
+    <div style={{textAlign:'left'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:12}}>
+        <div style={{fontSize:10,color:S.muted,lineHeight:1.5,maxWidth:560}}>
+          <strong style={{color:S.accent}}>Talking to production worker</strong>{' '}
+          (<span style={{fontFamily:'monospace'}}>{prodHost}</span>).{' '}
+          Which RA, Songkick, SoundCloud… account belongs to each entity. Candidates come from
+          MusicBrainz and Wikidata via <span style={{fontFamily:'monospace'}}>entities-external-sweep.mjs</span>. Nothing reaches the
+          shop until it&apos;s approved here; whatever you leave out is remembered as rejected.
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <Btn ch={loading ? '…' : '↻ Reload'} variant="ghost" onClick={() => load()} disabled={busy || loading} />
+          <Btn ch="Change secret" variant="ghost" onClick={() => { linksProdSecret = ''; setAuthed(false); setRows(null); onCounts?.(null); }} disabled={busy || loading} />
+        </div>
+      </div>
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
+      {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
+      {progress && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,marginBottom:4}}>Approving {progress.done} of {progress.total}…</div>
+          <div style={{height:4,background:S.border,borderRadius:2,overflow:'hidden'}}>
+            <div style={{height:'100%',width:`${Math.round(100 * progress.done / (progress.total || 1))}%`,background:S.accent,transition:'width .2s'}} />
+          </div>
+        </div>
+      )}
+
+      {/* ── Confirmed ── */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
+        <div style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
+          Confirmed by Discogs ID · {confirmed.length}
+        </div>
+        {confirmed.length > 0 && (
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={confirmed.every(r => sel[r.slug])}
+                onChange={e => { const n = { ...sel }; confirmed.forEach(r => { n[r.slug] = e.target.checked; }); setSel(n); }} />
+              Select all
+            </label>
+            <Btn ch={busy ? 'Approving…' : `Approve selected (${confirmed.filter(r => sel[r.slug]).length})`}
+              onClick={approveBulk} disabled={busy || !confirmed.some(r => sel[r.slug])} />
+          </div>
+        )}
+      </div>
+      <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+        A record of ours, already matched on Discogs, credits a Discogs ID that MusicBrainz links to
+        exactly one entity — and no field has two values. Pre-selected. Open anything that looks off.
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:420,overflowY:'auto',marginBottom:24}}>
+        {confirmed.length === 0 && <div style={{fontSize:11,color:S.muted,padding:'14px 0',textAlign:'center'}}>Nothing confirmed for {kindTab === 'artist' ? 'artists' : 'labels'}.</div>}
+        {confirmed.map(r => {
+          const c = r.candidates[0];
+          return (
+            <div key={r.slug} style={{display:'flex',alignItems:'flex-start',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+              <input type="checkbox" checked={!!sel[r.slug]} onChange={e => setSel({ ...sel, [r.slug]: e.target.checked })} style={{marginTop:3}} />
+              <div style={{flex:1,minWidth:0}}>
+                {head(r)}
+                <div style={{fontSize:10,color:S.muted,marginTop:3}}>MusicBrainz: {mbLine(c)}</div>
+                {quienEs(r, c)}
+                {evidence(r)}
+                <div style={{fontSize:10,marginTop:5,display:'flex',flexDirection:'column',gap:3}}>
+                  {Object.entries(c.links || {}).map(([f, vals]) => (
+                    <div key={f} style={{color:S.muted,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{minWidth:80}}>{LINK_FIELD_LABEL[f] || f}</span>{perfil(vals[0])}
+                    </div>
+                  ))}
+                  {Object.keys(c.links || {}).length === 0 && <span style={{color:S.muted}}>no links — approves the MusicBrainz ID only</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Review ── */}
+      <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+        Review one by one · {review.length}
+      </div>
+      <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+        Pick the MusicBrainz entity that is really this one, then the links to keep. A field with two
+        values starts empty on purpose. <strong>None of these</strong> rejects every candidate in the row.
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {review.length === 0 && <div style={{fontSize:11,color:S.muted,padding:'14px 0',textAlign:'center'}}>Nothing to review for {kindTab === 'artist' ? 'artists' : 'labels'}.</div>}
+        {review.map(r => {
+          const cur = r.candidates.find(c => c.mbid === pick[r.slug]) || r.candidates[0];
+          const f = fields[r.slug] || {};
+          return (
+            <div key={r.slug} style={{background:S.bg,padding:'10px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
+              {head(r)}
+              <div style={{fontSize:10,color:'#ffd24a',marginTop:3}}>{LINK_WHY[r.bucketWhy] || r.bucketWhy}</div>
+              {quienEs(r, cur)}
+              {evidence(r)}
+              <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:4}}>
+                {r.candidates.map(c => (
+                  <label key={c.mbid} style={{fontSize:10,color:S.muted,display:'flex',gap:6,alignItems:'baseline',cursor:'pointer'}}>
+                    <input type="radio" name={`mb-${r.slug}`} checked={cur?.mbid === c.mbid}
+                      onChange={() => { setPick({ ...pick, [r.slug]: c.mbid }); setFields({ ...fields, [r.slug]: defaultsFor(r, c.mbid) }); }} />
+                    <span>{mbLine(c)} · {c.why === 'discogs-id' ? 'via Discogs ID' : `name match${c.score ? ` (${c.score})` : ''}`}</span>
+                  </label>
+                ))}
+              </div>
+              {cur && Object.keys(cur.links || {}).length > 0 && (
+                <div style={{marginTop:8,paddingLeft:18,display:'flex',flexDirection:'column',gap:8}}>
+                  {Object.entries(cur.links).map(([field, vals]) => {
+                    const sel = f[field] || [];
+                    // Dos cuentas pueden ser las dos buenas —la personal y la del
+                    // sello—: se marcan las que valgan y la primera manda.
+                    const toggle = (value) => {
+                      const next = sel.includes(value) ? sel.filter(x => x !== value) : [...sel, value];
+                      setFields({ ...fields, [r.slug]: { ...f, [field]: next } });
+                    };
+                    const primero = (value) => setFields({ ...fields, [r.slug]: { ...f, [field]: [value, ...sel.filter(x => x !== value)] } });
+                    return (
+                      <div key={field} style={{fontSize:10,color:S.muted,display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-start'}}>
+                        <span style={{minWidth:80,paddingTop:2}}>{LINK_FIELD_LABEL[field] || field}</span>
+                        <div style={{display:'flex',flexDirection:'column',gap:4,flex:1,minWidth:260}}>
+                          {vals.map(v => (
+                            <div key={v.value} style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                              <label style={{display:'flex',gap:4,alignItems:'center',cursor:'pointer'}}>
+                                <input type="checkbox" checked={sel.includes(v.value)} onChange={() => toggle(v.value)} />
+                              </label>
+                              {perfil(v)}
+                              <span style={{fontSize:9}}>({v.from.join('+')})</span>
+                              {/* "main" solo dice algo cuando hay mas de una cuenta elegida. */}
+                              {vals.length > 1 && sel.includes(v.value) && (sel[0] === v.value
+                                ? <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>main</span>
+                                : <button onClick={() => primero(v.value)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,borderRadius:2,cursor:'pointer',fontSize:8,letterSpacing:1,textTransform:'uppercase',padding:'2px 5px'}}>make main</button>)}
+                            </div>
+                          ))}
+                          {sel.length === 0 && <span style={{fontSize:9}}>none — nothing kept for this field</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div style={{display:'flex',gap:6,marginTop:10}}>
+                <Btn ch={busy ? '…' : 'Approve'} onClick={() => approveRow(r)} disabled={busy || !cur} />
+                <Btn ch="None of these" variant="ghost" onClick={() => rejectRow(r)} disabled={busy} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

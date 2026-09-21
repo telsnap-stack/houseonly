@@ -1225,9 +1225,8 @@ MusicBrainz + Wikidata; (2) sub-vista Links en Entities; **parada** para que
 Eduardo despache la cola; (3) cron de sets; (4) bloques "Listen" y "Tour dates"
 en la estantería y la ficha pública.
 
-> **Pendiente de aclarar antes del paso 3.** "NTS solo en el script local" y
-> "cron de sets (Mixcloud + NTS)" chocan: o el cron llama a la API de NTS, o
-> los sets de NTS se refrescan solo al pasar el script. Se pregunta al llegar.
+> **Aclarado el 17-09:** el cron solo refresca Mixcloud; NTS únicamente vía el
+> script local.
 
 ### Esquema (paso 1, implementado)
 
@@ -1317,6 +1316,94 @@ Las cinco entidades de prueba, en seco el 17-09, **las cinco por Discogs ID**:
 
 Pampa, que por nombre era el caso imposible, sale bien **sin mirar el nombre**.
 
+### Barrido completo en seco (17-09) y sub-vista Links (paso 2)
+
+Las **180** entidades, contra prod, sin enviar nada:
+
+| | Filas |
+|---|---|
+| Un candidato por Discogs ID | **110** |
+| Solo por nombre | 50 (42 con uno, 5 con dos, 3 con tres) |
+| Sin candidato | 20 (`Ten Lovers Music`, `WIP Music`, `Bread & Souls`…) |
+
+Tras el `bucket` del worker: **103 `confirmed` · 57 `review`** (7 de las de Discogs
+tienen un campo con dos valores, p. ej. dos canales de YouTube para Bcee).
+
+Los de nombre confirman por qué nunca van en bloque: `Wax` devuelve un grupo
+pop de los 80, un rapero de YouTube y un cantante coreano; `Ur`, dos bandas de
+metal polacas; `Tommy The Cat`, dos artistas distintos.
+
+**Entities → Links** (`ExternalLinksView` en `src/App.jsx`):
+
+- Habla **siempre con el worker de producción** (`REVIEW_WORKER_URL`), se abra
+  el admin desde donde se abra, y pide el secreto de producción (con 401 lo dice).
+- *Confirmed by Discogs ID*: llega marcado; qué disco lo prueba, la entidad de
+  MB con enlace y los enlaces que se aprueban. Lotes de 50.
+- *Review one by one*: radio por entidad de MB y, por campo, un valor o `none`.
+  Con dos valores arranca en `none`. *None of these* descarta la fila.
+- Las pestañas Artists/Labels filtran por `roles`; una entidad con los dos sale
+  en ambas.
+
+Probado el 17-09 con `wrangler dev` local cargado con las 160 filas reales y el
+panel en Chromium headless: aprobar 2 en bloque, aprobar 1 y descartar 1 fila a
+fila dejan la cola en 101/55, sin errores de consola.
+
+### En producción (17-09)
+
+- Worker de prod **`329500c0`** con los endpoints `external-review-*` (antes
+  `2323997b`, que era `origin/staging` exacto: comprobado contra el source map
+  desplegado). Staging: `e6faad81`.
+- `entities-external-sweep.mjs --send --prod`: **160 filas en la cola de prod**.
+
+| Reparto final | Filas |
+|---|---|
+| **En bloque** (`confirmed`) | **103** |
+| **Fila a fila** (`review`) | **57** — 42 solo por nombre, 8 con varias entidades de MB, 7 con un campo con dos valores |
+| **Sin candidato** (no entran en la cola) | **20** |
+
+Por campo, en el primer candidato: SoundCloud 63, RA 33, YouTube 28, Songkick 22,
+**Mixcloud 2**, Bandsintown 1. O sea: el cron de Mixcloud del paso 3
+va a tener muy poco con qué trabajar.
+
+**Bandcamp: fuera** (cambio de alcance, 17-09). Estuvo unas horas como campo
+guardado y no publicado; se quitó del esquema, de la revisión y de los tests.
+`parseLinkUrl` no lo reconoce, así que una entidad no vuelve a la cola por
+Bandcamp aunque MusicBrainz lo traiga.
+
+**Paso 3, corregido el 17-09**: el cron solo refresca **Mixcloud**. NTS
+únicamente por el script local.
+
+### Quién es cada cuenta (17-09)
+
+Un ID crudo no se puede decidir: `UCGuRflg2kG0R-RMdxOWPg4g` o `2437861` no
+dicen nada. El barrido resuelve cada candidato y la fila lleva **nombre,
+avatar, seguidores y última actividad**, más un botón **open** por enlace.
+
+| Fuente | Cómo | Qué se ve |
+|---|---|---|
+| **SoundCloud** | oEmbed + la página pública (su `robots.txt` solo bloquea a los rastreadores de IA y `/search`, `/stream`, `/you`) | nombre, avatar, seguidores, pistas, última actividad |
+| **YouTube** | **Data API v3** con `YOUTUBE_API_KEY`: `channels.list` + último subido (2 unidades por canal; nada de raspar) | nombre, avatar, suscriptores, vídeos, último vídeo |
+| **Mixcloud** | su API pública | nombre, avatar, seguidores, shows, último show |
+| **Songkick / Bandsintown** | se intenta el `<title>`; hoy devuelven **406 y 403** a cualquier petición automática | la fila lo dice: *"bloquea las peticiones automáticas: solo enlace"* |
+| **RA** | **no se consulta**: sus términos (§4.4) prohíben el acceso automatizado | *"no se consulta: los términos de RA lo prohíben"* |
+
+Además, para saber de quién hablamos: la **disambiguation y la anotación de
+MusicBrainz** y la **descripción de Wikidata**, enteras, y **2–3 títulos de
+discos nuestros** que traen la entidad, enlazados a la tienda.
+
+Lo que esto resuelve, con casos reales:
+
+- **Ron Trent** tiene dos SoundCloud y los dos son suyos: `musicandpower`
+  (12.194 seguidores, activo en 2025) y `ron-trent-official` (7.425, parado
+  desde 2016). **Se aprueban los dos**, marcando cuál es el principal: el
+  campo `soundcloud` guarda el principal y el resto va a `secondary`, así que
+  quien lea `soundcloud` sigue leyendo una sola cuenta.
+- **Theo Parrish**: `soundsignature` tiene 1.413 seguidores, **0 pistas** y
+  última actividad en **2010**. Ahora se ve antes de aprobarlo.
+
+Caché de 7 días en disco, y la misma cuenta se resuelve una vez aunque llegue
+por MusicBrainz y por Wikidata.
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
@@ -1328,7 +1415,6 @@ concreta en el paso 4.
 ### Lo que queda fuera, a propósito
 
 - Eventos en la tienda: ni manuales, ni de sello, ni de API. Solo enlaces.
-- API de YouTube y de SoundCloud: URL pegada a mano y oEmbed.
-- NTS desde el worker (ver la nota pendiente arriba).
-- Bandcamp: MB lo trae casi siempre y sería el "Listen" más natural para una
-  tienda de discos, pero no está en el esquema pedido. Se añade si se decide.
+- API de SoundCloud: URL pegada a mano y oEmbed.
+- NTS desde el worker: solo el script local.
+- Bandcamp, en ningún sitio.
