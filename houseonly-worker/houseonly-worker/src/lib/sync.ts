@@ -140,6 +140,10 @@ const ORDER_LOCK_INFLIGHT_TTL_SECONDS = 10 * 60;
 const ORDER_LOCK_INFLIGHT = 'in-flight';
 const ORDER_LOCK_COMMITTED = '1';
 
+// Attempts kept per sales-detected record. A stuck sale retries every 15 min,
+// so cap it: 50 covers ~12 h of retries without letting the value grow forever.
+const ATTEMPT_HISTORY_MAX = 50;
+
 /**
  * Persist one order's audit record. first_detected_at / attempts are carried
  * by the caller so ?action=sync-pending can show how long a sale has been
@@ -151,6 +155,21 @@ async function recordOrderAttempt(
   audit: any,
   result?: PollResult,
 ): Promise<void> {
+  // One line per attempt, never overwritten. The audit itself only keeps the
+  // LAST outcome, so a sale that failed then succeeded (147628-C-30: first
+  // seen 16:31, created 17:02) left no trace of why the first try failed.
+  const oc = audit.order_creation || {};
+  const entry: any = {
+    at: audit.processed_at || new Date().toISOString(),
+    pass: audit.retry_pass || 'scan',
+    ok: Boolean(oc.ok),
+  };
+  if (oc.dry_run) entry.dry_run = true;
+  if (oc.shopify_order_name) entry.shopify_order_name = oc.shopify_order_name;
+  if (!oc.ok) entry.error = String(oc.error || 'unknown').slice(0, 300);
+  audit.history = [...(Array.isArray(audit.history) ? audit.history : []), entry]
+    .slice(-ATTEMPT_HISTORY_MAX);
+
   await env.SYNC_STATE.put(
     `sales-detected:${orderId}`,
     JSON.stringify(audit),
@@ -1013,6 +1032,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       processed_at: nowIso,
       first_detected_at: prev?.first_detected_at || nowIso,
       attempts: (prev?.attempts || 0) + 1,
+      // Carried over so recordOrderAttempt can append; see ATTEMPT_HISTORY_MAX.
+      history: Array.isArray(prev?.history) ? prev.history : [],
       items: [],
       order_creation: null as any,
     };
@@ -1023,6 +1044,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     // the SINGLE inventory decrement — so we must NOT call adjustInventory.
     const resolvedLines: DiscogsOrderLine[] = [];
     let hadUnmapped = false;
+    // Items that HAVE a SKU but no Shopify variant (lookup failed or no match).
+    // Same fiscal rule as unmapped: one such item voids the whole order. Before
+    // this, they were dropped and the rest invoiced — 147628-C-30 (2026-09-20)
+    // became a one-line #1048 for a two-record sale, then the durable lock
+    // stopped anything from ever adding the second line.
+    let hadUnresolved = false;
 
     for (const item of (order.items || [])) {
       const itemAudit: any = {
@@ -1084,12 +1111,14 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
         itemAudit.outcome = 'shopify_lookup_failed';
         itemAudit.error = e?.message || String(e);
         result.shopify_adjustments_failed++;
+        hadUnresolved = true;
         audit.items.push(itemAudit);
         continue;
       }
       if (!variant?.variantId) {
         itemAudit.outcome = 'variant_not_found';
         result.variant_not_found++;
+        hadUnresolved = true;
         audit.items.push(itemAudit);
         continue;
       }
@@ -1149,6 +1178,26 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
           ? `no resolvable line items: ${String(firstErr).slice(0, 300)}`
           : 'no resolvable line items',
       };
+      await recordOrderAttempt(env, orderIdStr, audit, result);
+      continue;
+    }
+
+    // Some items resolved, some did not: never invoice the subset. Same
+    // retry contract as unmapped — no durable lock, so once the variant can be
+    // found (SKU fixed in Shopify, lookup back up) the next poll creates the
+    // whole order.
+    if (hadUnresolved) {
+      const missing = (audit.items || [])
+        .filter((i: any) => i.outcome !== 'resolved')
+        .map((i: any) => `${i.sku} (${i.outcome})`)
+        .join(', ');
+      audit.order_creation = {
+        ok: false,
+        needs_manual: true,
+        will_retry: true,
+        error: `order has item(s) with no Shopify variant: ${missing}; skipped to avoid partial factura`,
+      };
+      result.shopify_adjustments_failed++;
       await recordOrderAttempt(env, orderIdStr, audit, result);
       continue;
     }
