@@ -887,6 +887,7 @@ import {
   handleSetsReviewApprove,
   handleSetsReviewReject,
 } from './lib/sets';
+import { handleMixcloudRefresh, refreshMixcloud } from './lib/mixcloud';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
@@ -1432,6 +1433,9 @@ export default {
     }
     if (action === 'sets-review-reject' && request.method === 'POST') {
       return await handleSetsReviewReject(request, env);
+    }
+    if (action === 'mixcloud-refresh') {
+      return await handleMixcloudRefresh(request, env);
     }
 
     // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.
@@ -3063,6 +3067,19 @@ export default {
       );
       return;
     }
+
+    // Fase 7C: la unica fuente que refresca el cron es Mixcloud, y solo para
+    // entidades con cuenta APROBADA. Va aparte del poll de Discogs: si Mixcloud
+    // falla, las ventas siguen sincronizandose igual.
+    ctx.waitUntil(
+      refreshMixcloud(env).then(
+        (r) => r.checked
+          ? env.ENTITIES.put('meta:mixcloud_last_run', JSON.stringify({ at: new Date(event.scheduledTime).toISOString(), ...r }))
+          : undefined,
+        (err) => env.ENTITIES.put('meta:mixcloud_last_run',
+          JSON.stringify({ at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+      ),
+    );
 
     ctx.waitUntil(
       pollDiscogsForSales(env).then(
