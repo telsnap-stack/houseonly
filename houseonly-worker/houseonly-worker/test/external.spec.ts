@@ -13,6 +13,7 @@ import {
 	handleExternalReviewApproveBulk,
 	handleExternalReviewReject,
 	buildLinks,
+	handleExternalGaps,
 	type ExternalReview,
 	type ExternalCandidate,
 } from "../src/lib/external";
@@ -293,5 +294,32 @@ describe("handlers", () => {
 	it("sin Bearer, 401", async () => {
 		const r = await handleExternalReviewList(new Request("https://w/?action=external-review-list"), env as any);
 		expect(r.status).toBe(401);
+	});
+});
+
+describe("entidades seguidas sin enlaces (fase 7D)", () => {
+	beforeEach(async () => {
+		await wipe();
+		(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
+		await seedEntity("omar-s", "Omar S", ["artist"]);
+		await seedEntity("pampa", "Pampa", ["label"]);
+		await seedEntity("dj-koze", "DJ Koze", ["artist"]);
+		for (const s of ["omar-s", "pampa", "dj-koze"]) await env.ENTITIES.put(`fanout:${s}:123`, "1");
+	});
+
+	it("cuenta solo las seguidas, y dice cuales siguen en la cola", async () => {
+		// Omar S tiene RA aprobado; Pampa solo MBID; DJ Koze nada y en cola.
+		await env.ENTITIES.put("external:omar-s", JSON.stringify({ slug: "omar-s", mbid: "x", ra: "dj/omars", approved: {}, rejected: {}, updatedAt: 1 }));
+		await env.ENTITIES.put("external:pampa", JSON.stringify({ slug: "pampa", mbid: "y", approved: {}, rejected: {}, updatedAt: 1 }));
+		await handleExternalReviewPut(req("external-review-put", { items: [{ ...omarRow(), slug: "dj-koze" }] }), env as any);
+
+		const d: any = await (await handleExternalGaps(req("external-gaps"), env as any)).json();
+		expect(d.followed).toBe(3);
+		expect(d.without).toBe(2);
+		expect(d.entities.map((e: any) => [e.display, e.pending])).toEqual([["DJ Koze", true], ["Pampa", false]]);
+	});
+
+	it("sin Bearer, 401", async () => {
+		expect((await handleExternalGaps(new Request("https://w/?action=external-gaps"), env as any)).status).toBe(401);
 	});
 });

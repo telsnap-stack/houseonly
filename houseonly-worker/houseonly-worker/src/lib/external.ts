@@ -54,9 +54,11 @@ export interface ExternalCandidate {
   disambiguation?: string;
   country?: string;
   score?: number;
-  // 'discogs-id': el Discogs ID que MB tiene enlazado coincide con el de un
-  // disco nuestro ya listado en Discogs. 'name': solo casa el nombre.
-  why: 'discogs-id' | 'name';
+  // Como se ha llegado hasta aqui, de mas a menos fiable:
+  //   'discogs-id' el Discogs ID que MB enlaza es el de un disco nuestro
+  //   'mbid'       la propia fuente devuelve un MBID y es el que ya aprobamos
+  //   'name'       solo casa el nombre — eso siempre se mira a mano
+  why: 'discogs-id' | 'mbid' | 'name';
   discogs: string[];                   // Discogs IDs que MB lista para esta entidad
   wikidata?: string;
   // Para decidir hace falta saber QUIEN es: lo que dice MusicBrainz (su
@@ -214,7 +216,9 @@ export function buildLinks(
 export function computeExternalBucket(row: Pick<ExternalReview, 'candidates'>): Pick<ExternalReview, 'bucket' | 'bucketWhy'> {
   const c = row.candidates;
   if (c.length !== 1) return { bucket: 'review', bucketWhy: c.length > 1 ? 'multi-mb' : 'no-discogs' };
-  if (c[0].why !== 'discogs-id') return { bucket: 'review', bucketWhy: 'no-discogs' };
+  // Un identificador que casa —el Discogs ID de un disco nuestro, o un MBID que
+  // la propia fuente confirma— vale para el bloque. El nombre, nunca.
+  if (c[0].why === 'name') return { bucket: 'review', bucketWhy: 'no-discogs' };
   for (const f of LINK_FIELDS) if ((c[0].links[f] || []).length > 1) return { bucket: 'review', bucketWhy: 'conflict' };
   return { bucket: 'confirmed' };
 }
@@ -363,7 +367,7 @@ export async function handleExternalReviewPut(request: Request, env: EntitiesEnv
     const candidates = it.candidates.map((c: any): ExternalCandidate => ({
       mbid: String(c.mbid || ''), mbKind: c.mbKind === 'label' ? 'label' as const : 'artist' as const,
       name: String(c.name || ''), disambiguation: c.disambiguation || undefined,
-      country: c.country || undefined, score: c.score, why: c.why === 'discogs-id' ? 'discogs-id' as const : 'name' as const,
+      country: c.country || undefined, score: c.score, why: c.why === 'discogs-id' ? 'discogs-id' as const : c.why === 'mbid' ? 'mbid' as const : 'name' as const,
       discogs: Array.isArray(c.discogs) ? c.discogs.map(String) : [],
       wikidata: c.wikidata || undefined,
       annotation: c.annotation || undefined,
@@ -503,4 +507,39 @@ export async function handleExternalGet(request: Request, env: EntitiesEnv): Pro
   const slug = new URL(request.url).searchParams.get('slug') || '';
   if (!slug) return json({ error: 'slug required' }, 400);
   return json({ external: await getExternal(env, slug), review: await getReview(env, slug) });
+}
+
+/**
+ * GET ?action=external-gaps  (Bearer)
+ *
+ * Cuantas entidades SEGUIDAS por algun cliente no tienen ningun enlace
+ * aprobado. Es el unico agujero que se nota de cara al cliente: alguien sigue a
+ * un artista, entra en su ficha y no hay nada que escuchar.
+ */
+export async function handleExternalGaps(request: Request, env: EntitiesEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  const followed = new Set<string>();
+  let cursor: string | undefined;
+  for (let i = 0; i < 20; i++) {
+    const l = await env.ENTITIES.list({ prefix: 'fanout:', limit: 1000, cursor });
+    for (const k of l.keys) { const s = k.name.split(':')[1]; if (s) followed.add(s); }
+    if (l.list_complete) break;
+    cursor = l.cursor;
+  }
+
+  const sin: Array<{ slug: string; display: string; pending: boolean }> = [];
+  for (const slug of followed) {
+    const rec = await getExternal(env, slug);
+    if (rec && LINK_FIELDS.some(f => (rec as any)[f])) continue;
+    const e = await getEntity(env, slug);
+    sin.push({
+      slug,
+      display: e?.display || slug,
+      // Si aun esta en la cola, no es un olvido: es trabajo pendiente.
+      pending: !!(await env.ENTITIES.get(K.review(slug))),
+    });
+  }
+  sin.sort((a, b) => a.display.localeCompare(b.display));
+  return json({ followed: followed.size, without: sin.length, entities: sin });
 }

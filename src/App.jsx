@@ -12402,6 +12402,9 @@ function ExternalLinksView({ kindTab, onCounts }) {
   const [setUrl, setSetUrl]     = useState('');
   const [cands, setCands]       = useState(null);
   const [candSel, setCandSel]   = useState({});
+  // Entidades que alguien sigue y no tienen ni un enlace aprobado: es el unico
+  // agujero que se nota de cara al cliente.
+  const [gaps, setGaps]         = useState(null);
 
   const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
   const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
@@ -12449,12 +12452,14 @@ function ExternalLinksView({ kindTab, onCounts }) {
   async function loadSetsSide(sec) {
     const useSecret = sec ?? secret;
     try {
-      const [ri, rc] = await Promise.all([
+      const [ri, rc, rg] = await Promise.all([
         fetch(`${REVIEW_WORKER_URL}?action=entity-index`),
         fetch(`${REVIEW_WORKER_URL}?action=sets-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
+        fetch(`${REVIEW_WORKER_URL}?action=external-gaps`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
       ]);
       if (ri.ok) setEnts((await ri.json()).entities || []);
       if (rc.ok) setCands((await rc.json()).records || []);
+      if (rg.ok) setGaps(await rg.json());
     } catch { /* la cola de enlaces no depende de esto */ }
   }
 
@@ -12679,6 +12684,22 @@ function ExternalLinksView({ kindTab, onCounts }) {
           <Btn ch="Change secret" variant="ghost" onClick={() => { linksProdSecret = ''; setAuthed(false); setRows(null); onCounts?.(null); }} disabled={busy || loading} />
         </div>
       </div>
+      {gaps && (
+        <div style={{fontSize:10,marginBottom:12,lineHeight:1.5,border:`1px solid ${S.border}`,borderLeft:`2px solid ${gaps.without ? '#ff8800' : S.accent}`,borderRadius:2,padding:'8px 10px'}}>
+          <strong style={{color:gaps.without ? '#ff8800' : S.accent}}>
+            {gaps.without} of {gaps.followed} followed entities have no approved link.
+          </strong>
+          {gaps.without > 0 && (
+            <span style={{color:S.muted}}>
+              {' '}Someone follows them, opens their page and finds nothing to listen to:{' '}
+              {gaps.entities.slice(0, 8).map((e, i) => (
+                <span key={e.slug}>{i ? ' · ' : ''}{e.display}{e.pending ? ' (in the queue)' : ''}</span>
+              ))}
+              {gaps.entities.length > 8 ? ` · and ${gaps.entities.length - 8} more` : ''}
+            </span>
+          )}
+        </div>
+      )}
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
       {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
       {progress && (
@@ -13295,6 +13316,211 @@ function ReleaseCard({ p, width = 150 }) {
  * Una estanteria por entidad. Se desliza con el pulgar: `overflow-x:auto` con
  * scroll-snap y sin barra visible en movil, que es donde se usa esto.
  */
+/**
+ * Lo que se puede escuchar de una entidad (fase 7D, docs/entities.md).
+ *
+ * Orden fijo, el mismo en la estanteria y en la ficha: sets destacados primero
+ * —que son los que ha elegido una persona—, luego los perfiles, y el tour
+ * aparte. **Enlaces, nunca reproductores incrustados**: se abre la fuente, que
+ * es donde el artista cobra y donde estan sus datos.
+ *
+ * El worker devuelve `listen: null` cuando no hay nada aprobado, y entonces
+ * este bloque no existe: un "Listen" vacio es peor que no tenerlo.
+ */
+/**
+ * El reproductor de cada fuente, para sonar DENTRO de la ficha. Se decidio el
+ * 2026-09-18: mandar al cliente a YouTube para escuchar un set es mandarlo
+ * fuera de la tienda, y aqui es donde compra discos.
+ *
+ * Son los reproductores OFICIALES de cada sitio —lo que sus terminos piden— y
+ * no se cargan hasta que alguien pulsa play. YouTube va por youtube-nocookie.
+ * `embeddable: false` (lo marca la busqueda con la Data API) cae a enlace: mas
+ * vale un enlace que un recuadro que dice "video no disponible".
+ */
+function embedSrc(st) {
+  if (st.embeddable === false) return null;
+  if (st.source === 'youtube') {
+    const id = (st.id || '').split(':')[1];
+    return id ? `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&modestbranding=1` : null;
+  }
+  if (st.source === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(st.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (st.source === 'mixcloud') {
+    const feed = st.url.replace(/^https?:\/\/(www\.)?mixcloud\.com/, '');
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(feed)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  return null;
+}
+
+/**
+ * El perfil de una entidad, sonando aqui dentro. Lo mismo que con los sets: si
+ * hay que salir de la tienda para escuchar, se pierde al cliente.
+ *   - SoundCloud y Mixcloud: su widget acepta la URL del perfil y suena lo
+ *     ultimo que han subido.
+ *   - YouTube: no hay embed de canal, pero si de su lista de subidas: el id del
+ *     canal empieza por UC y su lista de subidas es el mismo id con UU.
+ *   - NTS no tiene widget: se queda como enlace.
+ * Comprobado el 2026-09-18 con Pampa, Fokuz y Defected.
+ */
+function profileEmbedSrc(l) {
+  if (l.kind === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(l.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (l.kind === 'mixcloud') {
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(`/${l.value}/`)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  if (l.kind === 'youtube' && /^UC[\w-]{22}$/.test(l.value)) {
+    return `https://www.youtube-nocookie.com/embed/videoseries?list=UU${l.value.slice(2)}&autoplay=1&rel=0`;
+  }
+  return null;
+}
+
+const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
+
+function ListenBlock({ listen, compact }) {
+  const isMobile = useIsMobile(720);
+  // Que set esta sonando. Uno cada vez: dos reproductores a la vez es ruido.
+  const [playing, setPlaying] = useState(null);
+  if (!listen) return null;
+  const { sets = [], links = [], events = [] } = listen;
+  if (!sets.length && !links.length && !events.length) return null;
+
+  const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
+
+  // Un perfil: boton mientras no se toca, reproductor en cuanto se toca. Lo que
+  // no tiene reproductor no llega hasta aqui — el worker no lo manda.
+  const perfil = l => {
+    const src = profileEmbedSrc(l);
+    if (!src) return null;
+    const clave = `perfil:${l.kind}`;
+    if (playing !== clave) {
+      return (
+        <button key={clave} onClick={() => setPlaying(clave)}
+          style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
+            padding:'6px 10px', background:'none', color:S.text, fontFamily:'inherit', fontSize:11, cursor:'pointer', whiteSpace:'nowrap' }}>
+          <span style={{ color:S.accent }}>{LISTEN_ICON[l.kind] || '•'}</span>
+          {l.label}
+          {l.meta && <span style={{ color:S.muted, fontSize:10 }}>· {l.meta}</span>}
+          <span style={{ color:S.accent, fontSize:10 }}>▶</span>
+        </button>
+      );
+    }
+    return (
+      <div key={clave} style={{ width:'100%' }}>
+        <div style={{ position:'relative', width:'100%', ...(l.kind === 'youtube' ? { aspectRatio:'16 / 9' } : { height: l.kind === 'mixcloud' ? 120 : 166 }), background:'#000' }}>
+          <iframe src={src} title={l.label} loading="lazy" allowFullScreen
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+            style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }} />
+        </div>
+        <div style={{ fontSize:10, color:S.muted, marginTop:4 }}>
+          {l.label}{l.meta ? ` · ${l.meta}` : ''}
+        </div>
+      </div>
+    );
+  };
+
+  const ficha = st => (
+    <div style={{ minWidth:0 }}>
+      <div style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
+        {st.title || st.url}
+      </div>
+      {/* Sin enlace a la fuente: el credito lo lleva dentro el propio
+          reproductor (nombre del canal, logo y su enlace), que es lo que piden
+          sus terminos, y asi la pagina no saca a nadie fuera. */}
+      <div style={{ fontSize:10, color:S.muted, marginTop:3 }}>
+        {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
+      </div>
+    </div>
+  );
+
+  return (
+    <section style={{ marginTop: compact ? 12 : 30, textAlign:'left' }}>
+      {/* El rotulo solo si hay algo que escuchar: con solo fechas, "Listen"
+          encabezaba un hueco. */}
+      {(visibles.length > 0 || links.length > 0) && (
+        <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
+      )}
+
+      {visibles.length > 0 && (
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||events.length?14:0 }}>
+          {visibles.map(st => {
+            const src = embedSrc(st);
+            const sonando = playing === st.id && src;
+            return (
+              <div key={st.id} style={{ border:`1px solid ${S.border}`, borderRadius:2, padding:8, minWidth:0 }}>
+                {sonando ? (
+                  <div style={{ position:'relative', width:'100%', ...(st.source === 'youtube'
+                    ? { aspectRatio:'16 / 9' } : { height: st.source === 'mixcloud' ? 120 : 166 }), marginBottom:8, background:'#000' }}>
+                    <iframe
+                      src={src}
+                      title={st.title || st.url}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+                      allowFullScreen
+                      loading="lazy"
+                      style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }}
+                    />
+                  </div>
+                ) : (
+                  // Caratula con boton: el reproductor de terceros no se carga
+                  // hasta que alguien decide escuchar. Sin esto, cada ficha
+                  // arrastra cinco iframes y sus cookies.
+                  <button onClick={() => src && setPlaying(st.id)} disabled={!src}
+                    style={{ position:'relative', display:'block', width:'100%', ...(st.source === 'youtube' ? { aspectRatio:'16 / 9' } : { height: 120 }),
+                      marginBottom:8, padding:0, border:0, borderRadius:2, overflow:'hidden',
+                      background:st.thumbnail?`#000 center/cover no-repeat url(${JSON.stringify(st.thumbnail)})`:S.border,
+                      cursor:src?'pointer':'default' }}
+                    aria-label={src ? `Play ${st.title || 'set'}` : 'Open at the source'}>
+                    {src && (
+                      <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                        <span style={{ width:46, height:46, borderRadius:'50%', background:'rgba(8,8,8,.72)', border:`1px solid ${S.accent}`,
+                          color:S.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, paddingLeft:3 }}>▶</span>
+                      </span>
+                    )}
+                  </button>
+                )}
+                {ficha(st)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {compact && sets.length > visibles.length && (
+        <div style={{ fontSize:10, color:S.muted, marginBottom:10 }}>+{sets.length - visibles.length} more on their page</div>
+      )}
+
+      {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-start' }}>{links.map(perfil)}</div>}
+
+      {events.length > 0 && (
+        <div style={{ marginTop:16 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
+
+          {/* La lista es NUESTRA: sin widgets y sin sacar al cliente de aqui.
+              Las fechas llegan ya formateadas del worker. */}
+          {events.length > 0 && (
+            <div style={{ border:`1px solid ${S.border}`, borderRadius:2 }}>
+              {events.map((e, i) => (
+                <div key={e.id} style={{ display:'flex', gap:12, alignItems:'baseline', padding:isMobile?'9px 10px':'10px 12px',
+                  borderTop:i?`1px solid ${S.border}`:'none', flexWrap:'wrap' }}>
+                  <span style={{ fontSize:11, color:S.accent, letterSpacing:1, textTransform:'uppercase', whiteSpace:'nowrap', minWidth:isMobile?0:92 }}>
+                    {e.when}
+                  </span>
+                  <span style={{ flex:1, minWidth:0 }}>
+                    <span style={{ display:'block', fontSize:12, color:S.text }}>{e.where}</span>
+                    {e.venue && <span style={{ display:'block', fontSize:10, color:S.muted, marginTop:2 }}>{e.venue}{e.festival ? ' · festival' : ''}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+        </div>
+      )}
+    </section>
+  );
+}
+
 function EntityShelf({ shelf, onNavigate }) {
   const isMobile = useIsMobile(720);
   const w = isMobile ? 136 : 156;
@@ -13315,6 +13541,7 @@ function EntityShelf({ shelf, onNavigate }) {
       <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:12, scrollSnapType:'x mandatory', WebkitOverflowScrolling:'touch' }}>
         {shelf.items.map(p => <ReleaseCard key={p.handle} p={p} width={w} />)}
       </div>
+      <ListenBlock listen={shelf.listen} compact />
     </section>
   );
 }
@@ -13667,6 +13894,8 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigat
       {!data.products?.length && (
         <div style={{ color:S.muted, fontSize:13, marginTop:28 }}>Nothing in stock right now.</div>
       )}
+
+      <ListenBlock listen={data.listen} />
     </div>
   );
 }

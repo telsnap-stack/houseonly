@@ -876,6 +876,7 @@ import {
   handleExternalReviewApproveBulk,
   handleExternalReviewReject,
   handleExternalGet,
+  handleExternalGaps,
 } from './lib/external';
 import {
   handleSetsList,
@@ -888,6 +889,7 @@ import {
   handleSetsReviewReject,
 } from './lib/sets';
 import { handleMixcloudRefresh, refreshMixcloud } from './lib/mixcloud';
+import { handleEventsPut, handleEventsGet } from './lib/events';
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
@@ -1406,6 +1408,9 @@ export default {
     if (action === 'external-get' && request.method === 'GET') {
       return await handleExternalGet(request, env);
     }
+    if (action === 'external-gaps' && request.method === 'GET') {
+      return await handleExternalGaps(request, env);
+    }
 
     // ── SETS DESTACADOS (fase 7B) ───────────────────────────
     // docs/entities.md. Bearer. Nada se enseña sin aprobar: los candidatos de
@@ -1436,6 +1441,13 @@ export default {
     }
     if (action === 'mixcloud-refresh') {
       return await handleMixcloudRefresh(request, env);
+    }
+    // Fase 7E: las fechas las trae el script y las pinta la tienda. Sin widget.
+    if (action === 'events-put' && request.method === 'POST') {
+      return await handleEventsPut(request, env);
+    }
+    if (action === 'events-get' && request.method === 'GET') {
+      return await handleEventsGet(request, env);
     }
 
     // Los importers mandan aqui el genero que no resuelve. Nunca acaba en un tag.

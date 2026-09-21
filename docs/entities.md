@@ -1489,6 +1489,132 @@ Primera pasada real en producción, 18-09: Defected Records (220.275 seguidores,
 897 shows, último el 11-09) y Mark de Clive-Lowe (6.842, 10 shows, último de
 octubre de 2024 — un dato que por sí solo ya dice cuánto vale ese enlace).
 
+## Fase 7D: el bloque "Listen", y el hueco que deja ver
+
+En la estantería del portal y en la ficha pública, **el mismo orden**:
+
+1. **Sets destacados** — miniatura, título, fuente, quién lo subió y el año.
+2. **Canal de YouTube · SoundCloud · Mixcloud · NTS**, como enlaces de perfil.
+   El de Mixcloud lleva *"last show 11 Sep 2026"* cuando el cron lo sabe.
+3. **Tour dates**, aparte: RA y Songkick, cuando existen.
+
+**Los sets suenan aquí** (cambio del 2026-09-18): mandar al cliente a YouTube
+para escuchar un set es sacarlo de la tienda, y la tienda es donde compra
+discos. Reproductores **oficiales** de cada fuente —que es lo que piden sus
+términos— y con **carátula primero**: el iframe no se carga hasta que alguien
+pulsa play, así que una ficha con cinco sets no arrastra cinco reproductores ni
+sus cookies. YouTube va por `youtube-nocookie.com`. Suena **uno cada vez**.
+Debajo de cada set queda un `open ↗` pequeño: es el crédito a la fuente que
+piden SoundCloud y YouTube, y la salida para quien lo prefiera allí.
+
+**Los perfiles también suenan aquí** (18-09): el widget de SoundCloud y el de
+Mixcloud aceptan la URL del perfil y tocan lo último subido; YouTube no tiene
+embed de canal, pero sí de su **lista de subidas** (`UC…` → `UU…`). NTS no tiene
+widget y se queda como enlace. Mismo trato: botón primero, reproductor al pulsar.
+
+**Las fechas, como lista nuestra. Sin widget** (decisión de Eduardo, 18-09, que
+sustituye al widget que hubo unas horas). `entities-events-fetch.mjs` trae de
+Bandsintown lo mínimo que se enseña —fecha, ciudad, país, sala— y lo deja en
+`events:{slug}`; la tienda lo pinta con su propio aspecto y el cliente no sale
+de aquí. La URL de entradas se guarda ya, para la fase siguiente.
+
+Detalles que no son adorno:
+
+- La fecha de Bandsintown es **hora local de la sala y sin zona**
+  (`2026-09-27T23:00:00`). Se trata como fecha de calendario y no se convierte:
+  al hacerlo, el bolo de Ibiza de las 23:00 se movía al día siguiente.
+- El **día del concierto cuenta entero**: a las diez de la mañana todavía se
+  anuncia el bolo de esa noche.
+- Una lista que lleve **más de 14 días sin refrescarse no se enseña**: una fecha
+  caducada hace más daño que no tener fechas.
+- Ocho como mucho por ficha.
+
+**Fuera los enlaces salientes** (decisión de Eduardo, 18-09). La tienda es donde
+se compran discos, así que el bloque **solo enseña lo que suena aquí dentro**:
+
+| | |
+|---|---|
+| Se pinta | sets, canal de YouTube por id `UC…`, SoundCloud, Mixcloud, la lista de fechas |
+| Se guarda pero **no** se pinta | RA, Songkick, NTS, un YouTube por `@handle` — solo serían un enlace |
+
+RA y Songkick se quedan guardados por si algún día hay acuerdo; NTS no tiene
+reproductor incrustable y el canal por `@handle` no tiene lista de subidas.
+
+El único enlace que queda en la página es el que lleva **dentro** el propio
+reproductor (nombre del canal, logo, "ver en…"). Ese no se puede quitar: es el
+crédito que exigen SoundCloud y YouTube, y va dentro de su iframe.
+
+**Qué artista de Bandsintown es cuál.** `entities-bandsintown-candidates.mjs` lo
+resuelve sin fiarse del nombre: su ficha devuelve el `mbid`, y solo se propone
+cuando ese MBID es el que ya se aprobó. De 40 artistas mirados el 18-09, **21
+coincidieron y 18 eran otro artista con el mismo nombre** (Harmony, Subjects,
+Neroli, The Vanguard Project…). Los 21 están en la cola de Links, en bloque.
+
+> **Esto llama a la API de Bandsintown**, que según sus términos pide
+> consentimiento por escrito. Su propio widget hace las mismas llamadas desde el
+> navegador, pero eso no es permiso. El texto para pedirlo está en
+> `docs/fase7-solicitudes.md` y **sigue sin enviarse**.
+
+Un vídeo que YouTube no deje incrustar se guarda con `embeddable: false` —lo
+comprueba la búsqueda con `videos.list`, 1 unidad por cada 50— y se pinta como
+enlace: más vale eso que un recuadro que diga "vídeo no disponible". De los 43
+sets aprobados el 18-09, **los 43 son incrustables**; 12 tienen restricción por
+país, que el propio reproductor gestiona.
+
+**Si una entidad no tiene nada aprobado, el bloque no existe**
+(`buildListen` devuelve `null`): un "Listen" vacío es peor que no tenerlo.
+
+En la estantería va en versión corta —un set en móvil, dos en escritorio, y un
+*"+N more on their page"*—; en la ficha, todos. Las **segundas cuentas
+aprobadas** (Ron Trent) salen detrás de la principal, que para eso se guardaron.
+
+Medido el 18-09 en el navegador: Theo Parrish sale con sus cuatro sets, su
+SoundCloud y RA + Songkick; DJ Koze con cinco sets; **Mooncraft, que alguien
+sigue y no tiene nada aprobado, no pinta bloque**. En móvil (390 px) no hay
+desbordes horizontales.
+
+### El preview habla con staging, y ahí no había nada
+
+Descubierto el 18-09 en `claude-fase7-listen`: la ficha salía **sin bloque**. No
+era el código. El bundle del preview tiene **dos** workers dentro y no hacen lo
+mismo:
+
+- la **tienda y el portal** usan `VITE_WORKER_URL`, que en el preview es
+  **staging**;
+- la pestaña **Links** usa `REVIEW_WORKER_URL`, que es **producción** a
+  propósito, porque allí se decide.
+
+Como las entidades se aprueban en producción, `staging-ENTITIES` tenía **0
+claves** de `external:`, `sets:` y `mixstat:`. `scripts/entities-copiar-a-staging.mjs`
+(dry-run por defecto) copia esos tres prefijos **de prod a staging** —183 claves
+el 18-09— y con `--limpiar-indice` tira las cachés (`entityindex:`, `feedindex:`,
+`meta:mixcloud_index`) para que se reconstruyan. **No copia** `follow:`,
+`fanout:`, `alerttoken:` ni las colas `extreview:`/`setreview:`: los clientes y
+el trabajo pendiente son de producción.
+
+Esto hay que repetirlo cada vez que se quiera ver en el preview algo aprobado
+después. Cuando el frontend llegue a `main`, deja de hacer falta: allí los dos
+workers son el mismo.
+
+### "Also written as" no repite el propio nombre
+
+Theo Parrish tenía como alias `THEO PARRISH` y `Theo Parrish`: su mismo nombre
+dos veces, y la ficha lo pintaba debajo del título como si fueran otra cosa.
+`otrasGrafias()` deja fuera lo que solo cambia en **mayúsculas o espacios**; la
+puntuación sí cuenta, así que `Omar-S` se queda. Con esto, Theo Parrish y DJ
+Koze ya no enseñan la línea.
+
+### El contador de la pestaña Entities
+
+Arriba de Links, en naranja si no es cero:
+
+> **3 of 9 followed entities have no approved link.** Someone follows them,
+> opens their page and finds nothing to listen to: Mercury · Mooncraft · Play It
+> Again Sam
+
+Dice también cuáles siguen en la cola, porque eso no es un olvido sino trabajo
+pendiente. Sale de `?action=external-gaps`, que cruza `fanout:` con `external:`.
+
 ### País del cliente
 
 `request.cf.country` en el worker (*"same value as … `CF-IPCountry`"*) como
