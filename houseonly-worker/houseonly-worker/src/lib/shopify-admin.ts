@@ -201,8 +201,17 @@ export async function findVariantBySku(
   const result = await shopifyAdminGraphQL(env, query, { q: `sku:"${escapedSku}"` });
   const edges = result?.data?.productVariants?.edges || [];
 
-  // Exact match (Shopify search is loose by default)
-  const exact = edges.find((e: any) => e?.node?.sku === sku);
+  // Exact match (Shopify search is loose by default). Case is the one thing we
+  // forgive: a Discogs catno cached as "satltd008" never matched the Shopify
+  // SKU SATLTD008 and dropped a record from order 147628-C-30 (2026-09-20).
+  // An exact-case hit wins; otherwise accept a case-insensitive match only if
+  // it is the ONLY one, so two SKUs differing just by case resolve to nothing
+  // rather than to the wrong record.
+  const upper = sku.toUpperCase();
+  const caseless = edges.filter((e: any) =>
+    typeof e?.node?.sku === 'string' && e.node.sku.toUpperCase() === upper);
+  const exact = caseless.find((e: any) => e.node.sku === sku)
+    || (caseless.length === 1 ? caseless[0] : null);
   if (!exact) return null;
 
   return {
