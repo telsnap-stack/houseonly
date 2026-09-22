@@ -843,6 +843,7 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 import { shopifyAdminGraphQL, getShopifyAdminToken } from './lib/shopify-admin';
 import {
   handleSyncBootstrap,
+  handleSyncRelink,
   handleSyncStatus,
   handleSyncPending,
   handleRegisterWebhook,
@@ -1346,6 +1347,13 @@ export default {
     // wrangler secrets DISCOGS_TOKEN and BOOTSTRAP_AUTH_SECRET.
     if (action === 'sync-bootstrap' && request.method === 'POST') {
       return await handleSyncBootstrap(request, env);
+    }
+
+    // POST ?action=sync-relink&page=N[&status=][&commit=1]  (Bearer)
+    // Repairs listing ↔ Shopify SKU links so web-shop sales delist on Discogs.
+    // Dry-run unless commit=1. See handleSyncRelink / scripts/relink-discogs.mjs.
+    if (action === 'sync-relink' && request.method === 'POST') {
+      return await handleSyncRelink(request, env);
     }
 
     // ── SYNC STATUS ─────────────────────────────────────────
