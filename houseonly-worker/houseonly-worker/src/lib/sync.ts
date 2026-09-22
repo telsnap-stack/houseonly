@@ -38,10 +38,14 @@ import {
   getPrimaryLocationId,
   adjustInventory,
   createDiscogsOrder,
+  getVariantsStock,
+  searchVariantsBySkus,
+  shopifyAdminGraphQL,
   type DiscogsOrderLine,
   type DiscogsBuyer,
   type ShopifyAdminEnv,
 } from './shopify-admin';
+import { sendSyncAlerts, type SyncAlertSummary } from './sync-alerts';
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
@@ -194,6 +198,61 @@ async function notePollFailure(env: SyncEnv): Promise<void> {
   await env.SYNC_STATE.put('meta:poll_fail_streak', String(streak));
 }
 
+/** Mark an unsynced sale as finished because Discogs no longer calls it firm. */
+function closeAudit(audit: any, discogsStatus: string): void {
+  audit.status = discogsStatus;
+  audit.processed_at = new Date().toISOString();
+  audit.order_creation = {
+    ok: false,
+    will_retry: false,
+    closed: true,
+    error: `Discogs status is now "${discogsStatus}"; no Shopify order will be created`,
+  };
+}
+
+async function closeUnsyncedAudit(env: SyncEnv, orderId: string, discogsStatus: string): Promise<void> {
+  const raw = await env.SYNC_STATE.get(`sales-detected:${orderId}`);
+  if (!raw) return;
+  let audit: any;
+  try { audit = JSON.parse(raw); } catch { return; }
+  if (audit.order_creation?.ok || audit.order_creation?.closed) return;
+  closeAudit(audit, discogsStatus);
+  await recordOrderAttempt(env, orderId, audit);
+}
+
+/**
+ * Oversell guard. A Discogs sale for a record with no Shopify stock means the
+ * copy already went elsewhere — the listing stayed live after a web-shop sale
+ * (147628-C-31, 2026-09-22: BOND12081C shipped with #1040 on 7 Sep, then sold
+ * again on Discogs). Creating the order would invoice a record we cannot ship
+ * and push stock negative, so we stop and tell Eduardo instead.
+ *
+ * Returns null when every line is covered, else the reason. Variants that do
+ * not track inventory are not guarded. A failed stock read throws: the caller
+ * treats it as transient and retries, never as "in stock".
+ */
+async function oversoldReason(
+  env: SyncAdminEnv,
+  lines: DiscogsOrderLine[],
+  items: any[],
+): Promise<string | null> {
+  const stock = await getVariantsStock(env, lines.map((l) => l.variantId));
+  const need = new Map<string, number>();
+  for (const l of lines) need.set(l.variantId, (need.get(l.variantId) || 0) + l.quantity);
+  const short: string[] = [];
+  for (const [variantId, qty] of need) {
+    const have = stock.get(variantId);
+    if (have === null || have === undefined) continue;
+    if (have < qty) {
+      const sku = items.find((i) => i.shopify_variant_id === variantId)?.sku || variantId;
+      short.push(`${sku} (Shopify stock ${have})`);
+    }
+  }
+  return short.length
+    ? `oversold: ${short.join(', ')}; no order created — cancel on Discogs or restock in Shopify`
+    : null;
+}
+
 /**
  * Retry sales we ALREADY know about, before (and independently of) the window
  * scan.
@@ -250,9 +309,32 @@ async function retryParkedSales(
     audit.attempts = (audit.attempts || 0) + 1;
     audit.retry_pass = 'parked';
 
+    // Oversell guard before any Discogs call: a stuck oversold sale must not
+    // spend the Discogs budget every 15 minutes.
+    try {
+      const reason = await oversoldReason(env, resolvedLines, items);
+      if (reason) {
+        audit.order_creation = { ok: false, oversold: true, needs_manual: true, will_retry: true, error: reason };
+        await recordOrderAttempt(env, orderIdStr, audit, result);
+        continue;
+      }
+    } catch (e: any) {
+      audit.order_creation = { ok: false, will_retry: true, error: `stock check failed: ${e?.message || e}` };
+      await recordOrderAttempt(env, orderIdStr, audit, result);
+      continue;
+    }
+
     let buyer: DiscogsBuyer;
     try {
       const full = await getOrder(env.DISCOGS_TOKEN, orderIdStr);
+      // The stored audit may be hours old: the order can have been cancelled
+      // and refunded since (147628-C-31). Only a still-firm order may become
+      // a factura.
+      if (full.status && !FIRM_SALE_STATUSES.has(full.status)) {
+        closeAudit(audit, full.status);
+        await recordOrderAttempt(env, orderIdStr, audit, result);
+        continue;
+      }
       const parsed = parseDiscogsShippingAddress(full.shipping_address);
       buyer = {
         name: parsed.name,
@@ -323,6 +405,9 @@ export interface SyncEnv {
   DISCOGS_TOKEN: string;
   BOOTSTRAP_AUTH_SECRET: string;
   SHOPIFY_ADMIN_CLIENT_SECRET: string;
+  // Stuck-sale alerts (sync-alerts.ts). Optional so a missing key never
+  // breaks the sync itself — the alert is skipped and the poll says why.
+  RESEND_API_KEY?: string;
 }
 
 /** Combined Env type for handlers that need both sync + Shopify admin access. */
@@ -871,6 +956,8 @@ interface PollResult {
   // healthy for four days while two sales sat stuck (2026-09-03 → 09-07).
   // sync-status stores this whole object, so the reason is one URL away.
   failures?: Array<{ order_id: string; attempts: number; error: string }>;
+  // Email to Eduardo for oversold / stuck sales / a failing poll (sync-alerts).
+  alerts?: SyncAlertSummary;
 }
 
 /**
@@ -974,6 +1061,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     result.errors = errors;
     // The poll died before it could see any order.
     await notePollFailure(env);
+    // Alert anyway: a refused order list is exactly when sales pile up unseen.
+    result.alerts = await sendSyncAlerts(env);
     return result;
   }
 
@@ -987,8 +1076,13 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       newestSeen = order.created;
     }
 
-    // Filter to firm-sale statuses
-    if (!FIRM_SALE_STATUSES.has(order.status)) continue;
+    // Filter to firm-sale statuses. An order we were still trying to sync
+    // that is no longer firm (cancelled / refunded) gets its audit closed, so
+    // neither the parked pass nor the stuck-sale alert keeps chasing it.
+    if (!FIRM_SALE_STATUSES.has(order.status)) {
+      await closeUnsyncedAudit(env, String(order.id), order.status);
+      continue;
+    }
     result.firm_sales_found++;
 
     // Idempotency check: have we already processed this order?
@@ -1202,6 +1296,23 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
+    // ── Oversell guard (before getOrder, so a stuck oversell costs no
+    //    Discogs calls). Retries stay on: a restock lets the sale through.
+    try {
+      const reason = await oversoldReason(env, resolvedLines, audit.items);
+      if (reason) {
+        audit.order_creation = { ok: false, oversold: true, needs_manual: true, will_retry: true, error: reason };
+        result.shopify_adjustments_failed++;
+        await recordOrderAttempt(env, orderIdStr, audit, result);
+        continue;
+      }
+    } catch (e: any) {
+      audit.order_creation = { ok: false, will_retry: true, error: `stock check failed: ${e?.message || e}` };
+      result.shopify_adjustments_failed++;
+      await recordOrderAttempt(env, orderIdStr, audit, result);
+      continue;
+    }
+
     // ── Fetch full order for buyer details, parse the shipping address ──
     let buyer: DiscogsBuyer;
     try {
@@ -1294,6 +1405,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     await env.SYNC_STATE.put('meta:last_polled_ts', newestSeen);
     result.new_cursor = newestSeen;
   }
+
+  result.alerts = await sendSyncAlerts(env);
 
   if (errors.length > 0) result.errors = errors;
   return result;
@@ -1905,4 +2018,172 @@ function jsonResponse(data: any, status = 200): Response {
       'Access-Control-Allow-Headers': '*',
     },
   });
+}
+
+// ── RELINK: repair listing ↔ Shopify SKU mappings ───────────────────
+//
+// POST ?action=sync-relink&page=N[&status=For%20Sale|Draft][&commit=1]
+// Auth: Bearer BOOTSTRAP_AUTH_SECRET. Body (optional): {"approve": {"<listing_id>": "<Shopify SKU>"}}
+//
+// Why: the Shopify order webhook only takes a record off Discogs when
+// sku:{exact Shopify SKU} exists. Listings created outside the auto-list flow
+// carry no external_id, so the self-heal cached the raw Discogs catno
+// ("BOND 12081") instead of the Shopify SKU (BOND12081C). The web-shop sale of
+// #1040 never delisted it and it sold again on Discogs (147628-C-31).
+//
+// One Discogs inventory page per call (100 listings) so each run stays small;
+// scripts/relink-discogs.mjs walks the pages. Dry-run unless commit=1.
+//
+// Auto-fixed ONLY when exactly one Shopify SKU equals a listing's
+// external_id / catno / cached SKU exactly, case-insensitively, or with
+// separators removed — the rules the sale path already applies. Anything
+// else (e.g. BOND12081 → BOND12081C) is reported with candidates and written
+// only if Eduardo approves that listing → SKU pair in the body. Existing keys
+// are never deleted, and a SKU already linked to ANOTHER listing is reported,
+// never overwritten.
+
+type RelinkOutcome = 'ok' | 'fix' | 'approved' | 'ambiguous' | 'unresolved' | 'conflict';
+
+const normSku = (s: string) => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Promise<Response> {
+  if (!isAuthorized(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+  if (!env.DISCOGS_TOKEN) return jsonResponse({ error: 'DISCOGS_TOKEN not configured' }, 500);
+
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const status = (url.searchParams.get('status') || 'For Sale') as 'For Sale' | 'Draft';
+  const commit = url.searchParams.get('commit') === '1';
+  let approve: Record<string, string> = {};
+  try {
+    const body: any = await request.json();
+    if (body && typeof body.approve === 'object') approve = body.approve;
+  } catch { /* no body = no approvals */ }
+
+  let inv;
+  try {
+    inv = await getInventory(env.DISCOGS_TOKEN, DISCOGS_USERNAME, page, status);
+  } catch (e: any) {
+    return jsonResponse({ error: `getInventory failed: ${e?.message || e}` }, 502);
+  }
+
+  // Candidates per listing, and one batched Shopify search for all of them.
+  const rows = await Promise.all(inv.listings.map(async (l) => {
+    const cached = (await getListingMapping(env, l.id))?.sku || '';
+    const cands = [...new Set([l.external_id || '', l.release?.catalog_number || '', cached]
+      .map((s) => s.trim()).filter(Boolean))];
+    return { l, cached, cands };
+  }));
+  const terms = new Set<string>();
+  for (const r of rows) for (const c of r.cands) { terms.add(c); terms.add(normSku(c)); }
+  for (const s of Object.values(approve)) terms.add(String(s));
+  let variants: Awaited<ReturnType<typeof searchVariantsBySkus>>;
+  try {
+    variants = await searchVariantsBySkus(env, [...terms]);
+  } catch (e: any) {
+    return jsonResponse({ error: `Shopify search failed: ${e?.message || e}` }, 502);
+  }
+
+  // Unresolved listings get a prefix search for hints (BOND12081 → BOND12081C).
+  const matchFor = (cands: string[]) => {
+    const byId = new Map<string, (typeof variants)[number]>();
+    for (const v of variants) {
+      for (const c of cands) {
+        if (v.sku === c || v.sku.toUpperCase() === c.toUpperCase() || normSku(v.sku) === normSku(c)) byId.set(v.id, v);
+      }
+    }
+    return [...byId.values()];
+  };
+
+  const report: any[] = [];
+  const counts: Record<RelinkOutcome, number> = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0 };
+  const noStock: any[] = [];
+
+  for (const { l, cached, cands } of rows) {
+    const approvedSku = approve[String(l.id)];
+    let target: (typeof variants)[number] | undefined;
+    let outcome: RelinkOutcome;
+    let hints: any[] = [];
+
+    if (approvedSku) {
+      target = variants.find((v) => v.sku === approvedSku);
+      outcome = target ? 'approved' : 'unresolved';
+      if (!target) hints = [{ error: `approved SKU "${approvedSku}" not found in Shopify (exact)` }];
+    } else {
+      const m = matchFor(cands);
+      if (m.length === 1) { target = m[0]; outcome = 'fix'; }
+      else if (m.length > 1) { outcome = 'ambiguous'; hints = m.map((v) => ({ sku: v.sku, stock: v.inventoryQuantity, title: v.title })); }
+      else {
+        outcome = 'unresolved';
+        const prefixes = [...new Set(cands.map(normSku).filter((s) => s.length >= 4))];
+        if (prefixes.length) {
+          try {
+            const q = prefixes.map((p) => `sku:${p}*`).join(' OR ');
+            const r = await shopifyPrefixSearch(env, q);
+            hints = r.filter((v) => prefixes.some((p) => normSku(v.sku).startsWith(p)))
+              .map((v) => ({ sku: v.sku, stock: v.inventoryQuantity, title: v.title }));
+          } catch { /* hints are best effort */ }
+        }
+      }
+    }
+
+    if (target) {
+      const current = await getSkuMapping(env, target.sku);
+      if (current?.listing_id && current.listing_id !== l.id) {
+        outcome = 'conflict';
+        hints = [{ sku: target.sku, already_linked_to: current.listing_id }];
+      } else if (cached === target.sku && current?.listing_id === l.id) {
+        outcome = 'ok';
+      } else if (commit) {
+        const now = new Date().toISOString();
+        await env.SYNC_STATE.put(`listing:${l.id}`, JSON.stringify({ sku: target.sku, status: l.status }));
+        await env.SYNC_STATE.put(`sku:${target.sku}`, JSON.stringify({ listing_id: l.id, status: l.status, synced_at: now }));
+      }
+      if (l.status === 'For Sale' && target.inventoryQuantity !== null && target.inventoryQuantity <= 0) {
+        noStock.push({ listing_id: l.id, sku: target.sku, stock: target.inventoryQuantity, title: target.title });
+      }
+    }
+
+    counts[outcome]++;
+    if (outcome !== 'ok') {
+      report.push({
+        listing_id: l.id,
+        status: l.status,
+        release: l.release?.description,
+        catno: l.release?.catalog_number || null,
+        external_id: l.external_id || null,
+        cached_sku: cached || null,
+        outcome,
+        shopify_sku: target?.sku || null,
+        shopify_stock: target?.inventoryQuantity ?? null,
+        hints: hints.length ? hints : undefined,
+      });
+    }
+  }
+
+  return jsonResponse({
+    page,
+    pages: inv.pagination.pages,
+    items: inv.pagination.items,
+    status,
+    committed: commit,
+    counts,
+    // Live on Discogs while Shopify has none: sell it there and it cannot ship.
+    for_sale_without_stock: noStock,
+    listings: report,
+  });
+}
+
+async function shopifyPrefixSearch(env: SyncAdminEnv, q: string) {
+  const query = `
+    query skus($q: String!) {
+      productVariants(first: 50, query: $q) {
+        nodes { id sku inventoryQuantity product { title } }
+      }
+    }
+  `;
+  const res = await shopifyAdminGraphQL(env, query, { q });
+  return ((res?.data?.productVariants?.nodes || []) as any[])
+    .filter((n) => typeof n?.sku === 'string')
+    .map((n) => ({ sku: n.sku as string, inventoryQuantity: typeof n.inventoryQuantity === 'number' ? n.inventoryQuantity : null, title: n.product?.title || '' }));
 }

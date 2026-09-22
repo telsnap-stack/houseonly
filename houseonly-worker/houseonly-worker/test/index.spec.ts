@@ -14,7 +14,7 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn() };
+	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn(), getVariantsStock: vi.fn() };
 });
 
 
@@ -66,6 +66,9 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
 			variantId: "gid://shopify/ProductVariant/1",
 		} as any);
+		// In stock unless a test says otherwise (oversell guard).
+		vi.mocked(shopifyAdmin.getVariantsStock).mockImplementation(async (_e, ids) =>
+			new Map(ids.map((id) => [id, 5])));
 		vi.mocked(discogs.getOrder).mockResolvedValue({
 			...firmOrder,
 			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
