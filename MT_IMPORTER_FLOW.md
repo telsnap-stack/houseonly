@@ -1,174 +1,143 @@
 # MT (Mother Tongue) import flow
 
-Escrito el 2026-09-28 leyendo el código, no de memoria. Referencias con
-`fichero:línea` sobre el árbol en `claude/genero-garage`.
+Actualizado el 2026-09-28. Referencias con `fichero:línea` sobre la rama
+`claude/genero-garage`.
 
-## De dónde sale el HTML del listener (corregido 2026-09-28)
-
-Los scrapers estaban en `~/Downloads`, no en el repo. Ya están copiados a
-`scripts/mt/`. Lo que encontré **corrige** lo que suponía la primera versión de
-este documento:
-
-- **No existe ningún `mt_scraper_v3.js` completo** en esta máquina. Hay
-  `mt_scraper_v2_with_genres.js` (7 de mayo de 2026) y
-  `mt_scraper_v3_1_patch.js` (5 de julio de 2026), que es un parche puntual
-  para la factura 756, no el scraper entero. La v3 propiamente dicha no
-  aparece ni en `~/Downloads`, ni en Spotlight, ni en el repo.
-- **El scraper NO genera el HTML del listener.** Descarga un **JSON**
-  (`mt_enrichment_AAAA-MM-DD.json`) y su último log dice literalmente «📥 JSON
-  descargado. Súbelo a Claude». El listener HTML se monta después, en una
-  conversación con Claude, cruzando ese JSON con la factura.
-
-La prueba está en los campos. La v2 emitía `page_title`, `headings`, `cover`,
-`description`, `genres`, `tracks`. El `RELEASES` del listener lleva además
-`cat`, `price`, `price_num`, `fmt_norm`, `is_preorder`, `status` y un
-`title`/`artist` ya separados. La v4 cierra parte de ese hueco —ya saca `catno`,
-`artist`, `title`, `label`, `format_hint` y `released` de la propia ficha—, pero
-el precio, la cantidad y la preventa **solo** están en la factura, así que el
-eslabón de montaje sigue haciendo falta. Ejemplo real de
-`~/Downloads/mt_listener_v3.html`:
-
-```json
-{"label": "2000Black - (Worldwide except UK)", "cat": "2053BLACK",
- "artist": "Kaidi Tatham", "title": "Galaxy", "price": "€ 8,24",
- "price_num": 8.24, "format": "Vinyl 12\"", "fmt_norm": "12\"",
- "url": "https://www.mothertonguerecords.com/product/kaidi-tatham-galaxy/",
- "status": "", "is_preorder": false, "tracks": [...]}
-```
-
-O sea, la cadena real tiene **cuatro** eslabones, no tres:
+## La cadena, hoy: un solo eslabón
 
 ```
-1.  scripts/mt_scraper_v4.js   (consola de Chrome, en mothertonguerecords.com)
-          catnos de la factura  →  mt_enrichment_v4_AAAA-MM-DD.json
-                    ↓
-2.  montaje del listener        (fuera del repo, cruzando con la factura:
-          JSON + factura PDF     precio, cantidad, preventa)
-                    ↓
-3.  listener HTML con const RELEASES = [...]
-                    ↓
-4.  MotherTongueImporter (src/App.jsx)  →  CSV de Shopify
+factura PDF  →  tab MT del admin  →  CSV de Shopify
+                      ↓
+              Worker ?action=mt-enrich   (fichas de mothertonguerecords.com)
+              Worker ?action=mirror       (portadas → R2)
+              Worker ?action=mirror-audio (snippets → R2)
 ```
 
-El eslabón 2 es el único sin código en el repo: hoy se hace a mano. El
-scraper **no** genera el listener y no debe intentarlo — sin la factura no
-sabe ni el precio ni cuántas copias entran.
+No hace falta nada más. Se suelta la factura, se pulsa procesar y sale el CSV
+con artista, título, sello, formato, géneros, portada y audio.
 
-### Cómo se ejecuta `scripts/mt_scraper_v4.js` (el vigente)
+Hasta el 2026-09-28 la cadena tenía cuatro eslabones y tres de ellos eran a
+mano: pegar un scraper en la consola de Chrome, montar un «listener» HTML
+cruzando su JSON con la factura, y volcar ese listener en el tab. Queda escrito
+abajo porque explica por qué el código tiene la forma que tiene, y porque el
+listener sigue aceptándose.
 
-IIFE para pegar en la **consola de Chrome**, no un script de Node: usa `fetch`
-same-origin, `DOMParser` y `URL.createObjectURL`.
+### Entradas opcionales
 
-1. Abrir cualquier página de `https://www.mothertonguerecords.com`.
-2. Editar el array `CATNOS` de la cabecera con los catnos de la factura.
-3. DevTools → Console, pegar el fichero entero.
-4. Descarga `mt_enrichment_v4_AAAA-MM-DD.json`; también queda en
-   `window._mtScrapeV4`.
+Las dos siguen funcionando y las dos **sobreescriben**:
 
-Mantiene de la v2 el ritmo de 4 en 4 con 200 ms entre tandas y los campos
-`page_title` / `headings` / `cover` / `description` / `genres` / `tracks` /
-`track_count`, y añade `catno`, `artist`, `title`, `label`, `format_hint`,
-`released`, `resolved_via` y `tracks_via`.
+- **Listener HTML.** Pisa campo a campo lo que trajo la ficha web, pero solo
+  con lo que traiga con valor (`conValor`, `src/App.jsx`): un listener al que le
+  falte el sello no puede borrar el que ya vino de la web.
+- **Carpeta del distribuidor.** Si trae audio para un catno, manda sobre los
+  snippets de la web: entonces son los ficheros que mandó el sello. MT no manda
+  promopacks, así que en la práctica casi nunca se usa.
 
-**Resolución del catno → producto**, en cascada, sin adivinar nunca:
+## Los dos endpoints del Worker
 
-1. Store API de WooCommerce, `/wp-json/wc/store/v1/products?search=CATNO`. Es
-   pública y devuelve el `sku`, que en esta tienda **es** el catalog number, así
-   que el emparejamiento es exacto y no por ranking de texto. Se prefiere SKU
-   idéntico → normalizado → prefijo único; si quedan varios candidatos, el
-   catno se reporta como ambiguo y no se elige.
-2. Si la búsqueda no da con él, se barre el catálogo entero
-   (`?per_page=100&page=N`, 7 peticiones para ~700 referencias) y se empareja el
-   SKU en local. Se barre una sola vez por ejecución y se cachea.
-3. Buscador HTML de WordPress, como último recurso.
+### `?action=mt-enrich&catnos=A,B,C`
 
-**El paso 3 hoy no funciona y conviene saberlo.** Comprobado el 2026-09-28
-contra la tienda en vivo: `/?s=CAT-016&post_type=product` responde 200 con
-«No products were found matching your selection», y da lo mismo buscar por
-catno o por título («Kaidi Tatham Galaxy» → 0 productos). La búsqueda nativa de
-WooCommerce no indexa SKUs, y el buscador que se ve en la web es el plugin
-Advanced Woo Search, cuyo endpoint AJAX devuelve 0 resultados sin nonce. El
-código se queda por si se reactiva, pero en la práctica lo que resuelve es la
-API; si la API cayera, el script deja los catnos en la lista de fallos para
-resolverlos a mano en vez de inventarse un producto.
+GET, Bearer de admin (`BOOTSTRAP_AUTH_SECRET`, el mismo de `mirror` y `upload`
+— no hay token nuevo). Máximo **10 catnos por llamada**; el front trocea de 8 en
+8 con pausa. Implementación en
+`houseonly-worker/houseonly-worker/src/lib/mt-enrich.ts`.
 
-**Extractores** (todos leen marcado estructurado, no heurísticas):
+Existe porque el navegador **no puede** leer mothertonguerecords.com: esa web no
+manda CORS ni en las páginas ni en su Store API. El Worker sí, porque `fetch()`
+en el edge no pasa por CORS — el mismo motivo por el que ya existía `mirror`.
+
+Resolución del catno, sin adivinar nunca:
+
+1. Store API de WooCommerce, `?search=CATNO`. El `sku` de esa tienda **es** el
+   catalog number, así que se empareja por SKU y no por ranking de texto.
+   Preferencia: idéntico → normalizado → prefijo único. Si quedan varios
+   candidatos se reporta como ambiguo y no se elige.
+2. Si la búsqueda no da con él, se barre el catálogo entero (~700 referencias,
+   7 peticiones) una sola vez por invocación y se empareja el SKU en local.
+
+Extractores, todos sobre marcado estructurado:
 
 | Campo | De dónde |
 |---|---|
 | `artist` | `h1.product_title` — en esta tienda el `h1` es el **artista** |
 | `title` | `p.mt-product-subheading` |
 | `label` | `p.mt-product-label` |
-| `format_hint` | `div.mt-product-meta` → fila «Format» |
-| `released` | `div.mt-product-meta` → fila «Released» |
-| `catno_web` | `div.mt-product-meta` → fila «Catalog No.», para cotejar |
+| `format_hint` | fila «Format» de `div.mt-product-meta` |
+| `released` | fila «Released» de `div.mt-product-meta` |
+| `catno_web` | fila «Catalog No.», para cotejar con la factura |
 | `genres` | `a[rel="tag"]` que apunten a `/product-category/` |
 | `cover` / `description` | `og:image` / `og:description` |
 | `tracks` | el array `new Player([{title, file}, …])` que imprime la página |
 
-Las filas de `mt-product-meta` se leen **por etiqueta**, no por posición: si
-añaden un campo, no se rompe.
+**Aquí no hay `DOMParser`.** Los Workers traen HTMLRewriter, que es un parser en
+streaming: no da `textContent` ni deja mirar hacia atrás. Cada campo se acumula
+por eventos y el orden del documento hace de estado. Dos consecuencias que
+costaron encontrar:
 
-### Validación (2026-09-28)
+- HTMLRewriter puede partir un mismo nodo de texto en varios trozos según llegan
+  por el cable, así que se concatena y se cierra al final, nunca en el primero.
+- HTMLRewriter **no decodifica entidades** y `DOMParser` sí. Sin `decodeEntities`
+  el artista de TLM041 entraría en Shopify como `Jose Rico &#038; Ruben Valero`.
 
-Ejecutado de principio a fin contra la tienda en vivo con cinco catnos
-(`TLM041`, `VP014`, `CAT-016`, `GT01`, `MT19024`): **5/5 resueltos, 17 pistas,
-sello 5/5, géneros 5/5, fecha 5/5, 0 fallos**, todos por `api:sku-exacto` y con
-las pistas vía `player-array`. Muestra:
+### `?action=mirror-audio`
 
-```
-TLM041   V.A. (Mike Perras, Takahiro Fuchigami, …) — Frisson EP Part B
-         sello=Ten Lovers Music · formato=Vinyl 12" · salida=26 June 2026
-         generos=[Broken Beat, House / Electronic, What's New] · pistas=4
-CAT-016  The Soul Pops — The Mask EP
-         sello=Cataleya Music · formato=vinyl 12" · salida=22 May 2026
-```
+POST, Bearer de admin. Es `mirror` con `audio/*` y tope de 20 MB en vez de 10:
+los snippets de algunos sellos son la pista entera y pasan de 6 MB. Comparten
+implementación (`handleMirrorGeneric`) para que el allowlist de hosts, el
+saneado de clave y el timeout no puedan divergir entre portadas y audio.
 
-Los extractores se probaron además uno a uno contra el HTML guardado de tres
-productos reales (`kaidi-tatham-galaxy`, TLM041, CAT-016), y los tres caminos de
-resolución contra la API en vivo, incluido el caso ambiguo: buscar
-`SACREDMEDICINE005` devuelve también `SACREDMEDICINE005B`, y la preferencia por
-SKU idéntico escoge el correcto.
+Los bytes del audio **nunca pasan por el navegador**: van de
+mothertonguerecords.com a R2 por el edge.
 
-### Qué hacía falta arreglar de la v2 y la v3.1
+## Validación (2026-09-28, factura 962 completa)
 
-Los dos scrapers anteriores siguen en `scripts/mt/` como referencia. Lo que la
-v4 corrige, comprobado contra el HTML de hoy:
+Con el worker corriendo en local (`wrangler dev`) para no escribir 88 objetos en
+el bucket real, que staging comparte con producción:
 
-- **La lista de 276 URLs incrustada** (v2) obligaba a editarla a mano por
-  factura. Sustituida por catnos + resolución por SKU.
-- **`extractLabel` de la v3.1 estaba mal**: `a[href*="/record-label/"]` coge el
-  *primer* enlace de la página, que hoy es el menú lateral de sellos. En
-  `/product/kaidi-tatham-galaxy/` devolvía «Salsoul Records» en vez de
-  «2000Black». La v4 usa `p.mt-product-label`.
-- **Los nombres de pista de la v2 salían del nombre del fichero.** Su heurística
-  (último `<strong>` en los 800 caracteres anteriores al mp3) no llegaba, porque
-  las URLs viven en un `<script>` lejos del listado. Por eso los listeners
-  viejos dicen «A1. Galaxy feat Lola» donde la web dice «Galaxy».
-- **`.posted_in` y `.tagged_as` ya no existen** en el tema actual; los géneros se
-  salvaban sólo por la tercera pasada de la v2 (`a[rel="tag"]`).
-- **El `h1` es el artista, no el título.** La v2 lo guardaba como `page_title` y
-  el nombre del disco se perdía; ahora salen los dos separados.
+- **16/16** referencias resueltas, todas por `api:sku-exacto`, 0 fallos.
+- **88/88** pistas espejadas, **0 sin nombre**.
+- **16/16** con portada; 15/16 con género.
+- Los tres dobles (`FUTLP011`, `MBH001/002`, `SR004`) a **900 g**; el resto a 500.
+- `MBH001/002` entra bien: su clave en R2 se sanea a `audio/MBH001-002/…` y el
+  nombre de pista ya no pasa por la regex que se rompía con la barra.
 
-### Lo que no copié al repo
+`MAKINEP022` sale **sin género** y es correcto: su única categoría en la web es
+«What's New», que D4 filtra por operativa. Es un hueco de origen, no del
+importer.
 
-En `~/Downloads` hay siete listeners HTML ya generados (`mt_listener_v2`,
-`mt_listener_v3` y duplicados, `mt_invoice_481_listener`,
-`mt_invoice_756_listener_with_genres`, `Mother Tongue · Listening Session`),
-entre 46 KB y 616 KB, unos 2 MB en total. Son **salidas** por factura, no
-herramientas: no los he commiteado. Si quieres conservarlos, el sitio sensato
-es Drive junto al resto de los assets de Mother Tongue, no el repo.
+Antes, contra el HTML guardado de tres productos reales, se comprobó que el
+puerto a HTMLRewriter da el **mismo resultado** que el `DOMParser` de v4: mismas
+88 URLs de audio y descripciones idénticas salvo espacios repetidos, que aquí se
+colapsan.
 
-## El HTML del listener: qué es y qué contrato cumple
+## `scripts/mt_scraper_v4.js` — herramienta de diagnóstico
 
-`parseListenerHTML` (`src/App.jsx:5664`) hace exactamente esto:
+Ya **no hace falta para importar**. Se queda porque sigue siendo la forma más
+rápida de ver qué está publicando MT sin tocar el admin ni el Worker: se pega en
+la consola de Chrome estando en mothertonguerecords.com, se le edita el array
+`CATNOS` de la cabecera y descarga `mt_enrichment_v4_AAAA-MM-DD.json`.
+
+Sirve sobre todo para dos cosas:
+
+- **Comparar** lo que devuelve `mt-enrich` con lo que ve un navegador de verdad,
+  si algún día sospechamos que HTMLRewriter se está dejando algo.
+- **Ver un catno que falla** sin pasar por el importer entero.
+
+Su cascada de resolución y sus extractores son los mismos que se portaron al
+Worker, así que una discrepancia entre los dos es señal de que el tema de la web
+ha cambiado. Los scrapers viejos (`scripts/mt/mt_scraper_v2_with_genres.js` y
+`mt_scraper_v3_1_patch.js`) siguen ahí como referencia histórica; no usarlos.
+
+## El listener HTML: qué es y qué contrato cumple (entrada opcional)
+
+`parseListenerHTML` (`src/App.jsx:5717`) hace exactamente esto:
 
 1. Lee el fichero como texto.
 2. Extrae con regex `const RELEASES = ([...]);` — literalmente
    `/const\s+RELEASES\s*=\s*(\[[\s\S]*?\]);/`.
 3. `JSON.parse` de ese array. Si no aparece el array → «Could not find RELEASES
    array in HTML file»; si no parsea → «RELEASES JSON parse failed».
-4. Indexa por **catno normalizado** (`normCatno`, `src/App.jsx:5510`: mayúsculas
+4. Indexa por **catno normalizado** (`normCatno`, `src/App.jsx:5561`: mayúsculas
    + solo `A-Z0-9`, así `MT-NERO-002` → `MTNERO002`).
 5. Ante catnos duplicados gana el registro con más datos, por un `score`:
    `cover` vale 4, `tracks.length` 2, `description` 1, `genres.length` 1.
@@ -194,32 +163,33 @@ texto— el fichero del listener es en la práctica **un reproductor HTML con el
 catálogo embebido como JSON**, y el importer lo trata como si fuera un `.json`.
 
 El origen de los datos sí se deja ver: las categorías son de **WooCommerce**
-(`src/App.jsx:5926`, D4 filtra «What's New», «Distribution (Wholesale)», «We
+(`src/App.jsx:5979`, D4 filtra «What's New», «Distribution (Wholesale)», «We
 Dig», «International»…) y las portadas siguen patrones de slug de **WordPress**
-(`-sideA-`, `sideA-scaled`, `src/App.jsx:5799`) — coherente con lo que hace el
+(`-sideA-`, `sideA-scaled`, `src/App.jsx:5852`) — coherente con lo que hace el
 scraper, que recorre la tienda WooCommerce de mothertonguerecords.com producto
 a producto.
 
 ## El flujo completo, paso a paso
 
 Todo ocurre en el navegador, en el panel admin, pestaña `mt`
-(`src/App.jsx:12258` → `<MotherTongueImporter />`, definido en
-`src/App.jsx:5492`). Tres entradas, un CSV de salida.
+(`src/App.jsx:12311` → `<MotherTongueImporter />`, definido en
+`src/App.jsx:5543`). Tres entradas, un CSV de salida.
 
 ### 1. Entradas (arrastrar o botón)
 
-La zona de drop (`src/App.jsx:6247`) clasifica por extensión: `.pdf` → factura,
-`.html`/`.htm` → listener, y `zip|jpe?g|png|webp|mp3|wav|flac|aac|ogg|m4a` →
-carpeta de assets. El botón de carpeta usa `webkitdirectory`.
+La zona de drop clasifica por extensión: `.pdf` → factura, `.html`/`.htm` →
+listener, y `zip|jpe?g|png|webp|mp3|wav|flac|aac|ogg|m4a` → carpeta de assets.
+El botón de carpeta usa `webkitdirectory`. **Solo el PDF es obligatorio**; los
+otros dos botones dicen «(opcional)».
 
 ### 2. Factura PDF → `[{catno, qty, dealerPrice}]`
 
-`parseInvoicePDF` (`src/App.jsx:5534`), con pdf.js cargado en caliente
+`parseInvoicePDF` (`src/App.jsx:5587`), con pdf.js cargado en caliente
 (`loadPDFJS`, `src/App.jsx:3112`):
 
 - Reconstruye líneas agrupando los items de texto por Y redondeada a múltiplos
   de 4 px, ordenando por X e insertando espacio cuando el hueco supera 1.0.
-- Descarta cabeceras/pies con `SKIP_PATTERNS` (`src/App.jsx:5566`): datos de
+- Descarta cabeceras/pies con `SKIP_PATTERNS` (`src/App.jsx:5620`): datos de
   Mother Tongue srl, IBAN, IVA, «Decreto legge…», etc.
 - Por cada línea candidata saca el catno con `/^([A-Za-z0-9][A-Za-z0-9._\-]{2,29})/`
   y exige que el último número de la línea sea `0` (el marcador de % IVA) —
@@ -233,23 +203,28 @@ carpeta de assets. El botón de carpeta usa `webkitdirectory`.
     *hermana* a ±20 px de Y, identificándolo por tener 3 decimales (`7.911`).
 - Se queda solo con filas donde `qty` y `dealerPrice` son > 0 y `qty < 100`.
 
-### 3. Listener HTML → `releaseMeta`
+### 3. Fichas web → `fichasMT` (y listener opcional → `releaseMeta`)
 
-Paso 2 de esta lista, arriba: `onHtml` (`src/App.jsx:5965`) llama a
-`parseListenerHTML` y guarda el mapa `catnoNorm → meta`. El fichero viene del
-montaje descrito al principio (scraper → JSON → listener), no del scraper
-directamente.
+Lo normal: `process()` llama a `pedirFichasMT` (`src/App.jsx:5477`), que pide
+`?action=mt-enrich` en tandas de 8 con 400 ms de pausa y guarda el mapa
+`catnoNorm → ficha`. Se piden **antes** del bucle: mezclarlas dentro convertiría
+una petición por tanda en una por disco. Al cargar otra factura se limpian, o
+los discos nuevos saldrían con los metadatos de la anterior y sin avisar.
+
+Si además se suelta un listener, `onHtml` (`src/App.jsx:6022`) llama a
+`parseListenerHTML` y ese mapa **pisa** la ficha web campo a campo — solo en los
+campos que traiga con valor (`conValor`, `src/App.jsx:5504`).
 
 ### 4. Carpeta del distribuidor → índice de assets
 
-`onFolder` (`src/App.jsx:5978`):
+`onFolder` (`src/App.jsx:6035`):
 
 - Si hay `.zip`, `expandZips` (`src/App.jsx:3068`) los abre con JSZip y saca
   solo imágenes y audio. Cada fichero extraído lleva `_relpath` con el nombre
   del zip por delante y `_zipBase` para agruparlo con sus hermanos. Se ignoran
   `__MACOSX/`, `._*` y `.DS_Store`.
-- `buildFolderIndex` (`src/App.jsx:5695`), en un `useEffect` que depende de
-  `folderFiles` e `invoiceItems` (`src/App.jsx:6004`), asigna cada fichero a un
+- `buildFolderIndex` (`src/App.jsx:5748`), en un `useEffect` que depende de
+  `folderFiles` e `invoiceItems` (`src/App.jsx:6061`), asigna cada fichero a un
   catno **por subcadena**, probando los catnos conocidos de más largo a más
   corto. Así `TLM041_promopack.zip` o `01 - CAT-016 - The Soul Pops.mp3`
   resuelven sin renombrar nada.
@@ -306,45 +281,52 @@ pistas entre catnos.
 Esta carpeta lleva solo audio. Las portadas no hacen falta: el importer las
 coge del `cover` del listener por el endpoint `mirror` (pasada 2 de D5).
 
-### 5. `process()` — bucle por artículo de la factura (`src/App.jsx:6009`)
+### 5. `process()` — bucle por artículo de la factura (`src/App.jsx:6066`)
 
-Para cada `{catno, qty, dealerPrice}`, con `meta = releaseMeta[key]` y
-`assets = folderIndex[key]`:
+Primero se piden las fichas web de toda la factura (paso 3). Después, para cada
+`{catno, qty, dealerPrice}`, con `meta = {…ficha, fmt_norm: ficha.format_hint,
+…conValor(listener)}` y `assets = folderIndex[key]`:
 
 1. **Artista**: `V.A.`/`Various…` → nombre del sello, y si pasa de 50 caracteres
    se corta al primer artista antes de `/`, `feat`, `ft.`, `,`.
 2. **Título**: limpia `....`, y si queda vacío o es `/` cae al catno.
 3. **Descripción**: si pasa de 100 caracteres y no acaba en puntuación, añade
-   `…` (el truncado a ~500 del scraper).
-4. **D2**: sin `artist` ni `title` del listener → `Status=draft`,
-   `Published=FALSE`.
+   `…` — `og:description` viene cortado a ~500 sin mirar dónde acaba la frase.
+4. **D2**: sin `artist` ni `title` (ni de la ficha web ni del listener) →
+   `Status=draft`, `Published=FALSE`.
 5. **Precio**: `dealerPrice × (1 + margen/100)`, techo, menos 0.01. Margen por
    defecto 60 %, editable en pantalla.
-6. **Gramos**: de `fmt_norm` (`gramsFromFmt`, `src/App.jsx:5943`): triple 1300,
+6. **Gramos**: de `fmt_norm` (`gramsFromFmt`, `src/App.jsx:5996`): triple 1300,
    doble 900, 7" 180, resto 500. (Ver memoria: los pesos son estimados.)
-7. **Portada — cascada D5** (`src/App.jsx:6064`), cuatro pasadas:
+7. **Portada — cascada D5** (`src/App.jsx:6150`), cuatro pasadas:
    1. funda real de la carpeta → `uploadToR2` a `covers/{catno}.{ext}`;
    2. URL «real» del listener → `?action=mirror` del Worker;
    3. cualquier imagen de la carpeta, aunque sea etiqueta/promo (D3);
    4. URL del listener aunque sea etiqueta.
    La clasificación real/etiqueta/trasera está en `isBack`/`isLabel`/
-   `isRealSleeve` (`src/App.jsx:5778-5801`); `selectCover` (`src/App.jsx:5816`)
+   `isRealSleeve` (`src/App.jsx:5831-5801`); `selectCover` (`src/App.jsx:5869`)
    elige, a igualdad de categoría, la imagen más grande. Las traseras nunca se
    usan.
    El espejo va por el Worker porque mothertonguerecords.com no manda CORS;
    `handleMirror` (`houseonly-worker/houseonly-worker/src/index.ts:1095`) valida
    host contra `MIRROR_ALLOWED_HOSTS` (`:1079`), tope 10 MB, 15 s, y exige
    `Content-Type: image/*`.
-8. **Audio**: `orderAudio` (`src/App.jsx:5844`) deduplica por nombre base
-   prefiriendo mp3 > m4a > wav, y ordena por cara/número (`A1`, `Side B.2`,
-   `01.`, o carpetas `THIS/`/`THAT/`). Cada pista sube a
-   `audio/{catno}/{fichero}`; el nombre visible sale de
-   `trackNameFromFilename` (`src/App.jsx:5889`), que quita prefijos (SKU, `A1`,
-   `Side A.1`, `01.`) y sufijos (`Snippet`, `Clip`, `(60 sec taster)`,
-   `- 2000BLACK`).
+8. **Audio**, con la carpeta mandando si trae algo para ese catno:
+   - **Con carpeta**: `orderAudio` (`src/App.jsx:5897`) deduplica por nombre
+     base prefiriendo mp3 > m4a > wav y ordena por cara/número (`A1`,
+     `Side B.2`, `01.`, o carpetas `THIS/`/`THAT/`). Cada pista sube a
+     `audio/{catno}/{fichero}` y el nombre visible sale de
+     `trackNameFromFilename` (`src/App.jsx:5942`).
+   - **Sin carpeta** (lo normal en MT): las pistas de la ficha web se espejan
+     una a una por `?action=mirror-audio` a
+     `audio/{catno}/{nn}-{fichero}.mp3`. El nombre visible es el del array del
+     reproductor, ya editado a mano por el sello, y **no** pasa por
+     `trackNameFromFilename`: esa función deduce el nombre de un fichero, y por
+     esta vía no hay fichero. De paso desaparece el problema de `MBH001/002`,
+     cuya barra rompía esa regex.
 9. **Tags**: `vinyl`, `source:mt`, `label:{sello limpio}`, los géneros pasados
    por `normalizeGenres` (D4) y luego por `tagsDeGenero`
-   (`src/App.jsx:11097`), y el año actual. **D1: no se emite ningún tag
+   (`src/App.jsx:11150`), y el año actual. **D1: no se emite ningún tag
    operativo `mothertongue`.**
 10. **Fila CSV**: `Body (HTML)` = `buildDescriptionHtml(...)` más, si hay
     pistas, un `<script type="application/json" id="tracks">` con el JSON de
@@ -355,16 +337,16 @@ Para cada `{catno, qty, dealerPrice}`, con `meta = releaseMeta[key]` y
 Al acabar: `autoRecomputeEntities('Mother Tongue')` y `status='review'`, que
 pinta la rejilla de tarjetas con portada, nº de pistas y errores por artículo.
 
-### 6. Descarga del CSV (`src/App.jsx:6202`)
+### 6. Descarga del CSV (`src/App.jsx:6320`)
 
-1. `exigirColaAutenticada()` (`src/App.jsx:11185`) — **sin la pestaña Entities
+1. `exigirColaAutenticada()` (`src/App.jsx:11238`) — **sin la pestaña Entities
    autenticada no hay CSV**, porque los géneros no resueltos se perderían sin
    avisar.
-2. `withEntityColumns` (`src/App.jsx:11538`) resuelve artista y sello a sus
+2. `withEntityColumns` (`src/App.jsx:11591`) resuelve artista y sello a sus
    slugs canónicos y añade las dos columnas de metafield. Si falla, el CSV sale
    igualmente pero con un `alert` diciendo por qué.
 3. `descargarCsvDeImporter(..., 'mothertongue_shopify_import.csv', 'mt')`
-   (`src/App.jsx:11422`) vuelca **primero** la cola de géneros al servidor y
+   (`src/App.jsx:11475`) vuelca **primero** la cola de géneros al servidor y
    solo descarga el fichero si la cola confirma; si no, lanza y no hay CSV.
    Las columnas son las claves de la fila menos las que empiezan por `_`
    (campos internos de la vista previa).
@@ -380,7 +362,6 @@ sigue siendo manual.
 
 ## Resumen en una línea
 
-Factura PDF (qué y a cuánto) × listener HTML (qué es; montado a partir del
-JSON que descarga `scripts/mt_scraper_v4.js`) × carpeta del distribuidor (cómo suena y cómo se ve)
-→ una fila de CSV de Shopify por artículo de la factura, con portadas y audio
-ya subidos a R2.
+La factura PDF dice qué discos entran, cuántos y a cuánto; el Worker va a
+buscar a mothertonguerecords.com qué son y cómo suenan; y el tab MT escupe una
+fila de CSV de Shopify por línea de factura, con portadas y audio ya en R2.
