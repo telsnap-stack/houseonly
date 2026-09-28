@@ -34,13 +34,12 @@
  */
 
 (async () => {
-  // ── EDITAR: los catnos de la factura, uno por linea ──────────────
+  // ── EDITAR: aqui van los catnos de la factura, uno por linea ─────
+  // Se deja un ejemplo suelto a proposito: la lista de una factura concreta no
+  // pinta nada en el repo, y dejarla puesta invita a relanzar la de otro dia
+  // sin darse cuenta.
   const CATNOS = [
-    'TLM041',
-    'VP014',
-    'CAT-016',
-    'GT01',
-    'MT19024',
+    'LEMAN006',
   ];
 
   // ── Config ───────────────────────────────────────────────────────
