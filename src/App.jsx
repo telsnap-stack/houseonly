@@ -5586,7 +5586,7 @@ function MotherTongueImporter() {
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
-  const [margin, setMargin]   = useState(60);
+  const [margin, setMargin]   = useState(75);   // 75 es el estandar de MT (confirmado 2026-09-28)
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const [documento, setDocumento] = useState(null);       // {tipo, numero} del PDF
   const pdfRef    = useRef(null);
@@ -6492,7 +6492,7 @@ function MotherTongueImporter() {
         <div style={{display:'flex',gap:12,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
           <div style={{display:'flex',alignItems:'center',gap:6}}>
             <span style={{fontSize:10,color:S.muted}}>Margin %</span>
-            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||60)}
+            <input type="number" value={margin} onChange={e=>setMargin(parseFloat(e.target.value)||75)}
               style={{width:70,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
           </div>
           <span style={{fontSize:9,color:S.muted}}>
