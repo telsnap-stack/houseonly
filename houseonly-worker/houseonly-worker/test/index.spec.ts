@@ -14,7 +14,7 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 });
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn() };
+	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn(), getVariantsStock: vi.fn() };
 });
 
 
@@ -66,6 +66,9 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
 			variantId: "gid://shopify/ProductVariant/1",
 		} as any);
+		// In stock unless a test says otherwise (oversell guard).
+		vi.mocked(shopifyAdmin.getVariantsStock).mockImplementation(async (_e, ids) =>
+			new Map(ids.map((id) => [id, 5])));
 		vi.mocked(discogs.getOrder).mockResolvedValue({
 			...firmOrder,
 			shipping_address: "Jane Doe\n1 Main St\nMadrid 28001\nSpain",
@@ -485,6 +488,101 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 			const res = await pollDiscogsForSales(env as any);
 			expect(res.parked_retried).toBe(0);
 			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		});
+	});
+
+	// 147628-C-30 (2026-09-20): two records, one had no Shopify variant, and a
+	// one-line order (#1048) was invoiced and durably locked.
+	describe("never invoices a partial order", () => {
+		const SECOND_LISTING = 556;
+		const twoItemOrder = {
+			...firmOrder,
+			items: [
+				{ id: LISTING_ID, release: { description: "Found" } },
+				{ id: SECOND_LISTING, release: { description: "Missing" } },
+			],
+		};
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			await env.SYNC_STATE.put(`listing:${SECOND_LISTING}`,
+				JSON.stringify({ sku: "satltd008", status: "Sold" }));
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([twoItemOrder]) as any);
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1048",
+			} as any);
+		});
+
+		it("skips the whole order when one item has no Shopify variant", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(async (_e, sku) =>
+				sku === "SKU1" ? { variantId: "gid://shopify/ProductVariant/1" } as any : null);
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			expect(res.variant_not_found).toBe(1);
+			// Retryable: short in-flight lock, not the 60-day one.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.will_retry).toBe(true);
+			expect(audit.order_creation.error).toContain("satltd008 (variant_not_found)");
+		});
+
+		it("skips the whole order when one Shopify lookup throws", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(async (_e, sku) => {
+				if (sku === "SKU1") return { variantId: "gid://shopify/ProductVariant/1" } as any;
+				throw new Error("Shopify Admin API 503");
+			});
+			await pollDiscogsForSales(env as any);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		});
+
+		it("the parked pass does not invoice the resolved subset either", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(async (_e, sku) =>
+				sku === "SKU1" ? { variantId: "gid://shopify/ProductVariant/1" } as any : null);
+			await pollDiscogsForSales(env as any);
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+			vi.mocked(discogs.getOrders).mockRejectedValue(new Error("429"));
+			const res = await pollDiscogsForSales(env as any);
+			expect(res.parked_retried).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+		});
+
+		it("creates the FULL order once the variant resolves", async () => {
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(async (_e, sku) =>
+				sku === "SKU1" ? { variantId: "gid://shopify/ProductVariant/1" } as any : null);
+			await pollDiscogsForSales(env as any);
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(async (_e, sku) =>
+				({ variantId: `gid://shopify/ProductVariant/${sku === "SKU1" ? 1 : 2}` }) as any);
+			await pollDiscogsForSales(env as any);
+
+			expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+			expect(vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2]).toHaveLength(2);
+		});
+	});
+
+	describe("attempt history", () => {
+		beforeEach(async () => {
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/9", orderName: "#1048",
+			} as any);
+		});
+
+		it("keeps the failed attempt after a later success", async () => {
+			vi.mocked(discogs.getOrder).mockRejectedValueOnce(new Error("Discogs getOrder failed: 429"));
+			await pollDiscogsForSales(env as any);
+			await env.SYNC_STATE.delete(`lock:order:${ORDER_ID}`);
+			await pollDiscogsForSales(env as any);
+
+			const audit = JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+			expect(audit.order_creation.ok).toBe(true);
+			expect(audit.history).toHaveLength(2);
+			expect(audit.history[0]).toMatchObject({ ok: false, pass: "scan" });
+			expect(audit.history[0].error).toContain("429");
+			expect(audit.history[1]).toMatchObject({ ok: true, shopify_order_name: "#1048" });
 		});
 	});
 

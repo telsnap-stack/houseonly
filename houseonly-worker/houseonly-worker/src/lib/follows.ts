@@ -29,6 +29,8 @@ export interface FollowRecord {
   updatedAt: number;
 }
 
+import { buildListen, type ListenBlock } from './sets';
+
 /** Tope por cliente, como los 500 items de la wishlist. */
 export const MAX_FOLLOWS = 500;
 
@@ -478,8 +480,29 @@ export async function buildFeed(
 
 // ── FICHA PUBLICA DE ENTIDAD ────────────────────────────────────────
 
+/**
+ * "Also written as" solo tiene sentido si enseña OTRA forma de escribirlo. Un
+ * alias que solo cambia en mayusculas o espacios es el mismo nombre —"THEO
+ * PARRISH" bajo "Theo Parrish"— y pintarlo hace dudar de si son dos cosas.
+ * La puntuacion SI cuenta: "Omar-S" es una grafia distinta y se queda.
+ */
+export function otrasGrafias(display: string, aliases: string[] = []): string[] {
+  const clave = (x: string) => x.toLowerCase().replace(/\s+/g, '');
+  const fuera = new Set([clave(display)]);
+  const out: string[] = [];
+  for (const a of aliases) {
+    const k = clave(a || '');
+    if (!k || fuera.has(k)) continue;
+    fuera.add(k);
+    out.push(a);
+  }
+  return out;
+}
+
 export interface EntityPage {
   slug: string;
+  /** Fase 7D: que se puede escuchar de esta entidad. null = no se pinta nada. */
+  listen?: ListenBlock | null;
   display: string;
   roles: string[];
   aliases: string[];
@@ -510,11 +533,12 @@ export async function entityPage(
     slug: e.slug,
     display: e.display,
     roles: e.roles,
-    aliases: e.aliases || [],
+    aliases: otrasGrafias(e.display, e.aliases || []),
     ...(e.parent ? { parent: e.parent } : {}),
     children: [...efectivos.keys()].filter(s => s !== e.slug),
     products: todos.slice(0, limit),
     total: todos.length,
+    listen: await buildListen(env as any, e.slug),
   };
 }
 
@@ -522,6 +546,7 @@ export async function entityPage(
 
 export interface Shelf {
   slug: string;
+  listen?: ListenBlock | null;   // fase 7D, igual que en la ficha
   display: string;
   roles: string[];
   total: number;                 // discos activos de la entidad
@@ -583,6 +608,7 @@ export async function accountHome(
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     shelves.push({
       slug: e.slug, display: e.display, roles: e.roles,
+      listen: await buildListen(env as any, e.slug),
       total: suyos.length,
       owned: suyos.filter(p => owned.has(p.id)).length,
       newest: suyos[0]?.createdAt || '',

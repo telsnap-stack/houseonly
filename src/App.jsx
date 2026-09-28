@@ -352,41 +352,6 @@ async function fetchLiveHandles() {
   return set;
 }
 
-// Catalogo vivo, pero distinguiendo pre-orders del resto. fetchLiveHandles solo
-// dice si un catno existe; aqui hace falta saber SI ADEMAS es un pre-order,
-// porque una fila de factura que casa con un pre-order no es un duplicado a
-// evitar sino una graduacion: hay que dejarla pasar y avisar de que el CSV
-// tiene que subirse con "Overwrite products with matching handles", o Shopify
-// la ignora en silencio.
-// Devuelve rdKey(catno) -> 'forthcoming' | 'live'.
-async function fetchForthcomingKeys() {
-  const out = new Map();
-  let cursor = null;
-  let safety = 25;
-  while (safety-- > 0) {
-    const after = cursor ? `, after: "${cursor}"` : '';
-    const data = await shopifyQuery(`{
-      products(first: 250${after}) {
-        pageInfo { hasNextPage endCursor }
-        edges { node { handle tags variants(first: 1) { edges { node { sku } } } } }
-      }
-    }`);
-    const { edges, pageInfo } = data.products;
-    for (const e of edges) {
-      const estado = (e.node.tags || []).includes('forthcoming') ? 'forthcoming' : 'live';
-      for (const v of [e.node.handle, e.node.variants?.edges?.[0]?.node?.sku]) {
-        const k = rdKey(v);
-        // 'forthcoming' gana: si el mismo catno aparece por handle y por SKU,
-        // lo que importa es que sea un pre-order.
-        if (k && (estado === 'forthcoming' || !out.has(k))) out.set(k, estado);
-      }
-    }
-    if (!pageInfo.hasNextPage) break;
-    cursor = pageInfo.endCursor;
-  }
-  return out;
-}
-
 // Fetch a single product by handle. Used when adding a wishlisted item to cart
 // where the record may not be in our paginated `records` array yet.
 async function fetchShopifyProductByHandle(handle) {
@@ -3193,11 +3158,11 @@ function ZipImporter() {
   // fila en el CSV, asi que ese disco NO se actualiza en Shopify — y hasta
   // ahora el importer no lo decia: procesaba los que podia y callaba el resto.
   const [missingZips, setMissingZips] = useState([]);
-  // Cuales de las filas ya existen como pre-order. Esas van a GRADUAR, que es
-  // lo que se quiere, pero solo si el CSV se sube con "Overwrite products with
-  // matching handles" — si no, Shopify ignora la fila en silencio.
-  const [graduating, setGraduating] = useState([]);
-  const [liveTags, setLiveTags] = useState(null);   // null = sin consultar
+  // Discos de la factura que ya son productos (pre-orders incluidos): fuera del
+  // CSV, se suman con Add stock. Antes los pre-orders viajaban en el CSV para
+  // "graduar" con Overwrite, que FIJA la cantidad y borraba lo pre-vendido; el
+  // tag forthcoming lo quita la graduacion del worker por fecha.
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
   const excelRef = useRef(null);
@@ -3213,8 +3178,13 @@ function ZipImporter() {
     });
   };
 
+  // W&S no pone el numero dentro del Excel (InvRef va vacio): va en el nombre,
+  // "264564.xlsx" o "53725_263599.xlsx".
+  const numeroWs = (excelFile?.name || '').match(/(\d{5,})(?!.*\d{5,})/)?.[1] || '';
+  const documento = { tipo: 'factura', numero: claveDocumento('WS', numeroWs), placeholder: 'WS-…' };
+
   const process = async () => {
-    if (!excelFile || !zipFiles.length) return;
+    if (!excelFile) return;
     setError(''); setStatus('processing'); setResults([]);
     try {
       setProgress({ done:0, total:0, current:'Loading libraries…' });
@@ -3232,27 +3202,22 @@ function ZipImporter() {
       const matchedZips = zipFiles.filter(f => rowMap[catnoFromFilename(f.name)]);
       const total = matchedZips.length;
 
+      // Que discos ya estan en la tienda. Va antes que lo demas: un disco en
+      // tienda sin ZIP no es un hueco, es una reposicion (Add stock).
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
+
       // Lo que la factura pide y no se ha soltado. Se calcula ANTES de procesar
       // para que salga aunque el procesado falle a mitad.
       const conZip = new Set(matchedZips.map(f => rdKey(catnoFromFilename(f.name))));
-      const faltan = Object.values(rowMap)
-        .filter(r => !conZip.has(rdKey(String(r.ArtNo || ''))))
+      const sinZip = Object.values(rowMap).filter(r => String(r.ArtNo || '').trim() && !conZip.has(rdKey(String(r.ArtNo || ''))));
+      const faltan = sinZip
+        .filter(r => !estaEnTienda(vivos, String(r.ArtNo)))
         .map(r => ({ catno: String(r.ArtNo || '').trim(),
-                     titulo: String(r.Titel || r.Title || r.Interpret || '').trim() }))
-        .filter(r => r.catno);
+                     titulo: String(r.Titel || r.Title || r.Interpret || '').trim() }));
       setMissingZips(faltan);
 
-      // Y cuales de los que SI van a viajar ya existen como pre-order. Se
-      // consulta el catalogo vivo con los tags, que es lo que distingue un
-      // pre-order de un producto normal.
-      let vivos = liveTags;
-      if (!vivos) {
-        vivos = await fetchForthcomingKeys().catch(() => new Map());
-        setLiveTags(vivos);
-      }
-      setGraduating(matchedZips
-        .map(f => catnoFromFilename(f.name))
-        .filter(c => vivos.get(rdKey(c)) === 'forthcoming'));
       const processed = [];
       for (let i = 0; i < matchedZips.length; i++) {
         const zipFile = matchedZips[i];
@@ -3361,6 +3326,7 @@ function ZipImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         processed.push({
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _alreadyLive: estaEnTienda(vivos, catno),
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year)].filter(Boolean).join(', '),
@@ -3380,6 +3346,14 @@ function ZipImporter() {
         });
         setProgress({ done:i+1, total, current:'' });
       }
+      // Reposiciones sin promopack: solo cantidad, para Add stock.
+      for (const r of sinZip.filter(r => estaEnTienda(vivos, String(r.ArtNo)))) {
+        processed.push({
+          _catno: String(r.ArtNo).toUpperCase().trim(), _title: String(r.Title || ''), _artist: String(r.Artist || ''),
+          _coverUrl: '', _tracks: [], _error: '', _alreadyLive: true,
+          'Body (HTML)': '', 'Variant Inventory Qty': String(r.Qty || '1'),
+        });
+      }
       setResults(processed);
       autoRecomputeEntities('W&S');
       setSkippedCount(zipFiles.length - matchedZips.length);
@@ -3390,12 +3364,17 @@ function ZipImporter() {
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // La factura ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'ws', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_ws.csv', 'ws');
@@ -3405,6 +3384,7 @@ function ZipImporter() {
   const covered=results.filter(r=>r._coverUrl).length;
   const withAudio=results.filter(r=>r._tracks?.length>0).length;
   const errors=results.filter(r=>r._error).length;
+  const enTienda=results.filter(r=>r._alreadyLive).length;
 
   return (
     <div>
@@ -3421,14 +3401,14 @@ function ZipImporter() {
         </div>
       </div>
       {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>)}</div>}
-      {status==='idle'&&excelFile&&zipFiles.length>0&&(
+      {status==='idle'&&excelFile&&(
         <div style={{marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
             <span style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap'}}>Margin %</span>
             <input type="number" value={margin} onChange={e=>setMargin(Math.max(0,parseFloat(e.target.value)||0))} min="0" max="500" style={{width:70,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:12,fontFamily:'inherit',outline:'none',textAlign:'center'}} />
             <span style={{fontSize:9,color:S.muted}}>→ e.g. €11 × {(1+margin/100).toFixed(2)} = €{(11*(1+margin/100)).toFixed(2)}</span>
           </div>
-          <Btn ch={`🚀 Process ${zipFiles.length} Releases → Upload to R2`} onClick={process} full />
+          <Btn ch={zipFiles.length?`🚀 Process ${zipFiles.length} Releases → Upload to R2`:'🚀 Process (sin ZIPs: solo reposiciones)'} onClick={process} full />
         </div>
       )}
       {status==='processing'&&(
@@ -3452,7 +3432,7 @@ function ZipImporter() {
       {status==='review'&&results.length>0&&(
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
-            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}</span></div>
+            <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} releases processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{errors>0?` · ${errors} errors`:''}{ skippedCount>0?` · ${skippedCount} skipped (no Excel match)`:''}{enTienda>0?` · ${enTienda} ya en tienda`:''}</span></div>
             {/* Lo que la factura pide y no viaja en el CSV. Sin ZIP no hay fila, y
                     sin fila ese disco NO se actualiza en Shopify. Antes se
                     procesaba lo que se podia y el resto se callaba. */}
@@ -3472,23 +3452,10 @@ function ZipImporter() {
                 </div>
               </div>
             )}
-            {graduating.length>0&&(
-              <div style={{marginBottom:12,padding:'10px 14px',background:'#001a0d',border:`1px solid ${S.accent}66`,borderRadius:4}}>
-                <div style={{fontSize:10,color:S.accent,fontWeight:700,marginBottom:4}}>
-                  {graduating.length} vienen de Forthcoming — marca «Overwrite» al subir el CSV
-                </div>
-                <div style={{fontSize:9,color:S.muted,lineHeight:1.6,marginBottom:6}}>
-                  Ya existen como pre-order y esta importación es su llegada: se les quita <code style={{fontFamily:'monospace'}}>forthcoming</code> y entran con el inventario de la factura. Pero Shopify empareja por Handle y, si <b style={{color:S.text}}>no</b> marcas <i>Overwrite products with matching handles</i>, <b style={{color:S.text}}>ignora esas filas en silencio</b> y se quedan en Forthcoming con stock 0.
-                </div>
-                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-                  {graduating.map((c,i2)=>(
-                    <span key={i2} style={{background:S.bg,border:`1px solid ${S.accent}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:S.accent}}>{c}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="ws" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3507,7 +3474,7 @@ function ZipImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -3599,6 +3566,13 @@ async function parseTvInvoicePdf(pdfBlob) {
   // "FOKUZLP 003"), a dot (".1"/".2"), a hyphen suffix ("-2024"), or trailing "_".
   const catRe = /^([A-Z0-9]+(?:\.\d+)?(?:LP)?(?:[\s-][0-9][\w.]*)?[A-Z0-9]*_?)/i;
   const eu = (s) => parseFloat(s.replace(/\./g, '').replace(',', '.')); // "8,89" / "1.234,56"
+  // Numero de factura: la linea "Invoice number:" y, un par de lineas mas abajo
+  // (en medio va la direccion), el numero solo: "202632312". La shelf list y el
+  // presupuesto no llevan esa linea: sin numero, Add stock lo pide a mano.
+  const lineas = text.split('\n');
+  const iNum = lineas.findIndex(l => /^Invoice number:?$/i.test(l.trim()));
+  const numero = iNum >= 0 ? (lineas.slice(iNum + 1, iNum + 5).find(l => /^\d{6,}$/.test(l.trim())) || '').trim() : '';
+  Object.defineProperty(out, '_documento', { value: numero ? { tipo: 'factura', numero: claveDocumento('TV', numero), placeholder: 'TV-…' } : null, enumerable: false });
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     const m = lineRe.exec(line);
@@ -3625,6 +3599,7 @@ function TripleVisionImporter() {
   const [results, setResults]     = useState([]);
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const pdfRef  = useRef(null);
   const metaRef = useRef(null);
   const zipRef  = useRef(null);
@@ -3655,6 +3630,10 @@ function TripleVisionImporter() {
     if (!invoice || !metaRecords) return;
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       setProgress({ done:0, total:0, current:'Loading libraries…' });
       const JSZip = await loadJSZip();
 
@@ -3741,7 +3720,7 @@ function TripleVisionImporter() {
 
         processed.push({
           _catno: key, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
-          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile, _alreadyLive: estaEnTienda(vivos, key),
           'Handle': handle, 'Title': title || key, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -3768,15 +3747,22 @@ function TripleVisionImporter() {
     } catch (e) { setError(e.message); setStatus('idle'); }
   };
 
+  const documento = invoice?._documento || null;   // {tipo, numero} del PDF, si lo trae
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'tv', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row => CSV_KEYS.map(h => `"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'shopify_import_tv.csv', 'tv');
@@ -3833,8 +3819,10 @@ function TripleVisionImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="tv" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3854,7 +3842,7 @@ function TripleVisionImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
         </div>
       )}
     </div>
@@ -4753,18 +4741,7 @@ function RubadubImporter() {
               Comprobando cuáles ya existen en la tienda…
             </div>
           )}
-          {liveRows.length>0&&(()=>{
-            // Discos en tienda: el SKU tal cual esta en Shopify (el worker no adivina).
-            const skuDe = (r) => liveHandles?.skuReal?.get(rdKey(r._catno)) || r._catno;
-            const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
-            return (<>
-              <AddStockPanel source="rd" documento={documento}
-                filas={liveRows.map(r => ({ sku: skuDe(r), delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: titulo(r) })).filter(f => f.delta > 0)} />
-              <CompletarMediaPanel
-                filas={liveRows.map(r => ({ sku: skuDe(r), titulo: titulo(r), imageUrl: r._coverUrl || '', tracks: r._tracks || [],
-                  notasHtml: String(r['Body (HTML)'] || '').replace(/<script[^>]*id="tracks"[^>]*>[\s\S]*?<\/script>/gi, '') }))} />
-            </>);
-          })()}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rd" />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -4855,6 +4832,7 @@ function KudosImporter() {
   const [minRetail, setMinRetail] = useState(9.99);
   const [stdW, setStdW]     = useState(500);
   const [dblW, setDblW]     = useState(900);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const pickRef = useRef(null);
   const jsonRef = useRef(null);
 
@@ -4881,6 +4859,9 @@ function KudosImporter() {
       parsed.push({ sku, upc:(row[ci.upc]||'').trim(), format:ci.format>=0?(row[ci.format]||'').trim():'', title:ci.title>=0?(row[ci.title]||'').trim():'', artist:ci.artist>=0?(row[ci.artist]||'').trim():'', requested:ci.requested>=0?parseInt(row[ci.requested])||0:1, fulfilled:ci.fulfilled>=0?parseInt(row[ci.fulfilled])||0:1, isBlack:/BLACK/i.test(row[ci.sku]||'') });
     }
     setPickingRows(parsed); setPickFile(filename); setStep2Ready(true);
+    // Que discos del picking ya estan en la tienda (reposiciones).
+    setLiveHandles(null);
+    cargarEnTienda().then(setLiveHandles);
   }
 
   function loadEnrichment(text, filename) {
@@ -4906,75 +4887,101 @@ function KudosImporter() {
     return {api:e,fmt};
   }
 
+  // Una fila por disco del picking, con las claves comunes de los importers
+  // (_catno, _title, _artist, _coverUrl, _tracks, 'Variant SKU', 'Variant
+  // Inventory Qty', 'Body (HTML)'), para marcar los que ya estan en tienda. Las
+  // etiquetas NO van aqui: resolver el genero apunta los desconocidos para la
+  // cola, y esto se calcula en cada render; se ponen solo al exportar.
+  const m=margin/100;
+  function filaKudos(r) {
+    const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
+    const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
+    // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
+    // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
+    // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
+    // tratan igual.
+    const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
+    const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
+    const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
+    const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
+    const formatDisplay=fmt?fmt.display:r.format;
+    const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
+    // Floor applies only to single 12" releases. 7" can legitimately retail below the
+    // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
+    const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
+    const flooredRetail = rawRetail > 0
+      ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
+      : 0;
+    const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
+    const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
+    const grams=is2LP?String(dblW):String(stdW);
+    let bodyHtml='';
+    let audioTracksJson = '';
+    if(api){
+      // Build tracklist for the helper: include duration in `d` field
+      const tracksForHelper = api.tracks
+        ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).map(t=>({
+            name: decodeHtml(t.title),
+            d: t.duration || ''
+          }))
+        : [];
+      // Build inline audio tracks JSON (separate from description, for the modal player)
+      if(api.tracks){
+        const audioArr = Object.values(api.tracks)
+          .sort((a,b)=>a.sequence-b.sequence)
+          .filter(t=>t.audio_clip)
+          .map(t=>({ name: decodeHtml(t.title), url: t.audio_clip.replace(/\.ka$/,'.mp3') }));
+        if(audioArr.length){
+          audioTracksJson = '<script type="application/json" id="tracks">'+JSON.stringify(audioArr)+'<\/script>';
+        }
+      }
+      // Year — try common API fields
+      const releaseYear = api.release_date ? new Date(api.release_date).getFullYear()
+                        : api.year ? parseInt(api.year)
+                        : undefined;
+      bodyHtml = buildDescriptionHtml({
+        artist, title, label,
+        year: releaseYear,
+        tracks: tracksForHelper,
+        // Las notas vienen de la misma API con entidades HTML que el resto.
+        sourceNotes: decodeHtml(api.b2c_notes || api.b2b_notes || ''),
+      }) + audioTracksJson;
+    } else {
+      bodyHtml = buildDescriptionHtml({ artist, title, label });
+    }
+    const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
+    const tracksMedia = api&&api.tracks
+      ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).filter(t=>t.audio_clip)
+          .map(t=>({ name: decodeHtml(t.title), d: t.duration || '', url: t.audio_clip.replace(/\.ka$/,'.mp3') }))
+      : [];
+    return {
+      _r: r, _catno: r.sku, _title: title, _artist: artist, _label: label, _genero: [genre,subgenre].filter(Boolean).join(', '),
+      _coverUrl: imgUrl, _tracks: tracksMedia, _handle: handle, _grams: grams, _retail: retailP, _cost: costEUR,
+      _alreadyLive: estaEnTienda(liveHandles, r.sku),
+      'Variant SKU': r.sku, 'Variant Inventory Qty': String(r.fulfilled), 'Body (HTML)': bodyHtml||'<p></p>',
+    };
+  }
+
   async function exportShopify() {
     // Sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
-    const m=margin/100;
+    if (liveHandles===null) { alert('Todavía se está comprobando qué discos ya están en la tienda. Espera un momento y repite.'); return; }
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = filas.filter(x => !x._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const csvRows=[cols];
-    pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0).forEach(r=>{
-      const en=getEnriched(r); const api=en?en.api:null; const fmt=en?en.fmt:null;
-      const artist=api?decodeHtml(api.main_artist):r.artist; const title=api?decodeHtml(api.title):r.title;
-      // La API de Kudos devuelve los valores con entidades HTML. El sello ya se
-      // decodificaba; el genero no, y por eso en el catalogo hay un tag literal
-      // "Soul/R&amp;B" en cuatro discos. Los tres salen de la misma fuente y se
-      // tratan igual.
-      const label=api?decodeHtml(api.label):''; const genre=api?decodeHtml(api.genre):''; const subgenre=api?decodeHtml(api.subgenre):'';
-      const handle=r.sku.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
-      const dealerGBP=fmt?parseFloat(fmt.dealer)||0:0; const dealerEUR=dealerGBP>0?dealerGBP*fx:0;
-      const rawRetail=dealerEUR>0?dealerEUR*(1+m):0;
-      const formatDisplay=fmt?fmt.display:r.format;
-      const is2LP=/2[\s-]?(?:x\s*)?lp|double\s*lp|3[\s-]?lp|2xlp/i.test(title)||/2[\s-]?(?:x\s*)?lp|2xlp/i.test(formatDisplay);
-      // Floor applies only to single 12" releases. 7" can legitimately retail below the
-      // floor; 2LPs have higher dealer prices so the formula already lifts them past it.
-      const isTwelveInch = !is2LP && /(?:^|[^0-9])12\s*[″'"]?|12\s*inch|^lp$/i.test(formatDisplay);
-      const flooredRetail = rawRetail > 0
-        ? (isTwelveInch ? Math.max(rawRetail, minRetail) : rawRetail)
-        : 0;
-      const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
-      const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
-      const grams=is2LP?String(dblW):String(stdW);
-      let bodyHtml='';
-      let audioTracksJson = '';
-      if(api){
-        // Build tracklist for the helper: include duration in `d` field
-        const tracksForHelper = api.tracks
-          ? Object.values(api.tracks).sort((a,b)=>a.sequence-b.sequence).map(t=>({
-              name: decodeHtml(t.title),
-              d: t.duration || ''
-            }))
-          : [];
-        // Build inline audio tracks JSON (separate from description, for the modal player)
-        if(api.tracks){
-          const audioArr = Object.values(api.tracks)
-            .sort((a,b)=>a.sequence-b.sequence)
-            .filter(t=>t.audio_clip)
-            .map(t=>({ name: decodeHtml(t.title), url: t.audio_clip.replace(/\.ka$/,'.mp3') }));
-          if(audioArr.length){
-            audioTracksJson = '<script type="application/json" id="tracks">'+JSON.stringify(audioArr)+'<\/script>';
-          }
-        }
-        // Year — try common API fields
-        const releaseYear = api.release_date ? new Date(api.release_date).getFullYear()
-                          : api.year ? parseInt(api.year)
-                          : undefined;
-        bodyHtml = buildDescriptionHtml({
-          artist, title, label,
-          year: releaseYear,
-          tracks: tracksForHelper,
-          // Las notas vienen de la misma API con entidades HTML que el resto.
-          sourceNotes: decodeHtml(api.b2c_notes || api.b2b_notes || ''),
-        }) + audioTracksJson;
-      } else {
-        bodyHtml = buildDescriptionHtml({ artist, title, label });
-      }
+    kept.forEach(x=>{
+      const r=x._r;
       // El genero y el subgenero de Kudos son dos campos de la misma API: se
       // juntan y se resuelven de una vez, para que "House" + "Deep House" no
       // escriba dos tags que dicen lo mismo.
-      const tags=['vinyl','kudos'];if(label)tags.push('label:'+label);tags.push(...tagsDeGenero([genre,subgenre].filter(Boolean).join(', '), { sku: r.sku, title }).tags);
-      const imgUrl=api?(api.img_url||'').replace(/\.ki$/,'.jpg'):'';
-      csvRows.push([handle,title+' - '+artist,bodyHtml||'<p></p>',artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,grams,'shopify',String(r.fulfilled),'continue','manual',retailP,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',costEUR,'active']);
+      const tags=['vinyl','kudos'];if(x._label)tags.push('label:'+x._label);tags.push(...tagsDeGenero(x._genero, { sku: r.sku, title: x._title }).tags);
+      const imgUrl=x._coverUrl, title=x._title, artist=x._artist;
+      csvRows.push([x._handle,title+' - '+artist,x['Body (HTML)'],artist,'Media > Music & Sound Recordings > Vinyl','',tags.join(', '),'TRUE','Title','Default Title','','','','','','','',r.sku,x._grams,'shopify',String(r.fulfilled),'continue','manual',x._retail,'','TRUE','TRUE',r.upc,imgUrl,imgUrl?'1':'',imgUrl?title+' - '+artist:'','FALSE','','','','g','',x._cost,'active']);
     });
+    // El picking ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'kudos', filas: kept }))) return;
     const ent = await withEntityColumnsArray(cols, csvRows.slice(1));
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const csv=[ent.cols, ...ent.rows].map(row=>row.map(cell=>{const s=String(cell==null?'':cell);return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;}).join(',')).join('\n');
@@ -4983,6 +4990,11 @@ function KudosImporter() {
   }
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
+  const filas = useMemo(() => importable.map(filaKudos), [pickingRows, enrichment, fx, margin, minRetail, stdW, dblW, liveHandles]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const enTienda = filas.filter(x => x._alreadyLive).length;
+  // El numero va en el nombre del fichero: "K235566 Picking Summary.csv".
+  const documento = { tipo: 'factura', etiqueta: 'picking', placeholder: 'KUDOS-K…',
+    numero: claveDocumento('KUDOS', (pickFile || '').match(/\b(K\d{5,})\b/i)?.[1] || '') };
   const excluded    = pickingRows.filter(r=>r.isBlack).length;
   const unfulfilled = pickingRows.filter(r=>!r.isBlack&&r.fulfilled<=0).length;
   const enrichedCount = importable.filter(r=>getEnriched(r)).length;
@@ -5039,7 +5051,9 @@ function KudosImporter() {
             </div>
           ))}
           <div style={{flex:1}} />
-          <Btn ch="⬇ Export Shopify CSV" onClick={exportShopify} disabled={importable.length===0} />
+          {filas.length>0&&enTienda===filas.length
+            ? <span style={{fontSize:9,color:S.muted,maxWidth:300,lineHeight:1.5}}>Sin CSV: los {enTienda} discos ya están en la tienda. Add stock y Completar media (abajo).</span>
+            : <Btn ch={`⬇ Export Shopify CSV (${filas.length-enTienda})`} onClick={exportShopify} disabled={importable.length===0||liveHandles===null} />}
         </div>
       )}
 
@@ -5051,8 +5065,10 @@ function KudosImporter() {
           <span>2000Black: <b style={{color:S.danger}}>{excluded}</b></span>
           <span>Unfulfilled: <b style={{color:'#ff8800'}}>{unfulfilled}</b></span>
           <span>Enriched: <b style={{color:S.accent}}>{enrichedCount}/{importable.length}</b></span>
+          <span>Ya en tienda: <b style={{color:enTienda>0?'#ff8800':S.muted}}>{liveHandles===null?'…':enTienda}</b>{enTienda>0?' (fuera del CSV)':''}</span>
         </div>
       )}
+      {pickFile && <EnTiendaBloque results={filas} live={liveHandles} documento={documento} source="kudos" />}
 
       {/* Table */}
       {pickingRows.length > 0 && (
@@ -5117,6 +5133,7 @@ function DBHImporter() {
   const [results, setResults]   = useState([]);
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const csvRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -5199,6 +5216,10 @@ function DBHImporter() {
     setError(''); setStatus('processing'); setResults([]);
 
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const JSZip = await loadJSZip();
       const total = csvRows.length;
       const processed = [];
@@ -5221,7 +5242,6 @@ function DBHImporter() {
         const ppu     = parseFloat(row['PPU'] || 0);
         const rawPrice = ppu * (1 + margin / 100);
         const price   = (Math.ceil(rawPrice) - 0.01).toFixed(2);
-        const qtyOrdered = parseInt(row['QTY Ordered'] || 1);
         const format  = row['Format'] || '';
         const is2LP   = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
         const grams   = is2LP ? '900' : '500';
@@ -5283,7 +5303,7 @@ function DBHImporter() {
         processed.push({
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _isPresale: isPresale, _zipFound: !!zipFile,
+          _isPresale: isPresale, _zipFound: !!zipFile, _alreadyLive: estaEnTienda(vivos, catno),
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -5298,7 +5318,9 @@ function DBHImporter() {
           'Variant SKU': catno,
           'Variant Grams': grams,
           'Variant Inventory Tracker': 'shopify',
-          'Variant Inventory Qty': String(qtyOrdered),
+          // Lo que llega en ESTE envio. "QTY Ordered" daba de alta, en un envio
+          // parcial, unidades que no habian llegado.
+          'Variant Inventory Qty': String(qtyShipped),
           'Variant Inventory Policy': 'continue',
           'Variant Fulfillment Service': 'manual',
           'Variant Price': price,
@@ -5328,15 +5350,24 @@ function DBHImporter() {
     }
   };
 
+  // El numero del pedido va en el nombre: "DBH-Music_Order_89005-2026-09-17.csv".
+  const documento = { tipo: 'factura', etiqueta: 'pedido', placeholder: 'DBH-…',
+    numero: claveDocumento('DBH', (csvFile || '').match(/Order_(\d+)/i)?.[1] || '') };
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'dbh', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k=>!k.startsWith('_')) : [];
     const lines = [CSV_KEYS.join(','), ...rows.map(row=>CSV_KEYS.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(','))];
         await descargarCsvDeImporter(lines.join('\n'), 'dbh_shopify_import.csv', 'dbh');
@@ -5429,9 +5460,11 @@ function DBHImporter() {
                 {errors>0?` · ${errors} errors`:''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
 
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="dbh" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
@@ -5457,7 +5490,7 @@ function DBHImporter() {
           </div>
 
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -5554,6 +5587,8 @@ function MotherTongueImporter() {
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [documento, setDocumento] = useState(null);       // {tipo, numero} del PDF
   const pdfRef    = useRef(null);
   const htmlRef   = useRef(null);
   const folderRef = useRef(null);
@@ -5708,6 +5743,15 @@ function MotherTongueImporter() {
         items.push({ catno, qty, dealerPrice });
       }
     }
+    // "FACTURA n°. 962/2026 de 2026-08-28" es la llegada; "ORDEN n°. 481/2026"
+    // es el pedido y no suma stock.
+    const cabecera = lines.map(l => l.text).join('\n');
+    const fac = cabecera.match(/FACTURA\s*n[°º]?\.?\s*(\d+)\s*\/\s*(\d{4})/i);
+    const ord = cabecera.match(/ORDEN\s*n[°º]?\.?\s*(\d+)\s*\/\s*(\d{4})/i);
+    const documento = fac ? { tipo: 'factura', numero: claveDocumento('MT', `${fac[1]}-${fac[2]}`) }
+                    : ord ? { tipo: 'presupuesto', numero: claveDocumento('MT-ORDEN', `${ord[1]}-${ord[2]}`) }
+                    : null;
+    Object.defineProperty(items, '_documento', { value: documento, enumerable: false });
     return items;
   }
 
@@ -6008,6 +6052,7 @@ function MotherTongueImporter() {
     try {
       const items = await parseInvoicePDF(file);
       setInvoiceItems(items);
+      setDocumento(items._documento ? { ...items._documento, placeholder: 'MT-…' } : null);
       setPdfFile(file.name);
       // Otra factura, otras fichas: si no se limpian, procesar la segunda
       // reutilizaria las de la primera y los discos nuevos saldrian sin nada.
@@ -6067,6 +6112,10 @@ function MotherTongueImporter() {
     if (!invoiceItems.length) { setError('Need invoice PDF first'); return; }
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const total = invoiceItems.length;
       const processed = [];
 
@@ -6274,7 +6323,7 @@ function MotherTongueImporter() {
           _catno: item.catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _hasMeta: hasMeta, _hasAssets: !!(assets.covers.length || assets.audio.length),
-          _draft: productStatus === 'draft',
+          _draft: productStatus === 'draft', _alreadyLive: estaEnTienda(vivos, item.catno),
           'Handle': handle,
           'Title': title || item.catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -6317,15 +6366,21 @@ function MotherTongueImporter() {
     }
   };
 
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'mt', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
@@ -6476,8 +6531,10 @@ function MotherTongueImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="mt" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
@@ -6502,7 +6559,7 @@ function MotherTongueImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -6551,6 +6608,8 @@ function RushHourImporter() {
   const [results, setResults] = useState([]);
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
+  const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [documento, setDocumento] = useState(null);       // {tipo, numero} del orderNumber
   const jsonRef = useRef(null);
   const zipRef  = useRef(null);
 
@@ -6575,6 +6634,8 @@ function RushHourImporter() {
     // Filter out malformed rows (need at least slug + dealerPrice + qty)
     const valid = arr.filter(it => it.slug && it.dealerPrice > 0 && it.qty > 0);
     if (!valid.length) throw new Error('JSON has no items with slug + dealerPrice + qty');
+    const numero = !Array.isArray(data) && /^\d+$/.test(String(data.orderNumber || '')) ? String(data.orderNumber) : '';
+    Object.defineProperty(valid, '_documento', { value: numero ? { tipo: 'factura', etiqueta: 'pedido', numero: claveDocumento('RH', numero) } : null, enumerable: false });
     return valid;
   }
 
@@ -6645,6 +6706,7 @@ function RushHourImporter() {
     try {
       const items = await parseOrderJSON(file);
       setOrderItems(items);
+      setDocumento(items._documento ? { ...items._documento, placeholder: 'RH-…' } : null);
       setJsonFile(file.name);
       setStatus('idle');
     } catch (e) {
@@ -6674,6 +6736,10 @@ function RushHourImporter() {
     if (!orderItems.length) { setError('Need order JSON first'); return; }
     setError(''); setStatus('processing'); setResults([]);
     try {
+      setProgress({ done:0, total:0, current:'Comprobando la tienda…' });
+      setLiveHandles(null);
+      const vivos = await cargarEnTienda();
+      setLiveHandles(vivos);
       const JSZip = await loadJSZip();
       const total = orderItems.length;
       const processed = [];
@@ -6795,7 +6861,7 @@ function RushHourImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         processed.push({
-          _catno: catno, _title: title, _artist: artist,
+          _catno: catno, _title: title, _artist: artist, _alreadyLive: estaEnTienda(vivos, catno),
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _draft: false,
           'Handle': handle,
@@ -6840,15 +6906,21 @@ function RushHourImporter() {
     }
   };
 
+
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
-    const ent = await withEntityColumns(results);
+    // Los discos en tienda no viajan: Add stock y Completar media.
+    const kept = results.filter(r => !r._alreadyLive);
+    if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
+    const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
     const rows = ent.rows;
+    // El documento ya da cantidad a estos SKUs: que Add stock no la sume otra vez.
+    if (!(await anotarCsvEnLibroDeStock({ documento, source: 'rh', filas: kept }))) return;
     const CSV_KEYS = rows.length ? Object.keys(rows[0]).filter(k => !k.startsWith('_')) : [];
     const lines = [
       CSV_KEYS.join(','),
@@ -6959,8 +7031,10 @@ function RushHourImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
+          {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rh" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:S.border}`,borderRadius:3,overflow:'hidden'}}>
@@ -6984,7 +7058,7 @@ function RushHourImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} />
           </div>
         </div>
       )}
@@ -11430,7 +11504,7 @@ function CompletarMediaPanel({ filas }) {
 // puede descargar: anotado, o el usuario acepta seguir sin anotar.
 // Presupuestos y documentos sin numero no se anotan: no son la llegada.
 async function anotarCsvEnLibroDeStock({ documento, source, filas }) {
-  if (documento?.tipo !== 'factura' || !documento?.numero || !filas.length) return true;
+  if (!documento || documento.tipo === 'presupuesto' || !documento.numero || !filas.length) return true;
   const items = filas.map(r => ({ sku: String(r['Variant SKU'] || '').trim(), delta: parseInt(r['Variant Inventory Qty'], 10) || 0 }))
     .filter(i => i.sku);
   try {
@@ -11442,7 +11516,7 @@ async function anotarCsvEnLibroDeStock({ documento, source, filas }) {
     if (!r.ok) throw new Error(d.error || `el worker respondió ${r.status}`);
     return true;
   } catch (e) {
-    return window.confirm(`No se pudo anotar la factura ${documento.numero} en el libro de stock (${e.message}).\n\n` +
+    return window.confirm(`No se pudo anotar el documento ${documento.numero} en el libro de stock (${e.message}).\n\n` +
       `Si descargas igualmente y luego estos discos aparecen "en tienda", Add stock podría volver a sumar su cantidad.\n\n¿Descargar el CSV de todas formas?`);
   }
 }
@@ -11476,7 +11550,7 @@ function AddStockPanel({ filas, documento, source }) {
 
   const lanzar = async (dry, items) => {
     if (!listo || busy) return;
-    if (!dry && !window.confirm(`Sumar inventario en Shopify (tienda real) para ${items.length} disco(s) con la factura ${ref}?\n\n` +
+    if (!dry && !window.confirm(`Sumar inventario en Shopify (tienda real) para ${items.length} disco(s) con el documento ${ref}?\n\n` +
         items.map(i => `${i.sku}: +${i.delta}`).join('\n'))) return;
     setBusy(dry ? 'dry' : 'real'); setErr('');
     try {
@@ -11498,8 +11572,8 @@ function AddStockPanel({ filas, documento, source }) {
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
         <div style={{fontSize:10,color:'#ff8800',fontWeight:700}}>{filas.length} ya en tienda — llegada de stock</div>
         <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
-          <span style={{fontSize:9,color:S.muted}}>factura</span>
-          <input value={numero} onChange={e=>setNumero(e.target.value)} placeholder="SI-…" style={{width:110,background:S.bg,border:`1px solid ${ref?S.border:'#ff880066'}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
+          <span style={{fontSize:9,color:S.muted}}>{documento?.etiqueta || 'factura'}</span>
+          <input value={numero} onChange={e=>setNumero(e.target.value)} placeholder={documento?.placeholder || 'nº de factura'} style={{width:110,background:S.bg,border:`1px solid ${ref?S.border:'#ff880066'}`,color:S.text,borderRadius:2,padding:'4px 8px',fontSize:11,fontFamily:'monospace',outline:'none'}} />
           <Btn ch={busy==='dry'?'Simulando…':'Simular (dry-run)'} variant="ghost" onClick={()=>lanzar(true, filas)} disabled={!listo||!!busy} />
           <Btn ch={busy==='real'?'Sumando…':`Add stock (${filas.length})`} onClick={()=>lanzar(false, filas)} disabled={!listo||!!busy} />
         </div>
@@ -11542,6 +11616,52 @@ function AddStockPanel({ filas, documento, source }) {
       </div>
     </div>
   );
+}
+
+// ── DISCOS YA EN TIENDA (comun a los importers) ──────────────
+// Cada importer marca `_alreadyLive` en sus filas con el catalogo vivo. Esas
+// filas NO viajan en el CSV (fijaria la cantidad y pisaria el producto): se
+// suman con Add stock y se completan con Completar media. Filas con las claves
+// de siempre: _catno, _title, _artist, _coverUrl, _tracks, 'Variant Inventory
+// Qty', 'Body (HTML)'.
+//
+// Si la consulta del catalogo falla no se bloquea el import, pero se dice: sin
+// ella el CSV puede llevar discos que ya existen.
+async function cargarEnTienda() {
+  try { return await fetchLiveHandles(); }
+  catch (e) { const s = new Set(); s.skuReal = new Map(); s.error = e?.message || 'error'; return s; }
+}
+const estaEnTienda = (live, catno) => !!live && live.has(rdKey(catno));
+
+// El numero de un documento como clave del libro de stock ("962/2026" no vale).
+const claveDocumento = (prefijo, numero) =>
+  numero ? `${prefijo}-${String(numero).toUpperCase().replace(/[^A-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}` : '';
+
+function EnTiendaBloque({ results, live, documento, source }) {
+  const liveRows = results.filter(r => r._alreadyLive);
+  // El SKU tal cual esta en Shopify: el worker no adivina.
+  const skuDe = (r) => live?.skuReal?.get(rdKey(r._catno)) || r._catno;
+  const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
+  return (<>
+    {live?.error&&(
+      <div style={{marginBottom:10,padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:4,fontSize:10,color:S.danger}}>
+        No se pudo comprobar qué discos ya están en la tienda ({live.error}). El CSV puede llevar discos que ya existen: vuelve a procesar antes de importarlo.
+      </div>
+    )}
+    {liveRows.length>0&&(<>
+      <AddStockPanel source={source} documento={documento}
+        filas={liveRows.map(r => ({ sku: skuDe(r), delta: parseInt(r['Variant Inventory Qty'], 10) || 0, titulo: titulo(r) })).filter(f => f.delta > 0)} />
+      <CompletarMediaPanel
+        filas={liveRows.map(r => ({ sku: skuDe(r), titulo: titulo(r), imageUrl: r._coverUrl || '', tracks: r._tracks || [],
+          notasHtml: String(r['Body (HTML)'] || '').replace(/<script[^>]*id="tracks"[^>]*>[\s\S]*?<\/script>/gi, '') }))} />
+    </>)}
+  </>);
+}
+
+function BotonCsvImporter({ results, onClick }) {
+  const n = results.filter(r => !r._alreadyLive).length;
+  if (n > 0) return <Btn ch={`⬇ Download Shopify CSV (${n})`} onClick={onClick} />;
+  return <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {results.length} discos ya están en la tienda. Para ellos, Add stock y Completar media.</span>;
 }
 
 async function descargarCsvDeImporter(contenido, nombreFichero, source, opciones = {}) {
@@ -11759,6 +11879,7 @@ function EntitiesPanel() {
   const [entsBusy, setEntsBusy] = useState(false);
   const [entQ, setEntQ]       = useState('');
   const [entEdit, setEntEdit] = useState(null);   // {slug, value}
+  const [linkCounts, setLinkCounts] = useState(null);   // {total, artist, label} de la vista Links
 
   // Las entidades se cargan al abrir su vista. El hook va aqui arriba, antes
   // del gate del secreto: detras del return temprano cambiaria el numero de
@@ -12008,7 +12129,7 @@ function EntitiesPanel() {
   );
 
   const kindBtn = (k, label) => {
-    const n = viewRows.filter(r => r.kind === k).length;
+    const n = view === 'links' ? (linkCounts ? linkCounts[k] : '…') : viewRows.filter(r => r.kind === k).length;
     return (
       <button onClick={()=>setKindTab(k)} style={{background:'none',border:'none',borderBottom:`2px solid ${kindTab===k?S.accent:'transparent'}`,color:kindTab===k?S.text:S.muted,cursor:'pointer',fontSize:10,fontWeight:kindTab===k?700:400,letterSpacing:1,textTransform:'uppercase',padding:'5px 2px',marginRight:18}}>{label} · {n}</button>
     );
@@ -12056,6 +12177,7 @@ function EntitiesPanel() {
         {viewBtn('otras','Other',otras.length)}
         {viewBtn('generos','Genres',gen.length)}
         {viewBtn('ents','Entities',ents ? ents.length : '…')}
+        {viewBtn('links','Links',linkCounts ? linkCounts.total : '…')}
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14,borderBottom:`1px solid ${S.border}`}}>
         {kindBtn('artist','Artists')}
@@ -12280,6 +12402,7 @@ function EntitiesPanel() {
         </div>
       )}
 
+      {view==='links' && <ExternalLinksView kindTab={kindTab} onCounts={setLinkCounts} />}
       {view==='ents' && (() => {
         const q = entQ.trim().toLowerCase();
         const todas = (ents || []).filter(e => (e.roles || []).includes(kindTab));
@@ -12340,6 +12463,588 @@ function EntitiesPanel() {
           </div>
         );
       })()}
+    </div>
+  );
+}
+
+// ── ENTITIES → LINKS (fase 7, docs/entities.md) ────────────────────
+// A que cuenta de RA, Songkick, SoundCloud… corresponde cada entidad. Los
+// candidatos los deja scripts/entities-external-sweep.mjs; aqui solo se
+// decide. Dos bloques, en este orden:
+//   - Confirmed: el Discogs ID de un disco nuestro lleva a una sola entidad de
+//     MusicBrainz y ningun campo tiene dos valores. Llegan marcadas y se
+//     aprueban en bloque. El worker lo vuelve a comprobar.
+//   - Review: por nombre, varios candidatos o algun conflicto. Fila a fila.
+// Siempre contra el worker de PRODUCCION (REVIEW_WORKER_URL), se abra el admin
+// desde donde se abra: las entidades de verdad viven alli desde el 2026-09-11,
+// y lo que se apruebe aqui es lo que lee el cron de sets.
+const LINK_FIELD_LABEL = {
+  mixcloud:'Mixcloud', soundcloud:'SoundCloud', youtube:'YouTube', ra:'RA',
+  songkick:'Songkick', bandsintown:'Bandsintown', nts:'NTS',
+};
+// Seguidores y fechas, legibles de un vistazo: 12.194 y "hace 9 meses" dicen
+// mas que 12194 y una fecha ISO cuando hay que elegir entre dos cuentas.
+const fmtNum = n => (typeof n === 'number' ? n.toLocaleString('en-US') : null);
+const fmtAgo = iso => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const meses = Math.round((Date.now() - d.getTime()) / (30.44 * 864e5));
+  const cuando = meses < 1 ? 'this month' : meses < 24 ? `${meses} months ago` : `${Math.round(meses / 12)} years ago`;
+  return `${d.toISOString().slice(0, 10)} · ${cuando}`;
+};
+
+const LINK_WHY = {
+  'no-discogs':'name match only — no record of ours proves it',
+  'multi-mb':'several MusicBrainz entities',
+  'conflict':'a field has two values',
+};
+
+// El secreto de PRODUCCION, aparte del de la pestaña. En el preview el admin
+// se valida contra el worker de staging, y Links habla con el de produccion:
+// con un solo campo no habia forma de despachar la cola desde ningun sitio.
+// Vive en memoria mientras dure la sesion, como el otro: se pierde al recargar.
+let linksProdSecret = '';
+
+function ExternalLinksView({ kindTab, onCounts }) {
+  const [secret, setSecret]     = useState(linksProdSecret);
+  const [authed, setAuthed]     = useState(!!linksProdSecret);
+  const [rows, setRows]         = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const [busy, setBusy]         = useState(false);
+  const [error, setError]       = useState('');
+  const [msg, setMsg]           = useState('');
+  const [sel, setSel]           = useState({});      // confirmed: slug → bool
+  const [pick, setPick]         = useState({});      // review: slug → mbid
+  const [fields, setFields]     = useState({});      // review: slug → {field: value|''}
+  const [progress, setProgress] = useState(null);
+  // Sets destacados: la entidad que se esta tocando, sus sets y la cola de
+  // candidatos que ha dejado la busqueda de YouTube.
+  const [ents, setEnts]         = useState(null);
+  const [setQ, setSetQ]         = useState('');
+  const [setSlug, setSetSlug]   = useState('');
+  const [sets, setSets]         = useState(null);
+  const [setUrl, setSetUrl]     = useState('');
+  const [cands, setCands]       = useState(null);
+  const [candSel, setCandSel]   = useState({});
+  // Entidades que alguien sigue y no tienen ni un enlace aprobado: es el unico
+  // agujero que se nota de cara al cliente.
+  const [gaps, setGaps]         = useState(null);
+
+  const hdrs = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' };
+  const prodHost = (REVIEW_WORKER_URL.match(/\/\/([^/]+)/) || [])[1];
+
+  // Valores por defecto de una fila de revision: el primer candidato, y en cada
+  // campo el valor si es unico. Con dos valores no se elige por nadie.
+  // Por campo, la lista de valores elegidos: el primero es el principal. Con un
+  // solo valor viene elegido; con dos, vacio: eso hay que mirarlo.
+  const defaultsFor = (r, mbid) => {
+    const c = r.candidates.find(x => x.mbid === mbid) || r.candidates[0];
+    const f = {};
+    for (const [k, vals] of Object.entries(c?.links || {})) f[k] = vals.length === 1 ? [vals[0].value] : [];
+    return f;
+  };
+
+  async function load(sec) {
+    const useSecret = sec ?? secret;
+    setLoading(true); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } });
+      if (r.status === 401) {
+        // El de la pestaña es el de staging y aqui no vale: se vuelve a pedir.
+        linksProdSecret = ''; setAuthed(false); onCounts?.(null);
+        setError('Unauthorized — this is the PRODUCTION worker and it wants the production secret.');
+        return;
+      }
+      if (!r.ok) { setError(`Links failed (HTTP ${r.status})`); return; }
+      const d = await r.json();
+      const list = d.records || [];
+      setRows(list);
+      const s0 = {}, p0 = {}, f0 = {};
+      for (const row of list) {
+        if (row.bucket === 'confirmed') s0[row.slug] = true;
+        else { p0[row.slug] = row.candidates[0]?.mbid; f0[row.slug] = defaultsFor(row, p0[row.slug]); }
+      }
+      setSel(s0); setPick(p0); setFields(f0);
+      linksProdSecret = useSecret; setAuthed(true);
+      loadSetsSide(useSecret);
+    } catch (e) { setError(`Links failed — ${e.message}`); }
+    finally { setLoading(false); }
+  }
+
+  // Los sets van contra la MISMA entidad aprobada, asi que la lista de
+  // entidades sale del indice publico del worker de produccion.
+  async function loadSetsSide(sec) {
+    const useSecret = sec ?? secret;
+    try {
+      const [ri, rc, rg] = await Promise.all([
+        fetch(`${REVIEW_WORKER_URL}?action=entity-index`),
+        fetch(`${REVIEW_WORKER_URL}?action=sets-review-list`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
+        fetch(`${REVIEW_WORKER_URL}?action=external-gaps`, { headers: { 'Authorization': `Bearer ${useSecret}` } }),
+      ]);
+      if (ri.ok) setEnts((await ri.json()).entities || []);
+      if (rc.ok) setCands((await rc.json()).records || []);
+      if (rg.ok) setGaps(await rg.json());
+    } catch { /* la cola de enlaces no depende de esto */ }
+  }
+
+  async function loadSets(slug) {
+    setSetSlug(slug); setSets(null); setSetUrl('');
+    if (!slug) return;
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=sets-list&slug=${encodeURIComponent(slug)}`, { headers: { 'Authorization': `Bearer ${secret}` } });
+      if (r.ok) setSets((await r.json()).sets);
+      else setError(`Sets failed (HTTP ${r.status})`);
+    } catch (e) { setError(`Sets failed — ${e.message}`); }
+  }
+
+  async function setsCall(action, body) {
+    setBusy(true); setError('');
+    try {
+      const r = await fetch(`${REVIEW_WORKER_URL}?action=${action}`, { method: 'POST', headers: hdrs, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(d.error || `HTTP ${r.status}`); return null; }
+      if (d.sets) setSets(d.sets);
+      return d;
+    } catch (e) { setError(`Error: ${e.message}`); return null; }
+    finally { setBusy(false); }
+  }
+
+  async function addSet() {
+    const url = setUrl.trim();
+    if (!url || !setSlug) return;
+    const d = await setsCall('sets-add', { slug: setSlug, url });
+    if (d) { setSetUrl(''); setMsg(d.already ? 'Already in the list.' : '✓ added'); }
+  }
+
+  async function approveCands(slug, ids) {
+    const d = await setsCall(ids.length ? 'sets-review-approve' : 'sets-review-reject', ids.length ? { slug, ids } : { slug });
+    if (d) {
+      setCands(cs => (cs || []).filter(c => c.slug !== slug));
+      setMsg(ids.length ? `✓ ${d.added} added to ${slug}` : `${slug}: none of these.`);
+      if (slug === setSlug) loadSets(slug);
+    }
+  }
+
+  useEffect(() => { if (authed) { load(); loadSetsSide(); } }, []);   // eslint-disable-line
+
+  const all       = rows || [];
+  const ofKind    = all.filter(r => (r.roles || []).includes(kindTab));
+  const confirmed = ofKind.filter(r => r.bucket === 'confirmed');
+  const review    = ofKind.filter(r => r.bucket !== 'confirmed');
+
+  useEffect(() => {
+    if (!rows) return;
+    onCounts?.({
+      total: rows.length,
+      artist: rows.filter(r => (r.roles || []).includes('artist')).length,
+      label: rows.filter(r => (r.roles || []).includes('label')).length,
+    });
+  }, [rows]);   // eslint-disable-line
+
+  const drop = slugs => setRows(rs => (rs || []).filter(r => !slugs.includes(r.slug)));
+
+  async function approveBulk() {
+    const chosen = confirmed.filter(r => sel[r.slug]).map(r => r.slug);
+    if (!chosen.length) return;
+    setBusy(true); setError(''); setMsg('');
+    setProgress({ done: 0, total: chosen.length });
+    let ok = 0, ko = 0; const failures = [], done = [];
+    for (let i = 0; i < chosen.length; i += 50) {
+      const chunk = chosen.slice(i, i + 50);
+      try {
+        const r = await fetch(`${REVIEW_WORKER_URL}?action=external-review-approve-bulk`, {
+          method: 'POST', headers: hdrs, body: JSON.stringify({ slugs: chunk }),
+        });
+        if (!r.ok) { ko += chunk.length; failures.push(`HTTP ${r.status} × ${chunk.length}`); }
+        else {
+          const d = await r.json();
+          for (const res of d.results || []) {
+            if (res.ok) { ok++; done.push(res.slug); } else { ko++; failures.push(`${res.slug}: ${res.error}`); }
+          }
+        }
+      } catch (e) { ko += chunk.length; failures.push(`${e.message} × ${chunk.length}`); }
+      setProgress({ done: Math.min(i + 50, chosen.length), total: chosen.length });
+    }
+    setProgress(null);
+    drop(done);
+    setMsg(`${ok} approved${ko ? ` · ${ko} failed` : ''}.`);
+    if (failures.length) setError(`Failures: ${failures.slice(0, 5).join(' · ')}`);
+    setBusy(false);
+  }
+
+  async function approveRow(r) {
+    const mbid = pick[r.slug];
+    const f = Object.fromEntries(Object.entries(fields[r.slug] || {}).filter(([, v]) => v.length));
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const res = await fetch(`${REVIEW_WORKER_URL}?action=external-review-approve`, {
+        method: 'POST', headers: hdrs, body: JSON.stringify({ slug: r.slug, mbid, fields: f }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) setError(`${r.display}: ${d.error || `HTTP ${res.status}`}`);
+      else {
+        const n = Object.values(f).reduce((a, v) => a + v.length, 0);
+        drop([r.slug]); setMsg(`✓ ${r.display} — ${n} link${n === 1 ? '' : 's'}`);
+      }
+    } catch (e) { setError(`${r.display}: ${e.message}`); }
+    setBusy(false);
+  }
+
+  async function rejectRow(r) {
+    setBusy(true); setError(''); setMsg('');
+    try {
+      const res = await fetch(`${REVIEW_WORKER_URL}?action=external-review-reject`, {
+        method: 'POST', headers: hdrs, body: JSON.stringify({ slug: r.slug }),
+      });
+      if (!res.ok) setError(`${r.display}: HTTP ${res.status}`);
+      else { drop([r.slug]); setMsg(`${r.display}: none of these — they won't come back.`); }
+    } catch (e) { setError(`${r.display}: ${e.message}`); }
+    setBusy(false);
+  }
+
+  // Quien es esa cuenta. Sin datos resueltos se dice por que, en vez de dejar
+  // el ID crudo solo.
+  const perfil = v => {
+    const p = v.preview || {};
+    const datos = [fmtNum(p.followers) && `${fmtNum(p.followers)} followers`,
+      fmtNum(p.items) && `${fmtNum(p.items)} uploads`,
+      fmtAgo(p.last) && `last ${fmtAgo(p.last)}`].filter(Boolean);
+    return (
+      <span style={{display:'inline-flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+        {p.avatar && <img src={p.avatar} alt="" width="22" height="22" style={{borderRadius:2,objectFit:'cover',background:S.border}} />}
+        <span style={{color:S.text}}>{p.name || p.title || v.value}</span>
+        {p.name && p.name !== v.value && <span style={{fontFamily:'monospace',fontSize:9}}>{v.value}</span>}
+        {datos.length > 0 && <span>· {datos.join(' · ')}</span>}
+        {p.note && <span style={{color:'#ffd24a'}}>· {p.note}</span>}
+        <a href={v.url} target="_blank" rel="noreferrer"
+          style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+      </span>
+    );
+  };
+
+  const a = (href, text) => (
+    <a href={href} target="_blank" rel="noreferrer" style={{color:S.text,textDecoration:'none',borderBottom:`1px dotted ${S.muted}`}}>{text}</a>
+  );
+
+  const head = r => (
+    <div style={{display:'flex',alignItems:'baseline',gap:8,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,color:S.text}}>{r.display}</span>
+      {r.followed && <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>followed</span>}
+      <span style={{fontSize:10,color:S.muted}}>{(r.roles || []).join(' + ')} · {r.total} record{r.total === 1 ? '' : 's'}</span>
+    </div>
+  );
+
+  const mbLine = c => (
+    <span>
+      {a(`https://musicbrainz.org/${c.mbKind}/${c.mbid}`, c.name)}
+      {c.country ? ` · ${c.country}` : ''}
+      {c.disambiguation ? ` · ${c.disambiguation}` : ''}
+      {c.discogs?.length ? <> · Discogs {c.discogs.map((id, i) => <span key={id}>{i ? ', ' : ''}{a(`https://www.discogs.com/${c.mbKind}/${id}`, id)}</span>)}</> : ''}
+    </span>
+  );
+
+  // De que entidad hablamos, con todas las letras, y por que discos la conocemos.
+  const quienEs = (r, c) => (
+    <>
+      {(c?.disambiguation || c?.wikidataDescription || c?.annotation) && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3,lineHeight:1.5}}>
+          {c.disambiguation && <div>MusicBrainz: {c.disambiguation}</div>}
+          {c.annotation && <div style={{whiteSpace:'pre-wrap'}}>{c.annotation}</div>}
+          {c.wikidataDescription && <div>Wikidata: {c.wikidataDescription}</div>}
+        </div>
+      )}
+      {(r.records || []).length > 0 && (
+        <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+          ours: {r.records.map((x, i) => <span key={x.handle}>{i ? ' · ' : ''}{a(`https://houseonly.store/products/${x.handle}`, x.title)}</span>)}
+        </div>
+      )}
+    </>
+  );
+
+  const evidence = r => (r.evidence || []).length > 0 && (
+    <div style={{fontSize:10,color:S.muted,marginTop:3}}>
+      proved by {r.evidence.map((e, i) => (
+        <span key={i}>{i ? ' · ' : ''}<span style={{fontFamily:'monospace'}}>{e.sku}</span> → {a(`https://www.discogs.com/release/${e.releaseId}`, `release ${e.releaseId}`)} credits {e.kind} {e.discogsId}</span>
+      ))}
+    </div>
+  );
+
+  if (!authed) {
+    return (
+      <div style={{textAlign:'left',maxWidth:460}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>
+          Links · talking to production worker
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:12,lineHeight:1.5}}>
+          This queue lives in <strong>production</strong> (<span style={{fontFamily:'monospace'}}>{prodHost}</span>),
+          because that&apos;s where the real entities are. The rest of this tab talks to the worker of
+          whatever environment you opened the admin from, so paste the <strong>production</strong>{' '}
+          <span style={{fontFamily:'monospace'}}>BOOTSTRAP_AUTH_SECRET</span> here. Held in memory only — gone on refresh.
+        </div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&secret&&load()} placeholder="Production secret"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={loading?'Connecting…':'Connect'} onClick={()=>load()} disabled={!secret||loading} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  if (loading && !rows) return <div style={{fontSize:10,color:S.muted}}>Loading links…</div>;
+
+  return (
+    // textAlign: el contenedor del admin centra el texto y aqui se leen filas.
+    <div style={{textAlign:'left'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:12}}>
+        <div style={{fontSize:10,color:S.muted,lineHeight:1.5,maxWidth:560}}>
+          <strong style={{color:S.accent}}>Talking to production worker</strong>{' '}
+          (<span style={{fontFamily:'monospace'}}>{prodHost}</span>).{' '}
+          Which RA, Songkick, SoundCloud… account belongs to each entity. Candidates come from
+          MusicBrainz and Wikidata via <span style={{fontFamily:'monospace'}}>entities-external-sweep.mjs</span>. Nothing reaches the
+          shop until it&apos;s approved here; whatever you leave out is remembered as rejected.
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <Btn ch={loading ? '…' : '↻ Reload'} variant="ghost" onClick={() => load()} disabled={busy || loading} />
+          <Btn ch="Change secret" variant="ghost" onClick={() => { linksProdSecret = ''; setAuthed(false); setRows(null); onCounts?.(null); }} disabled={busy || loading} />
+        </div>
+      </div>
+      {gaps && (
+        <div style={{fontSize:10,marginBottom:12,lineHeight:1.5,border:`1px solid ${S.border}`,borderLeft:`2px solid ${gaps.without ? '#ff8800' : S.accent}`,borderRadius:2,padding:'8px 10px'}}>
+          <strong style={{color:gaps.without ? '#ff8800' : S.accent}}>
+            {gaps.without} of {gaps.followed} followed entities have no approved link.
+          </strong>
+          {gaps.without > 0 && (
+            <span style={{color:S.muted}}>
+              {' '}Someone follows them, opens their page and finds nothing to listen to:{' '}
+              {gaps.entities.slice(0, 8).map((e, i) => (
+                <span key={e.slug}>{i ? ' · ' : ''}{e.display}{e.pending ? ' (in the queue)' : ''}</span>
+              ))}
+              {gaps.entities.length > 8 ? ` · and ${gaps.entities.length - 8} more` : ''}
+            </span>
+          )}
+        </div>
+      )}
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:10}}>{error}</div>}
+      {msg && <div style={{fontSize:10,color:S.accent,marginBottom:10}}>{msg}</div>}
+      {progress && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:10,color:S.muted,marginBottom:4}}>Approving {progress.done} of {progress.total}…</div>
+          <div style={{height:4,background:S.border,borderRadius:2,overflow:'hidden'}}>
+            <div style={{height:'100%',width:`${Math.round(100 * progress.done / (progress.total || 1))}%`,background:S.accent,transition:'width .2s'}} />
+          </div>
+        </div>
+      )}
+
+      {/* ── Confirmed ── */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:8}}>
+        <div style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase'}}>
+          Confirmed by Discogs ID · {confirmed.length}
+        </div>
+        {confirmed.length > 0 && (
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <label style={{fontSize:10,color:S.muted,display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+              <input type="checkbox" checked={confirmed.every(r => sel[r.slug])}
+                onChange={e => { const n = { ...sel }; confirmed.forEach(r => { n[r.slug] = e.target.checked; }); setSel(n); }} />
+              Select all
+            </label>
+            <Btn ch={busy ? 'Approving…' : `Approve selected (${confirmed.filter(r => sel[r.slug]).length})`}
+              onClick={approveBulk} disabled={busy || !confirmed.some(r => sel[r.slug])} />
+          </div>
+        )}
+      </div>
+      <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+        A record of ours, already matched on Discogs, credits a Discogs ID that MusicBrainz links to
+        exactly one entity — and no field has two values. Pre-selected. Open anything that looks off.
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:1,maxHeight:420,overflowY:'auto',marginBottom:24}}>
+        {confirmed.length === 0 && <div style={{fontSize:11,color:S.muted,padding:'14px 0',textAlign:'center'}}>Nothing confirmed for {kindTab === 'artist' ? 'artists' : 'labels'}.</div>}
+        {confirmed.map(r => {
+          const c = r.candidates[0];
+          return (
+            <div key={r.slug} style={{display:'flex',alignItems:'flex-start',gap:10,background:S.bg,padding:'8px 12px',borderRadius:2}}>
+              <input type="checkbox" checked={!!sel[r.slug]} onChange={e => setSel({ ...sel, [r.slug]: e.target.checked })} style={{marginTop:3}} />
+              <div style={{flex:1,minWidth:0}}>
+                {head(r)}
+                <div style={{fontSize:10,color:S.muted,marginTop:3}}>MusicBrainz: {mbLine(c)}</div>
+                {quienEs(r, c)}
+                {evidence(r)}
+                <div style={{fontSize:10,marginTop:5,display:'flex',flexDirection:'column',gap:3}}>
+                  {Object.entries(c.links || {}).map(([f, vals]) => (
+                    <div key={f} style={{color:S.muted,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                      <span style={{minWidth:80}}>{LINK_FIELD_LABEL[f] || f}</span>{perfil(vals[0])}
+                    </div>
+                  ))}
+                  {Object.keys(c.links || {}).length === 0 && <span style={{color:S.muted}}>no links — approves the MusicBrainz ID only</span>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Review ── */}
+      <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+        Review one by one · {review.length}
+      </div>
+      <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+        Pick the MusicBrainz entity that is really this one, then the links to keep. A field with two
+        values starts empty on purpose. <strong>None of these</strong> rejects every candidate in the row.
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {review.length === 0 && <div style={{fontSize:11,color:S.muted,padding:'14px 0',textAlign:'center'}}>Nothing to review for {kindTab === 'artist' ? 'artists' : 'labels'}.</div>}
+        {review.map(r => {
+          const cur = r.candidates.find(c => c.mbid === pick[r.slug]) || r.candidates[0];
+          const f = fields[r.slug] || {};
+          return (
+            <div key={r.slug} style={{background:S.bg,padding:'10px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a'}}>
+              {head(r)}
+              <div style={{fontSize:10,color:'#ffd24a',marginTop:3}}>{LINK_WHY[r.bucketWhy] || r.bucketWhy}</div>
+              {quienEs(r, cur)}
+              {evidence(r)}
+              <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:4}}>
+                {r.candidates.map(c => (
+                  <label key={c.mbid} style={{fontSize:10,color:S.muted,display:'flex',gap:6,alignItems:'baseline',cursor:'pointer'}}>
+                    <input type="radio" name={`mb-${r.slug}`} checked={cur?.mbid === c.mbid}
+                      onChange={() => { setPick({ ...pick, [r.slug]: c.mbid }); setFields({ ...fields, [r.slug]: defaultsFor(r, c.mbid) }); }} />
+                    <span>{mbLine(c)} · {c.why === 'discogs-id' ? 'via Discogs ID' : `name match${c.score ? ` (${c.score})` : ''}`}</span>
+                  </label>
+                ))}
+              </div>
+              {cur && Object.keys(cur.links || {}).length > 0 && (
+                <div style={{marginTop:8,paddingLeft:18,display:'flex',flexDirection:'column',gap:8}}>
+                  {Object.entries(cur.links).map(([field, vals]) => {
+                    const sel = f[field] || [];
+                    // Dos cuentas pueden ser las dos buenas —la personal y la del
+                    // sello—: se marcan las que valgan y la primera manda.
+                    const toggle = (value) => {
+                      const next = sel.includes(value) ? sel.filter(x => x !== value) : [...sel, value];
+                      setFields({ ...fields, [r.slug]: { ...f, [field]: next } });
+                    };
+                    const primero = (value) => setFields({ ...fields, [r.slug]: { ...f, [field]: [value, ...sel.filter(x => x !== value)] } });
+                    return (
+                      <div key={field} style={{fontSize:10,color:S.muted,display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-start'}}>
+                        <span style={{minWidth:80,paddingTop:2}}>{LINK_FIELD_LABEL[field] || field}</span>
+                        <div style={{display:'flex',flexDirection:'column',gap:4,flex:1,minWidth:260}}>
+                          {vals.map(v => (
+                            <div key={v.value} style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                              <label style={{display:'flex',gap:4,alignItems:'center',cursor:'pointer'}}>
+                                <input type="checkbox" checked={sel.includes(v.value)} onChange={() => toggle(v.value)} />
+                              </label>
+                              {perfil(v)}
+                              <span style={{fontSize:9}}>({v.from.join('+')})</span>
+                              {/* "main" solo dice algo cuando hay mas de una cuenta elegida. */}
+                              {vals.length > 1 && sel.includes(v.value) && (sel[0] === v.value
+                                ? <span style={{fontSize:8,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:S.accent,padding:'2px 5px',borderRadius:2}}>main</span>
+                                : <button onClick={() => primero(v.value)} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,borderRadius:2,cursor:'pointer',fontSize:8,letterSpacing:1,textTransform:'uppercase',padding:'2px 5px'}}>make main</button>)}
+                            </div>
+                          ))}
+                          {sel.length === 0 && <span style={{fontSize:9}}>none — nothing kept for this field</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div style={{display:'flex',gap:6,marginTop:10}}>
+                <Btn ch={busy ? '…' : 'Approve'} onClick={() => approveRow(r)} disabled={busy || !cur} />
+                <Btn ch="None of these" variant="ghost" onClick={() => rejectRow(r)} disabled={busy} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Sets destacados ── */}
+      <div style={{marginTop:28,paddingTop:20,borderTop:`1px solid ${S.border}`}}>
+        <div style={{fontSize:10,color:S.accent,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+          Featured sets
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+          Paste a <strong>YouTube video, SoundCloud track or Mixcloud show</strong> and it&apos;s resolved by
+          oEmbed — no API key. An account URL is not a set and gets refused. The order here is the order
+          the shop shows; drag isn&apos;t needed, just move them up.
+        </div>
+        <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+          <input value={setQ} onChange={e=>setSetQ(e.target.value)} placeholder="Find an entity…"
+            style={{flex:1,minWidth:180,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+          <select value={setSlug} onChange={e=>loadSets(e.target.value)}
+            style={{flex:1,minWidth:200,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}}>
+            <option value="">— pick an entity —</option>
+            {(ents || []).filter(e => {
+              const q = setQ.trim().toLowerCase();
+              return (e.roles || []).includes(kindTab) && (!q || e.display.toLowerCase().includes(q) || e.slug.includes(q));
+            }).slice(0, 80).map(e => <option key={e.slug} value={e.slug}>{e.display} · {e.total}</option>)}
+          </select>
+        </div>
+        {setSlug && (
+          <div style={{background:S.bg,padding:'10px 12px',borderRadius:2}}>
+            <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+              <input value={setUrl} onChange={e=>setSetUrl(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addSet()}
+                placeholder="https://www.youtube.com/watch?v=… · https://soundcloud.com/user/track · https://www.mixcloud.com/user/show/"
+                style={{flex:1,minWidth:260,background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'7px 10px',fontSize:11,fontFamily:'inherit',outline:'none'}} />
+              <Btn ch={busy?'…':'Add set'} onClick={addSet} disabled={busy||!setUrl.trim()} />
+            </div>
+            {sets === null && <div style={{fontSize:10,color:S.muted}}>Loading…</div>}
+            {sets && sets.items.length === 0 && <div style={{fontSize:10,color:S.muted}}>No sets yet — the Listen block won&apos;t show anything for this entity.</div>}
+            {(sets?.items || []).map((it, i) => (
+              <div key={it.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderTop:i?`1px solid ${S.border}`:'none'}}>
+                <span style={{fontSize:10,color:S.muted,width:16}}>{i + 1}</span>
+                {it.thumbnail && <img src={it.thumbnail} alt="" width="56" height="32" style={{objectFit:'cover',borderRadius:2,background:S.border}} />}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:11,color:S.text}}>{it.title || it.url}</div>
+                  <div style={{fontSize:10,color:S.muted}}>
+                    {it.source}{it.author ? ` · ${it.author}` : ''}{it.publishedAt ? ` · ${it.publishedAt.slice(0,10)}` : ''}
+                    {it.via === 'search' ? ' · from search' : ''}
+                  </div>
+                </div>
+                <a href={it.url} target="_blank" rel="noreferrer" style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+                <button disabled={busy||i===0} onClick={()=>setsCall('sets-order',{slug:setSlug,ids:[it.id,...sets.items.filter(x=>x.id!==it.id).map(x=>x.id)]})}
+                  style={{background:'none',border:`1px solid ${S.border}`,color:i===0?S.border:S.muted,borderRadius:2,cursor:i===0?'default':'pointer',fontSize:9,padding:'2px 6px'}}>↑ first</button>
+                <button disabled={busy} onClick={()=>setsCall('sets-remove',{slug:setSlug,id:it.id})}
+                  style={{background:'none',border:`1px solid ${S.border}`,color:S.danger,borderRadius:2,cursor:'pointer',fontSize:9,padding:'2px 6px'}}>remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Candidatos de la busqueda de YouTube ── */}
+      <div style={{marginTop:24,paddingTop:18,borderTop:`1px solid ${S.border}`}}>
+        <div style={{fontSize:10,color:'#ffd24a',fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>
+          Set candidates from YouTube search · {(cands || []).reduce((n, c) => n + c.candidates.length, 0)}
+        </div>
+        <div style={{fontSize:10,color:S.muted,marginBottom:10,lineHeight:1.5}}>
+          Proposed by <span style={{fontFamily:'monospace'}}>entities-youtube-candidates.mjs</span>. Search is a
+          generator, not a source: nothing here is shown in the shop until you add it, and anything you
+          leave rots away on its own after 30 days. Checking a video and pressing Add keeps it; the rest
+          of that row is discarded.
+        </div>
+        {(cands || []).length === 0 && <div style={{fontSize:11,color:S.muted,padding:'10px 0'}}>Nothing waiting.</div>}
+        {(cands || []).map(row => (
+          <div key={row.slug} style={{background:S.bg,padding:'10px 12px',borderRadius:2,borderLeft:'2px solid #ffd24a',marginBottom:8}}>
+            <div style={{fontSize:12,color:S.text,marginBottom:6}}>{row.slug}</div>
+            {row.candidates.map(c => (
+              <label key={c.id} style={{display:'flex',alignItems:'center',gap:10,padding:'4px 0',cursor:'pointer'}}>
+                <input type="checkbox" checked={!!candSel[c.id]} onChange={e=>setCandSel({...candSel,[c.id]:e.target.checked})} />
+                {c.thumbnail && <img src={c.thumbnail} alt="" width="56" height="32" style={{objectFit:'cover',borderRadius:2,background:S.border}} />}
+                <span style={{flex:1,minWidth:0}}>
+                  <span style={{fontSize:11,color:S.text,display:'block'}}>{c.title}</span>
+                  <span style={{fontSize:10,color:S.muted}}>{c.author}{c.publishedAt ? ` · ${c.publishedAt.slice(0,10)}` : ''} · found with “{c.query}”</span>
+                </span>
+                <a href={c.url} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()}
+                  style={{color:S.accent,textDecoration:'none',border:`1px solid ${S.border}`,borderRadius:2,padding:'1px 6px',fontSize:9,letterSpacing:1,textTransform:'uppercase'}}>open ↗</a>
+              </label>
+            ))}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              <Btn ch={busy?'…':`Add selected (${row.candidates.filter(c=>candSel[c.id]).length})`}
+                onClick={()=>approveCands(row.slug, row.candidates.filter(c=>candSel[c.id]).map(c=>c.id))}
+                disabled={busy||!row.candidates.some(c=>candSel[c.id])} />
+              <Btn ch="None of these" variant="ghost" onClick={()=>approveCands(row.slug, [])} disabled={busy} />
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -12736,6 +13441,211 @@ function ReleaseCard({ p, width = 150 }) {
  * Una estanteria por entidad. Se desliza con el pulgar: `overflow-x:auto` con
  * scroll-snap y sin barra visible en movil, que es donde se usa esto.
  */
+/**
+ * Lo que se puede escuchar de una entidad (fase 7D, docs/entities.md).
+ *
+ * Orden fijo, el mismo en la estanteria y en la ficha: sets destacados primero
+ * —que son los que ha elegido una persona—, luego los perfiles, y el tour
+ * aparte. **Enlaces, nunca reproductores incrustados**: se abre la fuente, que
+ * es donde el artista cobra y donde estan sus datos.
+ *
+ * El worker devuelve `listen: null` cuando no hay nada aprobado, y entonces
+ * este bloque no existe: un "Listen" vacio es peor que no tenerlo.
+ */
+/**
+ * El reproductor de cada fuente, para sonar DENTRO de la ficha. Se decidio el
+ * 2026-09-18: mandar al cliente a YouTube para escuchar un set es mandarlo
+ * fuera de la tienda, y aqui es donde compra discos.
+ *
+ * Son los reproductores OFICIALES de cada sitio —lo que sus terminos piden— y
+ * no se cargan hasta que alguien pulsa play. YouTube va por youtube-nocookie.
+ * `embeddable: false` (lo marca la busqueda con la Data API) cae a enlace: mas
+ * vale un enlace que un recuadro que dice "video no disponible".
+ */
+function embedSrc(st) {
+  if (st.embeddable === false) return null;
+  if (st.source === 'youtube') {
+    const id = (st.id || '').split(':')[1];
+    return id ? `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&modestbranding=1` : null;
+  }
+  if (st.source === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(st.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (st.source === 'mixcloud') {
+    const feed = st.url.replace(/^https?:\/\/(www\.)?mixcloud\.com/, '');
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(feed)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  return null;
+}
+
+/**
+ * El perfil de una entidad, sonando aqui dentro. Lo mismo que con los sets: si
+ * hay que salir de la tienda para escuchar, se pierde al cliente.
+ *   - SoundCloud y Mixcloud: su widget acepta la URL del perfil y suena lo
+ *     ultimo que han subido.
+ *   - YouTube: no hay embed de canal, pero si de su lista de subidas: el id del
+ *     canal empieza por UC y su lista de subidas es el mismo id con UU.
+ *   - NTS no tiene widget: se queda como enlace.
+ * Comprobado el 2026-09-18 con Pampa, Fokuz y Defected.
+ */
+function profileEmbedSrc(l) {
+  if (l.kind === 'soundcloud') {
+    return `https://w.soundcloud.com/player/?url=${encodeURIComponent(l.url)}&auto_play=true&hide_related=true&show_comments=false&show_teaser=false&color=%23c8ff00`;
+  }
+  if (l.kind === 'mixcloud') {
+    return `https://player-widget.mixcloud.com/widget/iframe/?feed=${encodeURIComponent(`/${l.value}/`)}&autoplay=1&hide_cover=1&light=0`;
+  }
+  if (l.kind === 'youtube' && /^UC[\w-]{22}$/.test(l.value)) {
+    return `https://www.youtube-nocookie.com/embed/videoseries?list=UU${l.value.slice(2)}&autoplay=1&rel=0`;
+  }
+  return null;
+}
+
+const LISTEN_ICON = { youtube:'▶', soundcloud:'~', mixcloud:'◴', nts:'◉', ra:'◆', songkick:'◇' };
+
+function ListenBlock({ listen, compact }) {
+  const isMobile = useIsMobile(720);
+  // Que set esta sonando. Uno cada vez: dos reproductores a la vez es ruido.
+  const [playing, setPlaying] = useState(null);
+  if (!listen) return null;
+  const { sets = [], links = [], events = [] } = listen;
+  if (!sets.length && !links.length && !events.length) return null;
+
+  const visibles = compact ? sets.slice(0, isMobile ? 1 : 2) : sets;
+
+  // Un perfil: boton mientras no se toca, reproductor en cuanto se toca. Lo que
+  // no tiene reproductor no llega hasta aqui — el worker no lo manda.
+  const perfil = l => {
+    const src = profileEmbedSrc(l);
+    if (!src) return null;
+    const clave = `perfil:${l.kind}`;
+    if (playing !== clave) {
+      return (
+        <button key={clave} onClick={() => setPlaying(clave)}
+          style={{ display:'inline-flex', alignItems:'center', gap:6, border:`1px solid ${S.border}`, borderRadius:2,
+            padding:'6px 10px', background:'none', color:S.text, fontFamily:'inherit', fontSize:11, cursor:'pointer', whiteSpace:'nowrap' }}>
+          <span style={{ color:S.accent }}>{LISTEN_ICON[l.kind] || '•'}</span>
+          {l.label}
+          {l.meta && <span style={{ color:S.muted, fontSize:10 }}>· {l.meta}</span>}
+          <span style={{ color:S.accent, fontSize:10 }}>▶</span>
+        </button>
+      );
+    }
+    return (
+      <div key={clave} style={{ width:'100%' }}>
+        <div style={{ position:'relative', width:'100%', ...(l.kind === 'youtube' ? { aspectRatio:'16 / 9' } : { height: l.kind === 'mixcloud' ? 120 : 166 }), background:'#000' }}>
+          <iframe src={src} title={l.label} loading="lazy" allowFullScreen
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+            style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }} />
+        </div>
+        <div style={{ fontSize:10, color:S.muted, marginTop:4 }}>
+          {l.label}{l.meta ? ` · ${l.meta}` : ''}
+        </div>
+      </div>
+    );
+  };
+
+  const ficha = st => (
+    <div style={{ minWidth:0 }}>
+      <div style={{ fontSize:12, lineHeight:1.35, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>
+        {st.title || st.url}
+      </div>
+      {/* Sin enlace a la fuente: el credito lo lleva dentro el propio
+          reproductor (nombre del canal, logo y su enlace), que es lo que piden
+          sus terminos, y asi la pagina no saca a nadie fuera. */}
+      <div style={{ fontSize:10, color:S.muted, marginTop:3 }}>
+        {st.source}{st.author ? ` · ${st.author}` : ''}{st.publishedAt ? ` · ${st.publishedAt.slice(0,4)}` : ''}
+      </div>
+    </div>
+  );
+
+  return (
+    <section style={{ marginTop: compact ? 12 : 30, textAlign:'left' }}>
+      {/* El rotulo solo si hay algo que escuchar: con solo fechas, "Listen"
+          encabezaba un hueco. */}
+      {(visibles.length > 0 || links.length > 0) && (
+        <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:10 }}>Listen</div>
+      )}
+
+      {visibles.length > 0 && (
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?260:300}px,1fr))`, gap:12, marginBottom:links.length||events.length?14:0 }}>
+          {visibles.map(st => {
+            const src = embedSrc(st);
+            const sonando = playing === st.id && src;
+            return (
+              <div key={st.id} style={{ border:`1px solid ${S.border}`, borderRadius:2, padding:8, minWidth:0 }}>
+                {sonando ? (
+                  <div style={{ position:'relative', width:'100%', ...(st.source === 'youtube'
+                    ? { aspectRatio:'16 / 9' } : { height: st.source === 'mixcloud' ? 120 : 166 }), marginBottom:8, background:'#000' }}>
+                    <iframe
+                      src={src}
+                      title={st.title || st.url}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
+                      allowFullScreen
+                      loading="lazy"
+                      style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:0 }}
+                    />
+                  </div>
+                ) : (
+                  // Caratula con boton: el reproductor de terceros no se carga
+                  // hasta que alguien decide escuchar. Sin esto, cada ficha
+                  // arrastra cinco iframes y sus cookies.
+                  <button onClick={() => src && setPlaying(st.id)} disabled={!src}
+                    style={{ position:'relative', display:'block', width:'100%', ...(st.source === 'youtube' ? { aspectRatio:'16 / 9' } : { height: 120 }),
+                      marginBottom:8, padding:0, border:0, borderRadius:2, overflow:'hidden',
+                      background:st.thumbnail?`#000 center/cover no-repeat url(${JSON.stringify(st.thumbnail)})`:S.border,
+                      cursor:src?'pointer':'default' }}
+                    aria-label={src ? `Play ${st.title || 'set'}` : 'Open at the source'}>
+                    {src && (
+                      <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                        <span style={{ width:46, height:46, borderRadius:'50%', background:'rgba(8,8,8,.72)', border:`1px solid ${S.accent}`,
+                          color:S.accent, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, paddingLeft:3 }}>▶</span>
+                      </span>
+                    )}
+                  </button>
+                )}
+                {ficha(st)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {compact && sets.length > visibles.length && (
+        <div style={{ fontSize:10, color:S.muted, marginBottom:10 }}>+{sets.length - visibles.length} more on their page</div>
+      )}
+
+      {links.length > 0 && <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-start' }}>{links.map(perfil)}</div>}
+
+      {events.length > 0 && (
+        <div style={{ marginTop:16 }}>
+          <div style={{ fontSize:9, letterSpacing:2.4, textTransform:'uppercase', color:S.muted, marginBottom:8 }}>Tour dates</div>
+
+          {/* La lista es NUESTRA: sin widgets y sin sacar al cliente de aqui.
+              Las fechas llegan ya formateadas del worker. */}
+          {events.length > 0 && (
+            <div style={{ border:`1px solid ${S.border}`, borderRadius:2 }}>
+              {events.map((e, i) => (
+                <div key={e.id} style={{ display:'flex', gap:12, alignItems:'baseline', padding:isMobile?'9px 10px':'10px 12px',
+                  borderTop:i?`1px solid ${S.border}`:'none', flexWrap:'wrap' }}>
+                  <span style={{ fontSize:11, color:S.accent, letterSpacing:1, textTransform:'uppercase', whiteSpace:'nowrap', minWidth:isMobile?0:92 }}>
+                    {e.when}
+                  </span>
+                  <span style={{ flex:1, minWidth:0 }}>
+                    <span style={{ display:'block', fontSize:12, color:S.text }}>{e.where}</span>
+                    {e.venue && <span style={{ display:'block', fontSize:10, color:S.muted, marginTop:2 }}>{e.venue}{e.festival ? ' · festival' : ''}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+        </div>
+      )}
+    </section>
+  );
+}
+
 function EntityShelf({ shelf, onNavigate }) {
   const isMobile = useIsMobile(720);
   const w = isMobile ? 136 : 156;
@@ -12756,6 +13666,7 @@ function EntityShelf({ shelf, onNavigate }) {
       <div style={{ display:'flex', gap:12, overflowX:'auto', paddingBottom:12, scrollSnapType:'x mandatory', WebkitOverflowScrolling:'touch' }}>
         {shelf.items.map(p => <ReleaseCard key={p.handle} p={p} width={w} />)}
       </div>
+      <ListenBlock listen={shelf.listen} compact />
     </section>
   );
 }
@@ -13108,6 +14019,8 @@ function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigat
       {!data.products?.length && (
         <div style={{ color:S.muted, fontSize:13, marginTop:28 }}>Nothing in stock right now.</div>
       )}
+
+      <ListenBlock listen={data.listen} />
     </div>
   );
 }

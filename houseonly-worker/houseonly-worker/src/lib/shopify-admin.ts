@@ -201,8 +201,17 @@ export async function findVariantBySku(
   const result = await shopifyAdminGraphQL(env, query, { q: `sku:"${escapedSku}"` });
   const edges = result?.data?.productVariants?.edges || [];
 
-  // Exact match (Shopify search is loose by default)
-  const exact = edges.find((e: any) => e?.node?.sku === sku);
+  // Exact match (Shopify search is loose by default). Case is the one thing we
+  // forgive: a Discogs catno cached as "satltd008" never matched the Shopify
+  // SKU SATLTD008 and dropped a record from order 147628-C-30 (2026-09-20).
+  // An exact-case hit wins; otherwise accept a case-insensitive match only if
+  // it is the ONLY one, so two SKUs differing just by case resolve to nothing
+  // rather than to the wrong record.
+  const upper = sku.toUpperCase();
+  const caseless = edges.filter((e: any) =>
+    typeof e?.node?.sku === 'string' && e.node.sku.toUpperCase() === upper);
+  const exact = caseless.find((e: any) => e.node.sku === sku)
+    || (caseless.length === 1 ? caseless[0] : null);
   if (!exact) return null;
 
   return {
@@ -248,6 +257,82 @@ export async function findVariantBySkuLoose(
   if (!normalized || normalized === sku) return null;
 
   return await findVariantBySku(env, normalized);
+}
+
+/**
+ * Current Shopify stock per variant, for the oversell guard. Returns
+ * variantId → available quantity, or null when the variant does not track
+ * inventory (nothing to guard) or no longer exists. Throws on API failure so
+ * the caller can treat it as transient rather than as "in stock".
+ */
+export async function getVariantsStock(
+  env: ShopifyAdminEnv,
+  variantIds: string[],
+): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>();
+  const ids = [...new Set(variantIds)];
+  if (ids.length === 0) return out;
+
+  const query = `
+    query stock($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on ProductVariant { id sku inventoryQuantity inventoryItem { tracked } }
+      }
+    }
+  `;
+  const result = await shopifyAdminGraphQL(env, query, { ids });
+  if (result?.errors?.length) {
+    throw new Error(`Shopify stock query failed: ${JSON.stringify(result.errors).slice(0, 200)}`);
+  }
+  const nodes: any[] = result?.data?.nodes || [];
+  for (const id of ids) {
+    const n = nodes.find((x) => x?.id === id);
+    if (!n || n.inventoryItem?.tracked === false || typeof n.inventoryQuantity !== 'number') {
+      out.set(id, null);
+    } else {
+      out.set(id, n.inventoryQuantity);
+    }
+  }
+  return out;
+}
+
+/**
+ * Look up many SKUs in one call. Returns every variant Shopify's search
+ * returned, WITHOUT filtering — callers decide what counts as a match (exact,
+ * case-insensitive, separator-stripped). Used by the relink pass so a page of
+ * 100 Discogs listings costs a handful of Shopify calls, not 100.
+ */
+export async function searchVariantsBySkus(
+  env: ShopifyAdminEnv,
+  skus: string[],
+): Promise<Array<{ id: string; sku: string; inventoryQuantity: number | null; title: string; status: string }>> {
+  const uniq = [...new Set(skus.map((s) => s.trim()).filter(Boolean))];
+  const out: Array<{ id: string; sku: string; inventoryQuantity: number | null; title: string; status: string }> = [];
+  const query = `
+    query skus($q: String!) {
+      productVariants(first: 250, query: $q) {
+        nodes { id sku inventoryQuantity product { title status } }
+      }
+    }
+  `;
+  // Shopify caps search query length; 40 terms per call stays well inside it.
+  for (let i = 0; i < uniq.length; i += 40) {
+    const q = uniq.slice(i, i + 40)
+      .map((s) => `sku:"${s.replace(/"/g, '\\"')}"`)
+      .join(' OR ');
+    const result = await shopifyAdminGraphQL(env, query, { q });
+    for (const n of result?.data?.productVariants?.nodes || []) {
+      if (typeof n?.sku !== 'string') continue;
+      out.push({
+        id: n.id,
+        sku: n.sku,
+        inventoryQuantity: typeof n.inventoryQuantity === 'number' ? n.inventoryQuantity : null,
+        title: n.product?.title || '',
+        status: n.product?.status || '',
+      });
+    }
+  }
+  return out;
 }
 
 // ── LOCATION LOOKUP ─────────────────────────────────────────────────
