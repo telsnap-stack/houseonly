@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
 	parseSetUrl,
 	resolveSetMeta,
@@ -247,17 +247,34 @@ describe("bloque Listen (fase 7D)", () => {
 	});
 
 	it("las fechas llegan formateadas y solo las futuras", async () => {
-		const ahora = Date.parse("2026-09-18T00:00:00Z");
-		await env.ENTITIES.put("events:theo-parrish", JSON.stringify({
-			slug: "theo-parrish", source: "bandsintown", fetchedAt: ahora,
-			items: [
-				{ id: "1", date: "2026-09-27T23:00:00", city: "Ibiza", country: "Spain", venue: "Amnesia Ibiza", tickets: "https://x" },
-				{ id: "2", date: "2020-01-01T20:00:00", city: "Detroit", country: "United States", region: "MI", venue: "Viejo" },
-			],
-		}));
-		const l = (await buildListen(env as any, "theo-parrish"))!;
-		expect(l.events).toHaveLength(1);
-		expect(l.events[0]).toMatchObject({ when: "Sun 27 Sep", where: "Ibiza, Spain", venue: "Amnesia Ibiza", tickets: "https://x" });
+		// El reloj va congelado. Este test comprueba justo que solo se enseñan
+		// las futuras, asi que con fechas fijas caducaba solo: empezo a fallar el
+		// 2026-09-28, cuando el evento del fixture paso a ser pasado. Las fechas
+		// se derivan del ahora congelado, no se escriben a mano.
+		//
+		// Se finge SOLO Date: buildListen espera a la KV por medio y con los
+		// temporizadores falsos esos await no avanzarian.
+		const CONGELADO = Date.parse("2026-09-18T00:00:00Z");
+		const dia = (n: number) =>
+			new Date(CONGELADO + n * 86400000).toISOString().slice(0, 10);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(CONGELADO);
+		try {
+			await env.ENTITIES.put("events:theo-parrish", JSON.stringify({
+				slug: "theo-parrish", source: "bandsintown", fetchedAt: CONGELADO,
+				items: [
+					// dia(9) es 2026-09-27, domingo: de ahi el "Sun 27 Sep" de abajo.
+					{ id: "1", date: `${dia(9)}T23:00:00`, city: "Ibiza", country: "Spain", venue: "Amnesia Ibiza", tickets: "https://x" },
+					// Vispera del ahora congelado: pasado, se cae.
+					{ id: "2", date: `${dia(-1)}T20:00:00`, city: "Detroit", country: "United States", region: "MI", venue: "Viejo" },
+				],
+			}));
+			const l = (await buildListen(env as any, "theo-parrish"))!;
+			expect(l.events).toHaveLength(1);
+			expect(l.events[0]).toMatchObject({ when: "Sun 27 Sep", where: "Ibiza, Spain", venue: "Amnesia Ibiza", tickets: "https://x" });
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("la foto del cron pone fecha al enlace de Mixcloud", async () => {
