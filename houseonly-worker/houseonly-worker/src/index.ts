@@ -872,6 +872,7 @@ import {
 import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
+import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1075,6 +1076,10 @@ async function handleBackorderRequest(req: BackorderRequest, env: Env): Promise<
 //           5xx { error: string, ... } on upstream/network failure
 
 const MIRROR_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+// Los snippets de MT son mp3-128 de pista entera en algunos sellos, no recortes
+// de 60 s: el mayor de la factura 962 pasa de 6 MB. 20 MB deja margen sin
+// acercarse a los 128 MB de memoria del isolate.
+const MIRROR_AUDIO_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
 const MIRROR_TIMEOUT_MS = 15_000;
 const MIRROR_ALLOWED_HOSTS = new Set([
   'www.mothertonguerecords.com',
@@ -1092,7 +1097,29 @@ const MIRROR_ALLOWED_HOSTS = new Set([
   // 'kompakt.fm', 'www.kompakt.fm', etc.
 ]);
 
+// Espejo generico. `handleMirror` (portadas) y `handleMirrorAudio` (snippets)
+// comparten TODO menos el tipo aceptado y el tope de tamano: mismo allowlist de
+// hosts, mismo saneado de clave, mismo timeout y la misma negativa a guardar lo
+// que no sea del tipo esperado — un 200 con text/html es casi siempre una
+// pagina de "no encontrado", y no queremos eso en R2 haciendose pasar por una
+// portada ni por una pista.
+type MirrorCfg = { tipo: string; maxBytes: number; accept: string };
+const MIRROR_IMAGEN: MirrorCfg = { tipo: 'image/', maxBytes: MIRROR_MAX_BYTES, accept: 'image/*' };
+const MIRROR_AUDIO: MirrorCfg = { tipo: 'audio/', maxBytes: MIRROR_AUDIO_MAX_BYTES, accept: 'audio/*' };
+
 async function handleMirror(req: { url?: string; key?: string }, env: Env): Promise<Response> {
+  return await handleMirrorGeneric(req, env, MIRROR_IMAGEN);
+}
+
+async function handleMirrorAudio(req: { url?: string; key?: string }, env: Env): Promise<Response> {
+  return await handleMirrorGeneric(req, env, MIRROR_AUDIO);
+}
+
+async function handleMirrorGeneric(
+  req: { url?: string; key?: string },
+  env: Env,
+  cfg: MirrorCfg,
+): Promise<Response> {
   // 1. Validate inputs
   if (!req.url || typeof req.url !== 'string') {
     return jsonRes({ error: 'missing url' }, 400);
@@ -1128,7 +1155,7 @@ async function handleMirror(req: { url?: string; key?: string }, env: Env): Prom
       // Pretend to be a normal browser request to maximize compat.
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; HouseOnlyMirror/1.0)',
-        'Accept': 'image/*',
+        'Accept': cfg.accept,
       },
     });
   } catch (e: any) {
@@ -1140,13 +1167,13 @@ async function handleMirror(req: { url?: string; key?: string }, env: Env): Prom
     return jsonRes({ error: `upstream ${upstream.status}` }, 502);
   }
 
-  // 3. Sanity-check Content-Type. We refuse anything that isn't an image —
-  //    a successful 200 with text/html is almost always a "soft 404" landing
-  //    page, and we don't want that mirrored as a cover.
+  // 3. Sanity-check Content-Type. We refuse anything that isn't of the expected
+  //    kind — a successful 200 with text/html is almost always a "soft 404"
+  //    landing page, and we don't want that mirrored as a cover or a track.
   const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
-  if (!contentType.startsWith('image/')) {
+  if (!contentType.startsWith(cfg.tipo)) {
     return jsonRes({
-      error: 'upstream did not return an image',
+      error: `upstream did not return ${cfg.tipo}*`,
       contentType,
     }, 502);
   }
@@ -1156,8 +1183,8 @@ async function handleMirror(req: { url?: string; key?: string }, env: Env): Prom
   if (buf.byteLength === 0) {
     return jsonRes({ error: 'empty body' }, 502);
   }
-  if (buf.byteLength > MIRROR_MAX_BYTES) {
-    return jsonRes({ error: 'too large', bytes: buf.byteLength }, 413);
+  if (buf.byteLength > cfg.maxBytes) {
+    return jsonRes({ error: 'too large', bytes: buf.byteLength, max: cfg.maxBytes }, 413);
   }
 
   // 5. Put in R2 and return public URL
@@ -1926,6 +1953,51 @@ export default {
         return jsonRes({ error: 'invalid json' }, 400);
       }
       return await handleMirror(body, env);
+    }
+
+    // ── MIRROR AUDIO ────────────────────────────────────────
+    // POST ?action=mirror-audio  body: { url, key }
+    //
+    // Igual que mirror pero para los snippets mp3 de la ficha del distribuidor.
+    // Mismo allowlist de hosts: lo unico que cambia es que se exige audio/* y
+    // que el tope sube a 20 MB. Existe porque desde que el tab MT se alimenta
+    // de ?action=mt-enrich, los mp3 ya no pasan por una carpeta local — el
+    // navegador nunca ve los bytes, van de la web de MT a R2 por el edge.
+    if (action === 'mirror-audio' && request.method === 'POST') {
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
+      let body: any = {};
+      try {
+        body = await request.json();
+      } catch {
+        return jsonRes({ error: 'invalid json' }, 400);
+      }
+      return await handleMirrorAudio(body, env);
+    }
+
+    // ── MT ENRICH ───────────────────────────────────────────
+    // GET ?action=mt-enrich&catnos=SR003,TMR-008,...
+    //
+    // Devuelve { releases, errors } con la ficha de cada catno en
+    // mothertonguerecords.com. Lo llama el tab MT del admin para poder importar
+    // con la factura PDF y nada mas. Ver src/lib/mt-enrich.ts.
+    //
+    // Bearer de admin aunque el dato de origen sea publico: sin el, esto es un
+    // proxy de scraping gratis a cuenta de nuestro presupuesto de peticiones.
+    if (action === 'mt-enrich' && request.method === 'GET') {
+      if (!bearerAdminValido(request, env)) return jsonRes({ error: 'unauthorized' }, 401);
+      const crudo = url.searchParams.get('catnos') || '';
+      const catnos = crudo.split(',').map(c => c.trim()).filter(Boolean);
+      if (!catnos.length) return jsonRes({ error: 'missing catnos' }, 400);
+      if (catnos.length > MT_MAX_CATNOS) {
+        return jsonRes({
+          error: `too many catnos (${catnos.length}); max ${MT_MAX_CATNOS} per call`,
+        }, 400);
+      }
+      try {
+        return jsonRes(await mtEnrich(catnos));
+      } catch (e: any) {
+        return jsonRes({ error: 'mt-enrich failed', message: e?.message || String(e) }, 502);
+      }
     }
 
     // ── STORY CONTEXT (Stories knowledge line) ──────────────
