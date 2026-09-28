@@ -258,6 +258,54 @@ directamente.
   catno (normalmente la portada) fija el catno de todas las pistas del zip
   aunque el zip se llame con un hash. Si no resuelve, avisa por `console.warn`.
 
+**MT no envía promopacks; la carpeta de assets se construye descargando
+`tracks[].url` del JSON del scraper.** A diferencia de Triple Vision o Rubadub,
+Mother Tongue no manda un zip por release: los snippets viven en su web y el
+scraper ya los recoge. Hoy la carpeta se arma a mano bajando esas URLs. Es un
+candidato claro a botón del propio tab `mt`, como el de Rubadub.
+
+#### Cómo nombrar los ficheros al bajarlos
+
+Una subcarpeta por catno y el número de orden con **dos dígitos** delante:
+
+```
+mt-962/
+  SR003/01 - Been Robbed.mp3
+  FUTLP011/01 - Running (Marc Rapson Remix).mp3
+  …
+  FUTLP011/20 - I Warned You (Electric Conversation Remix).mp3
+```
+
+No es capricho: probado el 2026-09-28 contra `orderAudio` y
+`trackNameFromFilename` con las 88 pistas de la factura 962, los esquemas
+planos fallan y este no.
+
+| Esquema | Orden | Nombre visible |
+|---|---|---|
+| `{catno} - {n} - {título}.mp3` | 14/16 releases | 82/88 pistas |
+| `{catno} - {nn} - {título}.mp3` | 16/16 | 82/88 |
+| `{catno}/{nn} - {título}.mp3` | **16/16** | **88/88** |
+
+Los dos fallos que corrige:
+
+- **Sin cero a la izquierda el orden se rompe a partir de 10 pistas.** Ningún
+  patrón de `orderAudio` casa con un nombre que empieza por el catno, así que
+  cae al desempate alfabético y `10` va antes que `2`. Con la factura 962 eso
+  descolocaba `FUTLP011` (20 pistas) y `SR004` (13).
+- **Un catno con barra rompe el nombre visible.** `trackNameFromFilename`
+  construye su regex con el catno de la factura (`MBH001/002`), pero el fichero
+  no puede llevar `/` y en disco es `MBH001-002`: el prefijo no casa y se queda
+  dentro del nombre de pista («MBH001-002 - 01 - Antheme»). Con el catno en la
+  carpeta y no en el fichero, el problema desaparece.
+
+Con subcarpeta, `orderAudio` sí engancha (`/^(\d+)[.\s_-]/` → ordena por
+número, no alfabéticamente) y `buildFolderIndex` saca el catno del segmento de
+ruta: comprobado, **88/88 ficheros indexados y 16/16 releases** sin mezclar
+pistas entre catnos.
+
+Esta carpeta lleva solo audio. Las portadas no hacen falta: el importer las
+coge del `cover` del listener por el endpoint `mirror` (pasada 2 de D5).
+
 ### 5. `process()` — bucle por artículo de la factura (`src/App.jsx:6009`)
 
 Para cada `{catno, qty, dealerPrice}`, con `meta = releaseMeta[key]` y
