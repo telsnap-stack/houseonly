@@ -19,11 +19,13 @@ este documento:
   descargado. Súbelo a Claude». El listener HTML se monta después, en una
   conversación con Claude, cruzando ese JSON con la factura.
 
-La prueba está en los campos. El scraper emite `page_title`, `headings`,
-`cover`, `description`, `genres`, `tracks`. El `RELEASES` del listener lleva
-además `cat`, `price`, `price_num`, `fmt_norm`, `is_preorder`, `status` y un
-`title`/`artist` ya separados — nada de eso sale de la web de Mother Tongue:
-viene de la factura y de un paso de normalización posterior. Ejemplo real de
+La prueba está en los campos. La v2 emitía `page_title`, `headings`, `cover`,
+`description`, `genres`, `tracks`. El `RELEASES` del listener lleva además
+`cat`, `price`, `price_num`, `fmt_norm`, `is_preorder`, `status` y un
+`title`/`artist` ya separados. La v4 cierra parte de ese hueco —ya saca `catno`,
+`artist`, `title`, `label`, `format_hint` y `released` de la propia ficha—, pero
+el precio, la cantidad y la preventa **solo** están en la factura, así que el
+eslabón de montaje sigue haciendo falta. Ejemplo real de
 `~/Downloads/mt_listener_v3.html`:
 
 ```json
@@ -37,61 +39,120 @@ viene de la factura y de un paso de normalización posterior. Ejemplo real de
 O sea, la cadena real tiene **cuatro** eslabones, no tres:
 
 ```
-scraper en la consola de Chrome  →  mt_enrichment_*.json
-            +  factura PDF
-            ↓  (montaje asistido, fuera del repo)
-   listener HTML con const RELEASES = [...]
-            ↓
-   MotherTongueImporter  →  CSV de Shopify
+1.  scripts/mt_scraper_v4.js   (consola de Chrome, en mothertonguerecords.com)
+          catnos de la factura  →  mt_enrichment_v4_AAAA-MM-DD.json
+                    ↓
+2.  montaje del listener        (fuera del repo, cruzando con la factura:
+          JSON + factura PDF     precio, cantidad, preventa)
+                    ↓
+3.  listener HTML con const RELEASES = [...]
+                    ↓
+4.  MotherTongueImporter (src/App.jsx)  →  CSV de Shopify
 ```
 
-### Cómo se ejecuta `scripts/mt/mt_scraper_v2_with_genres.js`
+El eslabón 2 es el único sin código en el repo: hoy se hace a mano. El
+scraper **no** genera el listener y no debe intentarlo — sin la factura no
+sabe ni el precio ni cuántas copias entran.
 
-Es un IIFE para pegar en la **consola de Chrome**, no un script de Node: usa
-`fetch` con cookies omitidas, `DOMParser` y `URL.createObjectURL`, y depende de
-estar en el origen correcto para no chocar con CORS.
+### Cómo se ejecuta `scripts/mt_scraper_v4.js` (el vigente)
+
+IIFE para pegar en la **consola de Chrome**, no un script de Node: usa `fetch`
+same-origin, `DOMParser` y `URL.createObjectURL`.
 
 1. Abrir cualquier página de `https://www.mothertonguerecords.com`.
-2. Abrir DevTools → Console y pegar el fichero entero.
-3. Esperar ~3-5 minutos. Va de 4 en 4 con 200 ms entre tandas y registra el
-   avance como `123/276 (45%) · last batch: 4t/2g,...` (pistas/géneros).
-4. Al acabar descarga solo `mt_enrichment_AAAA-MM-DD.json`. También queda en
-   `window._mtScrapeResults` por si hay que inspeccionarlo sin reabrirlo.
+2. Editar el array `CATNOS` de la cabecera con los catnos de la factura.
+3. DevTools → Console, pegar el fichero entero.
+4. Descarga `mt_enrichment_v4_AAAA-MM-DD.json`; también queda en
+   `window._mtScrapeV4`.
 
-De cada página saca: MP3s por regex sobre `wp-content/uploads/*.mp3`, con el
-nombre de pista tomado del último `<strong>` en los 800 caracteres anteriores
-al enlace; `h1` como título; `og:image` como portada; `og:description` como
-descripción (**de ahí el truncado a ~500 caracteres que el importer compensa**);
-y los géneros de `.posted_in a`, `.tagged_as a` y los `a[rel="tag"]` que apunten
-a `/product-category/`.
+Mantiene de la v2 el ritmo de 4 en 4 con 200 ms entre tandas y los campos
+`page_title` / `headings` / `cover` / `description` / `genres` / `tracks` /
+`track_count`, y añade `catno`, `artist`, `title`, `label`, `format_hint`,
+`released`, `resolved_via` y `tracks_via`.
 
-**La lista de URLs va incrustada en el propio fichero** — 276 URLs a pelo al
-principio del script, incluidos cuatro enlaces de Dropbox que no son productos
-y fallarán. Para una factura nueva hay que editar ese array a mano. No hay
-descubrimiento automático de catálogo.
+**Resolución del catno → producto**, en cascada, sin adivinar nunca:
 
-### Cómo se ejecuta `scripts/mt/mt_scraper_v3_1_patch.js`
+1. Store API de WooCommerce, `/wp-json/wc/store/v1/products?search=CATNO`. Es
+   pública y devuelve el `sku`, que en esta tienda **es** el catalog number, así
+   que el emparejamiento es exacto y no por ranking de texto. Se prefiere SKU
+   idéntico → normalizado → prefijo único; si quedan varios candidatos, el
+   catno se reporta como ambiguo y no se elige.
+2. Si la búsqueda no da con él, se barre el catálogo entero
+   (`?per_page=100&page=N`, 7 peticiones para ~700 referencias) y se empareja el
+   SKU en local. Se barre una sola vez por ejecución y se cachea.
+3. Buscador HTML de WordPress, como último recurso.
 
-Mismo método (consola de Chrome, ~30 s), pero es un **remiendo de un solo uso
-para la factura 756/2026**, con los datos de esa factura incrustados:
+**El paso 3 hoy no funciona y conviene saberlo.** Comprobado el 2026-09-28
+contra la tienda en vivo: `/?s=CAT-016&post_type=product` responde 200 con
+«No products were found matching your selection», y da lo mismo buscar por
+catno o por título («Kaidi Tatham Galaxy» → 0 productos). La búsqueda nativa de
+WooCommerce no indexa SKUs, y el buscador que se ve en la web es el plugin
+Advanced Woo Search, cuyo endpoint AJAX devuelve 0 resultados sin nonce. El
+código se queda por si se reactiva, pero en la práctica lo que resuelve es la
+API; si la API cayera, el script deja los catnos en la lista de fallos para
+resolverlos a mano en vez de inventarse un producto.
 
-1. Resuelve dos referencias que la v3 no había encontrado (`TLM041`, `VP014`)
-   buscándolas en `/?s=...&post_type=product` y quedándose con el primer
-   resultado; el comentario de cabecera dice que arregla un «bug de stop-words».
-2. Repasa las 12 URLs ya scrapeadas (también incrustadas) para sacar **solo**
-   `label` (del enlace a `/record-label/`) y `format_hint` (regex de `2LP`,
-   `12"`, `7"`…).
-3. Descarga `mt_enrichment_756_patch.json`.
+**Extractores** (todos leen marcado estructurado, no heurísticas):
 
-Añade sobre la v2 tres extractores que la v2 no tiene: `extractLabel`,
-`extractFormatHint` y `extractReleased`. Si alguna vez hay que rehacer un
-scraper completo, esos tres son lo que merece la pena rescatar de aquí — y
-`label` y `fmt_norm` son justo dos campos que el listener lleva y la v2 no
-sabía producir.
+| Campo | De dónde |
+|---|---|
+| `artist` | `h1.product_title` — en esta tienda el `h1` es el **artista** |
+| `title` | `p.mt-product-subheading` |
+| `label` | `p.mt-product-label` |
+| `format_hint` | `div.mt-product-meta` → fila «Format» |
+| `released` | `div.mt-product-meta` → fila «Released» |
+| `catno_web` | `div.mt-product-meta` → fila «Catalog No.», para cotejar |
+| `genres` | `a[rel="tag"]` que apunten a `/product-category/` |
+| `cover` / `description` | `og:image` / `og:description` |
+| `tracks` | el array `new Player([{title, file}, …])` que imprime la página |
+
+Las filas de `mt-product-meta` se leen **por etiqueta**, no por posición: si
+añaden un campo, no se rompe.
+
+### Validación (2026-09-28)
+
+Ejecutado de principio a fin contra la tienda en vivo con cinco catnos
+(`TLM041`, `VP014`, `CAT-016`, `GT01`, `MT19024`): **5/5 resueltos, 17 pistas,
+sello 5/5, géneros 5/5, fecha 5/5, 0 fallos**, todos por `api:sku-exacto` y con
+las pistas vía `player-array`. Muestra:
+
+```
+TLM041   V.A. (Mike Perras, Takahiro Fuchigami, …) — Frisson EP Part B
+         sello=Ten Lovers Music · formato=Vinyl 12" · salida=26 June 2026
+         generos=[Broken Beat, House / Electronic, What's New] · pistas=4
+CAT-016  The Soul Pops — The Mask EP
+         sello=Cataleya Music · formato=vinyl 12" · salida=22 May 2026
+```
+
+Los extractores se probaron además uno a uno contra el HTML guardado de tres
+productos reales (`kaidi-tatham-galaxy`, TLM041, CAT-016), y los tres caminos de
+resolución contra la API en vivo, incluido el caso ambiguo: buscar
+`SACREDMEDICINE005` devuelve también `SACREDMEDICINE005B`, y la preferencia por
+SKU idéntico escoge el correcto.
+
+### Qué hacía falta arreglar de la v2 y la v3.1
+
+Los dos scrapers anteriores siguen en `scripts/mt/` como referencia. Lo que la
+v4 corrige, comprobado contra el HTML de hoy:
+
+- **La lista de 276 URLs incrustada** (v2) obligaba a editarla a mano por
+  factura. Sustituida por catnos + resolución por SKU.
+- **`extractLabel` de la v3.1 estaba mal**: `a[href*="/record-label/"]` coge el
+  *primer* enlace de la página, que hoy es el menú lateral de sellos. En
+  `/product/kaidi-tatham-galaxy/` devolvía «Salsoul Records» en vez de
+  «2000Black». La v4 usa `p.mt-product-label`.
+- **Los nombres de pista de la v2 salían del nombre del fichero.** Su heurística
+  (último `<strong>` en los 800 caracteres anteriores al mp3) no llegaba, porque
+  las URLs viven en un `<script>` lejos del listado. Por eso los listeners
+  viejos dicen «A1. Galaxy feat Lola» donde la web dice «Galaxy».
+- **`.posted_in` y `.tagged_as` ya no existen** en el tema actual; los géneros se
+  salvaban sólo por la tercera pasada de la v2 (`a[rel="tag"]`).
+- **El `h1` es el artista, no el título.** La v2 lo guardaba como `page_title` y
+  el nombre del disco se perdía; ahora salen los dos separados.
 
 ### Lo que no copié al repo
 
-En `~/Downloads` hay además siete listeners HTML ya generados (`mt_listener_v2`,
+En `~/Downloads` hay siete listeners HTML ya generados (`mt_listener_v2`,
 `mt_listener_v3` y duplicados, `mt_invoice_481_listener`,
 `mt_invoice_756_listener_with_genres`, `Mother Tongue · Listening Session`),
 entre 46 KB y 616 KB, unos 2 MB en total. Son **salidas** por factura, no
@@ -272,6 +333,6 @@ sigue siendo manual.
 ## Resumen en una línea
 
 Factura PDF (qué y a cuánto) × listener HTML (qué es; montado a partir del
-JSON que descarga `scripts/mt/mt_scraper_v2_with_genres.js`) × carpeta del distribuidor (cómo suena y cómo se ve)
+JSON que descarga `scripts/mt_scraper_v4.js`) × carpeta del distribuidor (cómo suena y cómo se ve)
 → una fila de CSV de Shopify por artículo de la factura, con portadas y audio
 ya subidos a R2.
