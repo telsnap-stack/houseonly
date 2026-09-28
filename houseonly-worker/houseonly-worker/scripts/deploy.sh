@@ -88,7 +88,7 @@ else
   echo
 fi
 
-gris "HEAD $(git rev-parse --short HEAD) · rama $(git branch --show-current)"
+gris "HEAD $(git rev-parse --short HEAD) · rama $(git branch --show-current || echo desacoplada)"
 if [ "$ENTORNO" = "staging" ]; then
   npx wrangler deploy --env staging
 else
