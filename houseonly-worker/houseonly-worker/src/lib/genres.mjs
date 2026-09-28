@@ -123,11 +123,16 @@ export const GENRES = [
     { raw:'Electronica', tipo:'canonico' }, { raw:'Electronica/Dance', tipo:'misma' },
     { raw:'Ambient', tipo:'sub' }, { raw:'IDM', tipo:'sub' },
     { raw:'Modern Classical Music', tipo:'sub' }, { raw:'Modern Classical', tipo:'sub' },
-    // `Electronic` lo escribe Word and Sound en 136 discos y 133 ya tienen
-    // genero propio: en una tienda de electronica no distingue nada. Va aqui,
-    // el ultimo de todo, para que solo se lleve los que no dicen nada mas, y
-    // como 'sub' para que el tag crudo no se borre de esos 136.
-    { raw:'Electronic', tipo:'sub' },
+    // `Electronic` a secas estuvo aqui y se quito el 2026-09-28. Lo escribe
+    // Word and Sound en ~140 discos, y aunque la idea era que solo se llevara
+    // los que no dicen nada mas, medido contra el catalogo entero resolvia 141
+    // discos de golpe: habria hecho de Electronica una de las pildoras mas
+    // grandes de la tienda a base de una palabra que, en una tienda de
+    // electronica, no distingue nada.
+    //
+    // `Electronica`, `Electronica/Dance` y `Ambient` se quedan: esos si dicen
+    // algo. Si un disco solo dice "Electronic", se queda sin genero a
+    // proposito, que es mejor que meterlo en un cajon que no significa nada.
   ]},
   { id:'soulfunkdisco', label:'Soul · Funk · Disco', seccion:'house', orden:10, pildora:'con-discos', alias:[
     { raw:'Soul', tipo:'sub' }, { raw:'Funk', tipo:'sub' }, { raw:'Disco', tipo:'sub' },
