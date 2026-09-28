@@ -79,6 +79,21 @@ const esHeredado = t => /^genre:/i.test(t) && !GENRES.some(g => genreTag(g.id) =
 const valorHeredado = t => t.slice(t.indexOf(':') + 1).trim();
 
 /**
+ * Un disco resuelve a UN canonico. Si ya lleva uno, la pasada A no le pone
+ * otro AUNQUE la tabla haya cambiado y ahora resuelva distinto: dos canonicos
+ * lo meten en dos pildoras a la vez.
+ *
+ * Esto salta porque los canonicos son tags estructurales y por tanto NO entran
+ * en los valores crudos: al resolver, el barrido no ve el genero que el disco
+ * ya tiene. SIG028RP lo enseña bien — es `genre:drumandbass` y su unico valor
+ * suelto es `Dubstep`, que desde los alias nuevos resuelve a bassmusic; sin
+ * este freno se habria quedado con los dos.
+ *
+ * Cambiar el genero de un disco que ya lo tiene es otra operacion, y es a mano.
+ */
+const TAGS_CANONICOS = new Set(GENRES.map(g => genreTag(g.id).toLowerCase()));
+
+/**
  * Arreglos puntuales, los dos de la pasada B (la A no borra nunca):
  *   - un tag mal escrito en origen, que se reescribe;
  *   - dos nombres de artista metidos como genero en UN disco concreto.
@@ -124,7 +139,7 @@ async function tokenAdmin() {
 
 // ── EL PLAN ─────────────────────────────────────────────────────────
 function plan(productos) {
-  const p = { porGenero:new Map(), sinGenero:[], desconocidos:new Map(), escrituras:[], yaTienen:0, borrados:new Map() };
+  const p = { porGenero:new Map(), sinGenero:[], desconocidos:new Map(), escrituras:[], yaTienen:0, yaTieneOtro:0, borrados:new Map() };
   for (const prod of productos) {
     const crudos = (prod.tags || []).filter(t => !esEstructural(t));
     const heredados = (prod.tags || []).filter(esHeredado).map(valorHeredado);
@@ -142,7 +157,11 @@ function plan(productos) {
 
     if (!LIMPIEZA && !B1) {
       if (!g) continue;
-      if ((prod.tags || []).includes(g.tag)) { p.yaTienen++; continue; }
+      // En minusculas porque Shopify unifica los tags que solo difieren en eso:
+      // `genre:House` y `genre:house` son el mismo tag para la tienda.
+      const tagsBajos = (prod.tags || []).map(t => String(t).toLowerCase());
+      if (tagsBajos.includes(g.tag.toLowerCase())) { p.yaTienen++; continue; }
+      if (tagsBajos.some(t => TAGS_CANONICOS.has(t))) { p.yaTieneOtro++; continue; }
       p.escrituras.push({ ...prod, anadir:[g.tag], quitar:[] });
     } else if (B1) {
       const viejos = (prod.tags || []).filter(esHeredado)
@@ -218,7 +237,7 @@ if (!LIMPIEZA && !B1) {
     if (n) console.log(`    ${genreTag(g.id).padEnd(22)} ${String(n).padStart(5)}   (${g.seccion})`);
   }
   console.log(`    ${'(sin genero)'.padEnd(22)} ${String(p.sinGenero.length).padStart(5)}`);
-  console.log(`\n  ya lo tienen puesto: ${p.yaTienen} · se escribirian: ${p.escrituras.length}`);
+  console.log(`\n  ya lo tienen puesto: ${p.yaTienen} · ya llevan OTRO canonico (no se tocan): ${p.yaTieneOtro} · se escribirian: ${p.escrituras.length}`);
 
   /**
    * Disco a disco, en cuatro bloques, para poder dar el OK por partes. El
