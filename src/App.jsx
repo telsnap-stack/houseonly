@@ -5465,12 +5465,63 @@ function DBHImporter() {
   );
 }
 
+// Pide al Worker las fichas de mothertonguerecords.com para una lista de
+// catnos (?action=mt-enrich). El navegador no puede hacerlo por su cuenta: esa
+// web no manda cabeceras CORS, ni en las paginas ni en su Store API.
+//
+// Se trocea en tandas por dos motivos: el endpoint acepta 10 catnos por llamada
+// (por el limite de subpeticiones de un Worker) y detras hay el WordPress de un
+// distribuidor pequeno, no una API pensada para aguantar carga.
+const MT_ENRICH_LOTE = 8;
+const MT_ENRICH_PAUSA_MS = 400;
+async function pedirFichasMT(catnos, onProgreso) {
+  const lista = [...new Set(catnos.map(c => String(c || '').trim()).filter(Boolean))];
+  const releases = [];
+  const errores = [];
+  for (let i = 0; i < lista.length; i += MT_ENRICH_LOTE) {
+    const lote = lista.slice(i, i + MT_ENRICH_LOTE);
+    onProgreso?.(i, lista.length);
+    const r = await fetchAdmin(
+      `${WORKER_URL}?action=mt-enrich&catnos=${encodeURIComponent(lote.join(','))}`);
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      throw new Error(`mt-enrich ${r.status}: ${t.slice(0, 200)}`);
+    }
+    const d = await r.json();
+    releases.push(...(d.releases || []));
+    errores.push(...(d.errors || []));
+    onProgreso?.(Math.min(i + lote.length, lista.length), lista.length);
+    if (i + MT_ENRICH_LOTE < lista.length) {
+      await new Promise(res => setTimeout(res, MT_ENRICH_PAUSA_MS));
+    }
+  }
+  return { releases, errores };
+}
+
+// Mezcla dos fuentes de metadatos dejando ganar a la segunda, pero solo en los
+// campos que traiga con valor: un listener al que le falte el sello no debe
+// borrar el que ya trajo la ficha web.
+function conValor(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && !v.trim()) continue;
+    if (Array.isArray(v) && !v.length) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 // ── MOTHER TONGUE IMPORTER ─────────────────────────────────────
-// Combines 3 sources to build the Shopify CSV:
-//   1. Invoice PDF      → catno, qty, dealer price (with discount detection)
-//   2. Listener HTML    → artist, title, label, format, description, GENRES,
-//                         and a fallback cover URL from mothertonguerecords.com
-//   3. Distributor folder → cover image + audio snippets (uploaded to R2)
+// Importa con la factura PDF y nada mas. Las otras dos entradas siguen
+// existiendo, pero son opcionales y solo sirven para sobreescribir:
+//   1. Invoice PDF      → catno, qty, dealer price (with discount detection)  [OBLIGATORIO]
+//   2. ?action=mt-enrich → artist, title, label, format, description, GENRES,
+//                         portada y snippets, leidos de la ficha del producto
+//                         en mothertonguerecords.com por el Worker
+//   3. Listener HTML    → opcional; pisa campo a campo lo que traiga la ficha
+//   4. Distributor folder → opcional; si trae audio para un catno, manda sobre
+//                         los snippets de la web (son los ficheros del sello)
 //
 // Folder is dropped via webkitdirectory; we walk every file and index by
 // "normalized catno" (uppercase, alphanumeric only). Tolerates the chaotic
@@ -5494,7 +5545,9 @@ function MotherTongueImporter() {
   const [htmlFile, setHtmlFile]     = useState(null);
   const [folderFiles, setFolderFiles] = useState([]); // raw File[] from webkitdirectory
   const [invoiceItems, setInvoiceItems] = useState([]); // [{catno, qty, dealerPrice}]
-  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → meta object
+  const [releaseMeta, setReleaseMeta]   = useState({}); // catnoNorm → meta del listener (opcional)
+  const [fichasMT, setFichasMT]         = useState({}); // catnoNorm → ficha de mt-enrich
+  const [fallosMT, setFallosMT]         = useState([]); // catnos que la web no resolvio
   const [folderIndex, setFolderIndex]   = useState({}); // catnoNorm → {covers:[File], audio:[File]}
   const [status, setStatus]   = useState('idle');
   const [progress, setProgress] = useState({ done:0, total:0, current:'' });
@@ -5956,6 +6009,10 @@ function MotherTongueImporter() {
       const items = await parseInvoicePDF(file);
       setInvoiceItems(items);
       setPdfFile(file.name);
+      // Otra factura, otras fichas: si no se limpian, procesar la segunda
+      // reutilizaria las de la primera y los discos nuevos saldrian sin nada.
+      setFichasMT({});
+      setFallosMT([]);
       setStatus('idle');
     } catch (e) {
       setError('PDF parse error: ' + e.message); setStatus('idle');
@@ -6012,10 +6069,39 @@ function MotherTongueImporter() {
     try {
       const total = invoiceItems.length;
       const processed = [];
+
+      // ── FICHAS DE LA WEB DE MT ───────────────────────────
+      // Antes del bucle, porque van en tandas y con pausa: mezclarlas dentro
+      // del bucle convertiria una peticion por tanda en una por disco.
+      let fichas = fichasMT;
+      if (!Object.keys(fichas).length) {
+        setProgress({ done: 0, total: invoiceItems.length, current: 'consultando mothertonguerecords.com…' });
+        const { releases, errores } = await pedirFichasMT(
+          invoiceItems.map(it => it.catno),
+          (hechos, cuantos) => setProgress({
+            done: hechos, total: cuantos, current: `fichas ${hechos}/${cuantos}…`,
+          }),
+        );
+        fichas = {};
+        for (const rel of releases) fichas[normCatno(rel.catno)] = rel;
+        setFichasMT(fichas);
+        setFallosMT(errores);
+        if (errores.length) {
+          console.warn('[MT] sin ficha web:', errores.map(e => `${e.catno} (${e.error})`).join(' · '));
+        }
+      }
+
       for (let i = 0; i < invoiceItems.length; i++) {
         const item = invoiceItems[i];
         const key  = normCatno(item.catno);
-        const meta = releaseMeta[key] || {};
+        // La ficha web es la base; el listener, si lo hay, pisa campo a campo.
+        // `fmt_norm` es el nombre que espera gramsFromFmt mas abajo.
+        const ficha = fichas[key] || {};
+        const meta = {
+          ...ficha,
+          fmt_norm: ficha.format_hint || '',
+          ...conValor(releaseMeta[key] || {}),
+        };
         const assets = folderIndex[key] || { covers: [], audio: [] };
         setProgress({ done:i, total, current:`${item.catno} — preparing…` });
 
@@ -6124,17 +6210,49 @@ function MotherTongueImporter() {
         }
 
         // ── AUDIO ────────────────────────────────────────────
+        // La carpeta manda si trae algo para este catno: son los ficheros que
+        // mando el sello. Si no hay carpeta —lo normal en MT, que no envia
+        // promopacks— se espejan los snippets de la ficha web. Los bytes no
+        // pasan por el navegador: van de mothertonguerecords.com a R2 por el
+        // edge, que es el unico sitio donde el CORS de su servidor no estorba.
         const tracks = [];
         const audioOrdered = orderAudio(assets.audio);
-        for (let a = 0; a < audioOrdered.length; a++) {
-          const af = audioOrdered[a];
-          const safeFilename = af.name.replace(/[^A-Za-z0-9._-]+/g, '-');
-          try {
-            setProgress({ done:i, total, current:`${item.catno} — audio ${a+1}/${audioOrdered.length}…` });
-            const url = await uploadToR2(af, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
-            tracks.push({ name: trackNameFromFilename(af.name, item.catno), url });
-          } catch (_) {
-            if (!itemError) itemError = 'Audio upload partial fail';
+        if (audioOrdered.length) {
+          for (let a = 0; a < audioOrdered.length; a++) {
+            const af = audioOrdered[a];
+            const safeFilename = af.name.replace(/[^A-Za-z0-9._-]+/g, '-');
+            try {
+              setProgress({ done:i, total, current:`${item.catno} — audio ${a+1}/${audioOrdered.length}…` });
+              const url = await uploadToR2(af, `audio/${safeKey}/${safeFilename}`, 'audio/mpeg');
+              tracks.push({ name: trackNameFromFilename(af.name, item.catno), url });
+            } catch (_) {
+              if (!itemError) itemError = 'Audio upload partial fail';
+            }
+          }
+        } else if (Array.isArray(meta.tracks) && meta.tracks.length) {
+          for (let a = 0; a < meta.tracks.length; a++) {
+            const t = meta.tracks[a];
+            if (!t?.url) continue;
+            // El nombre visible viene del array del reproductor de la ficha, ya
+            // editado a mano por el sello. NO se pasa por trackNameFromFilename:
+            // esa funcion existe para deducirlo del nombre de un fichero, y
+            // aqui no hay fichero del que deducir nada.
+            const orden = String(a + 1).padStart(2, '0');
+            const base = String(t.filename || `track-${orden}`).replace(/[^A-Za-z0-9._-]+/g, '-');
+            try {
+              setProgress({ done:i, total, current:`${item.catno} — espejando audio ${a+1}/${meta.tracks.length}…` });
+              const r = await fetchAdmin(`${WORKER_URL}?action=mirror-audio`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: t.url, key: `audio/${safeKey}/${orden}-${base}.mp3` }),
+              });
+              if (!r.ok) { if (!itemError) itemError = `Audio mirror ${r.status}`; continue; }
+              const d = await r.json().catch(() => ({}));
+              if (d.url) tracks.push({ name: t.name || base, url: d.url });
+              else if (!itemError) itemError = 'Audio mirror sin url';
+            } catch (_) {
+              if (!itemError) itemError = 'Audio mirror partial fail';
+            }
           }
         }
 
@@ -6237,10 +6355,11 @@ function MotherTongueImporter() {
   return (
     <div>
       <p style={{fontSize:10,color:S.muted,margin:'0 0 14px',lineHeight:1.6}}>
-        Drop the invoice PDF, the listener HTML (descriptions/artist/title/genres), and the
-        full distributor folder (loose files or per-release promopack .zip files — zips are
-        unpacked automatically). The importer matches catnos across all three sources and
-        builds the Shopify CSV.
+        Solo hace falta la <b style={{color:S.text}}>factura PDF</b>. Al procesar, el Worker
+        busca cada catno en mothertonguerecords.com y trae artista, título, sello, formato,
+        géneros, portada y snippets. El listener HTML y la carpeta del distribuidor siguen
+        aceptándose y son opcionales: el listener pisa campo a campo lo que traiga la web, y
+        la carpeta manda sobre los snippets si trae audio de ese catno.
       </p>
 
       <div
@@ -6264,7 +6383,7 @@ function MotherTongueImporter() {
       >
         <div style={{fontSize:28,marginBottom:6}}>🇮🇹</div>
         <div style={{fontSize:11,color:(pdfFile||htmlFile||folderFiles.length)?S.accent:S.muted,fontWeight:700,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>
-          Mother Tongue · Drop invoice PDF + listener HTML, then pick folder
+          Mother Tongue · suelta la factura PDF (lo demás es opcional)
         </div>
         <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
           <input ref={pdfRef}  type="file" accept=".pdf"  style={{display:'none'}} onChange={e=>{if(e.target.files[0])onPdf(e.target.files[0]);e.target.value='';}} />
@@ -6276,11 +6395,11 @@ function MotherTongueImporter() {
           </button>
           <button onClick={()=>htmlRef.current.click()}
             style={{background:htmlFile?S.accent:S.border,border:'none',color:htmlFile?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {htmlFile?`✓ ${htmlFile}`:'+ Listener HTML'}
+            {htmlFile?`✓ ${htmlFile}`:'+ Listener HTML (opcional)'}
           </button>
           <button onClick={()=>folderRef.current.click()}
             style={{background:folderFiles.length?S.accent:S.border,border:'none',color:folderFiles.length?'#080808':S.muted,cursor:'pointer',fontSize:9,padding:'6px 14px',borderRadius:2,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit',fontWeight:700}}>
-            {folderFiles.length?`✓ ${folderFiles.length} files`:'+ Distributor folder'}
+            {folderFiles.length?`✓ ${folderFiles.length} files`:'+ Carpeta (opcional)'}
           </button>
           {folderFiles.length>0&&<button onClick={()=>setFolderFiles([])} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'6px 10px',borderRadius:2,fontFamily:'inherit'}}>Clear</button>}
         </div>
@@ -6289,6 +6408,12 @@ function MotherTongueImporter() {
       {(invoiceItems.length>0 || Object.keys(releaseMeta).length>0 || folderFiles.length>0) && status==='idle' && (
         <div style={{marginBottom:12,fontSize:10,color:S.muted,display:'flex',gap:16,flexWrap:'wrap',padding:'8px 14px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4}}>
           <span>Invoice items: <b style={{color:S.text}}>{invoiceItems.length}</b></span>
+          {Object.keys(fichasMT).length>0 && (
+            <span>Fichas web: <b style={{color: Object.keys(fichasMT).length===invoiceItems.length ? S.accent : '#ff8800'}}>{Object.keys(fichasMT).length}/{invoiceItems.length}</b></span>
+          )}
+          {fallosMT.length>0 && (
+            <span style={{color:S.danger}}>Sin ficha: <b>{fallosMT.map(f=>f.catno).join(', ')}</b></span>
+          )}
           {Object.keys(releaseMeta).length>0 && (
             <span>Listener releases: <b style={{color:S.text}}>{Object.keys(releaseMeta).length}</b></span>
           )}
