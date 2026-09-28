@@ -49,6 +49,49 @@ Escotilla de emergencia, a sabiendas: `DEPLOY_SIN_FRENOS=1 npm run deploy`.
 
 Run `wrangler types` after changing bindings in wrangler.jsonc.
 
+## Pages: "Active" no significa que ya sirva el bundle nuevo
+
+El frontend se construye en Cloudflare Pages desde `main` y `staging`, y el
+build corre `vite build` **y `scripts/prerender.mjs`**, que escribe ~1.400
+paginas de producto y ~1.500 de entidad. Eso tarda, y mientras tanto:
+
+- `wrangler pages deployment list` ya muestra el deployment con el commit nuevo,
+- el alias (`staging.houseonly.pages.dev`) **sigue sirviendo el build anterior**.
+
+El 2026-09-28 eso casi se reporta como desplegado: el estado decia "Active" y el
+bundle servido era el de antes, sin los cambios.
+
+Verificar por CONTENIDO, nunca por estado:
+
+```bash
+U=https://staging.houseonly.pages.dev
+JS=$(curl -s "$U/?cb=$RANDOM" | grep -o '/assets/[^"]*\.js' | head -1)
+curl -s "$U$JS" | grep -c "una-cadena-de-tu-cambio"
+```
+
+Y que sea una cadena que sobreviva a la minificacion: un rotulo de la interfaz o
+el nombre de una accion (`mt-enrich`), **no** el nombre de una variable, que se
+renombra. Tampoco sirve comparar el hash del fichero con el de tu build local:
+el hash depende del entorno de build y no coincide aunque el contenido sea
+equivalente.
+
+## Secretos: no se pegan en chats de agentes
+
+`BOOTSTRAP_AUTH_SECRET` y compania protegen endpoints que escriben en R2 y en
+Shopify. No se pegan en la conversacion con un agente, ni como variable, ni
+"solo para esta prueba": lo que entra en un chat queda en su transcripcion.
+
+Para verificar un despliegue esta `scripts/verify-deploy.sh`, que pide el Bearer
+por teclado sin eco — no queda ni en el historial del shell.
+
+Si aun asi un secreto aparece en la conversacion, el agente debe:
+
+1. **Señalarlo** en cuanto lo vea, sin dar por hecho que da igual.
+2. **No reutilizarlo** sin que la persona lo autorice explicitamente.
+3. **Proponer rotarlo**: `npx wrangler secret put BOOTSTRAP_AUTH_SECRET` (o con
+   `--env staging`), y recordar que el valor nuevo hay que meterlo tambien en la
+   pestaña Entities del admin, que es de donde el frontend saca el Bearer.
+
 ## Node.js Compatibility
 
 https://developers.cloudflare.com/workers/runtime-apis/nodejs/
