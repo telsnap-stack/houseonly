@@ -14,6 +14,7 @@
  * de Drum & Bass se queda vacia para el cliente.
  *
  *   node scripts/genres-sweep.mjs                 dry-run de la pasada A
+ *   node scripts/genres-sweep.mjs --detalle       dry-run A, disco a disco
  *   node scripts/genres-sweep.mjs --apply         aplica la A  (pide Admin)
  *   node scripts/genres-sweep.mjs --limpieza      dry-run de la pasada B
  *   node scripts/genres-sweep.mjs --limpieza --apply
@@ -56,6 +57,13 @@ const B1 = args.includes('--b1');               // B1: el namespace heredado
  *   --b1 --planos   ademas aplana el resto: va DESPUES del despliegue.
  */
 const PLANOS = args.includes('--planos');
+/**
+ * --detalle: en la pasada A, ademas del recuento por genero, la lista disco a
+ * disco de lo que se escribiria. Solo cambia lo que se imprime; el plan y la
+ * escritura no se enteran. Sirve para revisar ANTES de aplicar, que es cuando
+ * se puede decidir por bloques.
+ */
+const DETALLE = args.includes('--detalle');
 
 /**
  * El namespace `genre:` ya se usaba antes que nosotros, con texto libre escrito
@@ -88,7 +96,7 @@ const esEstructural = t => /:/.test(t) || /^\d{4}$/.test(t) || /^forthcoming$/i.
 // exactamente los mismos 1276 que `status:active` en la Admin API (medido).
 async function leerStorefront() {
   const q = `query($cursor:String){ products(first:250, after:$cursor){ pageInfo{hasNextPage endCursor}
-    edges{node{ id title tags variants(first:1){edges{node{sku}}} }}}}`;
+    edges{node{ id title vendor tags variants(first:1){edges{node{sku}}} }}}}`;
   let cursor = null, out = [];
   while (true) {
     const r = await fetch(`https://${SHOP}/api/${API_SF}/graphql.json`, { method:'POST',
@@ -96,8 +104,8 @@ async function leerStorefront() {
       body: JSON.stringify({ query:q, variables:{cursor} }) });
     const d = await r.json();
     const p = d?.data?.products; if (!p) throw new Error(JSON.stringify(d).slice(0,200));
-    out.push(...p.edges.map(e => ({ id:e.node.id, title:e.node.title, tags:e.node.tags,
-      sku: e.node.variants.edges[0]?.node.sku || '' })));
+    out.push(...p.edges.map(e => ({ id:e.node.id, title:e.node.title, vendor:e.node.vendor || '',
+      tags:e.node.tags, sku: e.node.variants.edges[0]?.node.sku || '' })));
     if (!p.pageInfo.hasNextPage) break;
     cursor = p.pageInfo.endCursor;
   }
@@ -211,6 +219,36 @@ if (!LIMPIEZA && !B1) {
   }
   console.log(`    ${'(sin genero)'.padEnd(22)} ${String(p.sinGenero.length).padStart(5)}`);
   console.log(`\n  ya lo tienen puesto: ${p.yaTienen} · se escribirian: ${p.escrituras.length}`);
+
+  /**
+   * Disco a disco, en cuatro bloques, para poder dar el OK por partes. El
+   * reparto se hace por el tag que recibiria cada uno, no por como se llego a
+   * el: lo que importa al revisar es que tag se le va a poner.
+   */
+  if (DETALLE) {
+    const TAGS_B = new Set(['electronica', 'soulfunkdisco', 'jazz'].map(genreTag));
+    const fila = (prod, tag, extra = '') =>
+      `    ${(prod.sku || '(sin sku)').padEnd(18)}` +
+      `${`${prod.vendor || '?'} — ${prod.title}`.slice(0, 56).padEnd(58)}` +
+      `${tag}${extra}`;
+    const bloque = (titulo, filas) => {
+      console.log(`\n  ${titulo} — ${filas.length}`);
+      for (const f of filas) console.log(f);
+      if (!filas.length) console.log('    (ninguno)');
+    };
+
+    const bloqueA = p.escrituras.filter(e => e.anadir[0] === genreTag('bassmusic'));
+    const bloqueB = p.escrituras.filter(e => TAGS_B.has(e.anadir[0]));
+    const yaListados = new Set([...bloqueA, ...bloqueB].map(e => e.id));
+    const bloqueC = p.escrituras.filter(e => !yaListados.has(e.id));
+
+    bloque('(a) recibirian genre:bassmusic', bloqueA.map(x => fila(x, x.anadir[0])));
+    bloque('(b) recibirian genre:electronica / soulfunkdisco / jazz',
+      bloqueB.map(x => fila(x, x.anadir[0])));
+    bloque('(c) resto que recibiria tag', bloqueC.map(x => fila(x, x.anadir[0])));
+    bloque('(d) sin resolver — se quedan sin genero', p.sinGenero.map(x =>
+      fila(x, '', (x.tags || []).filter(t => !esEstructural(t)).slice(0, 4).join(' | ') || '(sin tags de genero)')));
+  }
 } else {
   console.log('  TAGS QUE SE BORRARIAN, y en cuantos productos');
   const orden = [...p.borrados.entries()].sort((a,b) => b[1]-a[1]);
