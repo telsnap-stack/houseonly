@@ -37,6 +37,25 @@ if [ -z "$BS" ]; then rojo "✗ sin Bearer no hay verificacion"; exit 2; fi
 echo "Verificando ${URL}"
 echo
 
+# ── 0. ¿El Bearer es el de ESTE entorno? ─────────────────────────
+# Sin esta sonda, un secreto equivocado se veia como tres endpoints rotos: las
+# rutas existen y contestan 401, pero mt-enrich y mirror-audio devuelven
+# "unauthorized" en vez de lo suyo y el script los daba por caidos. Llego a
+# sugerir un rollback de un worker perfectamente sano.
+#
+# Se prueba contra una ruta vieja, anterior a todo esto, que esta en cualquier
+# version desplegada: si el worker contesta pero rechaza el secreto, el
+# problema es el secreto y no hay nada que revertir.
+SONDA=$(curl -s --max-time 25 -H "Authorization: Bearer $BS" "$URL/?action=pending-review-list")
+case "$SONDA" in
+  *unauthorized*)
+    rojo "✗ Bearer incorrecto — prueba con el de ${ENTORNO}"
+    echo "   El worker responde y la ruta existe; lo que no cuadra es el secreto."
+    echo "   Esto NO es un fallo del despliegue: no hay nada que revertir."
+    exit 2
+    ;;
+esac
+
 # ── 1. ¿Existen todas las rutas? ─────────────────────────────────
 # No se miran codigos HTTP: enganan. mirror-audio con GET devuelve 200 porque
 # exige POST y cae al fallback de accion desconocida. Lo que se mira es si la

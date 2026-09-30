@@ -241,23 +241,81 @@ function generos(f: Ficha): string[] {
   return out;
 }
 
+// Nombre de pista deducido del fichero, SOLO para cuando el reproductor no
+// trae titulo. Los nombres crudos de MT vienen con de todo encima:
+//
+//   09-9.-Sandra-St.-Victor-Womanizer-Mother-Tongue-records_snippet.mp3
+//
+// y de ahi lo unico que interesa es "Womanizer": el numero de pista sale dos
+// veces, el artista ya va en el Vendor y el sello ya va en su tag.
+export function humanizaNombrePista(fichero: string, artist = '', label = ''): string {
+  const original = fichero.replace(/\.[^.]+$/, '');
+  let n = original;
+
+  // Un nombre propio se puede escribir con guiones, guiones bajos o espacios
+  // segun quien exportara el fichero, asi que se compara con cualquiera.
+  const comoRegex = (s: string) => s.trim().split(/\s+/)
+    .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[-_\\s]+');
+
+  // 1. Coletilla de recorte al final: _snippet, -clip, (preview)…
+  n = n.replace(
+    /[-_\s]*\(?\s*(snippets?|snips?|previews?|clips?|teasers?|tasters?)\s*\)?\s*$/i, '');
+
+  // 2. Coletilla del sello. Si el sello ya se llama "… Records" lo cubre la
+  //    propia etiqueta; si se llama solo "Mother Tongue", el grupo opcional
+  //    recoge el "-records" que el fichero si trae.
+  if (label.trim()) {
+    n = n.replace(new RegExp(
+      `[-_\\s]*${comoRegex(label)}(?:[-_\\s]*recordings?|[-_\\s]*records?)?\\s*$`, 'i'), '');
+  }
+
+  // 3. Prefijo de numero de pista, hasta dos veces porque vienen encadenados
+  //    ("09-9.-"). Se exige que PAREZCA un indice —cero delante, o punto o
+  //    parentesis detras— para no comerse un titulo que empiece por cifra:
+  //    "2-Step-Dub" tiene que seguir siendo "2 Step Dub".
+  for (let i = 0; i < 2; i++) {
+    const antes = n;
+    n = n.replace(/^(?:0\d{1,2}|\d{1,3}\s*[.)])\s*[-._\s]*/, '');
+    if (n === antes) break;
+  }
+
+  // 4. Separadores a espacios.
+  n = n.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // 5. Si lo que queda empieza por el artista que ya sacamos de la ficha, fuera.
+  if (artist.trim()) {
+    n = n.replace(new RegExp(`^${comoRegex(artist)}[-_\\s]*`, 'i'), '').trim();
+  }
+
+  n = n.replace(/^[\s\-–—.]+|[\s\-–—.]+$/g, '').replace(/\s+/g, ' ').trim();
+  // Si de tanto limpiar no queda nada, mejor el nombre crudo que una pista sin
+  // nombre: al menos se puede reconocer el fichero.
+  return n || original;
+}
+
 // La ficha imprime el reproductor como
 //   var player = new Player( [ { "title": "...", "file": "...", "howl": null }, … ] );
 // que es JSON valido y trae el titulo editado a mano. Es la fuente buena: el
 // nombre del fichero mp3 no lo es (de ahi los "A1. Galaxy feat Lola" de antes).
-function pistas(html: string): { tracks: MtTrack[]; via: string } {
+function pistas(html: string, artist = '', label = ''): { tracks: MtTrack[]; via: string } {
   const m = html.match(/new\s+Player\(\s*(\[[\s\S]*?\])\s*\)/);
   if (m) {
     try {
       const arr = JSON.parse(m[1]);
       const tracks: MtTrack[] = (Array.isArray(arr) ? arr : [])
         .filter((t: any) => t && typeof t.file === 'string' && t.file)
-        .map((t: any) => ({
-          name: limpia(decodeEntities(String(t.title || ''))) ||
-                String(t.file).split('/').pop()!.replace(/\.mp3$/i, ''),
-          filename: String(t.file).split('/').pop()!.replace(/\.mp3$/i, ''),
-          url: String(t.file),
-        }));
+        .map((t: any) => {
+          const filename = String(t.file).split('/').pop()!.replace(/\.mp3$/i, '');
+          return {
+            // El titulo del reproductor manda; solo si viene vacio se deduce
+            // del nombre del fichero.
+            name: limpia(decodeEntities(String(t.title || ''))) ||
+                  humanizaNombrePista(filename, artist, label),
+            filename,
+            url: String(t.file),
+          };
+        });
       if (tracks.length) return { tracks, via: 'player-array' };
     } catch { /* cae al respaldo */ }
   }
@@ -265,7 +323,7 @@ function pistas(html: string): { tracks: MtTrack[]; via: string } {
     /https:\/\/www\.mothertonguerecords\.com\/wp-content\/uploads\/[^"'\s)]+\.mp3/gi) || [])];
   const tracks: MtTrack[] = urls.map(url => {
     const filename = url.split('/').pop()!.replace(/\.mp3$/i, '');
-    return { name: filename, filename, url };
+    return { name: humanizaNombrePista(filename, artist, label), filename, url };
   });
   return { tracks, via: tracks.length ? 'regex-mp3' : 'sin-pistas' };
 }
@@ -294,7 +352,7 @@ async function unCatno(catno: string, mapa: Map<string, any> | null): Promise<Mt
     const html = await r.text();
 
     const f = await leerFicha(html);
-    const { tracks, via } = pistas(html);
+    const { tracks, via } = pistas(html, f.artist, f.label);
     const catnoWeb = campo(f, 'Catalog No');
 
     const rel: MtRelease = {
