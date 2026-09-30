@@ -884,6 +884,64 @@ function formatExpected(isoDate) {
   return 'Expected ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
+// Dias que un pre-order sigue en Forthcoming despues de su fecha de salida.
+// Pasado ese plazo sin stock, el disco no llego y deja de enseñarse: lo que no
+// puede pasar es que la tienda siga diciendo "Expected 4 September" en octubre.
+const FORTHCOMING_GRACE_DAYS = 30;
+
+// En que momento de su vida esta un pre-order, comparando SOLO la fecha de
+// calendario (nada de horas: la salida es un dia, no un instante).
+//
+//   'pre'      → aun no ha salido. Se compra pagando, como siempre.
+//   'released' → ya salio y sigue sin stock, dentro de la ventana de gracia.
+//   'expired'  → paso la ventana y nunca llego. Fuera de la tienda.
+//
+// Sin fecha, o con una que no se puede leer, se trata como 'pre': ante la duda
+// el disco sigue a la venta, que es el estado que no pierde ventas ni miente.
+// El filtro va en el cliente porque la API de Shopify no compara rangos sobre
+// el valor de un tag; el `release:YYYY-MM-DD` ya viene en el registro.
+function forthcomingPhase(r, hoy = new Date()) {
+  const salida = parseLocalDate(r?.releaseDate);
+  if (!salida) return 'pre';
+  const hoyDia = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate(), 12);
+  if (hoyDia < salida) return 'pre';
+  const limite = parseLocalDate(addDays(r.releaseDate, FORTHCOMING_GRACE_DAYS));
+  return !limite || hoyDia <= limite ? 'released' : 'expired';
+}
+
+// Un pre-order que ya salio y sigue sin stock deja de ser comprable: pagar por
+// el prometeria un envio que no podemos cumplir. La unica via es la peticion,
+// exactamente la misma del backorder — no hay flujo nuevo. En Shopify el
+// producto no se toca: esto es solo lo que ve el cliente.
+function esPeticionDeForthcoming(r) {
+  return isForthcoming(r) && (r.stock ?? 0) === 0 && forthcomingPhase(r) === 'released';
+}
+
+// ¿Este disco se enseña en la tienda?
+//
+// Catalogo normal: solo lo que se puede comprar. Un disco sin stock que no es
+// pre-order sale de la rejilla y del buscador, tanto si ofrecia REQUEST como si
+// decia "Sold Out". Se pidio asi a proposito: la portada enseña lo comprable.
+//
+// Forthcoming: se queda mientras no haya vencido. Con stock ya no deberia estar
+// aqui —el importer de llegadas le quita el tag y pasa a la rejilla—, pero si
+// aun lo lleva se enseña igual, que es comprable.
+function esVisibleEnTienda(r) {
+  if (isForthcoming(r)) {
+    if ((r.stock ?? 0) > 0) return true;
+    return forthcomingPhase(r) !== 'expired';
+  }
+  return (r.stock ?? 0) > 0;
+}
+
+// Lo que se enseña bajo la portada de un pre-order. Antes de salir, la fecha
+// estimada; ya salido y sin stock, la fecha estaria caducada y engaña.
+function etiquetaForthcoming(r) {
+  return esPeticionDeForthcoming(r)
+    ? 'Released · available on request'
+    : formatExpected(addDays(r.releaseDate, 14));
+}
+
 // ── LOGO ──────────────────────────────────────────────────────
 function Logo({ scale=1, onClick }) {
   return (
@@ -1735,6 +1793,10 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               // so it gets a "+ Pre-order" add-to-cart button just like an
               // in-stock record. The full-width REQUEST button below is for
               // backorders only and is suppressed for forthcoming (see below).
+              // Un pre-order ya salido y sin stock NO ofrece pagar: su accion es
+              // la peticion, en el boton ancho de abajo, asi que este hueco queda
+              // vacio igual que en un backorder.
+              if (esPeticionDeForthcoming(r)) return null;
               if (isForthcoming(r)) {
                 if (hasVariantChoice) return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Choose a version, then pre-order" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>Options</button>;
                 return <button onClick={e=>{e.stopPropagation();onAdd(r);}} title="Pre-order — pay now, ships when it arrives" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Pre-order</button>;
@@ -1753,9 +1815,9 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         </div>
         {r.stock>0&&r.stock<=3&&!isForthcoming(r)&&<div style={{ fontSize:8, color:'#ff8800', marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Only {r.stock} left</div>}
         {isForthcoming(r) && (
-          <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{formatExpected(addDays(r.releaseDate, 14))}</div>
+          <div style={{ fontSize:8, color:S.accent, marginTop:5, letterSpacing:1, textTransform:'uppercase', fontWeight:700 }}>{etiquetaForthcoming(r)}</div>
         )}
-        {!isForthcoming(r) && r.stock===0 && isBackorderEligible(r) && (
+        {((!isForthcoming(r) && r.stock===0 && isBackorderEligible(r)) || esPeticionDeForthcoming(r)) && (
           <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Request this release — we'll confirm availability" style={{ marginTop:8, width:'100%', background:hov?S.accent:'transparent', color:hov?'#080808':S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'7px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap', fontFamily:'inherit' }}>Request</button>
         )}
         {!isForthcoming(r) && r.stock===0 && !isBackorderEligible(r) && <div style={{ fontSize:8, color:S.danger, marginTop:5, letterSpacing:1, textTransform:'uppercase' }}>Out of stock</div>}
@@ -1778,7 +1840,8 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
   const player = usePlayer();
   const wished = isWished?.(r);
   const cover = coverSrc(r.coverUrl);
-  const expected = formatExpected(addDays(r.releaseDate, 14));
+  const yaSalido = esPeticionDeForthcoming(r);
+  const expected = etiquetaForthcoming(r);
   const hasTracks = (r.tracks || []).length > 0;
   const isCurrentlyPlaying = player ? player.isReleasePlaying(r) : false;
   const isQueued = player ? player.isReleaseQueued(r) : false;
@@ -1822,7 +1885,7 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
         {metaRow('Label', r.label)}
         {metaRow('Cat-No', r.catalog)}
         <div style={{ display:'flex', gap:8, fontSize:11, lineHeight:1.5, minWidth:0 }}>
-          <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>Expected</span>
+          <span style={{ color:S.muted, minWidth:74, flexShrink:0, textTransform:'uppercase', letterSpacing:0.5, fontSize:9, paddingTop:1 }}>{yaSalido ? 'Status' : 'Expected'}</span>
           <span style={{ color:S.accent, fontWeight:700, minWidth:0, wordBreak:'break-word' }}>{expected.replace(/^Expected\s/, '')}</span>
         </div>
         {metaRow('Genre', r.genre)}
@@ -1830,7 +1893,9 @@ function ForthcomingRow({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
           <span style={{ fontSize:18, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
         </div>
         <div style={{ display:'flex', gap:8, marginTop:6, alignItems:'center', justifyContent:'flex-end' }}>
-          <button onClick={()=>onAdd(r)} title="Pre-order — pay now, ships when it arrives" style={{ flex:1, background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Pre-order</button>
+          {yaSalido
+            ? <button onClick={()=>onOpen(r)} title="Request this release — we'll confirm availability" style={{ flex:1, background:'transparent', color:S.accent, border:`1px solid ${S.accent}`, borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Request</button>
+            : <button onClick={()=>onAdd(r)} title="Pre-order — pay now, ships when it arrives" style={{ flex:1, background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:10, fontWeight:800, letterSpacing:1.5, padding:'9px 12px', textTransform:'uppercase', whiteSpace:'nowrap', fontFamily:'inherit' }}>Pre-order</button>}
           {onWishlistToggle && (
             <button onClick={()=>onWishlistToggle(r)} aria-label={wished?'Remove from wishlist':'Add to wishlist'} title={wished?'Remove from wishlist':'Add to wishlist'} style={{ background:'transparent', border:`1px solid ${wished?S.accent:S.border}`, color:wished?S.accent:S.muted, borderRadius:2, padding:'8px 10px', cursor:'pointer', display:'flex', alignItems:'center' }}>
               <HeartIcon wished={wished} size={13} />
@@ -2105,7 +2170,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
               For in-stock and truly-OOS products, we keep the original order:
                 description → tracks → price/heart/cart row.
             */}
-            {!isForthcoming(r) && r.stock === 0 && isBackorderEligible(r) ? (
+            {(!isForthcoming(r) && r.stock === 0 && isBackorderEligible(r)) || esPeticionDeForthcoming(r) ? (
               <>
                 <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
                   <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{r.price.toFixed(2)}</span>
@@ -2119,6 +2184,9 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
                     </button>
                   )}
                 </div>
+                {esPeticionDeForthcoming(r) && (
+                  <div style={{ fontSize:10, color:S.accent, letterSpacing:1, textTransform:'uppercase', fontWeight:700, marginBottom:8 }}>Released · available on request</div>
+                )}
                 <BackorderRequestForm release={r} />
                 {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, margin:'20px 0 16px' }}>{r.desc}</p>}
                 {/* Sin reproductor pero con lista en el texto: se pinta como
@@ -8103,7 +8171,9 @@ function StoriesGenerator() {
   // Caja vacia -> seed (lo mas nuevo primero); escribiendo -> resultados de
   // busqueda. Al borrar la caja se vuelve al seed, no a una lista vacia.
   const searchMode = query.trim().length > 0;
-  const shown = searchMode ? results : seed;
+  // Mismo criterio que la rejilla: el buscador no puede ofrecer lo que la
+  // portada ya no enseña, o el REQUEST volveria por la puerta de atras.
+  const shown = (searchMode ? results : seed).filter(esVisibleEnTienda);
 
   return (
     <div>
@@ -14484,8 +14554,11 @@ export default function App() {
   // Forthcoming view, where all records are loaded (no pagination), so the sort
   // is complete. Records with no release date sort to the bottom (guard).
   const filtered = useMemo(() => {
+    // La portada enseña lo que se puede comprar o pedir: fuera el agotado que no
+    // es pre-order, y fuera el pre-order que vencio sin llegar nunca.
+    const visibles = records.filter(esVisibleEnTienda);
     if (filters.forthcoming && filters.sort === 'release-asc') {
-      return [...records].sort((a, b) => {
+      return [...visibles].sort((a, b) => {
         const da = a.releaseDate || '';
         const db = b.releaseDate || '';
         if (!da && !db) return 0;
@@ -14494,7 +14567,7 @@ export default function App() {
         return da.localeCompare(db); // ISO YYYY-MM-DD sorts correctly as string
       });
     }
-    return records;
+    return visibles;
   }, [records, filters.forthcoming, filters.sort]);
 
   const cartCount=cart.reduce((s,i)=>s+i.qty,0);
