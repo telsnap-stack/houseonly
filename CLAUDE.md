@@ -108,4 +108,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-09-17-libro-de-stock-y-login.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-10-01-forthcoming-sin-fecha-60d.md`.
