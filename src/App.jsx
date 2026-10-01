@@ -199,6 +199,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
     products(first: 24${after}${sortArg}${queryArg}) {
       pageInfo { hasNextPage endCursor }
       edges {
+        cursor
         node {
           id title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
@@ -208,7 +209,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
     }
   }`);
   const { edges, pageInfo } = data.products;
-  return { products: edges.map(parseProduct), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
+  return { products: edges.map(parseProduct), cursors: edges.map(e => e.cursor), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
 // Server-side free-text search via the Storefront API's `search` endpoint.
@@ -282,6 +283,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
     products(first: 24${after}, query: ${combinedQuery}) {
       pageInfo { hasNextPage endCursor }
       edges {
+        cursor
         node {
           id title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
@@ -292,7 +294,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
   }`);
   const { edges, pageInfo } = data.products;
   const products = edges.map(e => parseProduct({ node: e.node }));
-  return { products, hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
+  return { products, cursors: edges.map(e => e.cursor), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
 // Fetch only the lightweight metadata (tags + vendor) for ALL products in the
@@ -946,6 +948,38 @@ function esVisibleEnTienda(r) {
     return forthcomingPhase(r) !== 'expired';
   }
   return (r.stock ?? 0) > 0;
+}
+
+// Discos visibles por pagina de la rejilla. 24 llena filas de 2, 3, 4, 6 y 8.
+const VISIBLES_POR_PAGINA = 24;
+
+// Una pagina de la rejilla con exactamente VISIBLES_POR_PAGINA discos visibles.
+//
+// Shopify devuelve paginas de 24 y esVisibleEnTienda() quita despues los
+// agotados, asi que cada pagina pintaba menos de 24 y las filas quedaban
+// cojas en cada LOAD MORE. `available_for_sale:true` en la consulta no sirve:
+// casi todo agotado admite backorder (vender sin stock) y Shopify lo da por
+// disponible (213 de 216 en la rejilla house, 01-10).
+//
+// Se piden paginas hasta reunir los visibles y se corta en el cursor del
+// ultimo, para que la siguiente empiece justo despues. Los ocultos que vienen
+// por el camino se devuelven igual: `records` los conserva (el panel de admin
+// tira de la misma lista) y la rejilla los sigue quitando con su filtro.
+async function fetchPaginaVisible(fetchPage, cursor = null) {
+  const products = [];
+  let visibles = 0;
+  for (;;) {
+    const page = await fetchPage({ cursor });
+    for (let i = 0; i < page.products.length; i++) {
+      products.push(page.products[i]);
+      if (esVisibleEnTienda(page.products[i]) && ++visibles === VISIBLES_POR_PAGINA) {
+        const quedan = i < page.products.length - 1 || page.hasNextPage;
+        return { products, hasNextPage: quedan, endCursor: page.cursors[i] };
+      }
+    }
+    if (!page.hasNextPage) return { products, hasNextPage: false, endCursor: page.endCursor };
+    cursor = page.endCursor;
+  }
 }
 
 // Lo que se enseña bajo la portada de un pre-order. Antes de salir, la fecha
@@ -14504,7 +14538,8 @@ export default function App() {
   //   - otherwise → `products` endpoint (sortable, paginated), forthcoming
   //     EXCLUDED so pre-orders never appear in the main catalogue
   // The active code path is encapsulated in fetchActivePage so loadMore stays simple.
-  const fetchActivePage = useCallback((extraOpts={}) => {
+  // Cada pagina se rellena hasta VISIBLES_POR_PAGINA visibles (fetchPaginaVisible).
+  const fetchActivePage = useCallback(({ cursor = null } = {}) => fetchPaginaVisible((extraOpts) => {
     // La busqueda manda sobre la seccion: si hay termino, se busca DENTRO de
     // forthcoming en vez de listar la seccion entera ignorando lo tecleado.
     if (fetchParams.forthcoming && !fetchParams.searchTerm) {
@@ -14532,7 +14567,7 @@ export default function App() {
       dnb: fetchParams.dnb,
       ...extraOpts,
     });
-  }, [fetchParams]);
+  }, cursor), [fetchParams]);
 
   useEffect(()=>{
     setShopifyLoaded(false);
