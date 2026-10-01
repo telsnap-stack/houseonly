@@ -135,6 +135,9 @@ function parseProduct({ node }) {
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, descTracks, desc, g:'135deg,#1a1a2e,#16213e',
     tags, releaseDate,
+    // Alta en Shopify (ISO DateTime). Solo lo usa forthcomingPhase() para
+    // caducar los pre-orders que no traen fecha de salida.
+    createdAt: node.createdAt || '',
   };
 }
 
@@ -197,7 +200,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id title vendor descriptionHtml tags
+          id title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -280,7 +283,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id title vendor descriptionHtml tags
+          id title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -359,7 +362,7 @@ async function fetchShopifyProductByHandle(handle) {
   const data = await shopifyQuery(`
     query($h: String!) {
       product(handle: $h) {
-        id title vendor descriptionHtml tags
+        id title vendor descriptionHtml tags createdAt
         variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
         images(first:1) { edges { node { url } } }
       }
@@ -889,6 +892,11 @@ function formatExpected(isoDate) {
 // puede pasar es que la tienda siga diciendo "Expected 4 September" en octubre.
 const FORTHCOMING_GRACE_DAYS = 30;
 
+// Dias que un pre-order SIN fecha de salida sigue en Forthcoming desde su alta.
+// Sin `release:` no hay salida contra la que medir, asi que se mide contra el
+// createdAt: el dia +60 aun se enseña, el +61 ya no.
+const FORTHCOMING_UNDATED_DAYS = 60;
+
 // En que momento de su vida esta un pre-order, comparando SOLO la fecha de
 // calendario (nada de horas: la salida es un dia, no un instante).
 //
@@ -896,14 +904,20 @@ const FORTHCOMING_GRACE_DAYS = 30;
 //   'released' → ya salio y sigue sin stock, dentro de la ventana de gracia.
 //   'expired'  → paso la ventana y nunca llego. Fuera de la tienda.
 //
-// Sin fecha, o con una que no se puede leer, se trata como 'pre': ante la duda
-// el disco sigue a la venta, que es el estado que no pierde ventas ni miente.
+// Sin fecha, o con una que no se puede leer, es 'pre' durante
+// FORTHCOMING_UNDATED_DAYS desde el alta y 'expired' despues. Si tampoco hay un
+// createdAt legible se queda en 'pre': nunca se oculta por datos malos.
 // El filtro va en el cliente porque la API de Shopify no compara rangos sobre
 // el valor de un tag; el `release:YYYY-MM-DD` ya viene en el registro.
 function forthcomingPhase(r, hoy = new Date()) {
-  const salida = parseLocalDate(r?.releaseDate);
-  if (!salida) return 'pre';
   const hoyDia = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate(), 12);
+  const salida = parseLocalDate(r?.releaseDate);
+  if (!salida) {
+    const alta = r?.createdAt ? new Date(r.createdAt) : null;
+    if (!alta || isNaN(alta.getTime())) return 'pre';
+    const limite = new Date(alta.getFullYear(), alta.getMonth(), alta.getDate() + FORTHCOMING_UNDATED_DAYS, 12);
+    return hoyDia <= limite ? 'pre' : 'expired';
+  }
   if (hoyDia < salida) return 'pre';
   const limite = parseLocalDate(addDays(r.releaseDate, FORTHCOMING_GRACE_DAYS));
   return !limite || hoyDia <= limite ? 'released' : 'expired';
