@@ -14733,7 +14733,11 @@ export default function App() {
           </div>
         ) : (
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-            {filtered.flatMap((r, i) => {
+            {/* La tarjeta del newsletter ocupa una celda: con ella cada pagina
+                serian 24+1 y la ultima fila quedaria coja. Mientras queda por
+                cargar se guarda el ultimo disco, que sale primero en la pagina
+                siguiente; en la ultima pagina se enseña todo. */}
+            {(hasMore && filtered.length > 14 ? filtered.slice(0, -1) : filtered).flatMap((r, i) => {
               const card = <RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />;
               // Drop a newsletter card into the row after the 12th record, but only
               // when there are enough records that it doesn't look out of place.
