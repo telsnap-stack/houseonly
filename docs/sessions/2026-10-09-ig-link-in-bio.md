@@ -63,11 +63,36 @@ rama se queda solo con lo suyo.
   y de feed vacío enseñan su mensaje con el botón.
 - Comprobado que la siembra fue local: `ig:feed` no existe en el KV de prod.
 
+## Despliegue a producción (09-10)
+
+- **Worker** desde `claude/ig-link-in-bio` (`b9cb56f`), con
+  `NODE_OPTIONS="--dns-result-order=ipv4first --no-network-family-autoselection"
+  npm run deploy`. Frenos OK (85 rutas de main, 3 nuevas, 0 líneas borradas).
+  Versión en prod **`7678bafd-225b-4780-bc98-3bf7cf6cb447`** (08:48:16 UTC).
+  Anterior, para un rollback: `c21d180a-4467-480a-9fea-7b2e5747bae1`.
+  - `GET ig-feed` sin auth → 200, `{"items":[]}`, `cache-control: public,
+    max-age=60`. `POST ig-feed-add` / `ig-feed-remove` sin Bearer → 401.
+  - `sync-status` y `entity-index` → 200; `admin-check` y `events-get` sin
+    Bearer → 401, como antes. Crons `*/15` y `0 6` registrados. Primer poll con
+    la versión nueva: 09:00:50 UTC, `ok: true`, modo live.
+- **main**: #88 → `a00d291`, #89 → `a1ede5c` (merge commits, sin conflicto).
+  Árbol de `a1ede5c` idéntico al de la rama probada.
+- **Pages** (verificado por contenido, no por estado): bundle
+  `index-CujXQF_g.js` con «Seen on Instagram», «Cierre del vídeo» y «Añadir al
+  link in bio», sin la URL del worker de staging. Chrome headless:
+  - `/ig` → 308 → `/ig/`, título y canonical prerenderizados, «Nothing here
+    yet» con el botón a la tienda, 390 px sin scroll horizontal, 0 errores de
+    consola.
+  - Portada (18 fichas) y una ficha de producto, 0 errores de consola.
+  - `/#admin` llega a la pantalla de login de producción; de ahí no se pasa sin
+    secreto.
+- Ramas `claude/cierre-reels` y `claude/ig-link-in-bio` no se han borrado: el
+  repo no borra ramas al mergear.
+
 ## Pendiente a mano
 
-- Admin real (pide el secreto): botón Añadir/Quitar, y exportar con Link in bio
-  (añade) y con Seguir (no añade).
-- `./scripts/verify-ig-feed.sh` contra staging (add/remove con Bearer).
-- En staging, `/ig` con discos de verdad, tras añadirlos desde el admin.
-- Producción: `cd houseonly-worker/houseonly-worker && npm run deploy` desde
-  `main` ya mergeado, y luego `./scripts/verify-ig-feed.sh produccion`.
+- `./scripts/verify-ig-feed.sh produccion` (add/remove con Bearer).
+- Admin de producción: ver «Cierre del vídeo» y «Link in bio»; Añadir/Quitar;
+  exportar con Link in bio (añade) y con Seguir (no añade).
+- Con el primer disco añadido: `/ig` lo enseña, y poner
+  `houseonly.store/ig` en la bio de @onlyhouseonly.
