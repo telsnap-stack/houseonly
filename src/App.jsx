@@ -377,11 +377,13 @@ async function fetchShopifyProductByHandle(handle) {
 // feed). NO con `products(query:"handle:a OR handle:b")`: `handle` no es un
 // filtro de la Storefront API y la tienda lo ignora sin error —comprobado el
 // 2026-10-09, devuelve 10 discos cualquiera—. Un alias de `product(handle:)`
-// por disco es exacto y da null si el handle ya no existe. Lotes de 20.
+// por disco es exacto y da null si el handle ya no existe. Lotes de 20, en
+// paralelo: 137 discos en serie tardaban 3,5-7 s; a la vez, ~1,2 s.
 async function fetchShopifyProductsByHandles(handles) {
   const out = new Map();
-  for (let i = 0; i < handles.length; i += 20) {
-    const lote = handles.slice(i, i + 20);
+  const lotes = [];
+  for (let i = 0; i < handles.length; i += 20) lotes.push(handles.slice(i, i + 20));
+  await Promise.all(lotes.map(async (lote) => {
     const vars = lote.map((_, j) => `$h${j}: String!`).join(', ');
     const campos = lote.map((_, j) => `p${j}: product(handle: $h${j}) {
         id handle title vendor descriptionHtml tags createdAt
@@ -391,7 +393,7 @@ async function fetchShopifyProductsByHandles(handles) {
     const data = await shopifyQuery(`query(${vars}) { ${campos} }`,
       Object.fromEntries(lote.map((h, j) => [`h${j}`, h])));
     lote.forEach((h, j) => { if (data[`p${j}`]) out.set(h, parseProduct({ node: data[`p${j}`] })); });
-  }
+  }));
   return handles.map(h => out.get(h)).filter(Boolean);
 }
 
@@ -14220,12 +14222,23 @@ function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt,
 // Un disco agotado NO desaparece: quien llega desde un Reel antiguo tiene que
 // encontrarlo igual, con su "Sold out". Los pre-orders tienen stock 0 por
 // definicion y no llevan la marca.
+//
+// Carga perezosa: el feed puede tener hasta 200 discos y pedirlos todos de golpe
+// a la Storefront API tardaba varios segundos (137 en serie: 3,5-7 s). Se piden
+// los primeros IG_PAGE al abrir, IG_PAGE mas cada vez que el final de la
+// rejilla se acerca a la pantalla, y todo lo que falte en cuanto se busca algo
+// (el buscador filtra en cliente y tiene que ver la lista entera).
 const IG_PAGE_TITLE = 'Seen on Instagram — House Only';
+const IG_PAGE = 40;
 function IgFeedPage({ onOpen, onAdd, isWished, onWishlistToggle, onNavigate }) {
   const isMobile = useIsMobile(720);
-  const [records, setRecords] = useState(null);   // null = cargando
+  const [handles, setHandles] = useState(null);   // orden del feed; null = cargando
+  const [records, setRecords] = useState(null);   // fichas ya pedidas, en ese orden
+  const [pedidos, setPedidos] = useState(0);      // cuantos handles se han pedido ya
+  const [cargando, setCargando] = useState(false);
   const [err, setErr] = useState('');
   const [q, setQ] = useState('');
+  const finRef = useRef(null);
 
   useEffect(() => {
     const antes = document.title;
@@ -14239,13 +14252,38 @@ function IgFeedPage({ onOpen, onAdd, isWished, onWishlistToggle, onNavigate }) {
       const r = await fetch(`${WORKER_URL}?action=ig-feed`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const { items = [] } = await r.json();
-      const recs = items.length ? await fetchShopifyProductsByHandles(items.map(i => i.handle)) : [];
-      if (vivo) setRecords(recs);
-    })().catch(e => { if (vivo) { setErr(e?.message || 'error'); setRecords([]); } });
+      const hs = items.map(i => i.handle);
+      const recs = hs.length ? await fetchShopifyProductsByHandles(hs.slice(0, IG_PAGE)) : [];
+      if (vivo) { setHandles(hs); setRecords(recs); setPedidos(Math.min(IG_PAGE, hs.length)); }
+    })().catch(e => { if (vivo) { setErr(e?.message || 'error'); setHandles([]); setRecords([]); } });
     return () => { vivo = false; };
   }, []);
 
   const term = q.trim().toLowerCase();
+  const quedan = handles ? handles.length - pedidos : 0;
+  // Pide el siguiente tramo (o todo lo que falte, si se esta buscando).
+  const pedirMas = useCallback(async (todo) => {
+    if (cargando || !handles || pedidos >= handles.length) return;
+    const hasta = todo ? handles.length : Math.min(handles.length, pedidos + IG_PAGE);
+    setCargando(true);
+    try {
+      const mas = await fetchShopifyProductsByHandles(handles.slice(pedidos, hasta));
+      setRecords(rs => [...(rs || []), ...mas]);
+      setPedidos(hasta);
+    } catch { /* se reintenta al volver a hacer scroll o al buscar */ }
+    finally { setCargando(false); }
+  }, [cargando, handles, pedidos]);
+
+  useEffect(() => { if (term && quedan > 0) pedirMas(true); }, [term, quedan, pedirMas]);
+
+  useEffect(() => {
+    const el = finRef.current;
+    if (!el || quedan <= 0 || term) return;
+    const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) pedirMas(false); }, { rootMargin: '800px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [quedan, term, pedirMas]);
+
   const shown = (records || []).filter(r => !term ||
     [r.title, r.artist, r.label, r.catalog].some(v => (v || '').toLowerCase().includes(term)));
 
@@ -14257,7 +14295,7 @@ function IgFeedPage({ onOpen, onAdd, isWished, onWishlistToggle, onNavigate }) {
 
       {records === null ? (
         <div style={{ color:S.muted, fontSize:12, padding:'40px 0' }}>Loading…</div>
-      ) : !records.length ? (
+      ) : !records.length && quedan <= 0 ? (
         <div style={{ padding:'48px 0', textAlign:'center' }}>
           <p style={{ color:S.muted, fontSize:13, margin:'0 0 18px' }}>
             {err ? "We couldn't load the list right now." : 'Nothing here yet.'}
@@ -14278,7 +14316,9 @@ function IgFeedPage({ onOpen, onAdd, isWished, onWishlistToggle, onNavigate }) {
               </div>
             ))}
           </div>
-          {!shown.length && <div style={{ color:S.muted, fontSize:12, padding:'32px 0' }}>No records match “{q}”.</div>}
+          <div ref={finRef} style={{ height:1 }} />
+          {cargando && <div style={{ color:S.muted, fontSize:12, padding:'20px 0', textAlign:'center' }}>{term ? 'Searching all records…' : 'Loading more…'}</div>}
+          {!shown.length && !cargando && <div style={{ color:S.muted, fontSize:12, padding:'32px 0' }}>No records match “{q}”.</div>}
         </>
       )}
     </div>
