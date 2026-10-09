@@ -121,13 +121,43 @@ Rama `claude/ig-feed-seed` (encima de #90).
   portada) y el resto la Storefront API, que en esta red va de 0,4 a 2,5 s por
   tanda. El tamaño del lote no cambia nada.
 
+## Estado final (09-10, cierre)
+
+- **main**: #88 `a00d291` · #89 `a1ede5c` · #90 `35cd3cc` · #91 `adb6030`
+  (merge commits, sin conflictos). Pages sirve el bundle `index-Ci86Rf7M.js`,
+  comprobado por contenido («Searching all records»).
+- **Worker**: prod `3f833105-fecc-43e6-ab81-7d05bb901228` (tope 200), staging
+  `94e203b4-d486-4de8-b853-320fa3ec2ee9`. Versiones anteriores en prod, para un
+  rollback: `7678bafd…` (ig-feed, tope 40) y `c21d180a…` (sin ig-feed).
+- **Feed de prod sembrado** (lo lanzó Eduardo con `seed-ig-feed.mjs --commit`):
+  `GET ig-feed` devuelve 137, primero `rmce028p`, último `wiiw002`, sin
+  duplicados.
+- **`houseonly.store/ig` en Chrome headless a 390 px** (caché desactivada):
+  - 40 fichas al abrir; con el scroll 80 → 120 → 137. Primera
+    `black-eyes-ocean-floor-funk-ep` (rmce028p), última
+    `11-68pm-wide-screen-narrow-mind` (wiiw002).
+  - Buscar `wiiw002` con 40 cargadas lo encuentra en ~2,8 s, sin scroll.
+  - «Sold out» en 7 fichas (p. ej. Walt J — The Traveller EP, UR — Knights of
+    the Jaguar). Abrir una ficha y cerrarla vuelve a `/ig`.
+  - 0 errores de consola, sin scroll horizontal.
+  - Portada (18 fichas) y una ficha de producto: 0 errores, sin scroll
+    horizontal.
+- **Tiempo hasta las primeras fichas: 5,7-11,2 s** en esta conexión, por encima
+  de los 2-3 s buscados. El grueso es la red: el primer byte del propio HTML
+  tarda 2,1-2,9 s y la portada también necesita 5,7 s en la misma prueba. Lo
+  que `/ig` añade sobre la portada (~1-2 s) son dos peticiones en cadena:
+  `ig-feed` al worker (1,7 s aquí, aunque pese casi nada) y luego las 40 fichas
+  de la Storefront API (~1 s). No se ha tocado: hay que medirlo desde otra red
+  antes de decidir. Si sigue lento, las opciones son meter el feed en el HTML
+  prerenderizado de `/ig` o no pedir el catálogo de la portada estando en
+  `/ig` (hoy se pide igual, en paralelo).
+- `ig-seed.json` borrado de la raíz; nunca se versionó.
+
 ## Pendiente a mano
 
-- Sembrar prod (pide el Bearer):
-  `cd houseonly-worker/houseonly-worker && node scripts/seed-ig-feed.mjs --commit`.
-- Después, `GET ig-feed` con 137 items (primero `rmce028p`, último `wiiw002`)
-  y `/ig` a 390 px.
+- Poner `houseonly.store/ig` en la bio de @onlyhouseonly.
 - `./scripts/verify-ig-feed.sh produccion` (add/remove con Bearer).
 - Admin de producción: ver «Cierre del vídeo» y «Link in bio»; Añadir/Quitar;
   exportar con Link in bio (añade) y con Seguir (no añade).
-- Poner `houseonly.store/ig` en la bio de @onlyhouseonly.
+- Medir `/ig` desde el móvil con datos (otra red) para saber si los 2-3 s se
+  cumplen fuera de esta conexión.
