@@ -921,6 +921,7 @@ import {
 import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './lib/slug';
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
+import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed';
 
 import {
   buildAuthorizeUrl,
@@ -1445,6 +1446,19 @@ export default {
     }
     if (action === 'external-gaps' && request.method === 'GET') {
       return await handleExternalGaps(request, env);
+    }
+
+    // ── FEED DE INSTAGRAM (link in bio) ─────────────────────
+    // La pagina publica /ig lo lee sin auth; solo el generador de Stories del
+    // admin escribe. lib/ig-feed.ts.
+    if (action === 'ig-feed' && request.method === 'GET') {
+      return await handleIgFeed(env);
+    }
+    if (action === 'ig-feed-add' && request.method === 'POST') {
+      return await handleIgFeedAdd(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'ig-feed-remove' && request.method === 'POST') {
+      return await handleIgFeedRemove(request, env, bearerAdminValido(request, env));
     }
 
     // ── SETS DESTACADOS (fase 7B) ───────────────────────────
