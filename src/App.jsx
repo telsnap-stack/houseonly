@@ -126,7 +126,7 @@ function parseProduct({ node }) {
     stock: e.node.quantityAvailable ?? 0,
   }));
   return {
-    id: node.id, shopifyVariantId: v?.id, variants,
+    id: node.id, handle: node.handle || '', shopifyVariantId: v?.id, variants,
     title, artist, label,
     catalog, genre, year,
     slug: makeSlug(artist, title, catalog),
@@ -201,7 +201,7 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
       edges {
         cursor
         node {
-          id title vendor descriptionHtml tags createdAt
+          id handle title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -285,7 +285,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
       edges {
         cursor
         node {
-          id title vendor descriptionHtml tags createdAt
+          id handle title vendor descriptionHtml tags createdAt
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
@@ -364,13 +364,35 @@ async function fetchShopifyProductByHandle(handle) {
   const data = await shopifyQuery(`
     query($h: String!) {
       product(handle: $h) {
-        id title vendor descriptionHtml tags createdAt
+        id handle title vendor descriptionHtml tags createdAt
         variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
         images(first:1) { edges { node { url } } }
       }
     }`, { h: handle });
   if (!data.product) return null;
   return parseProduct({ node: data.product });
+}
+
+// Varios productos por handle, en el orden pedido (la pagina /ig respeta el del
+// feed). NO con `products(query:"handle:a OR handle:b")`: `handle` no es un
+// filtro de la Storefront API y la tienda lo ignora sin error —comprobado el
+// 2026-10-09, devuelve 10 discos cualquiera—. Un alias de `product(handle:)`
+// por disco es exacto y da null si el handle ya no existe. Lotes de 20.
+async function fetchShopifyProductsByHandles(handles) {
+  const out = new Map();
+  for (let i = 0; i < handles.length; i += 20) {
+    const lote = handles.slice(i, i + 20);
+    const vars = lote.map((_, j) => `$h${j}: String!`).join(', ');
+    const campos = lote.map((_, j) => `p${j}: product(handle: $h${j}) {
+        id handle title vendor descriptionHtml tags createdAt
+        variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
+        images(first:1) { edges { node { url } } }
+      }`).join('\n');
+    const data = await shopifyQuery(`query(${vars}) { ${campos} }`,
+      Object.fromEntries(lote.map((h, j) => [`h${j}`, h])));
+    lote.forEach((h, j) => { if (data[`p${j}`]) out.set(h, parseProduct({ node: data[`p${j}`] })); });
+  }
+  return handles.map(h => out.get(h)).filter(Boolean);
 }
 
 // Resolve a pre-order by SLUG. Companion to the handle lookup above, for the
@@ -7970,7 +7992,7 @@ function exportAudioSrc(url) {
 // (10-15s), with the chosen track's audio playing under it. Records the canvas
 // + audio via MediaRecorder to a WebM and downloads it. (MP4 conversion is 5B.)
 // Also copies the product URL to the clipboard for the Instagram link sticker.
-function StoryExporter({ release, track, line, ctaMode }) {
+function StoryExporter({ release, track, line, ctaMode, onExported }) {
   const canvasRef = useRef(null);
   const audioRef = useRef(null);
   const coverImgRef = useRef(null);
@@ -8063,6 +8085,7 @@ function StoryExporter({ release, track, line, ctaMode }) {
       const purl = await copyProductUrl();
       try { if (ac) ac.close(); } catch {}
       setStatus('done'); setMsg(`Done — WebM downloaded · product URL copied: ${purl}${hasAudio ? '' : ' · (silent — add audio in Instagram)'}`);
+      if (onExported) onExported({ release, ctaMode });
     };
 
     // Go: start audio (if any) + recorder, drive the canvas for the full length.
@@ -8143,6 +8166,39 @@ function StoriesGenerator() {
     try { const v = localStorage.getItem(STORY_CTA_KEY); return STORY_CTA_MODES.some(m => m.id === v) ? v : 'follow'; } catch { return 'follow'; }
   });
   useEffect(() => { try { localStorage.setItem(STORY_CTA_KEY, ctaMode); } catch { /* modo privado */ } }, [ctaMode]);
+  // Feed de la pagina publica /ig (link de la bio). Se lee del worker sin
+  // auth; anadir y quitar van con el secreto de admin (fetchAdmin). El GET
+  // lleva cache de 60 s, asi que tras escribir se usa la lista que devuelve el
+  // POST y la carga inicial va con cache-buster.
+  const [igFeed, setIgFeed] = useState(null);       // null = cargando
+  const [igMsg, setIgMsg]   = useState('');
+  const [igBusy, setIgBusy] = useState(false);
+  useEffect(() => {
+    fetch(`${WORKER_URL}?action=ig-feed&t=${Date.now()}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => setIgFeed(d.items || []))
+      .catch(e => { setIgFeed([]); setIgMsg(`No se pudo leer el link in bio: ${e.message}`); });
+  }, []);
+  const igWrite = async (action, body, okMsg) => {
+    setIgBusy(true);
+    try {
+      const r = await fetchAdmin(`${WORKER_URL}?action=${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setIgFeed(d.items || []);
+      setIgMsg(okMsg);
+    } catch (e) {
+      setIgMsg(`Link in bio: ${e.message}`);
+    } finally {
+      setIgBusy(false);
+    }
+  };
+  const igAdd = (r) => {
+    if (!r?.handle) { setIgMsg('Link in bio: este disco no trae handle de Shopify.'); return Promise.resolve(); }
+    return igWrite('ig-feed-add', { handle: r.handle, sku: r.catalog || '', title: r.title || '', artist: r.artist || '' }, 'Añadido al link in bio');
+  };
   const [chosenTrack, setChosenTrack]   = useState(null);   // index into analyzed tracks
 
   // Debounced server-side search over the WHOLE catalog (reuses the same
@@ -8469,6 +8525,35 @@ function StoriesGenerator() {
                   <button key={m.id} onClick={()=>setCtaMode(m.id)} style={{ background:ctaMode===m.id?S.accent:'none', color:ctaMode===m.id?'#080808':S.muted, border:`1px solid ${ctaMode===m.id?S.accent:S.border}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'4px 10px', fontFamily:'inherit' }}>{m.label}</button>
                 ))}
               </div>
+              <div style={{ marginBottom:14, padding:'10px 12px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:2 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginBottom:8 }}>
+                  <span style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase' }}>Link in bio</span>
+                  <a href="/ig" target="_blank" rel="noreferrer" style={{ fontSize:9, color:S.muted }}>houseonly.store/ig ↗</a>
+                  <div style={{ flex:1 }} />
+                  {(() => { const ya = !!igFeed?.some(i => i.handle === selected.handle); return (
+                    <button onClick={()=>igAdd(selected)} disabled={igBusy || !selected.handle} title={ya ? 'Ya está: lo sube al principio' : ''} style={{ background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:igBusy?'wait':'pointer', fontSize:9, fontWeight:800, letterSpacing:1, textTransform:'uppercase', padding:'5px 10px', fontFamily:'inherit' }}>{ya ? 'Subir al principio' : 'Añadir al link in bio'}</button>
+                  ); })()}
+                </div>
+                {ctaMode === 'bio' && <div style={{ fontSize:9, color:S.muted, marginBottom:8 }}>Con el cierre «Link in bio», exportar añade el disco solo.</div>}
+                {igMsg && <div style={{ fontSize:10, color:/^(Link in bio:|No se pudo)/.test(igMsg) ? S.danger : S.accent, marginBottom:8 }}>{igMsg}</div>}
+                {igFeed === null ? (
+                  <div style={{ fontSize:10, color:S.muted }}>Cargando…</div>
+                ) : !igFeed.length ? (
+                  <div style={{ fontSize:10, color:S.muted }}>Vacío: /ig enseña “Nothing here yet”.</div>
+                ) : (
+                  <div style={{ maxHeight:180, overflowY:'auto' }}>
+                    {igFeed.map(i => (
+                      <div key={i.handle} style={{ display:'flex', alignItems:'center', gap:8, fontSize:10, padding:'4px 0', borderTop:`1px solid ${S.border}` }}>
+                        <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', color:i.handle===selected.handle?S.accent:S.text }}>
+                          {[i.title, i.artist, i.sku].filter(Boolean).join(' · ')}
+                        </span>
+                        <span style={{ color:S.muted, fontFamily:'monospace', fontSize:9 }}>{new Date(i.addedAt).toLocaleDateString('es-ES')}</span>
+                        <button onClick={()=>igWrite('ig-feed-remove', { handle:i.handle }, 'Quitado del link in bio')} disabled={igBusy} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, borderRadius:2, cursor:'pointer', fontSize:9, padding:'2px 8px', fontFamily:'inherit' }}>Quitar</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               {!exTrack && (
                 <div style={{ fontSize:9, color:S.muted, letterSpacing:0.5, marginBottom:10, lineHeight:1.6 }}>
                   No audio snippet for this release — the story exports silently. Add audio in the Instagram app after uploading.
@@ -8488,7 +8573,7 @@ function StoriesGenerator() {
                   <Shot3Canvas release={selected} ctaMode={ctaMode} />
                 </div>
               </div>
-              <StoryExporter release={selected} track={exTrack} line={ctxChosen} ctaMode={ctaMode} />
+              <StoryExporter release={selected} track={exTrack} line={ctxChosen} ctaMode={ctaMode} onExported={({ release, ctaMode: modo }) => { if (modo === 'bio') igAdd(release); }} />
             </div>
             );
           })()}
@@ -14129,6 +14214,77 @@ function AccountPage({ auth, onSignIn, onOpenWishlist, onNavigate, wishSyncedAt,
 }
 
 /** /artist/{slug} y /label/{slug} — publicas, sin sesion. */
+// ── /ig — destino fijo del link de la bio de Instagram ─────────────
+// Los discos que han salido en Reels, el mas reciente primero (el orden lo pone
+// el feed del worker, ?action=ig-feed, que alimenta el generador de Stories).
+// Un disco agotado NO desaparece: quien llega desde un Reel antiguo tiene que
+// encontrarlo igual, con su "Sold out". Los pre-orders tienen stock 0 por
+// definicion y no llevan la marca.
+const IG_PAGE_TITLE = 'Seen on Instagram — House Only';
+function IgFeedPage({ onOpen, onAdd, isWished, onWishlistToggle, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  const [records, setRecords] = useState(null);   // null = cargando
+  const [err, setErr] = useState('');
+  const [q, setQ] = useState('');
+
+  useEffect(() => {
+    const antes = document.title;
+    document.title = IG_PAGE_TITLE;
+    return () => { document.title = antes; };
+  }, []);
+
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      const r = await fetch(`${WORKER_URL}?action=ig-feed`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const { items = [] } = await r.json();
+      const recs = items.length ? await fetchShopifyProductsByHandles(items.map(i => i.handle)) : [];
+      if (vivo) setRecords(recs);
+    })().catch(e => { if (vivo) { setErr(e?.message || 'error'); setRecords([]); } });
+    return () => { vivo = false; };
+  }, []);
+
+  const term = q.trim().toLowerCase();
+  const shown = (records || []).filter(r => !term ||
+    [r.title, r.artist, r.label, r.catalog].some(v => (v || '').toLowerCase().includes(term)));
+
+  return (
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 14px 8px':'34px 20px 8px', textAlign:'left' }}>
+      <Logo scale={isMobile?1.2:1.6} />
+      <h1 style={{ fontSize:isMobile?22:30, fontWeight:800, letterSpacing:'-0.6px', margin:'18px 0 0', color:S.text }}>Seen on Instagram</h1>
+      <p style={{ color:S.muted, fontSize:12, margin:'8px 0 0', lineHeight:1.6 }}>Every record from our Reels, newest first.</p>
+
+      {records === null ? (
+        <div style={{ color:S.muted, fontSize:12, padding:'40px 0' }}>Loading…</div>
+      ) : !records.length ? (
+        <div style={{ padding:'48px 0', textAlign:'center' }}>
+          <p style={{ color:S.muted, fontSize:13, margin:'0 0 18px' }}>
+            {err ? "We couldn't load the list right now." : 'Nothing here yet.'}
+          </p>
+          <ILink to="/" onNavigate={onNavigate} style={{ display:'inline-block', fontSize:10, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', color:'#080808', background:S.accent, borderRadius:2, padding:'10px 18px' }}>Browse the shop</ILink>
+        </div>
+      ) : (
+        <>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search title, artist, label or cat. no." aria-label="Search these records"
+            style={{ display:'block', width:'100%', boxSizing:'border-box', marginTop:20, background:S.surf, border:`1px solid ${S.border}`, color:S.text, borderRadius:2, padding:'10px 12px', fontSize:14, fontFamily:'inherit', outline:'none' }} />
+          <div style={{ display:'grid', gridTemplateColumns:`repeat(auto-fill,minmax(${isMobile?150:160}px,1fr))`, gap:12, marginTop:18 }}>
+            {shown.map(r => (
+              <div key={r.id} style={{ position:'relative' }}>
+                <RecordCard r={r} onOpen={onOpen} onAdd={onAdd} isWished={isWished} onWishlistToggle={onWishlistToggle} />
+                {r.stock === 0 && !isForthcoming(r) && (
+                  <span style={{ position:'absolute', top:8, left:8, zIndex:2, pointerEvents:'none', background:'#080808', color:S.text, border:`1px solid ${S.border}`, borderRadius:2, fontSize:9, fontWeight:800, letterSpacing:1.5, textTransform:'uppercase', padding:'4px 7px' }}>Sold out</span>
+                )}
+              </div>
+            ))}
+          </div>
+          {!shown.length && <div style={{ color:S.muted, fontSize:12, padding:'32px 0' }}>No records match “{q}”.</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function EntityPage({ slug, auth, onSignIn, following, onFollowChange, onNavigate }) {
   const isMobile = useIsMobile(720);
   const [data, setData] = useState(null);
@@ -14522,9 +14678,12 @@ export default function App() {
     return ()=>registerAlertsHook(null);
   },[auth?.session, alertsState]);
 
+  // A donde vuelve closeProduct (lo fija openProduct; ver alli).
+  const volverA = useRef('/');
   // Rutas del portal (fase 5b). /account pide sesion; las fichas de entidad no.
   const portalRoute = useMemo(()=>{
     if (/^\/account\/?$/.test(path)) return { kind:'account' };
+    if (/^\/ig\/?$/.test(path)) return { kind:'ig' };
     const m = path.match(/^\/(artist|label)\/([^/]+)\/?$/);
     return m ? { kind:m[1], slug:m[2] } : null;
   },[path]);
@@ -14542,12 +14701,17 @@ export default function App() {
     // modal shows complete content. Fall back to the snap if not found in the catalog
     // (rare: release was unpublished mid-session).
     const full = records.find(rec => rec.id === r.id) || records.find(rec => rec.slug && rec.slug === r.slug) || r;
+    // Desde /ig se vuelve a /ig al cerrar: quien llega del link de la bio no
+    // tiene por que acabar en la portada. El resto de rutas, como siempre.
+    if (portalRoute?.kind === 'ig') volverA.current = '/ig';
+    else if (!path.startsWith('/products/')) volverA.current = '/';
     setSelected(full);
     navigate(`/products/${full.slug}/`);
   };
   const closeProduct = () => {
     setSelected(null);
-    if (path.startsWith('/products/')) navigate('/');
+    if (path.startsWith('/products/')) navigate(volverA.current);
+    volverA.current = '/';
   };
 
   // Admin password gate (same as before — Ctrl+Shift+A toggles, #admin opens)
@@ -14732,7 +14896,9 @@ export default function App() {
       </Nav>
 
       {portalRoute ? (
-        portalRoute.kind === 'account'
+        portalRoute.kind === 'ig'
+          ? <IgFeedPage onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} onNavigate={navigate} />
+          : portalRoute.kind === 'account'
           ? <AccountPage
               key={auth?.session || 'anon'}
               auth={auth}

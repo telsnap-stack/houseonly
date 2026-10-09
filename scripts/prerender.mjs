@@ -333,6 +333,28 @@ function renderEntityHtml(template, e) {
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 }
 
+// /ig — destino del link de la bio de Instagram. La lista la pinta el cliente
+// (sale del feed del worker); aqui solo van el titulo, la descripcion y el
+// canonical propios, para que el enlace compartido no salga como la portada.
+function renderIgHtml(template) {
+  const url = `${SITE_URL}/ig/`;
+  const title = 'Seen on Instagram — House Only';
+  const desc = 'Every record from our Instagram Reels, newest first. House Only — vinyl delivered worldwide.';
+  const seoHead = `  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(desc)}" />
+  <link rel="canonical" href="${url}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(desc)}" />
+  <meta property="og:url" content="${url}" />`;
+  const seoBody = `<noscript><h1>Seen on Instagram</h1><p>${escapeHtml(desc)}</p></noscript>`;
+  return template
+    .replace(/<title>[^<]*<\/title>/, '')
+    .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
+    .replace('</head>', `${seoHead}\n  </head>`)
+    .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
+}
+
 function renderSitemap(products, entities = []) {
   const today = new Date().toISOString().slice(0, 10);
   const urls = [
@@ -400,6 +422,10 @@ async function main() {
   } catch (err) {
     console.warn(`[prerender] ⚠ entity pages skipped: ${err.message}`);
   }
+
+  mkdirSync(join(DIST_DIR, 'ig'), { recursive: true });
+  writeFileSync(join(DIST_DIR, 'ig', 'index.html'), renderIgHtml(template));
+  console.log('[prerender] Wrote /ig');
 
   console.log('[prerender] Generating sitemap.xml...');
   writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities));
