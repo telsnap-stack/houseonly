@@ -59,6 +59,15 @@ describe("addToFeed / removeFromFeed", () => {
 		expect(removeFromFeed(f, "disco-2").map(i => i.handle)).toEqual(["disco-3", "disco-1"]);
 	});
 
+	it("el tope es 200: caben los 137 Reels de la siembra y sobra sitio", () => {
+		expect(IG_FEED_MAX).toBe(200);
+		let f: IgFeedItem[] = [];
+		for (let n = 1; n <= 137; n++) f = addToFeed(f, disco(n), n);
+		expect(f).toHaveLength(137);
+		expect(f[0].handle).toBe("disco-137");
+		expect(f.at(-1)!.handle).toBe("disco-1");
+	});
+
 	it(`tope de ${IG_FEED_MAX}: el mas antiguo sale`, () => {
 		let f: IgFeedItem[] = [];
 		for (let n = 1; n <= IG_FEED_MAX + 5; n++) f = addToFeed(f, disco(n), n);

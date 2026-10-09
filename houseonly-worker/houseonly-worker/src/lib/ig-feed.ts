@@ -8,7 +8,7 @@
 // exportar con el cierre "Link in bio").
 //
 // Clave (en SYNC_STATE, que tiene id distinto en prod y staging):
-//   ig:feed → IgFeedItem[]   max 40, sin duplicados por handle
+//   ig:feed → IgFeedItem[]   max 200, sin duplicados por handle
 //
 // KV no tiene escritura atomica (docs de Cloudflare, "How KV works"): dos
 // escrituras a la vez podrian pisarse. Aqui escribe una sola persona desde el
@@ -27,7 +27,9 @@ export interface IgFeedEnv {
 }
 
 export const IG_FEED_KEY = 'ig:feed';
-export const IG_FEED_MAX = 40;
+// 200 y no 40: la siembra inicial (2026-10-09) ya trae 137 Reels, y /ig tiene
+// que seguir encontrando los antiguos.
+export const IG_FEED_MAX = 200;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
