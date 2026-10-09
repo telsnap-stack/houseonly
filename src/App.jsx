@@ -7669,12 +7669,45 @@ function Shot2Canvas({ release, line }) {
   );
 }
 
+// ── SHOT 3 CTA (Stories) ───────────────────────────────────────
+// Cierre del ultimo plano, elegido en StoriesGenerator: 'follow' (por
+// defecto), 'bio' (discos que se quieren vender) o 'none' (sin texto, solo el
+// sticker de enlace). Una sola funcion para preview y export, que asi no
+// divergen. y=1440: bajo la linea del catalogo (~1321) y por encima de la
+// zona que tapa la interfaz de Reels (caption/usuario, y>~1500). El pulso a
+// 120 BPM sale solo de `elapsed`, asi que el export es determinista.
+const IG_HANDLE = '@onlyhouseonly';
+const STORY_CTA_KEY = 'houseonly_story_cta';
+const STORY_CTA_MODES = [
+  { id: 'follow', label: 'Seguir' },
+  { id: 'bio',    label: 'Link in bio' },
+  { id: 'none',   label: 'Ninguno' },
+];
+function drawShot3Cta(ctx, W, H, mode, elapsed) {
+  const text = mode === 'follow' ? `FOLLOW ${IG_HANDLE.toUpperCase()}`
+             : mode === 'bio'    ? 'LINK IN BIO'
+             : '';
+  if (!text) return;
+  const beatSec = 0.5; // 120 BPM
+  const phase = (elapsed || 0) % beatSec;
+  const scale = phase < 0.16 ? 1 + (1 - phase / 0.16) * 0.04 : 1;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let fs = 56;
+  ctx.font = `900 ${fs}px Inter, sans-serif`;
+  while (fs > 36 && ctx.measureText(text).width > W - 160) { fs -= 2; ctx.font = `900 ${fs}px Inter, sans-serif`; }
+  ctx.translate(W / 2, 1440 * (H / 1920));
+  ctx.scale(scale, scale);
+  ctx.fillStyle = '#c8ff00';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 // ── SHOT 3 CANVAS (Stories) ────────────────────────────────────
-// The closing brand shot at 1080x1920: HOUSE ONLY logo as the hero, a small
-// cover reminder, title/artist/catalog, and a "Tap to shop →" CTA that pulses
-// subtly on the 120 BPM beat — same heartbeat as Shots 1 and 2. The CTA pulse
-// draws the eye to the call-to-action at the moment of the tap. Preview-only.
-function Shot3Canvas({ release }) {
+// The closing brand shot at 1080x1920: HOUSE ONLY logo as the hero, the
+// cover, title/artist/catalog, and the CTA chosen in StoriesGenerator
+// (drawShot3Cta). Preview-only; exDrawShot3 mirrors it for the export.
+function Shot3Canvas({ release, ctaMode }) {
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
   const startRef = useRef(0);
@@ -7738,8 +7771,7 @@ function Shot3Canvas({ release }) {
     ctx.font = '500 28px "JetBrains Mono", monospace';
     ctx.fillText(release?.catalog || '', W / 2, ty);
 
-    // No drawn CTA — the Instagram link sticker (always visible) is the real,
-    // tappable link. The bottom band is left clear so the sticker can sit there.
+    drawShot3Cta(ctx, W, H, ctaMode, elapsed);
   };
 
   const loop = () => {
@@ -7748,6 +7780,12 @@ function Shot3Canvas({ release }) {
     if (elapsed < DUR) rafRef.current = requestAnimationFrame(loop);
     else { setPlaying(false); drawFrame(0); }
   };
+
+  // Cambiar el cierre redibuja el fotograma quieto.
+  useEffect(() => {
+    if (!playing) drawFrame(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctaMode]);
 
   const play = () => {
     if (playing) { setPlaying(false); if (rafRef.current) cancelAnimationFrame(rafRef.current); drawFrame(0); return; }
@@ -7897,7 +7935,7 @@ function exDrawShot2(ctx, W, H, release, lineText, elapsed) {
   ctx.globalAlpha = 1;
 }
 
-function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
+function exDrawShot3(ctx, W, H, release, coverImg, elapsed, ctaMode) {
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, '#0c0c0c'); g.addColorStop(1, '#060606');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
@@ -7914,9 +7952,7 @@ function exDrawShot3(ctx, W, H, release, coverImg, elapsed) {
   ctx.fillStyle = '#efefef'; ctx.font = '800 52px Inter, sans-serif'; ctx.fillText(release?.title || '', W/2, ty);
   ty += 62; ctx.fillStyle = '#9a9a9a'; ctx.font = '500 36px Inter, sans-serif'; ctx.fillText(release?.artist || '', W/2, ty);
   ty += 48; ctx.fillStyle = '#585858'; ctx.font = '500 28px "JetBrains Mono", monospace'; ctx.fillText(release?.catalog || '', W/2, ty);
-  // NOTE: no drawn CTA button — the Instagram link sticker (always visible) is
-  // the real, tappable link. The bottom band (~y 1450-1700) is left clear so
-  // the sticker can sit there without covering anything.
+  drawShot3Cta(ctx, W, H, ctaMode, elapsed);
 }
 
 // Todo <audio> que carga snippets de R2 lleva crossOrigin="anonymous": si una
@@ -7934,7 +7970,7 @@ function exportAudioSrc(url) {
 // (10-15s), with the chosen track's audio playing under it. Records the canvas
 // + audio via MediaRecorder to a WebM and downloads it. (MP4 conversion is 5B.)
 // Also copies the product URL to the clipboard for the Instagram link sticker.
-function StoryExporter({ release, track, line }) {
+function StoryExporter({ release, track, line, ctaMode }) {
   const canvasRef = useRef(null);
   const audioRef = useRef(null);
   const coverImgRef = useRef(null);
@@ -7966,7 +8002,7 @@ function StoryExporter({ release, track, line }) {
   const drawAt = (ctx, elapsed) => {
     if (elapsed < SHOT) exDrawShot1(ctx, W, H, release, coverImgRef.current, elapsed);
     else if (elapsed < SHOT2_END) exDrawShot2(ctx, W, H, release, line, elapsed - SHOT);
-    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT2_END);
+    else exDrawShot3(ctx, W, H, release, coverImgRef.current, elapsed - SHOT2_END, ctaMode);
   };
 
   const copyProductUrl = async () => {
@@ -8058,7 +8094,7 @@ function StoryExporter({ release, track, line }) {
       {!line && <div style={{ fontSize: 9, color: '#ff8800', marginTop: 8, letterSpacing: 1, textTransform: 'uppercase' }}>Pick a knowledge line first</div>}
       {msg && <div style={{ fontSize: 10, color: status === 'error' ? S.danger : status === 'done' ? S.accent : S.muted, marginTop: 8, lineHeight: 1.5 }}>{msg}</div>}
       <div style={{ fontSize: 9, color: S.muted, marginTop: 8, lineHeight: 1.6 }}>
-        Records the 3 shots{track?.url ? ' with the track audio' : ' (silent — no snippet for this release)'} (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram, then add a link sticker in the clear area near the bottom{track?.url ? '' : ', and add audio in the app'}.
+        Records the 3 shots{track?.url ? ' with the track audio' : ' (silent — no snippet for this release)'} (length varies with the knowledge line). Downloads a WebM and copies the product URL. Upload to Google Drive → phone → Instagram{ctaMode === 'bio' ? ' and put the product URL in your bio (the close says LINK IN BIO)' : ', then add a link sticker below the close'}{track?.url ? '' : ', and add audio in the app'}.
       </div>
     </div>
   );
@@ -8102,6 +8138,11 @@ function StoriesGenerator() {
   // and keep its kick timestamps for the waveform pulse (canvas comes in 4A-2).
   const [kickAnalysis, setKickAnalysis] = useState(null);   // {tracks:[{...,score,bpm,kicks}], bestIndex}
   const [kickLoading, setKickLoading]   = useState(false);
+  // Cierre del Shot 3 (drawShot3Cta). Se recuerda entre sesiones.
+  const [ctaMode, setCtaMode] = useState(() => {
+    try { const v = localStorage.getItem(STORY_CTA_KEY); return STORY_CTA_MODES.some(m => m.id === v) ? v : 'follow'; } catch { return 'follow'; }
+  });
+  useEffect(() => { try { localStorage.setItem(STORY_CTA_KEY, ctaMode); } catch { /* modo privado */ } }, [ctaMode]);
   const [chosenTrack, setChosenTrack]   = useState(null);   // index into analyzed tracks
 
   // Debounced server-side search over the WHOLE catalog (reuses the same
@@ -8422,6 +8463,12 @@ function StoriesGenerator() {
             return (
             <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${S.border}` }}>
               <div style={lbl}>Shot previews</div>
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+                <span style={{ fontSize:9, color:S.muted, letterSpacing:1.5, textTransform:'uppercase' }}>Cierre del vídeo</span>
+                {STORY_CTA_MODES.map(m => (
+                  <button key={m.id} onClick={()=>setCtaMode(m.id)} style={{ background:ctaMode===m.id?S.accent:'none', color:ctaMode===m.id?'#080808':S.muted, border:`1px solid ${ctaMode===m.id?S.accent:S.border}`, borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1, textTransform:'uppercase', padding:'4px 10px', fontFamily:'inherit' }}>{m.label}</button>
+                ))}
+              </div>
               {!exTrack && (
                 <div style={{ fontSize:9, color:S.muted, letterSpacing:0.5, marginBottom:10, lineHeight:1.6 }}>
                   No audio snippet for this release — the story exports silently. Add audio in the Instagram app after uploading.
@@ -8437,11 +8484,11 @@ function StoriesGenerator() {
                   <Shot2Canvas release={selected} line={ctxChosen} />
                 </div>
                 <div>
-                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 3 — tap to shop</div>
-                  <Shot3Canvas release={selected} />
+                  <div style={{ fontSize:8, color:S.muted, letterSpacing:1.5, textTransform:'uppercase', marginBottom:8 }}>Shot 3 — cierre</div>
+                  <Shot3Canvas release={selected} ctaMode={ctaMode} />
                 </div>
               </div>
-              <StoryExporter release={selected} track={exTrack} line={ctxChosen} />
+              <StoryExporter release={selected} track={exTrack} line={ctxChosen} ctaMode={ctaMode} />
             </div>
             );
           })()}
