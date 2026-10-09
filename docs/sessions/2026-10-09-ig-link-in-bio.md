@@ -89,10 +89,45 @@ rama se queda solo con lo suyo.
 - Ramas `claude/cierre-reels` y `claude/ig-link-in-bio` no se han borrado: el
   repo no borra ramas al mergear.
 
+## Siembra del feed y carga perezosa (09-10, tarde)
+
+Rama `claude/ig-feed-seed` (encima de #90).
+
+- **Tope a 200** (`IG_FEED_MAX`): la siembra ya trae 137 Reels. Test del tope
+  ajustado (caben los 137 y a partir de 200 sale el más antiguo). Suite: 338/338.
+  Worker desplegado: staging `94e203b4-d486-4de8-b853-320fa3ec2ee9`, prod
+  **`3f833105-fecc-43e6-ab81-7d05bb901228`** (rollback: `7678bafd…`). En prod,
+  GET `ig-feed` 200 y POST sin Bearer 401.
+- **`scripts/seed-ig-feed.mjs`** (en `houseonly-worker/houseonly-worker`): lee
+  `ig-seed.json` (raíz del repo, sin commitear) del más antiguo al más reciente
+  y hace un `ig-feed-add` por disco, con 150 ms de pausa. Título y artista
+  salen de Shopify con la misma consulta que `/ig` (alias de
+  `product(handle:)`), nunca de `title_ocr`. Los handles que no existen se
+  saltan y se listan. Dry-run por defecto; `--commit` pide el Bearer sin eco;
+  un 401 lo para en seco, y repetirlo es seguro porque no duplica.
+- **Dry-run** contra la tienda: 137/137 resueltos, 0 que no existan, 0 con SKU
+  distinto, 0 sin artista. Arriba quedará `rmce028p`, abajo `wiiw002`. Los 6
+  títulos del OCR que no se parecen a los de Shopify son ruido del OCR (O por 0,
+  una frase de la portada, el catálogo), no handles equivocados.
+- `addedAt` será la hora de la siembra, no la del Reel: el endpoint lo pone y
+  `reel_date` no viaja.
+- **Carga perezosa en `/ig`**: pedir 137 fichas en serie tardaba 3,5-7 s. Ahora
+  se piden 40 al abrir, 40 más cuando el final de la rejilla se acerca a la
+  pantalla y todas al buscar. Los lotes de 20 van en paralelo. Probado en local
+  con los 137 en el KV, Chrome headless a 390 px: 40 → 80 → 120 → 137 con el
+  scroll; buscar `wiiw002` sin hacer scroll lo encuentra en ~1,2 s; 0 errores
+  de consola, sin scroll horizontal. Las primeras fichas tardan 4,5-5 s en
+  headless, de los que 2,2 s son el arranque de la app (igual que en la
+  portada) y el resto la Storefront API, que en esta red va de 0,4 a 2,5 s por
+  tanda. El tamaño del lote no cambia nada.
+
 ## Pendiente a mano
 
+- Sembrar prod (pide el Bearer):
+  `cd houseonly-worker/houseonly-worker && node scripts/seed-ig-feed.mjs --commit`.
+- Después, `GET ig-feed` con 137 items (primero `rmce028p`, último `wiiw002`)
+  y `/ig` a 390 px.
 - `./scripts/verify-ig-feed.sh produccion` (add/remove con Bearer).
 - Admin de producción: ver «Cierre del vídeo» y «Link in bio»; Añadir/Quitar;
   exportar con Link in bio (añade) y con Seguir (no añade).
-- Con el primer disco añadido: `/ig` lo enseña, y poner
-  `houseonly.store/ig` en la bio de @onlyhouseonly.
+- Poner `houseonly.store/ig` en la bio de @onlyhouseonly.
