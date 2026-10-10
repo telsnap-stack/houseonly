@@ -81,10 +81,124 @@ Rama `claude/google-merchant` desde `main` (`442795e`). Worker solo en staging.
   mismo.
 - 25 discos con stock no tienen imagen y no entran en el feed.
 
-## Pendiente
+## Cierre (10-10)
 
-- Desplegar el worker a prod tras el merge:
-  `cd houseonly-worker/houseonly-worker && NODE_OPTIONS="--dns-result-order=ipv4first --no-network-family-autoselection" npm run deploy`
-- Dar de alta el feed en Merchant Center:
-  `https://houseonly-worker.emontagut.workers.dev/?action=google-feed` (o
-  forzarlo antes con `google-feed-rebuild`).
+- **`identifier_exists`**: se omite cuando el item lleva `g:brand` y `g:mpn`, y
+  solo va a `no` si no hay GTIN ni sello. En prod: de 817 a **25**. Test
+  ajustado (sin sello → `no`; con sello y MPN → omitido; con GTIN → omitido).
+  Suite: 354/354.
+- **Worker en prod `55854aa6-fa5b-434d-819a-c8bbccf3e368`** (rollback:
+  `3f833105…`), desplegado desde `claude/google-merchant` (`1289ae2`). Staging
+  `29f85fcd-69e0-4664-af71-40a9fa481b88`; su copia vieja en KV se borró con
+  wrangler para que se regenere con la regla nueva.
+- **KV caliente sin Bearer**: la primera `GET google-feed` en prod la generó y
+  la guardó (8,1 s, 1019 items, built-at `2026-10-10T01:59:32Z`). Las tres
+  siguientes salen de KV (mismo built-at): primer byte en 0,41-0,58 s; bajar
+  los 1,1 MB entero tarda 1,1-1,4 s en esta conexión. `application/xml;
+  charset=utf-8`, parsea, 0 ids repetidos, 202 con GTIN. `google-feed-rebuild`
+  sin Bearer → 401. No se ha lanzado con Bearer: no hacía falta.
+- 3 `g:link` al azar (DAT071, DAT073, P98-014) → 200 con el título de su ficha
+  ("Nosebleed EP — Pascal | House Only", etc.), no "houseonly".
+- **main**: #93 → `1401d61`. Pages sirve `index-lj_xkynv.js`. El pie, en
+  portada, `/ig` y una ficha de prod a 390 px: 5 enlaces con
+  `target=_blank`, sin scroll horizontal, 0 errores de consola; también en el
+  HTML servido de las tres.
+
+## Para arreglar otro día
+
+### 25 discos con stock y sin imagen (fuera del feed)
+
+| SKU | Stock | Handle |
+|---|---|---|
+| `TOYT128` | 1 | `toyt128` |
+| `WGVINYL81` | 1 | `wgvinyl81` |
+| `VA003` | 1 | `va003` |
+| `AUS1136` | 1 | `aus1136` |
+| `FM12004` | 1 | `fm12004` |
+| `DES121-LTD` | 2 | `des121-ltd` |
+| `FOKUZ016.2` | 2 | `fokuz016-2` |
+| `FOKUZ017` | 2 | `fokuz017` |
+| `FOKUZ022` | 1 | `fokuz022` |
+| `FOKUZ071_` | 2 | `fokuz071` |
+| `FOKUZ114RP2_` | 2 | `fokuz114rp2` |
+| `FOKUZ115RP1_` | 2 | `fokuz115rp1` |
+| `FOKUZLP003` | 1 | `fokuzlp003` |
+| `SOULR056` | 2 | `soulr056` |
+| `SOULR062RP` | 2 | `soulr062rp` |
+| `CRN001` | 2 | `crn001` |
+| `DESLP18` | 2 | `deslp18` |
+| `DES133` | 1 | `des133` |
+| `164422902` | 2 | `164422902` |
+| `AOS-2023` | 2 | `aos2023` |
+| `AOS-432-J` | 1 | `aos432j` |
+| `AOS-444` | 2 | `aos444` |
+| `AYHR0060` | 2 | `ayhr0060` |
+| `BIGFXHE` | 2 | `bigfxhe` |
+| `PR31` | 2 | `pr31` |
+
+### 56 descripciones que empiezan a mitad de frase
+
+El texto ya viene cortado en Shopify (la ficha enseña lo mismo). Muchos cortes
+caen justo después de una ligadura rota ("fi rst", "fl oor"), así que parece
+que el importador perdió el principio al encontrarse una ligadura `ﬁ`/`ﬂ`.
+Revisar con `src/lib/ligatures.ts` antes de reescribir nada a mano.
+
+| SKU | Empieza por |
+|---|---|
+| `BARN129` | fl ute of the region, ARN4L2’s instinct for propul… |
+| `HEIST099` | fi rst cover feature on Spotify, multiple radio 1… |
+| `TOYT193` | fi rst shows abroad in countries like France, the… |
+| `DIRT156` | fl oor material at it’s best! Followed by the deep… |
+| `TOYT178` | fi rst EP by Josh Ludlow for Toy Tonics. Mastermin… |
+| `YRE-054` | fi rmly in the Detroit sound with a nod to the sou… |
+| `TOYT177` | fi ts with the current wave of funky house and gro… |
+| `TOYT159` | fi rst EP also this one was recorded in Barcelona… |
+| `TOYT161` | fi rst place he rarely releases music. Why? Becaus… |
+| `AUS175` | rRoxymore – I Wanted More… |
+| `YRE-040` | fl ip, “Midnight Sky” grooves as boldly, this time… |
+| `FP070` | fl oor. Norwegian techno's grand old man Per Marti… |
+| `RISQUEE29` | fl acid-to-hard, and identifiable-to-WTF? moments,… |
+| `WGVINYL38` | fl ying solo to create a stunning journey that lan… |
+| `RISQUEE28` | jichael mackson – catch 22… |
+| `ACGC2` | a guy called gerald – tronic jazz the berlin sessi… |
+| `CGTX003` | gemini sounds – r u afraid ep… |
+| `HOUSEWAX001LPS` | daniela will release her 2nd album on housewax - w… |
+| `HOUSEWAX006` | housewax is proud to welcome neville watson & nick… |
+| `HOUSEWAX008` | mome – tikka ep… |
+| `HOUSEWAX009` | red 7 (neville watson & nick woolfson) – the space… |
+| `HOUSEWAX012` | massiande – heart rushed love ep… |
+| `HOUSEWAXLTD007` | rick wade – The Vault… |
+| `HW011` | houseworx proudly welcomes legendary jordan fields… |
+| `HW020` | supported by YouAndMe Steve Lawler Matt Star Meat… |
+| `M&F016` | m&f016 Various Artists - 10 Years Of Muzik & Frien… |
+| `VISIO054` | a fresh take on the 2020 gem from Alex Attias, bri… |
+| `BARN127` | fl ip sees the formula in its straightest, driest… |
+| `SAT072` | fi rst time. Opening the A-side is a brand new and… |
+| `PLD047` | lim. 2026 Reissue! Ian Pooley brings back his time… |
+| `MAEVE035` | fi rst in a new run of releases scheduled througho… |
+| `FM12080` | fi rst time. Tom drops the vocal house bomb “Watch… |
+| `AMB3922LP` | aphex twin – selected ambient works 85 - 92… |
+| `YRE012` | andy vaz – different times ep… |
+| `INT005` | frankie flowerz – break the barriers, john daly re… |
+| `MACROM09` | raudive – cone ep… |
+| `VALT2` | tolga fidan – so long paris… |
+| `MIRAU013` | aeromaschine – ascultam vorbe ep… |
+| `QUINTESSE32` | paskal & urban absolutes henry l.& i. s. – b.d.d.k… |
+| `AUS1354` | rhythms. What follows, 'I'll Take You New Release… |
+| `CCS083` | fi rst fullyfledged vinyl offering from Scott and… |
+| `RC040` | the analog roland orchestra – patterns 3 / 4… |
+| `CADENZA94` | fl ip, "There Is No Answer" is another playful sli… |
+| `RB139` | phil weeks ft. ladybird – searching in love… |
+| `AST042` | super limited. London producer SusTrapperazzi has… |
+| `AWAYLMTD002` | black vinyl Tracklist A Silk Route part 1 B Sleepl… |
+| `CKNOWEP75` | djfix – The Dial EP… |
+| `CADENZA116` | fl uffy percussions and metallic bonks, with a tri… |
+| `CADENZA111` | luciano – the great amael, audion rmx… |
+| `CADALMA001` | luciano, felipe venegas, diego errázuriz – alma so… |
+| `CADENZA104` | that's designed to circulate around the brain. Spl… |
+| `RS079LP` | the back of an epic 3 part triple album “Sidequest… |
+| `IF1104STD` | territories : ww -fr -uk -benelux Genre • Electron… |
+| `CHCH05` | fl oating pitch and colourful pads carrying you ba… |
+| `868209` | crystal waters – gypsy woman… |
+| `F047` | re-pressing of this in-demand Moodyman produced cl… |
+
