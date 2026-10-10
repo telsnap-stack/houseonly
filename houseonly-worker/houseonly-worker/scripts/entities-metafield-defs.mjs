@@ -28,6 +28,7 @@
  *   SHOPIFY_ADMIN_CLIENT_SECRET
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { ENTITY_MF_DEFINITIONS, ENTITY_MF_NAMESPACE, isDefinitionTaken, csvHeader }
   from '../src/lib/entity-metafields.ts';
 

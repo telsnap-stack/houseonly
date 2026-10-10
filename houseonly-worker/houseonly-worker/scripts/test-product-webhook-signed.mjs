@@ -13,6 +13,7 @@
  * Usage:
  *   SHOPIFY_ADMIN_CLIENT_SECRET=... node test-product-webhook-signed.mjs
  */
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { createHmac } from 'node:crypto';
 
 const WORKER_URL = 'https://houseonly-worker-staging.emontagut.workers.dev/?action=webhook-shopify-product';

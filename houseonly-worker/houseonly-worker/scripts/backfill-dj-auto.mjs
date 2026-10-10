@@ -7,6 +7,7 @@
 // "no recognized source tag" (a terminal skip).
 // Dry-run by default; pass --send to actually replay.
 // Env: SHOPIFY_ADMIN_CLIENT_ID, SHOPIFY_ADMIN_CLIENT_SECRET, PROD_BS.
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { createHmac } from 'node:crypto';
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 const API_VERSION    = '2026-04';

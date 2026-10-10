@@ -18,6 +18,7 @@
  * To target PROD later, change WORKER_URL to the prod worker and re-run.
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 const API_VERSION    = '2026-04';
 const TOPIC          = 'PRODUCTS_CREATE';

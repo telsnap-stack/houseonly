@@ -35,6 +35,7 @@
  *   PROD_BS                       ...o el de produccion, con --prod
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 const SHOP = 'house-only-2.myshopify.com';
 const API = '2026-04';
 
