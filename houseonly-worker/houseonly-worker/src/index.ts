@@ -922,6 +922,7 @@ import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './li
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed';
+import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 
 import {
   buildAuthorizeUrl,
@@ -1459,6 +1460,16 @@ export default {
     }
     if (action === 'ig-feed-remove' && request.method === 'POST') {
       return await handleIgFeedRemove(request, env, bearerAdminValido(request, env));
+    }
+
+    // ── FEED DE GOOGLE MERCHANT CENTER ──────────────────────
+    // XML publico para Merchant Center; regenerarlo pide Bearer.
+    // lib/google-feed.ts.
+    if (action === 'google-feed' && request.method === 'GET') {
+      return await handleGoogleFeed(env);
+    }
+    if (action === 'google-feed-rebuild' && request.method === 'POST') {
+      return await handleGoogleFeedRebuild(env, bearerAdminValido(request, env));
     }
 
     // ── SETS DESTACADOS (fase 7B) ───────────────────────────
@@ -3163,6 +3174,14 @@ export default {
     // ninguno a proposito— devolveria el poll de Discogs que se quito para no
     // competir por el cupo de 60/min que necesita produccion.
     if (event.cron === DAILY_CRON) {
+      // Feed de Google Merchant Center: se regenera una vez al dia. Si falla,
+      // se queda el de ayer en KV y el error en meta:google_feed_last_run.
+      ctx.waitUntil(
+        rebuildGoogleFeed(env).then(
+          (r) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: true, ...r })),
+          (err) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+        ),
+      );
       ctx.waitUntil(
         runFollowAlerts(env, { workerUrl: FOLLOW_ALERTS_ORIGIN }).then(
           (summary) => env.ENTITIES.put('meta:follow_alerts_last_run',
