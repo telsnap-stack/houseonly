@@ -136,7 +136,19 @@ Rama `claude/google-merchant` desde `main` (`442795e`). Worker solo en staging.
 | `BIGFXHE` | 2 | `bigfxhe` |
 | `PR31` | 2 | `pr31` |
 
-### 56 descripciones que empiezan a mitad de frase
+### 56 descripciones que empiezan en minúscula (no todas están cortadas)
+
+El criterio fue "empieza en minúscula", y se pasa de largo. Repasadas:
+- **21 cortadas de verdad tras una ligadura rota** ("fi rst", "fl oor"…), más
+  unas pocas claramente a mitad de frase: AUS1354 ("rhythms. What follows…"),
+  CADENZA104 ("that's designed to…") y RS079LP ("the back of an epic…").
+- **19 son solo "artista – título" en minúsculas**, probablemente completas:
+  AUS175, RISQUEE28, ACGC2, CGTX003, HOUSEWAX008, HOUSEWAX009, HOUSEWAX012,
+  HOUSEWAXLTD007, M&F016, AMB3922LP, YRE012, INT005, MACROM09, VALT2,
+  MIRAU013, RC040, CKNOWEP75, CADENZA111, 868209.
+- El resto son textos enteros que empiezan en minúscula ("housewax is proud
+  to welcome…", "super limited…", "black vinyl Tracklist…"): mirar uno a uno.
+
 
 El texto ya viene cortado en Shopify (la ficha enseña lo mismo). Muchos cortes
 caen justo después de una ligadura rota ("fi rst", "fl oor"), así que parece
