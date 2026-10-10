@@ -17,6 +17,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { htmlToText, descripcionDeProducto } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
+import { POLICY_LINKS } from '../src/policies.mjs';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
@@ -333,6 +334,18 @@ function renderEntityHtml(template, e) {
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 }
 
+// Pie con las politicas, DENTRO de #root: lo ve quien no ejecuta JavaScript
+// (Google Merchant Center comprueba que esten enlazadas) y desaparece al montar
+// la app, que pinta el suyo (createRoot sustituye el contenido de #root). Se
+// aplica lo ultimo, sobre el HTML ya terminado de cada pagina.
+function conPiePoliticas(html) {
+  const enlaces = POLICY_LINKS
+    .map(([label, url]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(label)}</a>`)
+    .join('');
+  const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav></footer>`;
+  return html.replace('<div id="root"></div>', `<div id="root">${pie}</div>`);
+}
+
 // /ig — destino del link de la bio de Instagram. La lista la pinta el cliente
 // (sale del feed del worker); aqui solo van el titulo, la descripcion y el
 // canonical propios, para que el enlace compartido no salga como la portada.
@@ -398,7 +411,7 @@ async function main() {
   for (const p of products) {
     const out = join(DIST_DIR, 'products', p.slug, 'index.html');
     mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, renderProductHtml(template, p));
+    writeFileSync(out, conPiePoliticas(renderProductHtml(template, p)));
     written++;
   }
   console.log(`[prerender] Wrote ${written} product pages`);
@@ -414,7 +427,7 @@ async function main() {
     for (const ent of entities) {
       const out = join(DIST_DIR, entityDir(ent), ent.slug, 'index.html');
       mkdirSync(dirname(out), { recursive: true });
-      writeFileSync(out, renderEntityHtml(template, ent));
+      writeFileSync(out, conPiePoliticas(renderEntityHtml(template, ent)));
       e++;
     }
     const indexables = entities.filter(esIndexable).length;
@@ -424,8 +437,12 @@ async function main() {
   }
 
   mkdirSync(join(DIST_DIR, 'ig'), { recursive: true });
-  writeFileSync(join(DIST_DIR, 'ig', 'index.html'), renderIgHtml(template));
+  writeFileSync(join(DIST_DIR, 'ig', 'index.html'), conPiePoliticas(renderIgHtml(template)));
   console.log('[prerender] Wrote /ig');
+
+  // La portada (y el fallback de la SPA) es la propia plantilla: se reescribe
+  // con el pie al final, cuando ya no hace falta limpia.
+  writeFileSync(join(DIST_DIR, 'index.html'), conPiePoliticas(template));
 
   console.log('[prerender] Generating sitemap.xml...');
   writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities));

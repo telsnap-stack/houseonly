@@ -6,6 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
+import { POLICY_LINKS } from "./policies.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
@@ -14977,14 +14978,18 @@ export default function App() {
 
       <NewsletterSignup variant="footer" source="footer" />
 
-      <div style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
+      <footer style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
-        <div style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
-          {[['Privacy Policy','privacy-policy'],['Terms of Service','terms-of-service'],['Returns & Refunds','refund-policy'],['Shipping Policy','shipping-policy'],['Legal Notice','legal-notice'],['Contact','contact-information']].map(([label,slug])=>(
-            <button key={slug} onClick={()=>{setPolicySlug(slug);setCartOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>{label}</button>
+        {/* Enlaces de verdad (<a>), no botones: Google Merchant Center tiene que
+            poder seguirlos. Las URLs viven en src/policies.mjs, compartidas con el
+            pie del HTML prerenderizado. "Legal Notice" sigue en el cajon propio. */}
+        <nav aria-label="Store policies" style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
+          {POLICY_LINKS.map(([label,url])=>(
+            <a key={label} href={url} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',textDecoration:'none',transition:'color 0.15s'}} onMouseEnter={e=>e.currentTarget.style.color=S.accent} onMouseLeave={e=>e.currentTarget.style.color=S.muted}>{label}</a>
           ))}
-        </div>
-      </div>
+          <button onClick={()=>{setPolicySlug('legal-notice');setCartOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>Legal Notice</button>
+        </nav>
+      </footer>
 
       <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
