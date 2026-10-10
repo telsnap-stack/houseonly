@@ -69,7 +69,7 @@ describe("gtinValido", () => {
 });
 
 describe("productoAItem", () => {
-	it("sin barcode -> identifier_exists=no, y los campos del feed", () => {
+	it("sin barcode pero con sello y MPN -> sin gtin y SIN identifier_exists; los campos del feed", () => {
 		const it = esItem(productoAItem(producto()));
 		expect(it).toMatchObject({
 			id: "FAT072",
@@ -83,8 +83,10 @@ describe("productoAItem", () => {
 			gtin: "",
 		});
 		const xml = renderFeedXml([it], "t");
-		expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
+		expect(xml).not.toContain("identifier_exists");
 		expect(xml).not.toContain("<g:gtin>");
+		expect(xml).toContain("<g:brand>Freude Am Tanzen</g:brand>");
+		expect(xml).toContain("<g:mpn>FAT072</g:mpn>");
 		expect(xml).toContain("<g:google_product_category>543523</g:google_product_category>");
 		expect(xml).toContain("<g:product_type>Vinyl</g:product_type>");
 		expect(xml).not.toContain("shipping_weight");
@@ -94,6 +96,20 @@ describe("productoAItem", () => {
 		const it = esItem(productoAItem(producto({}, { barcode: "4006381333931" })));
 		expect(it.gtin).toBe("4006381333931");
 		const xml = renderFeedXml([it], "t");
+		expect(xml).toContain("<g:gtin>4006381333931</g:gtin>");
+		expect(xml).not.toContain("identifier_exists");
+	});
+
+	it("sin barcode y sin sello -> identifier_exists=no", () => {
+		const it = esItem(productoAItem(producto({ tags: ["vinyl", "2026"] })));
+		expect(it.brand).toBe("");
+		const xml = renderFeedXml([it], "t");
+		expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
+		expect(xml).not.toContain("<g:brand>");
+	});
+
+	it("con gtin y sin sello -> gtin, sin identifier_exists", () => {
+		const xml = renderFeedXml([esItem(productoAItem(producto({ tags: [] }, { barcode: "4006381333931" })))], "t");
 		expect(xml).toContain("<g:gtin>4006381333931</g:gtin>");
 		expect(xml).not.toContain("identifier_exists");
 	});
