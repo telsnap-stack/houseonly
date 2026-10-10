@@ -5,17 +5,20 @@
 // importers de src/App.jsx (formato del distribuidor o texto del titulo).
 //
 //   peso = 0,15 kg de embalaje + discos × peso por disco (+0,20 si es box set)
-//   12" o LP = 0,25 kg · 10" = 0,18 · 7" = 0,08
+//   12" o LP = 0,30 kg · 10" = 0,20 · 7" = 0,08
 //
-// Un 12" suelto embalado sale a 0,40 kg (Eduardo midio ~400 g). Sin ningun dato
-// de formato, eso es lo que se pone. Antes los importers adivinaban 500/900 g y
+// Un 12" suelto sale a 0,45 kg, y eso es lo que se pone sin ningun dato de
+// formato. (Primera version, 2026-10-09: 0,25 por 12" y 0,40 por defecto; con
+// eso un 3LP salia a 0,90 kg y bajaba de tramo respecto al 1,5 de Triple
+// Vision, asi que Eduardo subio el peso por disco.) En gramos todo es multiplo
+// par de 10, asi que ningun peso puede caer en 0,90 exacto, el borde del tramo. Antes los importers adivinaban 500/900 g y
 // un 3LP o un box salia con 500 (memoria vinyl-weights-are-guessed-at-import).
 // El peso decide el tramo de envio y lo que va en la declaracion de aduanas.
 
 export const EMBALAJE_KG = 0.15;
-export const KG_POR_DISCO = { 12: 0.25, 10: 0.18, 7: 0.08 };
+export const KG_POR_DISCO = { 12: 0.3, 10: 0.2, 7: 0.08 };
 export const BOX_SET_KG = 0.2;
-export const PESO_POR_DEFECTO_KG = 0.4;
+export const PESO_POR_DEFECTO_KG = 0.45;
 
 const r2 = (x) => Math.round(x * 100) / 100;
 
@@ -57,7 +60,7 @@ export function pesoDesdeDiscogs(formats) {
 /**
  * Peso a partir del texto de formato del distribuidor y/o del titulo:
  * "2x 12\"LP", "3LP", "2xLP", "Double LP", "7\"", "Box Set"… Sin nada que
- * reconocer, un 12" suelto (0,40 kg) con `origen: 'defecto'`.
+ * reconocer, un 12" suelto (0,45 kg) con `origen: 'defecto'`.
  */
 export function pesoDesdeTexto(...textos) {
   const s = textos.filter(Boolean).map(String).join(' ').toLowerCase().replace(/[″”“]/g, '"').replace(/''/g, '"');
