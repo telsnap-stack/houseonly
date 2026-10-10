@@ -17,9 +17,9 @@
 // separan parrafos.
 //
 // Cache: SYNC_STATE `shop:policies`, 1 hora (expirationTtl), y la misma cabecera
-// Cache-Control en la respuesta.
+// Cache-Control en la respuesta. Un fallo se recuerda 5 min.
 
-import { shopifyAdminGraphQL, getShopifyAdminToken, type ShopifyAdminEnv } from './shopify-admin';
+import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
 export interface ShopPoliciesEnv extends ShopifyAdminEnv {
   SYNC_STATE: KVNamespace;
@@ -29,6 +29,7 @@ export interface CleanPolicy {
   type: string;          // ShopPolicyType: SHIPPING_POLICY, REFUND_POLICY, ...
   title: string;
   html: string;          // ya limpio
+  lastUpdated: string;   // "Last updated: …" si la politica lo trae (se pinta aparte)
   url: string;           // la pagina de Shopify (checkout.shopify.com)
   updatedAt: string;
 }
@@ -70,6 +71,19 @@ export function cleanPolicyHtml(raw: string): string {
        .replace(/<(script|style|template|noscript)\b[\s\S]*?<\/\1>/gi, '')
        .replace(/<(meta|link)\b[^>]*>/gi, '');
   for (const [k, v] of Object.entries(ENT)) h = h.split(k).join(v);
+
+  // 1b · Titulos numerados guardados como lista de un solo punto: Shopify
+  // escribe "<ol start="3"><li>Pre-orders and requests</li></ol>" (Terms of
+  // Service, 2026-10-10). Si el unico punto es corto y no acaba en punto, es un
+  // titulo: "<h2>3. Pre-orders and requests</h2>".
+  // (El contenido del punto no puede llevar otro <li>: si no, una lista de
+  // varios puntos se tomaria por uno solo.)
+  h = h.replace(/<ol\b([^>]*)>\s*<li\b[^>]*>((?:(?!<li\b)[\s\S])*?)<\/li>\s*<\/ol>/gi, (m, attrs: string, li: string) => {
+    const t = textoDe(li);
+    if (!t || t.length > 90 || /[.;:]$/.test(t)) return m;
+    const n = parseInt((attrs.match(/\bstart\s*=\s*["']?(\d+)/i) || [])[1] || '1', 10);
+    return `<h2>${n}. ${t}</h2>`;
+  });
 
   // 2 · cada etiqueta a su forma permitida, sin atributos (salvo href)
   h = h.replace(/<\s*(\/?)\s*([a-z][a-z0-9]*)\b([^>]*)>/gi, (_m, cierre: string, tag: string, attrs: string) => {
@@ -129,31 +143,56 @@ export function cleanPolicyHtml(raw: string): string {
     .replace(/<li>\s*<\/li>/g, '');
 }
 
+// ── reglas por politica ────────────────────────────────────────────
+// Lo que no es limpieza generica sino de una politica concreta, sobre el HTML
+// ya limpio. Si cambia el texto en Shopify y la frase deja de estar, la regla
+// simplemente no hace nada.
+
+const REGLAS: Record<string, (html: string) => string> = {
+  // /returns: dos bloques que en Shopify no llevan titulo.
+  REFUND_POLICY: (h) => h
+    .replace(/(<p>If a record arrives damaged)/, '<h2>Damaged, defective or wrong records</h2>\n$1')
+    .replace(/(<p>If you[’']re in the EU)/, '<h2>EU customers</h2>\n$1'),
+  // /contact: la pagina ya pone el correo en grande (mailto) y debajo Instagram
+  // y Discogs. Del texto de Shopify sale la linea de Instagram y el mailto se
+  // queda como texto, para que cada enlace aparezca una sola vez.
+  CONTACT_INFORMATION: (h) => h
+    .replace(/<p>[^<]*Instagram\b[^<]*(?:<a href="https?:\/\/(?:www\.)?instagram\.com[^"]*">[^<]*<\/a>)?[^<]*<\/p>\n?/gi, '')
+    .replace(/<a href="mailto:[^"]*">([^<]*)<\/a>/g, '$1'),
+};
+
+/** Limpieza completa de una politica: generica, titulo repetido, "Last updated" y reglas propias. */
+export function prepararPolitica(type: string, title: string, body: string): { html: string; lastUpdated: string } {
+  let html = cleanPolicyHtml(body);
+  // Muchas politicas abren repitiendo su titulo ("Contact information" bajo
+  // "Contact", "Terms of Service — House Only"): la pagina ya lo pone en su h1.
+  // Se quita un primer h2 que EMPIECE por el titulo.
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const primero = html.match(/^<h2>([^<]*)<\/h2>\n?/);
+  if (primero && norm(title) && norm(primero[1]).startsWith(norm(title))) html = html.slice(primero[0].length);
+  // "Last updated: …" al principio: va aparte, en pequeno bajo el titulo.
+  let lastUpdated = '';
+  const lu = html.match(/^(?:<h2>[^<]*<\/h2>\n)?<p>\s*(Last updated\b[^<]*?)\s*<\/p>\n?/i);
+  if (lu) { lastUpdated = lu[1].trim(); html = html.replace(lu[0].replace(/^<h2>[^<]*<\/h2>\n/, ''), ''); }
+  if (REGLAS[type]) html = REGLAS[type](html);
+  return { html: html.trim(), lastUpdated };
+}
+
 // ── Admin API ──────────────────────────────────────────────────────
 
 const QUERY = `{ shop { shopPolicies { type title body url updatedAt } } }`;
 
 export async function fetchShopPolicies(env: ShopifyAdminEnv): Promise<CleanPolicy[]> {
-  let r = await shopifyAdminGraphQL(env, QUERY);
-  // El token de client credentials dura 24 h y lleva los scopes de cuando se
-  // pidio: tras anadir read_legal_policies a la app, el guardado en KV sigue
-  // sin el. Ante "Access denied" se pide uno nuevo UNA vez y se reintenta.
-  if (r.errors?.some((e: any) => /access denied/i.test(e?.message || ''))) {
-    await getShopifyAdminToken(env, true);
-    r = await shopifyAdminGraphQL(env, QUERY);
-  }
+  // Un token emitido antes de anadir el scope lo renueva shopifyAdminGraphQL.
+  const r = await shopifyAdminGraphQL(env, QUERY);
   if (r.errors?.length) throw new Error(`Admin API: ${r.errors[0].message}`);
   const lista = r.data?.shop?.shopPolicies;
   if (!Array.isArray(lista)) throw new Error('Admin API: shopPolicies no vino');
   return lista
     .filter((p: any) => p && String(p.body || '').trim())
     .map((p: any) => {
-      let html = cleanPolicyHtml(p.body);
-      // Muchas politicas repiten su titulo como primer encabezado: la pagina ya
-      // lo pone en su h1.
-      const primero = html.match(/^<h2>([^<]*)<\/h2>\n?/);
-      if (primero && primero[1].trim().toLowerCase() === String(p.title || '').trim().toLowerCase()) html = html.slice(primero[0].length);
-      return { type: p.type, title: p.title || '', html, url: p.url || '', updatedAt: p.updatedAt || '' };
+      const { html, lastUpdated } = prepararPolitica(p.type, p.title || '', p.body);
+      return { type: p.type, title: p.title || '', html, lastUpdated, url: p.url || '', updatedAt: p.updatedAt || '' };
     });
 }
 
