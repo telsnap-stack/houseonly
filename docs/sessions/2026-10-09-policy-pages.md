@@ -1,8 +1,9 @@
 # 2026-10-09 — Páginas de políticas propias
 
-Rama `claude/policy-pages` desde `main` (`075efd7`). **Bloqueada: a la app de
-Shopify le falta el scope `read_legal_policies`** (ver abajo). No se debe
-mezclar a `main` hasta resolverlo.
+Rama `claude/policy-pages` desde `main` (`075efd7`). El scope
+`read_legal_policies` ya está en la app (versión `houseonly-backorder-6`, 10-10)
+y las seis páginas están verificadas en staging con el texto real. El worker ya
+está en prod. **PR #95 listo, pendiente del OK de Eduardo para mezclar.**
 
 ## Qué hay
 
@@ -124,3 +125,75 @@ Así que, si hace falta, pegar esto en Settings → Policies:
 4. Solo entonces, merge del PR a `main`: el build de Pages de main lee el worker
    de prod. Si el worker de prod no tuviera aún el endpoint, el pie apuntaría a
    seis páginas con «We couldn't load this page».
+
+## 10-10 · Scope activo, token renovado y texto pulido
+
+### Por qué seguía el "Access denied" con el scope ya activo
+
+El token del Admin API se guarda en WISHLIST KV (`shopify_admin_token`, 23 h;
+**el mismo namespace en prod y staging**). Un token de client credentials
+lleva los scopes del momento en que se emite, y `shopifyAdminGraphQL` solo lo
+renovaba con HTTP 401. Un scope que falta llega como HTTP 200 con "Access
+denied … access scope" en `errors`, así que el token viejo seguía en uso.
+
+Además, el reintento que tenía `shop-policies` releía el token de KV justo
+después de escribirlo, y KV no garantiza leer lo recién escrito. El fallo
+quedaba en caché 5 min.
+
+**Arreglo, en `shopifyAdminGraphQL`, para todas las consultas:** ante "Access
+denied … access scope" pide un token nuevo y reintenta **con ese token**, sin
+releer KV. Como mucho una vez cada 5 min (marca
+`shopify_admin_token_scope_retry` en WISHLIST), para que un scope que falte de
+verdad no cueste un token por llamada. `shop-policies` ya no tiene su propia
+renovación. Tests: `test/shopify-admin-token.spec.ts` (5).
+
+Cuando se activó el scope, staging ya devolvía las seis políticas (había
+caducado el error en caché). Aun así se borró `shopify_admin_token` de
+WISHLIST, que afecta a prod y staging: los dos pidieron uno nuevo sin problema.
+También se borraron `shop:policies` y `shop:policies:error` de staging, para
+que saliera el formato nuevo.
+
+### Limpieza y reglas
+
+- Común: fuera atributos (`dir`, `class`…), `<p>&nbsp;</p>` y el h1/h2 inicial
+  que repite el título aunque lo diga con otras palabras («Contact
+  information» bajo «Contact», «Shipping policy», «Terms of Service — House
+  Only»): se quita si **empieza** por el título.
+- Terms: Shopify guarda cada título numerado como `<ol start="N"><li>Título</li></ol>`
+  y pasa a `<h2>N. Título</h2>`. Solo si la lista tiene un único punto corto
+  sin punto final: una lista de verdad no se toca. «Last updated» sale a un
+  campo `lastUpdated` y se pinta pequeño y en gris bajo el título (también
+  en Privacy).
+- /returns, regla solo de `REFUND_POLICY`: «Damaged, defective or wrong
+  records» antes de «If a record arrives damaged…» y «EU customers» antes de
+  «If you're in the EU…».
+- /contact, regla solo de `CONTACT_INFORMATION`: fuera la línea de Instagram
+  del texto y el mailto queda como texto. El correo en grande (mailto) y
+  debajo Instagram y Discogs salen **una vez** cada uno.
+- Diseño: sin logo grande (ya está en la cabecera) y sin el bloque «Join the
+  list». Orden: cabecera, título, «Last updated», texto, pie.
+- Tests del worker: 373/373. Lint 92 (ninguno nuevo). Build OK.
+
+### Verificación en staging (worker `f8106319-d893-4296-8894-3926fc151dc3`)
+
+`shop-policies` con los textos nuevos: Shipping con «15–30 business days»;
+Returns empieza por «You can return a record within 14 days» y lleva sus dos
+h2; Terms con **13** h2 («1. The shop» … «13. Contact») y «Last updated: 10
+October 2026»; Contact sin enlaces en el texto; Legal con «Telsnap S.L.» y
+«ESB75303990»; Privacy con 13 h2.
+
+Pages de staging prerenderiza las seis (title propio, `data-policy-type`, en el
+sitemap). Chrome headless a **390 px y a 1280 px**, en las seis: texto real,
+h2 en lima `rgb(200,255,0)`, 0 errores de consola, sin scroll horizontal,
+0 peticiones al worker (leen el prerender), solo el logo de la cabecera, sin
+newsletter y pie con los seis enlaces locales. En /contact: mailto 1,
+Instagram 1, Discogs 1.
+
+### Producción
+
+- Worker en prod **`9e25fcdc-9b42-4550-a379-03e3b22f4739`** desde
+  `claude/policy-pages` (`bac297c`); rollback: `55854aa6…`. `GET
+  shop-policies` en prod: las seis, con los textos nuevos, `Cache-Control:
+  public, max-age=3600`. `sync-status`, `google-feed` e `ig-feed` siguen en 200.
+- **Sin merge**: PR #95 fuera de draft, esperando el OK. Al mezclar, el build de
+  Pages de main ya encontrará el endpoint en el worker de prod.
