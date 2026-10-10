@@ -18,6 +18,8 @@
 //   - g:google_product_category 543523 = "Media > Music & Sound Recordings >
 //     Records & LPs" (taxonomia oficial de Google, version 2021-09-21; no hay
 //     una hoja "Vinyl").
+//   - g:identifier_exists = no solo si no hay GTIN ni marca: con marca + MPN
+//     Google pide omitirlo.
 //   - Sin g:shipping_weight: el peso en Shopify es un 0,5 kg generico.
 
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
@@ -143,7 +145,10 @@ function itemXml(it: FeedItem): string {
     campo('condition', 'new'),
     ...(it.brand ? [campo('brand', it.brand)] : []),
     campo('mpn', it.mpn),
-    ...(it.gtin ? [campo('gtin', it.gtin)] : [campo('identifier_exists', 'no')]),
+    ...(it.gtin ? [campo('gtin', it.gtin)] : []),
+    // Con marca + MPN ya hay identificador: Google pide omitir identifier_exists
+    // (si va a "no" da un warning). Solo va a "no" si no hay GTIN ni marca.
+    ...(!it.gtin && !(it.brand && it.mpn) ? [campo('identifier_exists', 'no')] : []),
     campo('google_product_category', GOOGLE_PRODUCT_CATEGORY),
     campo('product_type', 'Vinyl'),
   ];
