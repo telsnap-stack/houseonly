@@ -1,11 +1,11 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
-import { cleanPolicyHtml, handleShopPolicies, SHOP_POLICIES_KEY } from "../src/lib/shop-policies";
+import { cleanPolicyHtml, handleShopPolicies, SHOP_POLICIES_KEY, SHOP_POLICIES_ERROR_KEY } from "../src/lib/shop-policies";
 
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
-	return { ...actual, shopifyAdminGraphQL: vi.fn() };
+	return { ...actual, shopifyAdminGraphQL: vi.fn(), getShopifyAdminToken: vi.fn() };
 });
 
 // Trozo real de la Refund Policy de la tienda (Storefront, 2026-10-09).
@@ -30,8 +30,20 @@ describe("cleanPolicyHtml", () => {
 
 	it("fuera clases, estilos, spans y <meta> del body; solo quedan las etiquetas permitidas", () => {
 		const out = cleanPolicyHtml(`<meta charset="utf-8"><div class="x" style="color:red"><span data-mce="1">Hola <em>mundo</em></span></div><h3 class="t">Section</h3><ol><li class="a"><p>uno</p></li><li>dos</li></ol><script>alert(1)</script>`);
-		expect(out).toBe("<p>Hola mundo</p>\n<h2>Section</h2>\n<ul><li>uno</li><li>dos</li></ul>");
-		expect(out).not.toMatch(/class=|style=|<meta|<span|<em|<script|alert/);
+		expect(out).toBe("<p>Hola <strong>mundo</strong></p>\n<h2>Section</h2>\n<ul><li>uno</li><li>dos</li></ul>");
+		expect(out).not.toMatch(/class=|style=|<meta|<span|<em|<script|alert/);   // <em> ya convertido a <strong>
+	});
+
+	it("titulo en negrita en linea con el texto -> h2 + p (Shipping real)", () => {
+		const raw = `<p class="font-claude-response-body break-words"><strong>Processing time</strong> All orders are processed within 1–3 business days.</p>
+<p class="x"><strong>Shipping rates and delivery times</strong></p>
+<p class="x"><em>Spain</em> Standard Shipping — €5.00 to €15.00.</p>`;
+		expect(cleanPolicyHtml(raw)).toBe([
+			"<h2>Processing time</h2>",
+			"<p>All orders are processed within 1–3 business days.</p>",
+			"<h2>Shipping rates and delivery times</h2>",
+			"<p><strong>Spain</strong> Standard Shipping — €5.00 to €15.00.</p>",
+		].join("\n"));
 	});
 
 	it("enlaces: solo href seguros; javascript: se queda en texto", () => {
@@ -50,7 +62,9 @@ describe("handleShopPolicies", () => {
 	const gql = vi.mocked(shopifyAdmin.shopifyAdminGraphQL);
 	beforeEach(async () => {
 		await env.SYNC_STATE.delete(SHOP_POLICIES_KEY);
+		await env.SYNC_STATE.delete(SHOP_POLICIES_ERROR_KEY);
 		gql.mockReset();
+		vi.mocked(shopifyAdmin.getShopifyAdminToken).mockReset();
 	});
 
 	it("pide a la Admin API, limpia, guarda 1 h y la segunda vez sirve de KV", async () => {
@@ -66,6 +80,35 @@ describe("handleShopPolicies", () => {
 		expect(d.policies[0].html).toContain("<h2>Damages and issues</h2>");
 		await handleShopPolicies(env as any);
 		expect(gql).toHaveBeenCalledTimes(1);
+	});
+
+	it("el primer h2 igual al titulo se quita (la pagina ya lo pone en su h1)", async () => {
+		gql.mockResolvedValue({ data: { shop: { shopPolicies: [
+			{ type: "SHIPPING_POLICY", title: "Shipping Policy", body: "<p><strong>Shipping Policy</strong></p><p>Ships in 48 h.</p>", url: "", updatedAt: "" },
+		] } } });
+		const d = await (await handleShopPolicies(env as any)).json() as any;
+		expect(d.policies[0].html).toBe("<p>Ships in 48 h.</p>");
+	});
+
+	it("Access denied: pide token nuevo una vez y reintenta (scope recien anadido)", async () => {
+		gql.mockResolvedValueOnce({ errors: [{ message: "Access denied for shopPolicies field." }] });
+		gql.mockResolvedValueOnce({ data: { shop: { shopPolicies: [
+			{ type: "SHIPPING_POLICY", title: "Shipping Policy", body: "<p>Ships in 48 h.</p>", url: "", updatedAt: "" },
+		] } } });
+		const r = await handleShopPolicies(env as any);
+		expect(r.status).toBe(200);
+		expect(shopifyAdmin.getShopifyAdminToken).toHaveBeenCalledWith(expect.anything(), true);
+		expect(gql).toHaveBeenCalledTimes(2);
+	});
+
+	it("el fallo se recuerda 5 min: la segunda peticion no vuelve a Shopify", async () => {
+		gql.mockResolvedValue({ errors: [{ message: "Access denied for shopPolicies field." }] });
+		expect((await handleShopPolicies(env as any)).status).toBe(502);
+		const llamadas = gql.mock.calls.length;
+		const r2 = await handleShopPolicies(env as any);
+		expect(r2.status).toBe(502);
+		expect(((await r2.json()) as any).cached).toBe(true);
+		expect(gql.mock.calls.length).toBe(llamadas);
 	});
 
 	it("si la Admin API falla (p. ej. sin scope): 502 con el motivo y nada en KV", async () => {

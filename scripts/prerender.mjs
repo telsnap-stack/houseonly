@@ -17,7 +17,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { htmlToText, descripcionDeProducto } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
-import { POLICY_LINKS } from '../src/policies.mjs';
+import { POLICY_PAGES, CONTACT_LINKS } from '../src/policies.mjs';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
@@ -334,16 +334,58 @@ function renderEntityHtml(template, e) {
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 }
 
+// Paginas de politicas (/shipping, /returns, /contact, /privacy, /terms,
+// /legal). El texto es el de Shopify, limpio, servido por el worker
+// (?action=shop-policies): nada escrito a mano. Va DENTRO de #root con
+// data-policy-type, para que quien no ejecuta JavaScript lo lea y para que la
+// app lo recoja al montar sin volver a pedirlo.
+async function fetchPolicies() {
+  const r = await fetch(`${ENTITY_WORKER}?action=shop-policies`, { signal: AbortSignal.timeout(30000) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d.policies || [];
+}
+
+function renderPolicyHtml(template, pg, policy) {
+  const url = `${SITE_URL}${pg.path}/`;
+  const title = `${pg.title} — House Only`;
+  const seoHead = `  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(pg.description)}" />
+  <link rel="canonical" href="${url}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(pg.description)}" />
+  <meta property="og:url" content="${url}" />`;
+  const contacto = pg.type === 'CONTACT_INFORMATION'
+    ? `<p><a href="mailto:${escapeHtml(CONTACT_LINKS.email)}" style="color:#c8ff00;font-size:26px;font-weight:800;text-decoration:none">${escapeHtml(CONTACT_LINKS.email)}</a></p>
+<p><a href="${escapeHtml(CONTACT_LINKS.instagram.url)}" style="color:#c8ff00">Instagram ${escapeHtml(CONTACT_LINKS.instagram.label)}</a> · <a href="${escapeHtml(CONTACT_LINKS.discogs.url)}" style="color:#c8ff00">${escapeHtml(CONTACT_LINKS.discogs.label)}</a></p>`
+    : '';
+  // policy.html ya viene limpio del worker (solo p, strong, a, ul, li, h2).
+  const cuerpo = `<main style="max-width:1100px;margin:0 auto;padding:34px 20px;color:#efefef;font-family:Inter,system-ui,sans-serif;line-height:1.7">
+<h1 style="font-size:32px;margin:0 0 22px">${escapeHtml(policy.title || pg.title)}</h1>
+${contacto}
+<div data-policy-type="${escapeHtml(pg.type)}" data-policy-title="${escapeHtml(policy.title || pg.title)}" style="max-width:65ch">${policy.html}</div>
+<p><a href="/" style="color:#c8ff00">Back to the shop</a></p>
+</main>`;
+  return template
+    .replace(/<title>[^<]*<\/title>/, '')
+    .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
+    .replace('</head>', `${seoHead}\n  </head>`)
+    .replace('<div id="root"></div>', `<div id="root">${cuerpo}</div>`);
+}
+
 // Pie con las politicas, DENTRO de #root: lo ve quien no ejecuta JavaScript
 // (Google Merchant Center comprueba que esten enlazadas) y desaparece al montar
 // la app, que pinta el suyo (createRoot sustituye el contenido de #root). Se
 // aplica lo ultimo, sobre el HTML ya terminado de cada pagina.
 function conPiePoliticas(html) {
-  const enlaces = POLICY_LINKS
-    .map(([label, url]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(label)}</a>`)
+  const enlaces = POLICY_PAGES
+    .map(pg => `<a href="${escapeHtml(pg.path)}" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(pg.label)}</a>`)
     .join('');
   const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav></footer>`;
-  return html.replace('<div id="root"></div>', `<div id="root">${pie}</div>`);
+  // Al final del contenido de #root, haya algo dentro (paginas de politicas) o no.
+  if (html.includes('<div id="root"></div>')) return html.replace('<div id="root"></div>', `<div id="root">${pie}</div>`);
+  return html.replace(/(<div id="root">[\s\S]*?<\/main>)(<\/div>)/, `$1${pie}$2`);
 }
 
 // /ig — destino del link de la bio de Instagram. La lista la pinta el cliente
@@ -368,10 +410,11 @@ function renderIgHtml(template) {
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 }
 
-function renderSitemap(products, entities = []) {
+function renderSitemap(products, entities = [], policyPaths = []) {
   const today = new Date().toISOString().slice(0, 10);
   const urls = [
     `<url><loc>${SITE_URL}/</loc><lastmod>${today}</lastmod><priority>1.0</priority></url>`,
+    ...policyPaths.map(p => `<url><loc>${SITE_URL}${p}/</loc><lastmod>${today}</lastmod><priority>0.3</priority></url>`),
     ...products.map(p =>
       `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
     ),
@@ -436,6 +479,23 @@ async function main() {
     console.warn(`[prerender] ⚠ entity pages skipped: ${err.message}`);
   }
 
+  // Politicas: si el worker no contesta (o le falta el scope a la app de
+  // Shopify), se avisa y se sigue; la app las pide al worker al navegar.
+  let policyPaths = [];
+  try {
+    const policies = await fetchPolicies();
+    for (const pg of POLICY_PAGES) {
+      const pol = policies.find(x => x.type === pg.type);
+      if (!pol) { console.warn(`[prerender] ⚠ ${pg.path}: Shopify no tiene ${pg.type}`); continue; }
+      mkdirSync(join(DIST_DIR, pg.path.slice(1)), { recursive: true });
+      writeFileSync(join(DIST_DIR, pg.path.slice(1), 'index.html'), conPiePoliticas(renderPolicyHtml(template, pg, pol)));
+      policyPaths.push(pg.path);
+    }
+    console.log(`[prerender] Wrote ${policyPaths.length} policy pages: ${policyPaths.join(' ')}`);
+  } catch (err) {
+    console.warn(`[prerender] ⚠ policy pages skipped: ${err.message}`);
+  }
+
   mkdirSync(join(DIST_DIR, 'ig'), { recursive: true });
   writeFileSync(join(DIST_DIR, 'ig', 'index.html'), conPiePoliticas(renderIgHtml(template)));
   console.log('[prerender] Wrote /ig');
@@ -445,7 +505,7 @@ async function main() {
   writeFileSync(join(DIST_DIR, 'index.html'), conPiePoliticas(template));
 
   console.log('[prerender] Generating sitemap.xml...');
-  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities));
+  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities, policyPaths));
 
   console.log('[prerender] Generating robots.txt...');
   writeFileSync(join(DIST_DIR, 'robots.txt'), renderRobots());

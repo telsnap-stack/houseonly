@@ -6,7 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
-import { POLICY_LINKS } from "./policies.mjs";
+import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
@@ -13406,98 +13406,93 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-// ── POLICY DRAWER ──────────────────────────────────────────────
-const POLICY_SLUGS = {
-  'privacy-policy':      'privacyPolicy',
-  'terms-of-service':    'termsOfService',
-  'refund-policy':       'refundPolicy',
-  'shipping-policy':     'shippingPolicy',
-  'legal-notice':        'hardcoded',
-  'contact-information': 'hardcoded',
-};
-
-const HARDCODED_POLICIES = {
-  'legal-notice': {
-    title: 'Legal Notice',
-    body: `
-      <p><strong>HOUSEONLY</strong> is operated by:</p>
-      <p><strong>Telsnap S.L.</strong><br/>
-      NIF: B75303990<br/>
-      Registered in Spain</p>
-      <p><strong>Contact:</strong> <a href="mailto:info@houseonly.store">info@houseonly.store</a></p>
-      <p>The European Commission provides a platform for online dispute resolution (ODR) accessible at <a href="https://ec.europa.eu/consumers/odr" target="_blank" rel="noreferrer">ec.europa.eu/consumers/odr</a>.</p>
-      <p>All content on this website is the property of Telsnap S.L. or its content suppliers and is protected by applicable intellectual property laws.</p>
-    `,
-  },
-  'contact-information': {
-    title: 'Contact',
-    body: `
-      <p>For any questions about your order, shipping, or general enquiries:</p>
-      <p><strong>General:</strong> <a href="mailto:info@houseonly.store">info@houseonly.store</a><br/>
-      <strong>Orders:</strong> <a href="mailto:orders@houseonly.store">orders@houseonly.store</a></p>
-      <p>We aim to respond within 24–48 hours on business days.</p>
-    `,
-  },
-};
-
-async function fetchPolicy(field) {
-  if (!field) return null;
-  const data = await shopifyQuery(`{ shop { ${field} { title body } } }`);
-  return data?.shop?.[field] || null;
+// ── PAGINAS DE POLITICAS ───────────────────────────────────────
+// /shipping, /returns, /contact, /privacy, /terms y /legal (src/policies.mjs).
+// El texto es el de Shopify, ya limpio por el worker (?action=shop-policies);
+// aqui no hay ni una frase escrita a mano. En carga directa el texto ya viene
+// en el HTML prerenderizado (scripts/prerender.mjs) y se lee de ahi antes de
+// que React lo sustituya, sin pedir nada; navegando desde el pie se pide al
+// worker.
+const POLICY_CSS = `
+.ho-policy{color:#efefef;font-size:15px;line-height:1.7;max-width:65ch}
+.ho-policy p{margin:0 0 14px}
+.ho-policy h2{color:#c8ff00;font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin:30px 0 10px}
+.ho-policy a{color:#c8ff00;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+.ho-policy ul{margin:0 0 14px;padding-left:20px}
+.ho-policy li{margin:0 0 6px}
+.ho-policy strong{color:#fff}
+`;
+let policiesCache = null;   // la respuesta del worker, una vez por sesion
+function fetchShopPolicies() {
+  if (!policiesCache) {
+    policiesCache = fetch(`${WORKER_URL}?action=shop-policies`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .catch(e => { policiesCache = null; throw e; });
+  }
+  return policiesCache;
 }
-
-function PolicyDrawer({ slug, onClose }) {
-  const [content, setContent] = useState(null);
-  const [loading, setLoading] = useState(false);
+function PolicyPage({ page, onNavigate }) {
+  const isMobile = useIsMobile(720);
+  // Lo prerenderizado, si es esta misma pagina (se lee en el primer render,
+  // antes de que React sustituya el contenido de #root).
+  const [policy, setPolicy] = useState(() => {
+    const el = typeof document !== 'undefined' && document.querySelector(`[data-policy-type="${page.type}"]`);
+    return el ? { title: el.getAttribute('data-policy-title') || page.title, html: el.innerHTML } : null;
+  });
+  const [err, setErr] = useState('');
 
   useEffect(() => {
-    if (!slug) return;
-    setContent(null);
-    setLoading(true);
-    const field = POLICY_SLUGS[slug];
-    if (field === 'hardcoded') {
-      setContent(HARDCODED_POLICIES[slug] || { title: 'Not found', body: '<p>Content not available.</p>' });
-      setLoading(false);
-      return;
-    }
-    fetchPolicy(field)
-      .then(p => { setContent(p); setLoading(false); })
-      .catch(() => { setContent({ title: 'Error', body: '<p>Could not load policy.</p>' }); setLoading(false); });
-  }, [slug]);
+    const antes = document.title;
+    document.title = `${page.title} — House Only`;
+    return () => { document.title = antes; };
+  }, [page.title]);
 
-  const open = !!slug;
+  useEffect(() => {
+    if (policy) return;
+    let vivo = true;
+    fetchShopPolicies()
+      .then(d => {
+        const p = (d.policies || []).find(x => x.type === page.type);
+        if (!vivo) return;
+        if (p) setPolicy({ title: p.title || page.title, html: p.html });
+        else setErr('missing');
+      })
+      .catch(() => { if (vivo) setErr('error'); });
+    return () => { vivo = false; };
+  }, [page.type]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const esContacto = page.type === 'CONTACT_INFORMATION';
   return (
-    <>
-      {open && <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:900}} />}
-      <div style={{position:'fixed',top:0,right:0,bottom:0,width:560,maxWidth:'100vw',background:S.surf,borderLeft:`1px solid ${S.border}`,zIndex:1000,transform:open?'translateX(0)':'translateX(100%)',transition:'transform 0.25s ease',display:'flex',flexDirection:'column',boxSizing:'border-box'}}>
-        <div style={{padding:'18px 22px',borderBottom:`1px solid ${S.border}`,display:'flex',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
-          <span style={{fontWeight:800,fontSize:11,letterSpacing:2,textTransform:'uppercase',color:S.text}}>{content?.title || '…'}</span>
-          <button onClick={onClose} style={{background:'none',border:'none',color:S.muted,cursor:'pointer',fontSize:20}}>×</button>
+    <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 16px 8px':'34px 20px 8px', textAlign:'left' }}>
+      <style>{POLICY_CSS}</style>
+      <Logo scale={isMobile?1.2:1.6} />
+      <h1 style={{ fontSize:isMobile?26:34, fontWeight:800, letterSpacing:'-0.6px', margin:'18px 0 22px', color:S.text }}>{policy?.title || page.title}</h1>
+
+      {esContacto && (
+        <div style={{ marginBottom:28 }}>
+          <a href={`mailto:${CONTACT_LINKS.email}`} style={{ display:'inline-block', color:S.accent, fontSize:isMobile?22:30, fontWeight:800, letterSpacing:'-0.4px', textDecoration:'none', overflowWrap:'anywhere' }}>{CONTACT_LINKS.email}</a>
+          <div style={{ display:'flex', gap:18, flexWrap:'wrap', marginTop:12, fontSize:12, letterSpacing:1.5, textTransform:'uppercase' }}>
+            <a href={CONTACT_LINKS.instagram.url} target="_blank" rel="noopener noreferrer" style={{ color:S.accent, textDecoration:'none' }}>Instagram {CONTACT_LINKS.instagram.label} ↗</a>
+            <a href={CONTACT_LINKS.discogs.url} target="_blank" rel="noopener noreferrer" style={{ color:S.accent, textDecoration:'none' }}>{CONTACT_LINKS.discogs.label} ↗</a>
+          </div>
         </div>
-        <div style={{flex:1,overflowY:'auto',padding:'24px 28px'}}>
-          {loading && <div style={{color:S.muted,fontSize:12,textAlign:'center',paddingTop:40}}>Loading…</div>}
-          {content && !loading && (
-            <>
-              <style>{`
-                .policy-body { color: ${S.muted}; font-size: 13px; line-height: 1.8; }
-                .policy-body h1, .policy-body h2, .policy-body h3 { color: ${S.text}; font-size: 13px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin: 24px 0 10px; }
-                .policy-body h1:first-child { margin-top: 0; }
-                .policy-body p { margin: 0 0 14px; }
-                .policy-body a { color: ${S.accent}; text-decoration: none; }
-                .policy-body a:hover { text-decoration: underline; }
-                .policy-body ul, .policy-body ol { padding-left: 20px; margin: 0 0 14px; }
-                .policy-body li { margin-bottom: 6px; }
-                .policy-body strong { color: ${S.text}; font-weight: 600; }
-              `}</style>
-              <div className="policy-body" dangerouslySetInnerHTML={{__html: content.body}} />
-            </>
-          )}
-        </div>
+      )}
+
+      {policy ? (
+        <div className="ho-policy" dangerouslySetInnerHTML={{ __html: policy.html }} />
+      ) : err ? (
+        <p style={{ color:S.muted, fontSize:13 }}>{"We couldn't load this page right now. Please try again in a moment."}</p>
+      ) : (
+        <div style={{ color:S.muted, fontSize:12 }}>Loading…</div>
+      )}
+
+      <div style={{ margin:'34px 0 8px' }}>
+        <ILink to="/" onNavigate={onNavigate} style={{ display:'inline-block', fontSize:10, fontWeight:700, letterSpacing:1.5, textTransform:'uppercase', color:'#080808', background:S.accent, borderRadius:2, padding:'10px 18px' }}>Back to the shop</ILink>
       </div>
-    </>
+    </div>
   );
 }
+
 function Nav({ onLogo, children }) {
   const isMobile = useIsMobile(720);
   return (
@@ -14397,7 +14392,6 @@ export default function App() {
   const [loadingMore,setLoadingMore]     = useState(false);
   const [cart,setCart]                   = useState([]);
   const [cartOpen,setCartOpen]           = useState(false);
-  const [policySlug,setPolicySlug]       = useState(null);
   const [selected,setSelected]           = useState(null);
   const [filters,setFilters]             = useState({genre:null,sort:'newest',forthcoming:false,dnb:false});
   const [search,setSearch]               = useState('');
@@ -14691,6 +14685,8 @@ export default function App() {
   const portalRoute = useMemo(()=>{
     if (/^\/account\/?$/.test(path)) return { kind:'account' };
     if (/^\/ig\/?$/.test(path)) return { kind:'ig' };
+    const pol = policyPageFor(path);
+    if (pol) return { kind:'policy', page:pol };
     const m = path.match(/^\/(artist|label)\/([^/]+)\/?$/);
     return m ? { kind:m[1], slug:m[2] } : null;
   },[path]);
@@ -14902,7 +14898,9 @@ export default function App() {
       </Nav>
 
       {portalRoute ? (
-        portalRoute.kind === 'ig'
+        portalRoute.kind === 'policy'
+          ? <PolicyPage key={portalRoute.page.path} page={portalRoute.page} onNavigate={navigate} />
+          : portalRoute.kind === 'ig'
           ? <IgFeedPage onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} onNavigate={navigate} />
           : portalRoute.kind === 'account'
           ? <AccountPage
@@ -14980,18 +14978,16 @@ export default function App() {
 
       <footer style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>
-        {/* Enlaces de verdad (<a>), no botones: Google Merchant Center tiene que
-            poder seguirlos. Las URLs viven en src/policies.mjs, compartidas con el
-            pie del HTML prerenderizado. "Legal Notice" sigue en el cajon propio. */}
+        {/* Enlaces de verdad (<a href>) a las paginas propias de politicas, en la
+            misma pestana. La lista vive en src/policies.mjs, compartida con el
+            pie del HTML prerenderizado. */}
         <nav aria-label="Store policies" style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
-          {POLICY_LINKS.map(([label,url])=>(
-            <a key={label} href={url} target="_blank" rel="noopener noreferrer" style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',textDecoration:'none',transition:'color 0.15s'}} onMouseEnter={e=>e.currentTarget.style.color=S.accent} onMouseLeave={e=>e.currentTarget.style.color=S.muted}>{label}</a>
+          {POLICY_PAGES.map(pg=>(
+            <ILink key={pg.path} to={pg.path} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
           ))}
-          <button onClick={()=>{setPolicySlug('legal-notice');setCartOpen(false);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',padding:0,fontFamily:'inherit',transition:'color 0.15s'}} onMouseEnter={e=>e.target.style.color=S.accent} onMouseLeave={e=>e.target.style.color=S.muted}>Legal Notice</button>
         </nav>
       </footer>
 
-      <PolicyDrawer slug={policySlug} onClose={()=>setPolicySlug(null)} />
 
       <Modal onNavigate={navigate} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
         onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
