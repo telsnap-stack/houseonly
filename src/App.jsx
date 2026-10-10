@@ -13471,7 +13471,7 @@ function PolicyPage({ page, onNavigate }) {
   // antes de que React sustituya el contenido de #root).
   const [policy, setPolicy] = useState(() => {
     const el = typeof document !== 'undefined' && document.querySelector(`[data-policy-type="${page.type}"]`);
-    return el ? { title: el.getAttribute('data-policy-title') || page.title, html: el.innerHTML } : null;
+    return el ? { title: el.getAttribute('data-policy-title') || page.title, lastUpdated: el.getAttribute('data-policy-updated') || '', html: el.innerHTML } : null;
   });
   const [err, setErr] = useState('');
 
@@ -13488,7 +13488,7 @@ function PolicyPage({ page, onNavigate }) {
       .then(d => {
         const p = (d.policies || []).find(x => x.type === page.type);
         if (!vivo) return;
-        if (p) setPolicy({ title: p.title || page.title, html: p.html });
+        if (p) setPolicy({ title: p.title || page.title, lastUpdated: p.lastUpdated || '', html: p.html });
         else setErr('missing');
       })
       .catch(() => { if (vivo) setErr('error'); });
@@ -13499,8 +13499,11 @@ function PolicyPage({ page, onNavigate }) {
   return (
     <div style={{ maxWidth:1100, margin:'0 auto', padding:isMobile?'24px 16px 8px':'34px 20px 8px', textAlign:'left' }}>
       <style>{POLICY_CSS}</style>
-      <Logo scale={isMobile?1.2:1.6} />
-      <h1 style={{ fontSize:isMobile?26:34, fontWeight:800, letterSpacing:'-0.6px', margin:'18px 0 22px', color:S.text }}>{policy?.title || page.title}</h1>
+      {/* Sin logo grande: ya esta en la cabecera. Orden: titulo, "Last updated",
+          texto, pie (y en /contact, el correo y los enlaces bajo el titulo). */}
+      <h1 style={{ fontSize:isMobile?26:34, fontWeight:800, letterSpacing:'-0.6px', margin:'4px 0 0', color:S.text }}>{policy?.title || page.title}</h1>
+      {policy?.lastUpdated && <div style={{ fontSize:12, color:S.muted, marginTop:8 }}>{policy.lastUpdated}</div>}
+      <div style={{ height:22 }} />
 
       {esContacto && (
         <div style={{ marginBottom:28 }}>
@@ -15013,7 +15016,8 @@ export default function App() {
       </>
       )}
 
-      <NewsletterSignup variant="footer" source="footer" />
+      {/* En las paginas de politicas no va el bloque de la newsletter. */}
+      {portalRoute?.kind !== 'policy' && <NewsletterSignup variant="footer" source="footer" />}
 
       <footer style={{borderTop:`1px solid ${S.border}`,padding:'24px 20px',textAlign:'center',marginTop:40}}>
         <span style={{fontSize:9,color:S.muted,letterSpacing:3}}>HOUSEONLY · VINYL RECORD STORE · WORLDWIDE SHIPPING</span>

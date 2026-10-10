@@ -362,9 +362,11 @@ function renderPolicyHtml(template, pg, policy) {
     : '';
   // policy.html ya viene limpio del worker (solo p, strong, a, ul, li, h2).
   const cuerpo = `<main style="max-width:1100px;margin:0 auto;padding:34px 20px;color:#efefef;font-family:Inter,system-ui,sans-serif;line-height:1.7">
-<h1 style="font-size:32px;margin:0 0 22px">${escapeHtml(policy.title || pg.title)}</h1>
+<h1 style="font-size:32px;margin:0">${escapeHtml(policy.title || pg.title)}</h1>
+${policy.lastUpdated ? `<p style="font-size:12px;color:#585858;margin:8px 0 0">${escapeHtml(policy.lastUpdated)}</p>` : ''}
+<div style="height:22px"></div>
 ${contacto}
-<div data-policy-type="${escapeHtml(pg.type)}" data-policy-title="${escapeHtml(policy.title || pg.title)}" style="max-width:65ch">${policy.html}</div>
+<div data-policy-type="${escapeHtml(pg.type)}" data-policy-title="${escapeHtml(policy.title || pg.title)}" data-policy-updated="${escapeHtml(policy.lastUpdated || '')}" style="max-width:65ch">${policy.html}</div>
 <p><a href="/" style="color:#c8ff00">Back to the shop</a></p>
 </main>`;
   return template
