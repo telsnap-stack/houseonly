@@ -219,8 +219,13 @@ Revisar con `src/lib/ligatures.ts` antes de reescribir nada a mano.
 
 - Feed dado de alta como fuente **"PRODUCTS SOURCE 3"**, etiqueta `HOUSEONLY`,
   URL `https://houseonly-worker.emontagut.workers.dev/?action=google-feed`.
-- Lectura programada diaria a las **08:00**. El cron del worker lo regenera a
-  las 06:00, así que Google lee siempre el del día.
+- Lectura programada diaria a las **08:00**. Ojo con el horario: el cron del
+  worker (`0 6 * * *`) va en **UTC**, que en Madrid son las 08:00 en verano y
+  las 07:00 en invierno. En verano la lectura coincide con la regeneración, y
+  Google se lleva el feed de ayer o el nuevo, según quién llegue antes. Nunca
+  uno a medias: el XML se escribe en KV de una vez. Si se quiere el del día
+  seguro todo el año, basta con mover la lectura a las 08:30 (si la hora de
+  Merchant Center es la de Madrid).
 - Primera lectura: **2026-10-10 04:07**, **1.019 productos**, todos los
   atributos reconocidos.
 - Sitio verificado y reclamado.
