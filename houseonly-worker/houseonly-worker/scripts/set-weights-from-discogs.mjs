@@ -9,6 +9,11 @@
  *   0,15 kg embalaje + discos × (12"/LP 0,25 · 10" 0,18 · 7" 0,08) (+0,20 box set)
  * Un release sin vinilo, o que no se puede leer, no se toca y se lista.
  *
+ * Aparte, los productos SIN Discogs (su SKU no esta en SYNC_STATE) que siguen
+ * en 0,90 exacto —el "2LP = 900 g" de los importers viejos— pasan a 0,75, el
+ * peso de un 2LP con la regla actual. Se listan aparte y se aplican tambien en
+ * --commit. Los emparejados con Discogs nunca se remapean asi.
+ *
  * OJO (memoria discogs-match-needs-manual-approval): un emparejamiento con el
  * release equivocado da un peso equivocado. Por eso la tabla marca:
  *   DRAFT  el listing de Discogs no esta publicado (puede venir del auto-listado
@@ -42,7 +47,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import dns from 'node:dns';
-import { pesoDesdeDiscogs, pesoDesdeTexto, describirPeso, tramo } from '../src/lib/vinyl-weight.mjs';
+import { pesoDesdeDiscogs, pesoDesdeTexto, describirPeso, tramo, pesoDesdeLegado2LP } from '../src/lib/vinyl-weight.mjs';
 
 // En esta red el IPv6 puede estar roto y el fetch de Node se cuelga (2026-10-09).
 dns.setDefaultResultOrder('ipv4first');
@@ -263,14 +268,28 @@ async function main() {
       tramoAntes: tramo(shop.kg), tramoDespues: tramo(p.kg), marcas });
   }
 
+  // 5b · los 0,90 heredados sin Discogs → peso de 2LP con la regla actual
+  const remapeos = [];
+  for (const [sku, v] of catalogo) {
+    if (skuMap[sku]) continue;                         // tiene Discogs: no se remapea
+    const nuevo = pesoDesdeLegado2LP(v.kg);
+    if (nuevo == null) continue;
+    remapeos.push({ sku, titulo: v.title, estado: '', listing: '', release: '', formato: '2LP (legado 900 g)',
+      actual: v.kg, nuevo, cambia: true, tramoAntes: tramo(v.kg), tramoDespues: tramo(nuevo), marcas: ['LEGADO-0,90'] });
+  }
+
   // 6 · informe
   const pad = (s, n) => String(s).slice(0, n).padEnd(n);
   console.log(`\n${pad('SKU', 16)} ${pad('Título', 44)} ${pad('Discogs', 14)} actual → nuevo  marcas`);
   for (const f of filas.filter((x) => x.cambia || x.marcas.length)) {
     console.log(`${pad(f.sku, 16)} ${pad(f.titulo, 44)} ${pad(f.formato, 14)} ${f.actual.toFixed(2)} → ${f.nuevo.toFixed(2)}  ${f.marcas.join(' ')}`);
   }
+  if (remapeos.length) {
+    console.log(`\nSin Discogs y en 0,90 exacto (legado "2LP = 900 g") → 0,75:`);
+    for (const f of remapeos) console.log(`${pad(f.sku, 16)} ${pad(f.titulo, 44)} ${f.actual.toFixed(2)} → ${f.nuevo.toFixed(2)}`);
+  }
   const csv = [['sku', 'titulo', 'estado_listing', 'listing_id', 'release_id', 'formato_discogs', 'peso_actual', 'peso_nuevo', 'tramo_antes', 'tramo_despues', 'marcas', 'motivo_no_tocado']]
-    .concat(filas.map((f) => [f.sku, f.titulo, f.estado, f.listing, f.release, f.formato, f.actual, f.nuevo, f.tramoAntes, f.tramoDespues, f.marcas.join(' '), '']))
+    .concat([...filas, ...remapeos].map((f) => [f.sku, f.titulo, f.estado, f.listing, f.release, f.formato, f.actual, f.nuevo, f.tramoAntes, f.tramoDespues, f.marcas.join(' '), '']))
     .concat(noTocados.map((f) => [f.sku, f.titulo, f.estado, f.listing, f.release, '', '', '', '', '', '', f.motivo]))
     .map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
   writeFileSync(OUT, csv);
@@ -291,12 +310,13 @@ Resumen
   cambian de tramo:                   ${subenTramo.length}  ${JSON.stringify(porTramo)}
   marcados DRAFT o DISCREP:           ${dudosos.length}  (--commit no los aplica sin --incluir-dudosos)
   sin Discogs, se quedan en 0,5 kg:   ${quedan05}
+  sin Discogs en 0,90 → 0,75:         ${remapeos.length}  (legado "2LP = 900 g"; se aplican en --commit)
   CSV completo: ${OUT}`);
 
   if (!COMMIT) { console.log('\nDry-run: no se ha cambiado nada en Shopify.'); return; }
 
   // 7 · aplicar
-  const aplicar = cambian.filter((f) => DUDOSOS || !dudosos.includes(f));
+  const aplicar = [...cambian.filter((f) => DUDOSOS || !dudosos.includes(f)), ...remapeos];
   console.log(`\nAplicando ${aplicar.length} pesos…`);
   let hechos = 0, saltados = 0;
   for (const f of aplicar) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pesoDesdeDiscogs, pesoDesdeTexto, gramosDesdeFormato, describirPeso, tramo } from "../src/lib/vinyl-weight.mjs";
+import { pesoDesdeDiscogs, pesoDesdeTexto, gramosDesdeFormato, describirPeso, tramo, pesoDesdeLegado2LP } from "../src/lib/vinyl-weight.mjs";
 
 describe("pesoDesdeDiscogs (formats del release)", () => {
 	it("12\" suelto: 0,15 + 0,30 = 0,45", () => {
@@ -83,6 +83,17 @@ describe("ningun peso cae en 0,90 exacto (borde de tramo)", () => {
 			];
 			expect(pesoDesdeDiscogs(formats)?.kg).not.toBe(0.9);
 		}
+	});
+});
+
+describe("pesoDesdeLegado2LP (los 0,90 sin Discogs)", () => {
+	it("0,90 exacto -> 0,75, el peso de un 2LP con la regla actual", () => {
+		expect(pesoDesdeLegado2LP(0.9)).toBe(0.75);
+		expect(pesoDesdeLegado2LP("0.90")).toBe(0.75);
+		expect(pesoDesdeLegado2LP(0.9)).toBe(pesoDesdeDiscogs([{ name: "Vinyl", qty: "2", descriptions: ["LP"] }])?.kg);
+	});
+	it("cualquier otro peso no se toca", () => {
+		for (const kg of [0.5, 0.45, 0.75, 1, 1.5, 0.89, 0.92, 0]) expect(pesoDesdeLegado2LP(kg)).toBeNull();
 	});
 });
 

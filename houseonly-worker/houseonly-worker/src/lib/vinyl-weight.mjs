@@ -84,6 +84,16 @@ export function gramosDesdeFormato(...textos) {
   return String(Math.round(pesoDesdeTexto(...textos).kg * 1000));
 }
 
+/**
+ * Peso heredado de los importers viejos: "2LP = 900 g" (regex del titulo). Un
+ * producto SIN Discogs que sigue exactamente en 0,90 no tiene mas dato que esa
+ * suposicion de 2 discos, asi que pasa al peso de un 2LP con la regla actual
+ * (0,75). Cualquier otro peso devuelve null: no se toca. (2026-10-10)
+ */
+export function pesoDesdeLegado2LP(kg) {
+  return Math.abs(Number(kg) - 0.9) < 0.005 ? pesoDe([{ n: 2, talla: 12 }], false).kg : null;
+}
+
 /** Tramo de envio de Shopify al que cae un peso. */
 export function tramo(kg) {
   if (kg <= 0.5) return '≤0,5';
