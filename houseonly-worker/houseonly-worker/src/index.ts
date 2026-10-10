@@ -923,6 +923,7 @@ import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './li
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed';
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
+import { handleShopPolicies } from './lib/shop-policies';
 
 import {
   buildAuthorizeUrl,
@@ -1460,6 +1461,13 @@ export default {
     }
     if (action === 'ig-feed-remove' && request.method === 'POST') {
       return await handleIgFeedRemove(request, env, bearerAdminValido(request, env));
+    }
+
+    // ── POLITICAS DE LA TIENDA ──────────────────────────────
+    // Texto de Shopify (Admin API, ya limpio) para /shipping, /returns,
+    // /contact, /privacy, /terms y /legal. Publico. lib/shop-policies.ts.
+    if (action === 'shop-policies' && request.method === 'GET') {
+      return await handleShopPolicies(env);
     }
 
     // ── FEED DE GOOGLE MERCHANT CENTER ──────────────────────
