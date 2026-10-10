@@ -13,7 +13,8 @@
  * release equivocado da un peso equivocado. Por eso la tabla marca:
  *   DRAFT  el listing de Discogs no esta publicado (puede venir del auto-listado
  *          sin revisar)
- *   DISCREP  el titulo de Shopify dice otro numero de discos ("2LP", "3x12"…)
+ *   DISCREP  el titulo de Shopify dice otro numero de discos ("2LP", "3x12"…),
+ *            o el peso actual (si no es el 0,5 generico) implica otro numero
  *   TALLA?   el release no dice el tamano del vinilo (se cuenta como 12")
  * y --commit NO aplica los marcados DRAFT o DISCREP salvo con --incluir-dudosos.
  *
@@ -109,7 +110,17 @@ async function discogs(path) {
   for (let intento = 0; intento < 5; intento++) {
     if (restantes <= 1) await sleep(61000);
     else await sleep(DTOKEN ? 1050 : 2500);
-    const r = await fetch(`${DISCOGS}${path}`, { headers: { 'User-Agent': UA, ...(DTOKEN ? { Authorization: `Discogs token=${DTOKEN}` } : {}) } });
+    let r;
+    try {
+      r = await fetch(`${DISCOGS}${path}`, {
+        headers: { 'User-Agent': UA, ...(DTOKEN ? { Authorization: `Discogs token=${DTOKEN}` } : {}) },
+        signal: AbortSignal.timeout(30000),
+      });
+    } catch (e) {
+      // Red inestable (ETIMEDOUT, reset): esperar y reintentar, no abortar todo.
+      await sleep(5000 * (intento + 1));
+      continue;
+    }
     restantes = parseInt(r.headers.get('x-discogs-ratelimit-remaining') || '5', 10);
     if (r.status === 429) { restantes = 0; continue; }
     if (r.status === 404) return null;
@@ -118,7 +129,7 @@ async function discogs(path) {
     if (!r.ok) throw new Error(`Discogs ${r.status} ${path}`);
     return r.json();
   }
-  throw new Error(`Discogs: demasiados 429 en ${path}`);
+  throw new Error(`Discogs: sin respuesta tras 5 intentos en ${path}`);
 }
 
 // ── Shopify ────────────────────────────────────────────────────────
@@ -194,7 +205,8 @@ async function main() {
   if (sinRelease.length) console.log(`${sinRelease.length} listings fuera del inventario publico (Draft/Sold): uno a uno…`);
   const sinAcceso = new Set();
   for (const s of sinRelease) {
-    const l = await discogs(`/marketplace/listings/${skuMap[s].listing_id}`);
+    let l = null;
+    try { l = await discogs(`/marketplace/listings/${skuMap[s].listing_id}`); } catch { /* queda sin release y se lista */ }
     if (l?.noAccess) sinAcceso.add(s);
     else if (l?.release?.id) listingRelease.set(skuMap[s].listing_id, l.release.id);
   }
@@ -238,6 +250,14 @@ async function main() {
     if (m.status === 'Draft') marcas.push('DRAFT');
     const t = pesoDesdeTexto(shop.title);
     if (t.origen === 'texto' && t.discos !== p.discos) marcas.push(`DISCREP(titulo ${t.discos})`);
+    // El peso actual tambien es un dato si no es el 0,5 generico: lo pusieron los
+    // importers que leen el formato del distribuidor (Triple Vision: discos ×
+    // 0,5; otros 0,9 = 2LP, 1,3 = 3LP; 0,18 = 7"). Si de ahi sale otro numero de
+    // discos que en Discogs, el emparejamiento es sospechoso.
+    if (Math.abs(shop.kg - 0.5) >= 0.005) {
+      const implicitos = Math.max(1, Math.round(shop.kg / 0.5));
+      if (implicitos !== p.discos) marcas.push(`DISCREP(peso actual ${shop.kg} = ${implicitos} discos)`);
+    }
     if (p.partes.some((x) => x.sinTalla)) marcas.push('TALLA?');
     filas.push({ ...base, formato: describirPeso(p), actual: shop.kg, nuevo: p.kg, cambia: Math.abs(shop.kg - p.kg) >= 0.005,
       tramoAntes: tramo(shop.kg), tramoDespues: tramo(p.kg), marcas });
