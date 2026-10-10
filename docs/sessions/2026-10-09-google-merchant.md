@@ -214,3 +214,14 @@ Revisar con `src/lib/ligatures.ts` antes de reescribir nada a mano.
 | `868209` | crystal waters – gypsy woman… |
 | `F047` | re-pressing of this in-demand Moodyman produced cl… |
 
+
+## Estado en Merchant Center (10-10)
+
+- Feed dado de alta como fuente **"PRODUCTS SOURCE 3"**, etiqueta `HOUSEONLY`,
+  URL `https://houseonly-worker.emontagut.workers.dev/?action=google-feed`.
+- Lectura programada diaria a las **08:00**. El cron del worker lo regenera a
+  las 06:00, así que Google lee siempre el del día.
+- Primera lectura: **2026-10-10 04:07**, **1.019 productos**, todos los
+  atributos reconocidos.
+- Sitio verificado y reclamado.
+- Pendiente: la revisión de Google (1-3 días).
