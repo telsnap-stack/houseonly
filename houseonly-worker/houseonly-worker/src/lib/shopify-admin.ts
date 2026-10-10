@@ -124,8 +124,7 @@ export async function shopifyAdminGraphQL(
   query: string,
   variables?: any,
 ): Promise<any> {
-  let token = await getShopifyAdminToken(env);
-  let r = await fetch(
+  const post = (token: string) => fetch(
     `https://${SHOPIFY_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
     {
       method: 'POST',
@@ -137,27 +136,44 @@ export async function shopifyAdminGraphQL(
     },
   );
 
-  if (r.status === 401) {
-    token = await getShopifyAdminToken(env, true);
-    r = await fetch(
-      `https://${SHOPIFY_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token,
-        },
-        body: JSON.stringify({ query, variables: variables || {} }),
-      },
-    );
-  }
+  let r = await post(await getShopifyAdminToken(env));
+
+  // Token caducado o revocado: HTTP 401. Uno nuevo y se reintenta, una vez.
+  if (r.status === 401) r = await post(await getShopifyAdminToken(env, true));
 
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`Shopify Admin API ${r.status}: ${text}`);
   }
 
-  return await r.json();
+  const json: any = await r.json();
+
+  // Scope que falta en el TOKEN, no en la app: un token de client credentials
+  // lleva los scopes del momento en que se emitio y dura 24 h (23 h en KV).
+  // Tras publicar una version de la app con un scope nuevo, el token guardado
+  // sigue sin el y Shopify contesta HTTP 200 con "Access denied ... access
+  // scope" en `errors`, asi que la rama del 401 no lo ve (2026-10-10,
+  // read_legal_policies). Se pide uno nuevo y se reintenta, una vez, con ESE
+  // token —sin releer KV, que no garantiza leer lo que se acaba de escribir—.
+  // Como mucho una renovacion por esto cada 5 min: si el scope falta de verdad
+  // en la app, cada llamada no puede costar una peticion de token.
+  if (esScopeDenegado(json) && !(await env.WISHLIST.get(SCOPE_RETRY_KV_KEY))) {
+    await env.WISHLIST.put(SCOPE_RETRY_KV_KEY, '1', { expirationTtl: 300 });
+    const fresh = await getShopifyAdminToken(env, true);
+    const r2 = await post(fresh);
+    if (r2.ok) return await r2.json();
+  }
+
+  return json;
+}
+
+const SCOPE_RETRY_KV_KEY = 'shopify_admin_token_scope_retry';
+
+/** ¿La respuesta trae un "Access denied ... access scope" de Shopify? */
+export function esScopeDenegado(json: any): boolean {
+  return Array.isArray(json?.errors) && json.errors.some((e: any) =>
+    /access denied/i.test(String(e?.message || '')) && /access scope|required access/i.test(String(e?.message || '')),
+  );
 }
 
 // ── INVENTORY LOOKUP ────────────────────────────────────────────────
