@@ -27,6 +27,9 @@
  *   node scripts/set-weights-from-discogs.mjs                      dry-run, tabla + CSV
  *   node scripts/set-weights-from-discogs.mjs --commit             aplica (pide credenciales Admin)
  *   node scripts/set-weights-from-discogs.mjs --commit --incluir-dudosos
+ *   node scripts/set-weights-from-discogs.mjs --aplicar-lista lista.json
+ *       aplica SOLO esos pesos {"SKU": kg}, ya revisados a mano (los dudosos):
+ *       no consulta Discogs; peso entre 0,05 y 5 kg y SKU exacto, o se rechaza.
  *   opciones: --limit N  --out ruta.csv
  *
  * Entorno (o .dev.vars de houseonly-worker, que carga scripts/lib/dev-vars.mjs;
@@ -43,7 +46,7 @@
 
 import { faltan, DEV_VARS_PATH } from './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +63,7 @@ const COMMIT = args.includes('--commit');
 const DUDOSOS = args.includes('--incluir-dudosos');
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
 const LIMIT = parseInt(opt('--limit') || '0', 10) || 0;
+const LISTA = opt('--aplicar-lista');
 const OUT = opt('--out') || join(mkdtempSync(join(tmpdir(), 'pesos-')), `pesos-${new Date().toISOString().slice(0, 10)}.csv`);
 const WORKER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SHOP = 'house-only-2.myshopify.com';
@@ -321,22 +325,47 @@ Resumen
   // 7 · aplicar
   const aplicar = [...cambian.filter((f) => DUDOSOS || !dudosos.includes(f)), ...remapeos];
   console.log(`\nAplicando ${aplicar.length} pesos…`);
-  let hechos = 0, saltados = 0;
-  for (const f of aplicar) {
-    const d = await admin(`query($q: String!) { productVariants(first: 5, query: $q) { nodes { sku inventoryItem { id measurement { weight { value unit } } } } } }`, { q: `sku:'${f.sku.replace(/'/g, "\\'")}'` });
-    const v = d.productVariants.nodes.find((x) => x.sku === f.sku);
-    if (!v) { console.log(`  ✗ ${f.sku}: no encontrado en la Admin API`); continue; }
-    const w = v.inventoryItem.measurement?.weight;
-    const kgActual = w ? (w.unit === 'GRAMS' ? w.value / 1000 : w.unit === 'POUNDS' ? w.value * 0.4536 : w.unit === 'OUNCES' ? w.value * 0.02835 : w.value) : 0;
-    if (Math.abs(kgActual - f.nuevo) < 0.005) { saltados++; continue; }   // reanudable
-    const u = await admin(`mutation($id: ID!, $input: InventoryItemInput!) { inventoryItemUpdate(id: $id, input: $input) { inventoryItem { measurement { weight { value unit } } } userErrors { field message } } }`,
-      { id: v.inventoryItem.id, input: { measurement: { weight: { value: f.nuevo, unit: 'KILOGRAMS' } } } });
-    const errs = u.inventoryItemUpdate.userErrors;
-    if (errs?.length) console.log(`  ✗ ${f.sku}: ${errs.map((e) => e.message).join('; ')}`);
-    else { hechos++; if (hechos % 25 === 0) console.log(`  ${hechos}/${aplicar.length}`); }
-    await sleep(300);
-  }
-  console.log(`\nAplicados ${hechos}, ya estaban ${saltados}.`);
+  await aplicarPesos(aplicar);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+/**
+ * Escribe los pesos en Shopify (Admin API). Reanudable: si el inventory item ya
+ * tiene el peso, se salta. Devuelve el detalle para el informe.
+ */
+async function aplicarPesos(lista) {
+  const res = { inicio: new Date().toISOString(), aplicados: [], saltados: [], errores: [] };
+  for (const f of lista) {
+    try {
+      const d = await admin(`query($q: String!) { productVariants(first: 5, query: $q) { nodes { sku inventoryItem { id measurement { weight { value unit } } } } } }`, { q: `sku:'${f.sku.replace(/'/g, "\\'")}'` });
+      const v = d.productVariants.nodes.find((x) => x.sku === f.sku);
+      if (!v) { res.errores.push({ sku: f.sku, error: 'no encontrado en la Admin API' }); console.log(`  ✗ ${f.sku}: no encontrado`); continue; }
+      const w = v.inventoryItem.measurement?.weight;
+      const kgActual = w ? (w.unit === 'GRAMS' ? w.value / 1000 : w.unit === 'POUNDS' ? w.value * 0.4536 : w.unit === 'OUNCES' ? w.value * 0.02835 : w.value) : 0;
+      if (Math.abs(kgActual - f.nuevo) < 0.005) { res.saltados.push({ sku: f.sku, kg: f.nuevo }); continue; }
+      const u = await admin(`mutation($id: ID!, $input: InventoryItemInput!) { inventoryItemUpdate(id: $id, input: $input) { inventoryItem { measurement { weight { value unit } } } userErrors { field message } } }`,
+        { id: v.inventoryItem.id, input: { measurement: { weight: { value: f.nuevo, unit: 'KILOGRAMS' } } } });
+      const errs = u.inventoryItemUpdate.userErrors;
+      if (errs?.length) { res.errores.push({ sku: f.sku, error: errs.map((e) => e.message).join('; ') }); console.log(`  ✗ ${f.sku}: ${errs.map((e) => e.message).join('; ')}`); }
+      else { res.aplicados.push({ sku: f.sku, de: Math.round(kgActual * 100) / 100, a: f.nuevo }); if (res.aplicados.length % 25 === 0) console.log(`  ${res.aplicados.length}/${lista.length}`); }
+    } catch (e) { res.errores.push({ sku: f.sku, error: e.message }); console.log(`  ✗ ${f.sku}: ${e.message}`); }
+    await sleep(300);
+  }
+  res.fin = new Date().toISOString();
+  console.log(`\nAplicados ${res.aplicados.length}, ya estaban ${res.saltados.length}, errores ${res.errores.length} (${res.inicio} → ${res.fin}).`);
+  return res;
+}
+
+/** --aplicar-lista: solo los pesos de un JSON {"SKU": kg}, revisados a mano. */
+async function aplicarLista(ruta) {
+  const mapa = JSON.parse(readFileSync(ruta, 'utf8'));
+  const lista = Object.entries(mapa).map(([sku, kg]) => ({ sku: String(sku).trim(), nuevo: Math.round(Number(kg) * 100) / 100 }));
+  const malos = lista.filter((f) => !f.sku || !(f.nuevo >= 0.05 && f.nuevo <= 5));
+  if (malos.length) throw new Error(`Lista rechazada, pesos fuera de 0,05–5 kg o SKU vacio: ${malos.map((f) => f.sku || '(vacio)').join(', ')}`);
+  console.log(`--aplicar-lista ${ruta}: ${lista.length} SKU`);
+  const res = await aplicarPesos(lista);
+  const out = ruta.replace(/\.json$/, '') + `.resultado-${res.inicio.replace(/[:.]/g, '-')}.json`;
+  writeFileSync(out, JSON.stringify(res, null, 2));
+  console.log(`Detalle: ${out}`);
+}
+
+(LISTA ? aplicarLista(LISTA) : main()).catch((e) => { console.error(e); process.exit(1); });
