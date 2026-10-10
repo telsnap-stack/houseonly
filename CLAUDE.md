@@ -108,4 +108,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-10-09-ig-link-in-bio.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-10-09-google-merchant.md`.
