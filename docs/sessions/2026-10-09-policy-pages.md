@@ -3,7 +3,7 @@
 Rama `claude/policy-pages` desde `main` (`075efd7`). El scope
 `read_legal_policies` ya está en la app (versión `houseonly-backorder-6`, 10-10)
 y las seis páginas están verificadas en staging con el texto real. El worker ya
-está en prod. **PR #95 listo, pendiente del OK de Eduardo para mezclar.**
+está en prod. **En producción desde el 10-10: PR #95 mezclado en `54ca883`.**
 
 ## Qué hay
 
@@ -197,3 +197,24 @@ Instagram 1, Discogs 1.
   public, max-age=3600`. `sync-status`, `google-feed` e `ig-feed` siguen en 200.
 - **Sin merge**: PR #95 fuera de draft, esperando el OK. Al mezclar, el build de
   Pages de main ya encontrará el endpoint en el worker de prod.
+
+## Producción (10-10)
+
+- **main**: PR #95 mezclado con merge commit, **`54ca883`**. El árbol es
+  idéntico al de la rama verificada en staging. Rama remota
+  `claude/policy-pages` borrada (el repo no las borra solo).
+- **Worker en prod `9e25fcdc-9b42-4550-a379-03e3b22f4739`** (desplegado antes
+  del merge, para que el build de main encontrara `shop-policies`).
+- **Pages** sirve el bundle `index-aoa4UoNO.js`. Las seis páginas están
+  prerenderizadas con su `<title>` y `data-policy-type`, y van en el sitemap.
+- Chrome headless a 390 px en houseonly.store, en las seis: texto real de
+  Shopify, 0 errores de consola, sin scroll horizontal, 0 peticiones al worker
+  (leen el prerender), sin logo grande ni newsletter.
+  - /shipping con «15–30 business days»; /returns empieza por «You can return
+    a record within 14 days» y lleva sus dos h2 en lima.
+  - /contact: correo grande, Instagram y Discogs, una vez cada uno.
+  - /privacy: 13 secciones y «Last updated: July 31, 2026». /terms: 13
+    secciones numeradas y «Last updated: 10 October 2026».
+  - /legal con «Telsnap S.L.» y «ESB75303990».
+- Pie en la portada, /ig y una ficha: los seis enlaces locales (Shipping,
+  Returns, Contact, Privacy, Terms, Legal Notice), misma pestaña, 0 errores.
