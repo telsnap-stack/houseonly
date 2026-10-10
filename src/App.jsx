@@ -6,6 +6,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 // Ligaduras de PDF: misma regla que el worker, no una copia. Ver lib/ligatures.ts.
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
+import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
@@ -3425,8 +3426,8 @@ function ZipImporter() {
         const year   = row.Releasedate ? new Date(row.Releasedate).getFullYear() : '';
         const rawPrice = parseFloat(row.UnitPrice || 18.99) * (1 + margin / 100);
         const price  = String((Math.ceil(rawPrice) - 0.01).toFixed(2));
-        const is2LP  = /2[\s-]?lp|double\s*lp|3[\s-]?lp/i.test(title) || /2[\s-]?lp|3[\s-]?lp/i.test(catno);
-        const grams  = is2LP ? '900' : '500';
+        // Peso: regla comun (src/lib/vinyl-weight.mjs) sobre titulo y catalogo.
+        const grams  = gramosDesdeFormato(title, catno);
         const qty    = String(row.Qty || '1');
         const handle = catno.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
@@ -3618,21 +3619,6 @@ function tvLabelTag(label, catno) {
   return '';
 }
 
-// Disc count from TV "Format"/title, then grams = discs * 500.
-// Handles "2x12\"", "3x12\"", "4x12\"", "2LP", "double", single 12"/10"/LP.
-function tvDiscCount(format, title) {
-  const s = `${format || ''} ${title || ''}`.toLowerCase();
-  const m = s.match(/(\d+)\s*x?\s*(?:12"|10"|lp)/);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    if (n >= 1 && n <= 6) return n;
-  }
-  if (/double|2\s*lp/.test(s)) return 2;
-  return 1;
-}
-function tvGrams(format, title) {
-  return String(tvDiscCount(format, title) * 500);
-}
 
 // Normalize a TV style string for the genre tag.
 function tvGenre(style) {
@@ -3808,7 +3794,7 @@ function TripleVisionImporter() {
         const genre  = tvGenre(meta.style);
         const year   = (meta.released && (meta.released.match(/\b(19|20)\d{2}\b/)||[])[0]) || '';
         const desc   = String(meta.description || '');
-        const grams  = tvGrams(meta.format, title);
+        const grams  = gramosDesdeFormato(meta.format, title);   // regla comun (vinyl-weight.mjs)
         const qty    = String(inv.qty || 1);
 
         // Pricing from invoice cost: ceil(cost * (1+margin)) - 0.01 → ends .99.
@@ -4576,8 +4562,7 @@ function RubadubImporter() {
 
         const { artist, title } = rdSplitName(inv.name);
         const label = pdfLabel || '';
-        const is2LP = /2[\s-]?lp|double\s*lp|3[\s-]?lp|2x12|3x12/i.test(inv.name) || /2lp|3lp|2x12|3x12/i.test(key);
-        const grams = is2LP ? '900' : '500';
+        const grams = gramosDesdeFormato(inv.name, key);   // regla comun (vinyl-weight.mjs)
         const qty   = String(inv.qty || 1);
 
         // Pricing: dealer £ × FX → × margin → ceil − 0.01 (ends .99).
@@ -4937,8 +4922,6 @@ function KudosImporter() {
   const [fx, setFx]         = useState(1.15);
   const [margin, setMargin] = useState(60);
   const [minRetail, setMinRetail] = useState(9.99);
-  const [stdW, setStdW]     = useState(500);
-  const [dblW, setDblW]     = useState(900);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
   const pickRef = useRef(null);
   const jsonRef = useRef(null);
@@ -5021,7 +5004,7 @@ function KudosImporter() {
       : 0;
     const retailP = flooredRetail > 0 ? (Math.ceil(flooredRetail) - 0.01).toFixed(2) : '';
     const costEUR=dealerEUR>0?dealerEUR.toFixed(2):'';
-    const grams=is2LP?String(dblW):String(stdW);
+    const grams=gramosDesdeFormato(formatDisplay, title);   // regla comun (vinyl-weight.mjs)
     let bodyHtml='';
     let audioTracksJson = '';
     if(api){
@@ -5097,7 +5080,7 @@ function KudosImporter() {
   }
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
-  const filas = useMemo(() => importable.map(filaKudos), [pickingRows, enrichment, fx, margin, minRetail, stdW, dblW, liveHandles]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const filas = useMemo(() => importable.map(filaKudos), [pickingRows, enrichment, fx, margin, minRetail, liveHandles]);   // eslint-disable-line react-hooks/exhaustive-deps
   const enTienda = filas.filter(x => x._alreadyLive).length;
   // El numero va en el nombre del fichero: "K235566 Picking Summary.csv".
   const documento = { tipo: 'factura', etiqueta: 'picking', placeholder: 'KUDOS-K…',
@@ -5151,7 +5134,7 @@ function KudosImporter() {
       {/* Controls */}
       {pickFile && (
         <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',padding:'12px 16px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,marginBottom:10}}>
-          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['12" floor €',minRetail,setMinRetail,0.5],['Weight g',stdW,setStdW,100],['2LP g',dblW,setDblW,100]].map(([label,val,setter,step])=>(
+          {[['GBP→EUR',fx,setFx,0.01],['Margin %',margin,setMargin,1],['12" floor €',minRetail,setMinRetail,0.5]].map(([label,val,setter,step])=>(
             <div key={label} style={{display:'flex',alignItems:'center',gap:6}}>
               <span style={{fontSize:10,color:S.muted,whiteSpace:'nowrap'}}>{label}</span>
               <input type="number" value={val} step={step} onChange={e=>setter(parseFloat(e.target.value)||val)} style={{width:72,padding:'5px 8px',background:S.surf,border:`1px solid ${S.border}`,borderRadius:2,color:S.text,fontFamily:'monospace',fontSize:12,textAlign:'center',outline:'none'}} />
@@ -5350,8 +5333,7 @@ function DBHImporter() {
         const rawPrice = ppu * (1 + margin / 100);
         const price   = (Math.ceil(rawPrice) - 0.01).toFixed(2);
         const format  = row['Format'] || '';
-        const is2LP   = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
-        const grams   = is2LP ? '900' : '500';
+        const grams   = gramosDesdeFormato(format, title);   // regla comun (vinyl-weight.mjs)
         const tags    = row['Tags'] || '';
         const desc    = decodeHtml(row['Description'] || '');
         const handle  = catno.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+$/,'');
@@ -6143,14 +6125,6 @@ function MotherTongueImporter() {
     return Array.from(out);
   }
 
-  // ── DERIVE WEIGHT FROM FORMAT ─────────────────────────────────
-  function gramsFromFmt(fmt) {
-    const f = String(fmt || '').toLowerCase();
-    if (/3\s*x\s*12|3x12|triple/.test(f)) return '1300';
-    if (/2\s*x\s*12|2x12|double/.test(f)) return '900';
-    if (/7"|7\s*inch/.test(f))            return '180';
-    return '500';
-  }
 
   // ── INPUT HANDLERS ────────────────────────────────────────────
   const onPdf = async (file) => {
@@ -6251,7 +6225,7 @@ function MotherTongueImporter() {
         const item = invoiceItems[i];
         const key  = normCatno(item.catno);
         // La ficha web es la base; el listener, si lo hay, pisa campo a campo.
-        // `fmt_norm` es el nombre que espera gramsFromFmt mas abajo.
+        // `fmt_norm` es el nombre que espera el calculo del peso mas abajo.
         const ficha = fichas[key] || {};
         const meta = {
           ...ficha,
@@ -6266,7 +6240,7 @@ function MotherTongueImporter() {
         const rawTitle  = (meta.title  || '').trim();
         const labelMeta = (meta.label  || '').trim();
         const fmtNorm   = meta.fmt_norm || meta.format || '';
-        const grams     = gramsFromFmt(fmtNorm);
+        const grams     = gramosDesdeFormato(fmtNorm, rawTitle);   // regla comun (vinyl-weight.mjs)
 
         // Vendor cleanup: V.A. (Various Artists) doesn't help in the storefront —
         // substitute the label name when available. Skip the "House Only" fallback;
@@ -6785,14 +6759,6 @@ function RushHourImporter() {
     return m ? parseInt(m[1], 10) : '';
   }
 
-  // Weight from format string. Falls back to 500g (standard 12").
-  function gramsFromFormat(fmt) {
-    const f = String(fmt || '').toLowerCase();
-    if (/3\s*(?:x\s*)?lp|3lp|triple/.test(f)) return '1300';
-    if (/2\s*(?:x\s*)?lp|2lp|double|2\s*x\s*12/.test(f)) return '900';
-    if (/7\s*"|7\s*inch|7''/.test(f))                     return '180';
-    return '500';
-  }
 
   // Genre tags from JSON `tag` field. Rush Hour stacks tags newline-separated
   // ("House\nDetroit"). We split, trim, dedupe.
@@ -6865,7 +6831,7 @@ function RushHourImporter() {
         const title  = (meta.title  || '').trim() || catno;
         const label  = (meta.label  || '').trim();
         const year   = yearFromRelease(meta.release);
-        const grams  = gramsFromFormat(meta.format);
+        const grams  = gramosDesdeFormato(meta.format, title);   // regla comun (vinyl-weight.mjs)
         const desc   = (meta.description || '').trim();
         const slug   = meta.slug || '';
         const catnoKey = normCatno(catno);
@@ -10665,8 +10631,7 @@ function PreorderImporter() {
         if (price < 9.99) price = 9.99;
         price = price.toFixed(2);
         const format = m.format || '';
-        const is2LP  = /2\s*x\s*12|double\s*lp|3\s*x\s*12/i.test(format) || /2[\s-]?lp/i.test(title);
-        const grams  = is2LP ? '900' : '500';
+        const grams  = gramosDesdeFormato(format, title);   // regla comun (vinyl-weight.mjs)
         // HANDLE — conserva separadores ("YORE-011LTD" -> "yore-011ltd"),
         // al reves que el RubadubImporter de facturas, que los quita. Divergen
         // a proposito: la explicacion completa y lo que hay que saber antes de
