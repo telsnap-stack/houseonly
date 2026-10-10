@@ -18,6 +18,7 @@
  * missing, has the wrong topic, or already points at prod.
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 const SHOPIFY_DOMAIN  = 'house-only-2.myshopify.com';
 const API_VERSION     = '2026-04';
 const WEBHOOK_ID      = 'gid://shopify/WebhookSubscription/2252779028864';

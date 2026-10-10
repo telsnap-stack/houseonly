@@ -35,6 +35,7 @@
  *   STAGING_BS   (o PROD_BS con --prod)  Bearer de la capa de entidades
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import {
   ENTITY_MF_NAMESPACE, ENTITY_MF_KEYS, planMetafield, chunkMetafieldWrites,
   labelFromTags, METAFIELDS_SET_MAX,

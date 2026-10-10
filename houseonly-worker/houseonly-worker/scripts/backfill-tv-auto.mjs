@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { createHmac } from 'node:crypto';
 const SHOPIFY_DOMAIN = 'house-only-2.myshopify.com';
 const API_VERSION    = '2026-04';

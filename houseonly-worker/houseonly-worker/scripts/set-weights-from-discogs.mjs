@@ -29,7 +29,8 @@
  *   node scripts/set-weights-from-discogs.mjs --commit --incluir-dudosos
  *   opciones: --limit N  --out ruta.csv
  *
- * Entorno:
+ * Entorno (o .dev.vars de houseonly-worker, que carga scripts/lib/dev-vars.mjs;
+ * una variable de entorno definida manda sobre el archivo):
  *   DISCOGS_TOKEN                opcional: 60 llamadas/min en vez de 25
  *   SHOPIFY_ADMIN_CLIENT_ID/SECRET  solo para --commit (como los otros scripts)
  *
@@ -40,6 +41,7 @@
  * que ya tiene el peso calculado se salta.
  */
 
+import { faltan, DEV_VARS_PATH } from './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -163,7 +165,8 @@ let adminToken = '';
 async function admin(query, variables) {
   if (!adminToken) {
     const { SHOPIFY_ADMIN_CLIENT_ID: id, SHOPIFY_ADMIN_CLIENT_SECRET: secret } = process.env;
-    if (!id || !secret) throw new Error('--commit necesita SHOPIFY_ADMIN_CLIENT_ID y SHOPIFY_ADMIN_CLIENT_SECRET');
+    const sinValor = faltan('SHOPIFY_ADMIN_CLIENT_ID', 'SHOPIFY_ADMIN_CLIENT_SECRET');
+    if (sinValor.length) throw new Error(`--commit necesita ${sinValor.join(' y ')}: ponlas en el entorno o en ${DEV_VARS_PATH}`);
     const r = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ grant_type: 'client_credentials', client_id: id, client_secret: secret }).toString(),

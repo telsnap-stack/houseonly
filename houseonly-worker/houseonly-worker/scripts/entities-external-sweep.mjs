@@ -63,6 +63,7 @@
  *   STAGING_BS   ...el de staging, para --send sin --prod
  */
 
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';

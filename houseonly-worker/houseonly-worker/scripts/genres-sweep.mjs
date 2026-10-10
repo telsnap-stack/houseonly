@@ -18,6 +18,7 @@
  *   node scripts/genres-sweep.mjs --limpieza      dry-run de la pasada B
  *   node scripts/genres-sweep.mjs --limpieza --apply
  */
+import './lib/dev-vars.mjs';   // SHOPIFY_ADMIN_* y DISCOGS_TOKEN desde .dev.vars (el entorno manda)
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
