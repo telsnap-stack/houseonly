@@ -22,6 +22,14 @@
 // sumar sobre un dato viejo.
 //
 // dry por defecto: lista lo que sumaria, sin tocar Shopify ni el registro.
+//
+// FORTHCOMING (2026-10-11): si el producto lleva el tag `forthcoming` (un
+// pre-order que acaba de llegar), tras una suma correcta se le quita ese tag con
+// tagsRemove, lo mismo que hace el cron de graduacion al pasar la fecha (y solo
+// ese tag). Asi sale de Forthcoming y entra en el catalogo en el momento de la
+// llegada, no al dia siguiente. El dry-run lo avisa ("quitaria") y el registro
+// del libro guarda si se quito o por que no. Un fallo al quitar el tag NO deshace
+// la suma: el stock ya esta en Shopify y el registro queda "aplicado".
 
 import { shopifyAdminGraphQL, getShopifyAdminToken, type ShopifyAdminEnv } from './shopify-admin';
 
@@ -40,7 +48,11 @@ interface Resultado {
   producto?: string;
   motivo?: string;
   aplicadoEn?: string;
+  forthcoming?: 'quitaria' | 'quitado' | 'error';   // solo si el producto lleva el tag
+  forthcomingMotivo?: string;
 }
+
+const FORTHCOMING_TAG = 'forthcoming';
 
 const claveRegistro = (factura: string, sku: string) => `stock:${factura}:${sku}`;
 
@@ -82,6 +94,8 @@ async function ubicacionDeLaTienda(env: StockAddEnv): Promise<{ id: string; name
 
 interface Variante {
   inventoryItemId: string;
+  productId: string;
+  forthcoming: boolean;      // el producto lleva el tag `forthcoming`
   tracked: boolean;
   disponible: number | null;   // null = el item no esta activo en esa ubicacion
   producto: string;
@@ -93,7 +107,7 @@ async function resolverSku(env: StockAddEnv, sku: string, locationId: string): P
       productVariants(first: 10, query: $q) {
         edges { node {
           sku
-          product { title }
+          product { id title tags }
           inventoryItem {
             id tracked
             inventoryLevel(locationId: $loc) { quantities(names: ["available"]) { name quantity } }
@@ -111,10 +125,33 @@ async function resolverSku(env: StockAddEnv, sku: string, locationId: string): P
   const q = nivel?.quantities?.find((x: any) => x.name === 'available');
   return {
     inventoryItemId: v.inventoryItem?.id,
+    productId: v.product?.id || '',
+    forthcoming: (v.product?.tags || []).includes(FORTHCOMING_TAG),
     tracked: !!v.inventoryItem?.tracked,
     disponible: nivel ? (typeof q?.quantity === 'number' ? q.quantity : null) : null,
     producto: v.product?.title || '',
   };
+}
+
+// Quita SOLO el tag `forthcoming`, con la misma mutacion que el cron de
+// graduacion (lib/graduation.ts). Nunca lanza: devuelve el motivo si falla.
+async function quitarForthcoming(env: StockAddEnv, productId: string): Promise<{ ok: true } | { ok: false; motivo: string }> {
+  if (!productId) return { ok: false, motivo: 'sin id de producto' };
+  try {
+    const r = await shopifyAdminGraphQL(env, `
+      mutation removeForthcoming($id: ID!, $tags: [String!]!) {
+        tagsRemove(id: $id, tags: $tags) {
+          node { id }
+          userErrors { field message }
+        }
+      }`, { id: productId, tags: [FORTHCOMING_TAG] });
+    const errores = [...(r?.errors || []), ...(r?.data?.tagsRemove?.userErrors || [])];
+    if (errores.length) return { ok: false, motivo: errores.map((e: any) => e.message).join('; ') };
+    if (!r?.data?.tagsRemove?.node) return { ok: false, motivo: 'Shopify no confirmó tagsRemove' };
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, motivo: `sin respuesta de Shopify (${e?.message || e})` };
+  }
 }
 
 export async function handleStockAdd(request: Request, env: StockAddEnv, bearerValido: boolean): Promise<Response> {
@@ -184,7 +221,8 @@ export async function handleStockAdd(request: Request, env: StockAddEnv, bearerV
     if (v.disponible === null) { resultados.push({ sku, estado: 'error', delta, producto: v.producto, motivo: `no está activo en la ubicación ${ubicacion.name}` }); continue; }
 
     if (dry) {
-      resultados.push({ sku, estado: 'sumaria', delta, antes: v.disponible, despues: v.disponible + delta, producto: v.producto });
+      resultados.push({ sku, estado: 'sumaria', delta, antes: v.disponible, despues: v.disponible + delta, producto: v.producto,
+                        ...(v.forthcoming ? { forthcoming: 'quitaria' as const } : {}) });
       continue;
     }
 
@@ -230,11 +268,25 @@ export async function handleStockAdd(request: Request, env: StockAddEnv, bearerV
     }
     const cambio = (grupo.changes || []).find((c: any) => c.name === 'available');
     const despues = typeof cambio?.quantityAfterChange === 'number' ? cambio.quantityAfterChange : v.disponible + delta;
-    await env.STOCK_LEDGER.put(clave, JSON.stringify({
+    // Primero el registro de la suma: el stock es lo que manda y nunca debe
+    // quedar "en-curso" por culpa del tag.
+    const registro: any = {
       estado: 'aplicado', factura, sku, delta, antes: v.disponible, despues, producto: v.producto,
       at, groupId: grupo.id, source: body?.source || '',
-    }));
-    resultados.push({ sku, estado: 'sumado', delta, antes: v.disponible, despues, producto: v.producto, aplicadoEn: at });
+    };
+    await env.STOCK_LEDGER.put(clave, JSON.stringify(registro));
+    const res: Resultado = { sku, estado: 'sumado', delta, antes: v.disponible, despues, producto: v.producto, aplicadoEn: at };
+
+    if (v.forthcoming) {
+      const tag = await quitarForthcoming(env, v.productId);
+      res.forthcoming = tag.ok ? 'quitado' : 'error';
+      if (!tag.ok) res.forthcomingMotivo = tag.motivo;
+      registro.forthcoming = tag.ok
+        ? { estado: 'quitado', at: new Date().toISOString(), productId: v.productId }
+        : { estado: 'error', motivo: tag.motivo, productId: v.productId };
+      await env.STOCK_LEDGER.put(clave, JSON.stringify(registro));
+    }
+    resultados.push(res);
   }
 
   return json({ ok: true, dry, invoice: factura, ubicacion, permisos, resultados });
