@@ -249,7 +249,11 @@ export async function refreshAccessToken(
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
-    throw new Error(`token refresh failed: ${res.status} ${txt.slice(0, 200)}`);
+    // El status viaja en el error: 400/401 es refresh token rechazado, el resto
+    // (5xx, 429) un fallo pasajero que no debe cerrar la sesion.
+    const e: Error & { status?: number } = new Error(`token refresh failed: ${res.status} ${txt.slice(0, 200)}`);
+    e.status = res.status;
+    throw e;
   }
   return await res.json() as TokenResponse;
 }
@@ -286,6 +290,16 @@ export async function caapiQuery(
   query: string,
   variables?: Record<string, any>,
 ): Promise<any | null> {
+  return (await caapiQueryConStatus(accessToken, query, variables))?.json ?? null;
+}
+
+// Lo mismo, con el status HTTP de CAAPI: hace falta para distinguir "token
+// rechazado" (401/403) de "Shopify fallo" (5xx, 429). null = fallo de red.
+async function caapiQueryConStatus(
+  accessToken: string,
+  query: string,
+  variables?: Record<string, any>,
+): Promise<{ status: number; json: any | null } | null> {
   if (!accessToken) return null;
   try {
     const endpoint = await caapiGraphqlEndpoint();
@@ -298,7 +312,7 @@ export async function caapiQuery(
       },
       body: JSON.stringify(variables ? { query, variables } : { query }),
     });
-    return await res.json().catch(() => null);
+    return { status: res.status, json: await res.json().catch(() => null) };
   } catch {
     return null;
   }
@@ -371,13 +385,29 @@ export async function customerIdFromSession(
 // This is the single place token-lifetime is managed; both customerIdFromSession
 // and caapiQueryBySession build on it.
 async function getValidSession(env: AuthEnv, sessionId: string): Promise<SessionData | null> {
-  const sess = await readSession(env, sessionId);
-  if (!sess) return null;
+  const r = await resolverSesion(env, sessionId);
+  return r.ok ? r.sess : null;
+}
+
+// Por que una sesion no vale. 'sin-sesion' y 'caducada' son un logout de verdad
+// (401); 'temporal' es Shopify o KV fallando ahora mismo (502): el frontend no
+// debe cerrar la sesion por eso.
+export type SesionResuelta =
+  | { ok: true; sess: SessionData }
+  | { ok: false; motivo: 'sin-sesion' | 'caducada' | 'temporal' };
+
+const sesionFresca = (s: SessionData): boolean =>
+  Date.now() < s.expiresAt - REFRESH_SKEW_S * 1000;
+
+async function resolverSesion(env: AuthEnv, sessionId: string): Promise<SesionResuelta> {
+  let sess: SessionData | null;
+  try { sess = await readSession(env, sessionId); } catch { return { ok: false, motivo: 'temporal' }; }
+  if (!sess) return { ok: false, motivo: 'sin-sesion' };
 
   // Proactively refresh if the access token is at/near expiry. The session
   // (and thus wishlist/account access) survives as long as the refresh token is
   // valid, well beyond a single access-token lifetime.
-  if (Date.now() >= sess.expiresAt - REFRESH_SKEW_S * 1000) {
+  if (!sesionFresca(sess)) {
     try {
       const t = await refreshAccessToken(env, sess.refreshToken);
       sess.accessToken = t.access_token;
@@ -387,12 +417,22 @@ async function getValidSession(env: AuthEnv, sessionId: string): Promise<Session
       if (t.id_token) sess.idToken = t.id_token;
       sess.expiresAt = Date.now() + (t.expires_in || 3600) * 1000;
       await writeSession(env, sessionId, sess);
-    } catch {
-      // Refresh failed (revoked / expired refresh token). Treat as logged out.
-      return null;
+    } catch (e: any) {
+      if (e?.status !== 400 && e?.status !== 401) return { ok: false, motivo: 'temporal' };
+      // invalid_grant. Puede que el refresh token este revocado, o que otra
+      // peticion de la misma pagina (perfil, wishlist, follows salen a la vez)
+      // lo haya usado antes: Shopify lo rota y el viejo deja de valer. En ese
+      // caso la otra peticion guarda enseguida la sesion con el token nuevo.
+      for (const ms of [150, 400, 800]) {
+        await new Promise((r) => setTimeout(r, ms));
+        let otra: SessionData | null = null;
+        try { otra = await readSession(env, sessionId); } catch { /* sigue mirando */ }
+        if (otra && sesionFresca(otra) && otra.refreshToken !== sess.refreshToken) return { ok: true, sess: otra };
+      }
+      return { ok: false, motivo: 'caducada' };
     }
   }
-  return sess;
+  return { ok: true, sess };
 }
 
 // Return a fresh CAAPI access token for a session (refreshing if needed), or
@@ -422,6 +462,25 @@ export async function caapiQueryBySession(
   const sess = await getValidSession(env, sessionId);
   if (!sess) return null;
   return caapiQuery(sess.accessToken, query, variables);
+}
+
+// caapiQueryBySession con el status que debe devolver el endpoint: 401 solo si
+// la sesion no vale (no existe, refresh revocado, o CAAPI rechaza el token);
+// 502 si Shopify o la red fallan. El frontend cierra la sesion con un 401, asi
+// que un fallo pasajero nunca debe salir como 401. (2026-10-14)
+export async function caapiQueryBySessionConStatus(
+  env: AuthEnv,
+  sessionId: string,
+  query: string,
+  variables?: Record<string, any>,
+): Promise<{ status: 200 | 401 | 502; json: any | null }> {
+  const r = await resolverSesion(env, sessionId);
+  if (!r.ok) return { status: r.motivo === 'temporal' ? 502 : 401, json: null };
+  const res = await caapiQueryConStatus(r.sess.accessToken, query, variables);
+  if (!res) return { status: 502, json: null };
+  if (res.status === 401 || res.status === 403) return { status: 401, json: res.json };
+  if (res.status < 200 || res.status >= 300) return { status: 502, json: res.json };
+  return { status: 200, json: res.json };
 }
 
 // ── LOGOUT URL ────────────────────────────────────────────────────────────

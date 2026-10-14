@@ -935,6 +935,7 @@ import {
   consumeAuthState,
   customerIdFromSession,
   caapiQueryBySession,
+  caapiQueryBySessionConStatus,
   accessTokenFromSession,
 } from './lib/auth';
 
@@ -2464,10 +2465,13 @@ export default {
     // legacy customerProfile() returned, so the AccountDrawer is unchanged.
     if (action === 'account-profile' && request.method === 'GET') {
       const session = url.searchParams.get('session') || '';
-      const d = await caapiQueryBySession(env, session,
+      // 401 solo si la sesion no vale: con un 401 el frontend cierra la
+      // sesion. Un fallo pasajero de Shopify es 502 y la sesion sigue.
+      const r = await caapiQueryBySessionConStatus(env, session,
         `query { customer { id displayName firstName lastName emailAddress { emailAddress } } }`);
-      const c = d?.data?.customer;
-      if (!c) return jsonRes({ error: 'auth' }, 401);
+      if (r.status === 401) return jsonRes({ error: 'auth' }, 401);
+      const c = r.json?.data?.customer;
+      if (r.status !== 200 || !c) return jsonRes({ error: 'temporal' }, 502);
       return jsonRes({
         id: c.id,
         email: c.emailAddress?.emailAddress || '',
