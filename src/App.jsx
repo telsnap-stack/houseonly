@@ -726,10 +726,14 @@ async function customerActivateByUrl(activationUrl, password) {
   return result.customerAccessToken;
 }
 
+// Devuelve el perfil, 'auth' si el worker dice que la sesion no vale (401), o
+// null si no se pudo saber (red, 5xx). Solo 'auth' debe cerrar la sesion: antes
+// cualquier fallo la borraba y el cliente quedaba fuera sin enterarse (2026-10-14).
 async function customerProfile(session) {
-  if (!session) return null;
+  if (!session) return 'auth';
   try {
     const r = await fetch(`${WORKER_URL}?action=account-profile&session=${encodeURIComponent(session)}`);
+    if (r.status === 401) return 'auth';
     if (!r.ok) return null;
     const d = await r.json();
     if (d.error) return null;
@@ -1296,6 +1300,16 @@ function PlayerProvider({ children, gate }) {
     });
   };
 
+  // Si el snippet no carga (red, CORS, 404), 'canplay' no llega nunca y el
+  // reproductor se quedaba "sonando" sin sonido ni aviso. Se para y el boton
+  // vuelve a play, asi un segundo clic lo reintenta. (2026-10-14)
+  const onAudioError = () => {
+    const a = audioRef.current;
+    if (!a || !a.getAttribute('src')) return; // vaciar la cola tambien dispara error: no es un fallo
+    setPlaying(false);
+    a.removeAttribute('src');                  // el reintento vuelve a poner src y carga de cero
+  };
+
   const current = currentIdx >= 0 ? queue[currentIdx] : null;
   const currentRelease = current?.releaseSnap || null;
 
@@ -1319,7 +1333,7 @@ function PlayerProvider({ children, gate }) {
 
   return (
     <PlayerCtx.Provider value={value}>
-      <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onEnded={onEnded} preload="metadata" crossOrigin="anonymous" />
+      <audio ref={audioRef} onTimeUpdate={onTimeUpdate} onEnded={onEnded} onError={onAudioError} preload="metadata" crossOrigin="anonymous" />
       {children}
     </PlayerCtx.Provider>
   );
@@ -14427,13 +14441,20 @@ export default function App() {
     if (!auth?.session) { setProfile(null); return; }
 
     (async () => {
-      const p = await customerProfile(auth.session);
+      // Un fallo pasajero (red, 5xx) se reintenta una vez; la sesion solo se
+      // cierra si el worker contesta 401.
+      let p = await customerProfile(auth.session);
+      if (p === null && !cancelled) {
+        await new Promise(r => setTimeout(r, 2000));
+        if (!cancelled) p = await customerProfile(auth.session);
+      }
       if (cancelled) return;
-      if (!p) {
+      if (p === 'auth') {
         // Session rejected/expired → log out locally.
         saveAuth(null); setAuth(null); setProfile(null);
         return;
       }
+      if (!p) return; // no se sabe: se conserva la sesion; el perfil vuelve en la siguiente carga
       setProfile(p);
       // Merge local list into server, then pull authoritative list
       const localItems = loadLocalWishlist();
@@ -14968,7 +14989,7 @@ export default function App() {
         <div onClick={()=>setAudioGateOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
           <div onClick={e=>e.stopPropagation()} style={{background:S.surf,border:`1px solid ${S.border}`,borderRadius:6,padding:'28px 26px',maxWidth:360,width:'100%',textAlign:'center'}}>
             <div style={{fontSize:11,color:S.accent,letterSpacing:2,textTransform:'uppercase',fontWeight:700,marginBottom:10}}>Pre-order previews</div>
-            <div style={{fontSize:14,color:S.text,lineHeight:1.55,marginBottom:6}}>Create a free account to listen to forthcoming releases before they drop.</div>
+            <div style={{fontSize:14,color:S.text,lineHeight:1.55,marginBottom:6}}>This is a pre-order — create a free account to listen before it drops.</div>
             <div style={{fontSize:11,color:S.muted,lineHeight:1.5,marginBottom:20}}>The rest of the catalogue plays freely — this is just for the pre-order previews.</div>
             <button onClick={handleSignIn} style={{width:'100%',background:S.accent,color:'#080808',border:'none',borderRadius:4,padding:'12px 0',cursor:'pointer',fontSize:12,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',fontFamily:'inherit',marginBottom:10}}>Sign in / Create account</button>
             <button onClick={()=>setAudioGateOpen(false)} style={{background:'transparent',border:'none',color:S.muted,cursor:'pointer',fontSize:11,letterSpacing:1,textTransform:'uppercase',fontFamily:'inherit'}}>Not now</button>
