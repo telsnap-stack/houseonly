@@ -1300,15 +1300,28 @@ function PlayerProvider({ children, gate }) {
     });
   };
 
-  // Si el snippet no carga (red, CORS, 404), 'canplay' no llega nunca y el
-  // reproductor se quedaba "sonando" sin sonido ni aviso. Se para y el boton
-  // vuelve a play, asi un segundo clic lo reintenta. (2026-10-14)
-  const onAudioError = () => {
+  // Si el snippet no carga, 'canplay' no llega nunca y el reproductor se
+  // quedaba "sonando" sin sonido ni aviso. Se para y el boton vuelve a play;
+  // un segundo clic lo reintenta de cero (el efecto de arriba vuelve a poner
+  // src). Dos vias: el evento error, y un vigilante, porque con un 404 de R2
+  // Chrome no da error: se queda cargando y solo emite 'stalled'
+  // (staging, 2026-10-14).
+  const pararPorFallo = useCallback(() => {
     const a = audioRef.current;
     if (!a || !a.getAttribute('src')) return; // vaciar la cola tambien dispara error: no es un fallo
     setPlaying(false);
-    a.removeAttribute('src');                  // el reintento vuelve a poner src y carga de cero
-  };
+    a.removeAttribute('src');
+  }, []);
+  const onAudioError = pararPorFallo;
+  useEffect(() => {
+    if (!isPlaying) return;
+    const t = setTimeout(() => {
+      const a = audioRef.current;
+      // Solo si no llego a arrancar (3 = HAVE_FUTURE_DATA); un seek baja el readyState un momento.
+      if (a && a.readyState < 3 && !(a.currentTime > 0)) pararPorFallo();
+    }, 10000);
+    return () => clearTimeout(t);
+  }, [isPlaying, currentIdx, queue, pararPorFallo]);
 
   const current = currentIdx >= 0 ? queue[currentIdx] : null;
   const currentRelease = current?.releaseSnap || null;
