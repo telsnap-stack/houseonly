@@ -55,10 +55,12 @@
   // to prod. Polls Discogs marketplace every 15 min to detect sales (Fase 3E).
   // Staging cron continues to run independently (see env.staging.triggers below).
   "triggers": {
-    // */15 — Discogs + graduacion, lo de siempre.
+    // 7,22,37,52 — Discogs + graduacion, cada 15 min pero fuera del cuarto de
+    //        hora: a :00/:15 el cupo de 60/min de Discogs (por IP de salida,
+    //        compartida en Cloudflare) llega ya gastado (used 69-83, 2026-10-16).
     // 0 6  — avisos de novedades (fase 6). scheduled() bifurca por event.cron;
     //        la expresion tiene que coincidir con DAILY_CRON en src/index.ts.
-    "crons": ["*/15 * * * *", "0 6 * * *"]
+    "crons": ["7,22,37,52 * * * *", "0 6 * * *"]
   },
   "env": {
     "staging": {
