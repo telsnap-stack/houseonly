@@ -772,6 +772,9 @@ function saveLocalWishlist(items) {
 function recordToWishlistItem(r) {
   return {
     handle: r.slug || r.handle || (r.id != null ? String(r.id) : ''),
+    // `handle` es el slug de la web, no el de Shopify: para volver a pedir el
+    // disco hace falta el handle real (resolveWishlistRecord).
+    shopifyHandle: r.handle || '',
     title: r.title || '',
     artist: r.artist || '',
     label: r.label || '',
@@ -779,6 +782,29 @@ function recordToWishlistItem(r) {
     coverUrl: r.coverUrl || '',
     addedAt: Date.now(),
   };
+}
+
+// Un disco de la wishlist que no esta en la pagina cargada se pide a Shopify
+// por su handle REAL. `item.handle` es el slug (makeSlug) y Shopify no lo
+// conoce: buscarlo por ahi devolvia null y "+ Cart" no hacia nada. Los items
+// guardados antes de `shopifyHandle` lo sacan de la ficha prerenderizada
+// (<meta name="shopify-handle">); sin ficha, de la lista de pre-orders.
+async function resolveWishlistRecord(item, records) {
+  const loaded = records.find(rec => (rec.slug||'') === item.handle);
+  if (loaded) return loaded;
+  let handle = item.shopifyHandle || '';
+  if (!handle) {
+    try {
+      const res = await fetch(`/products/${encodeURIComponent(item.handle)}/`);
+      if (res.ok) {
+        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        handle = doc.querySelector('meta[name="shopify-handle"]')?.content?.trim() || '';
+      }
+    } catch { /* sin ficha: se intenta como pre-order */ }
+  }
+  try {
+    return handle ? await fetchShopifyProductByHandle(handle) : await fetchForthcomingBySlug(item.handle);
+  } catch { return null; }
 }
 
 async function fetchServerWishlist(session) {
@@ -1874,7 +1900,7 @@ function RecordCard({ r, onOpen, onAdd, isWished, onWishlistToggle }) {
               if (r.stock === 0 && eligible) return null;
               if (r.stock > 0) {
                 if (hasVariantChoice) return <button onClick={e=>{e.stopPropagation();onOpen(r);}} title="Choose a version before adding to cart" style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>Options</button>;
-                return <button onClick={e=>{e.stopPropagation();onAdd(r);}} style={{ background:hov?S.accent:S.border, color:hov?'#080808':S.muted, border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', transition:'all 0.15s', whiteSpace:'nowrap' }}>+ Cart</button>;
+                return <button onClick={e=>{e.stopPropagation();onAdd(r);}} style={{ background:S.accent, color:'#080808', border:'none', borderRadius:2, cursor:'pointer', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', whiteSpace:'nowrap' }}>+ Cart</button>;
               }
               return <button disabled style={{ background:S.border, color:S.muted, border:'none', borderRadius:2, cursor:'not-allowed', fontSize:9, fontWeight:700, letterSpacing:1.5, padding:'5px 10px', textTransform:'uppercase', opacity:0.4, whiteSpace:'nowrap' }}>Sold Out</button>;
             })()}
@@ -14549,12 +14575,7 @@ export default function App() {
   // If the record isn't in our loaded list yet (e.g. user is on page 1 but item is from page 5),
   // fetch it from Shopify directly so we get the shopifyVariantId needed for checkout.
   const addWishlistItemToCart = async (item) => {
-    let r = records.find(rec => (rec.slug||'') === item.handle);
-    if (!r) {
-      try {
-        r = await fetchShopifyProductByHandle(item.handle);
-      } catch { /* ignore */ }
-    }
+    const r = await resolveWishlistRecord(item, records);
     if (!r) return;
     // Multi-variant (e.g. Black/Coloured): don't silently add the default —
     // open the product so the buyer picks the version, and keep it wishlisted.
@@ -14570,10 +14591,7 @@ export default function App() {
     if (wishItems.length === 0) return;
     const toAdd = [];
     for (const item of wishItems) {
-      let r = records.find(rec => (rec.slug||'') === item.handle);
-      if (!r) {
-        try { r = await fetchShopifyProductByHandle(item.handle); } catch { /* skip */ }
-      }
+      const r = await resolveWishlistRecord(item, records);
       // Skip multi-variant records: they need a colour choice, so leave them
       // wishlisted (like OOS items) rather than bulk-adding the default.
       if (r && r.stock > 0 && (r.variants?.length || 0) <= 1) toAdd.push({ item, r });
