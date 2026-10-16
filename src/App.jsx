@@ -1006,8 +1006,20 @@ function esVisibleEnTienda(r) {
   return (r.stock ?? 0) > 0;
 }
 
-// Discos visibles por pagina de la rejilla. 24 llena filas de 2, 3, 4, 6 y 8.
+// Discos visibles por pagina de la rejilla. 24 llena filas de 2, 3, 4 y 6
+// columnas (REJILLA_CSS), y sus dos mitades de 12 tambien.
 const VISIBLES_POR_PAGINA = 24;
+
+// Columnas de la rejilla: 2, 3, 4 o 6, nunca 5. Con auto-fill salian 5 entre
+// ~880 y 1051 px (un iPad apaisado) y ni 24 ni 12 llenan filas de 5. Cada salto
+// se da donde la columna nueva cabe con >=160 px: contenedor = ancho - 32 de
+// padding (tope 1100), hueco 12. 3 col: 3*160+2*12+32 = 536; 4: 708; 6: 1052.
+const REJILLA_CSS = `
+.ho-rejilla{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (min-width:536px){.ho-rejilla{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (min-width:708px){.ho-rejilla{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media (min-width:1052px){.ho-rejilla{grid-template-columns:repeat(6,minmax(0,1fr))}}
+`;
 
 // Una pagina de la rejilla con exactamente VISIBLES_POR_PAGINA discos visibles.
 //
@@ -15004,12 +15016,14 @@ export default function App() {
             {filtered.map(r=><ForthcomingRow key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />)}
           </div>
         ) : (
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:12}}>
-            {/* La tarjeta del newsletter ocupa una celda: con ella cada pagina
-                serian 24+1 y la ultima fila quedaria coja. Mientras queda por
-                cargar se guarda el ultimo disco, que sale primero en la pagina
-                siguiente; en la ultima pagina se enseña todo. */}
-            {(hasMore && filtered.length > 14 ? filtered.slice(0, -1) : filtered).flatMap((r, i) => {
+          <div className="ho-rejilla">
+            <style>{REJILLA_CSS}</style>
+            {/* La tarjeta del newsletter (variant grid) ocupa una FILA entera
+                (gridColumn 1/-1), no una celda: cada pagina es 12 discos, la
+                fila del newsletter y 12 discos, todas completas. No se guarda
+                ningun disco para la pagina siguiente: eso dejaba 23 y la ultima
+                fila coja (6·6·NL·6·5, 2026-10-16). */}
+            {filtered.flatMap((r, i) => {
               const card = <RecordCard key={r.id} r={r} onOpen={openProduct} onAdd={addToCart} isWished={isWished} onWishlistToggle={wishlistToggle} />;
               // Drop a newsletter card into the row after the 12th record, but only
               // when there are enough records that it doesn't look out of place.
