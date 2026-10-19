@@ -64,6 +64,8 @@ Reglas:
 - Lo que no encaje con House Only → descartar: true. Sin explicarlo.
 - Si House Only ya lo tiene → yaLoTenemos: true; en "distinto" una frase SOLO si la otra tienda lo resuelve de forma claramente distinta (si no, cadena vacía).
 - En "ids" copia los id de TODOS los candidatos que cubre la función; cada candidato en una sola función.
+- Cada tienda trae "yaReportadas": funciones suyas que ya salieron otra semana. Si un candidato es una de ellas, usa EXACTAMENTE ese nombre.
+- Pon nombres cortos y estables ("Aviso de vuelta a stock", "Tarjeta regalo"): el mismo para la misma función en todas las tiendas.
 - Castellano, frases cortas, sin adornos.`;
 
 const ESQUEMA = {
@@ -110,6 +112,7 @@ function juzga(tiendas) {
   const entrada = {
     tiendas: tiendas.map(t => ({
       tienda: t.name,
+      yaReportadas: t.yaReportadas,
       candidatos: t.candidatos.map(c => ({
         id: c.id, pagina: c.pagina, tipo: c.tipo, valor: c.valor,
         tambienEnHouseOnly: (nuestra[c.tipo] || []).includes(c.valor),
@@ -146,40 +149,115 @@ const yaTenemos = [];   // detras de las ideas: es contexto, no propuesta
 const adjuntos = [];
 let coste = 0, sinJuicio = 0;
 
-const ajenas = d.tiendas.filter(t => !t.propia && t.candidatos.length);
+// ── LO YA JUZGADO ───────────────────────────────────────────────────
+/**
+ * docs/scout/juicios.json: cada candidato juzgado, por tienda, con su veredicto
+ * y la semana en que se detecto. La CLI no deja fijar la temperatura, asi que
+ * el juicio puede variar entre pasadas; este registro hace que no importe:
+ *
+ *   - un candidato se juzga UNA vez; volver a generar el informe de la misma
+ *     semana reutiliza el veredicto guardado y sale identico
+ *   - una funcion se reporta una sola vez por tienda, la semana que se detecta
+ *     (el juez recibe las ya reportadas y las reconoce por su nombre)
+ *   - si `claude -p` falla, los candidatos quedan "pendiente" y se juzgan la
+ *     semana siguiente: no se pierden aunque scout.mjs ya los de por vistos
+ */
+const RUTA_JUICIOS = join(DIR, 'juicios.json');
+const juicios = existsSync(RUTA_JUICIOS) ? JSON.parse(readFileSync(RUTA_JUICIOS, 'utf8')) : { tiendas: {} };
+const deTienda = key => (juicios.tiendas[key] ||= { candidatos: {}, funciones: {} });
+const clave = c => `${c.tipo}:${c.valor}`;
+
 const porId = new Map();
-for (const t of ajenas) {
-  t.candidatos.sort((a, b) => orden(a) - orden(b));
-  t.candidatos.forEach((c, i) => { c.id = `${t.key}-${i + 1}`; porId.set(c.id, { ...c, tienda: t }); });
+const repetidos = [];       // juzgados esta misma semana en una pasada anterior
+const ajenas = [];
+for (const t of d.tiendas.filter(t => !t.propia)) {
+  const reg = deTienda(t.key);
+  const actuales = new Set(t.candidatos.map(clave));
+  const pendientes = Object.entries(reg.candidatos)
+    .filter(([k, v]) => v.decision === 'pendiente' && !actuales.has(k))
+    .map(([, v]) => ({ pagina: v.pagina, tipo: v.tipo, valor: v.valor, url: v.url, sinValidar: v.sinValidar }));
+  const porJuzgar = [];
+  for (const c of [...t.candidatos, ...pendientes]) {
+    const v = reg.candidatos[clave(c)];
+    if (!v || v.decision === 'pendiente') porJuzgar.push(c);
+    else if (v.fecha === d.fecha) repetidos.push({ c, t, v });
+  }
+  if (!porJuzgar.length) continue;
+  porJuzgar.sort((a, b) => orden(a) - orden(b));
+  porJuzgar.forEach((c, i) => { c.id = `${t.key}-${i + 1}`; porId.set(c.id, { ...c, tienda: t }); });
+  ajenas.push({ ...t, candidatos: porJuzgar, yaReportadas: Object.keys(reg.funciones).filter(n => reg.funciones[n].fecha !== d.fecha) });
 }
+
+const guarda = (t, c, decision, funcion = null) => {
+  deTienda(t.key).candidatos[clave(c)] = {
+    fecha: d.fecha, decision, funcion,
+    pagina: c.pagina, tipo: c.tipo, valor: c.valor, url: c.url || null, sinValidar: !!c.sinValidar,
+  };
+};
+
+/** nombre → { texto, cubre: [{tienda, pagina, sinValidar}] }: lo que sale esta semana. */
+const salen = new Map();
+const sale = (nombre, texto, t, c) => {
+  if (!salen.has(nombre)) salen.set(nombre, { nombre, ...texto, cubre: [] });
+  salen.get(nombre).cubre.push({ tienda: t, pagina: c.pagina, sinValidar: !!c.sinValidar });
+};
+for (const { c, t, v } of repetidos) {
+  const f = v.funcion && deTienda(t.key).funciones[v.funcion];
+  if (f && f.fecha === d.fecha && (v.decision === 'reportada' || v.decision === 'ya-lo-tenemos')) sale(v.funcion, f, t, c);
+}
+
 const j = ajenas.length ? juzga(ajenas) : { funciones: [], coste: 0 };
 if (j.error) {
   sinJuicio = ajenas.length;
   console.error(`  sin juicio (${j.error})`);
   for (const t of ajenas) for (const c of t.candidatos) {
+    guarda(t, c, 'pendiente');
     L.push(`- **${t.name}** · ${NOMBRE_PAGINA[c.pagina]} — ${NOMBRE_TIPO[c.tipo]} \`${c.valor}\`${c.sinValidar ? SIN_VALIDAR : ''} (sin juicio)`);
   }
 } else {
   coste = j.coste;
-  // Lo mas interesante primero: lo que sale en ficha o carrito antes que en portada.
-  const funciones = j.funciones.filter(f => !f.descartar)
-    .map(f => ({ ...f, cubre: f.ids.map(id => porId.get(id)).filter(Boolean) }))
-    .filter(f => f.cubre.length)
-    .sort((a, b) => Math.min(...a.cubre.map(orden)) - Math.min(...b.cubre.map(orden)));
-  for (const f of funciones) {
-    const tiendas = [...new Set(f.cubre.map(c => c.tienda.name))].join(', ');
-    const pagina = NOMBRE_PAGINA[f.cubre.reduce((m, c) => (orden(c) < orden(m) ? c : m)).pagina];
-    const marca = f.cubre.some(c => c.sinValidar) ? SIN_VALIDAR : '';
-    if (f.yaLoTenemos) {
-      if (f.distinto) yaTenemos.push(`- ${tiendas} · ${f.nombre} — ya lo tenemos; ellos lo hacen así: ${f.distinto}${marca}`);
-      continue;
+  const cubiertos = new Set();
+  for (const f of j.funciones) {
+    const decision = f.descartar ? 'descartada' : f.yaLoTenemos ? 'ya-lo-tenemos' : 'reportada';
+    const texto = { queEs: f.queEs, encaje: f.encaje, distinto: f.distinto || '', decision };
+    for (const id of f.ids) {
+      const c = porId.get(id);
+      if (!c || cubiertos.has(id)) continue;
+      cubiertos.add(id);
+      const t = c.tienda, reg = deTienda(t.key);
+      guarda(t, c, decision, f.nombre);
+      if (decision === 'descartada') continue;
+      const previa = reg.funciones[f.nombre];
+      if (previa && previa.fecha !== d.fecha) continue;   // ya reportada otra semana
+      reg.funciones[f.nombre] ||= { fecha: d.fecha, ...texto };
+      sale(f.nombre, reg.funciones[f.nombre], t, c);
     }
-    L.push(`- **${tiendas}** · ${pagina} — **${f.nombre}**: ${f.queEs}${marca}`);
-    L.push(`  ${f.encaje}`);
-    const shot = f.cubre[0].tienda.shots?.[f.cubre[0].pagina];
-    if (shot && !adjuntos.includes(shot)) adjuntos.push(shot);
   }
+  // Lo que el juez no metio en ninguna funcion lo vio y no le dio valor.
+  for (const [id, c] of porId) if (!cubiertos.has(id)) guarda(c.tienda, c, 'descartada');
 }
+
+// Lo mas interesante primero: lo que sale en ficha o carrito antes que en portada.
+// Orden fijo (pagina, nombre; tiendas como en sites.json): la misma semana sale
+// siempre igual, se juzgue ahora o se reutilice el veredicto guardado.
+const posTienda = t => d.tiendas.findIndex(x => x.key === t.key);
+const primeraPag = f => Math.min(...f.cubre.map(orden));
+for (const f of [...salen.values()].sort((a, b) => primeraPag(a) - primeraPag(b) || a.nombre.localeCompare(b.nombre))) {
+  f.cubre.sort((a, b) => posTienda(a.tienda) - posTienda(b.tienda) || orden(a) - orden(b));
+  const tiendas = [...new Set(f.cubre.map(c => c.tienda.name))].join(', ');
+  const pagina = NOMBRE_PAGINA[f.cubre.reduce((m, c) => (orden(c) < orden(m) ? c : m)).pagina];
+  const marca = f.cubre.some(c => c.sinValidar) ? SIN_VALIDAR : '';
+  if (f.decision === 'ya-lo-tenemos') {
+    if (f.distinto) yaTenemos.push(`- ${tiendas} · ${f.nombre} — ya lo tenemos; ellos lo hacen así: ${f.distinto}${marca}`);
+    continue;
+  }
+  L.push(`- **${tiendas}** · ${pagina} — **${f.nombre}**: ${f.queEs}${marca}`);
+  L.push(`  ${f.encaje}`);
+  const primera = f.cubre[0];
+  const shot = primera.tienda.shots?.[primera.pagina];
+  if (shot && !adjuntos.includes(shot)) adjuntos.push(shot);
+}
+writeFileSync(RUTA_JUICIOS, JSON.stringify(juicios, null, 1) + '\n');
 
 // Lo que desaparece de nuestra web: un formulario o un script que se va sin
 // que nadie lo haya quitado a proposito es una funcion rota.
