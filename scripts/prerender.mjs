@@ -18,6 +18,8 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { htmlToText, descripcionDeProducto } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
 import { POLICY_PAGES, CONTACT_LINKS } from '../src/policies.mjs';
+import { GIFT_CARD, esTarjetaRegalo } from '../src/giftcard.mjs';
+import { pathToFileURL } from 'node:url';
 
 // ── Config ──────────────────────────────────────────────────────
 const SITE_URL = 'https://houseonly.store';
@@ -134,7 +136,7 @@ async function fetchAllProducts() {
         pageInfo { hasNextPage endCursor }
         edges {
           node {
-            id title vendor descriptionHtml tags handle
+            id title vendor descriptionHtml tags handle isGiftCard productType
             variants(first:1) { edges { node { sku price { amount currencyCode } quantityAvailable } } }
             images(first:1) { edges { node { url } } }
           }
@@ -170,6 +172,14 @@ function parseProduct(node) {
     slug: makeSlug(artist, title, catalog),
     handle: node.handle || '',
   };
+}
+
+/**
+ * Los discos que llevan /products/<slug>/ y entran en el sitemap. La tarjeta
+ * regalo no: tiene su propia pagina, /gift-card/ (src/giftcard.mjs).
+ */
+export function productosDelCatalogo(nodes) {
+  return nodes.filter(n => !esTarjetaRegalo(n)).map(parseProduct).filter(p => p.title && p.slug);
 }
 
 // ── HTML template ──────────────────────────────────────────────
@@ -412,10 +422,31 @@ function renderIgHtml(template) {
     .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
 }
 
-function renderSitemap(products, entities = [], policyPaths = []) {
+// /gift-card/ — la ficha de la tarjeta regalo la pinta el cliente (con los
+// importes que sirva Shopify); aqui van su titulo, descripcion y canonical.
+function renderGiftCardHtml(template) {
+  const url = `${SITE_URL}${GIFT_CARD.path}`;
+  const seoHead = `  <title>${escapeHtml(GIFT_CARD.title)}</title>
+  <meta name="description" content="${escapeHtml(GIFT_CARD.description)}" />
+  <link rel="canonical" href="${url}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(GIFT_CARD.title)}" />
+  <meta property="og:description" content="${escapeHtml(GIFT_CARD.description)}" />
+  <meta property="og:url" content="${url}" />`;
+  const seoBody = `<noscript><h1>Gift card</h1><p>${escapeHtml(GIFT_CARD.description)}</p></noscript>`;
+  return template
+    .replace(/<title>[^<]*<\/title>/, '')
+    .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
+    .replace('</head>', `${seoHead}\n  </head>`)
+    .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
+}
+
+export function renderSitemap(products, entities = [], policyPaths = [], { giftCard = false } = {}) {
   const today = new Date().toISOString().slice(0, 10);
   const urls = [
     `<url><loc>${SITE_URL}/</loc><lastmod>${today}</lastmod><priority>1.0</priority></url>`,
+    // Solo si Shopify la sirve: mientras esta en borrador la pagina no ensena nada.
+    ...(giftCard ? [`<url><loc>${SITE_URL}${GIFT_CARD.path}</loc><lastmod>${today}</lastmod><priority>0.5</priority></url>`] : []),
     ...policyPaths.map(p => `<url><loc>${SITE_URL}${p}/</loc><lastmod>${today}</lastmod><priority>0.3</priority></url>`),
     ...products.map(p =>
       `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
@@ -445,7 +476,8 @@ Sitemap: ${SITE_URL}/sitemap.xml
 async function main() {
   console.log('[prerender] Fetching Shopify products...');
   const nodes = await fetchAllProducts();
-  const products = nodes.map(parseProduct).filter(p => p.title && p.slug);
+  const products = productosDelCatalogo(nodes);
+  const giftCardPublicada = nodes.some(esTarjetaRegalo);
   console.log(`[prerender] Got ${products.length} products`);
 
   console.log('[prerender] Reading dist/index.html template...');
@@ -502,12 +534,16 @@ async function main() {
   writeFileSync(join(DIST_DIR, 'ig', 'index.html'), conPiePoliticas(renderIgHtml(template)));
   console.log('[prerender] Wrote /ig');
 
+  mkdirSync(join(DIST_DIR, 'gift-card'), { recursive: true });
+  writeFileSync(join(DIST_DIR, 'gift-card', 'index.html'), conPiePoliticas(renderGiftCardHtml(template)));
+  console.log(`[prerender] Wrote /gift-card (${giftCardPublicada ? 'publicada, en el sitemap' : 'no publicada todavia, fuera del sitemap'})`);
+
   // La portada (y el fallback de la SPA) es la propia plantilla: se reescribe
   // con el pie al final, cuando ya no hace falta limpia.
   writeFileSync(join(DIST_DIR, 'index.html'), conPiePoliticas(template));
 
   console.log('[prerender] Generating sitemap.xml...');
-  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities, policyPaths));
+  writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities, policyPaths, { giftCard: giftCardPublicada }));
 
   console.log('[prerender] Generating robots.txt...');
   writeFileSync(join(DIST_DIR, 'robots.txt'), renderRobots());
@@ -515,7 +551,10 @@ async function main() {
   console.log(`[prerender] ✓ Done. ${products.length} products, ${entities.length} entities, sitemap, robots.`);
 }
 
-main().catch(err => {
-  console.error('[prerender] FAILED:', err);
-  process.exit(1);
-});
+// Solo al ejecutarlo (npm run build), no al importarlo desde los tests.
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  main().catch(err => {
+    console.error('[prerender] FAILED:', err);
+    process.exit(1);
+  });
+}

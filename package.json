@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build && node scripts/prerender.mjs",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test 'src/**/*.test.mjs' 'scripts/**/*.test.mjs'"
   },
   "dependencies": {
     "react": "^19.2.4",
