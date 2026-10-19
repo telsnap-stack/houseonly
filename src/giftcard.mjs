@@ -41,3 +41,10 @@ export const esRutaTarjeta = path => /^\/gift-card\/?$/.test(String(path || ''))
 
 /** "€25" de la variante; el titulo de Shopify ya es el importe. */
 export const importeDeVariante = v => String(v?.option || v?.title || '').trim() || `€${Number(v?.price || 0).toFixed(0)}`;
+
+/**
+ * La portada de la ficha: en la tarjeta, la imagen del importe elegido (cada
+ * variante tiene la suya en Shopify); si no la tiene, la del producto. Un disco
+ * usa siempre la del producto.
+ */
+export const portadaDe = (r, variante) => ((r?.isGiftCard && variante?.imagen) || r?.coverUrl || null);

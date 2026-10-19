@@ -9,7 +9,7 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
-import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante } from "./giftcard.mjs";
+import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
@@ -330,7 +330,7 @@ async function fetchGiftCard() {
     query($h: String!) {
       product(handle: $h) {
         id handle title descriptionHtml isGiftCard productType
-        variants(first:10) { edges { node { id title price { amount } availableForSale } } }
+        variants(first:10) { edges { node { id title price { amount } availableForSale image { url } } } }
         images(first:1) { edges { node { url } } }
       }
     }`, { h: GIFT_CARD.handle });
@@ -339,6 +339,8 @@ async function fetchGiftCard() {
   const variants = p.variants.edges.map(e => ({
     id: e.node.id, option: e.node.title, price: parseFloat(e.node.price?.amount || 0),
     disponible: !!e.node.availableForSale,
+    // Cada importe tiene su imagen en Shopify; la ficha la cambia con el selector.
+    imagen: e.node.image?.url || null,
   }));
   return tarjetaRegalo({ id: p.id, title: p.title, descriptionHtml: p.descriptionHtml, coverUrl: p.images.edges[0]?.node?.url || null, variants });
 }
@@ -363,7 +365,12 @@ const ES_PRODUCCION = typeof window !== 'undefined' && /^(houseonly\.store|www\.
 const TARJETA_DE_PREVIEW = () => tarjetaRegalo({
   id: 'gift-card-preview', preview: true, title: 'House Only Gift Card',
   descriptionHtml: "<p>Not sure which record they'd pick? Let them choose. The gift card is delivered by email and can be used on any order at houseonly.store. No expiry.</p>",
-  variants: [25, 50, 100].map(n => ({ id: `preview-${n}`, option: `€${n}`, price: n, disponible: false })),
+  // Los importes que tiene en Shopify (comprobado el 2026-10-19), con las mismas
+  // imagenes, que tambien estan en public/giftcard.
+  variants: [25, 75, 100].map(n => ({
+    id: `preview-${n}`, option: `€${n}`, price: n, disponible: false,
+    imagen: `/giftcard/giftcard-${n}.png`,
+  })),
 });
 
 // Varios productos por handle, en el orden pedido (la pagina /ig respeta el del
@@ -2248,6 +2255,8 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
   const selVariant = variants.find(v => v.id === variantId) || variants[0] || null;
   const shownPrice = hasChoice && selVariant ? selVariant.price : r.price;
   const shownStock = hasChoice && selVariant ? selVariant.stock : r.stock;
+  // La tarjeta regalo tiene una imagen por importe: cambia con el selector.
+  const portada = portadaDe(r, selVariant);
   // Cart lines are keyed by record id; give each variant its own line and
   // point checkout at the chosen variant. Single-variant records pass through
   // untouched (same object as before).
@@ -2264,8 +2273,8 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
         <div style={{ display:'flex', flexWrap:'wrap' }}>
           <div style={{ width:240, flexShrink:0, position:'relative' }}>
             <div style={{ paddingBottom:'100%', position:'relative', background:`linear-gradient(${r.g})` }}>
-              {coverSrc(r.coverUrl) && <img src={coverSrc(r.coverUrl)} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
-              {r.isGiftCard && !coverSrc(r.coverUrl) && (
+              {coverSrc(portada) && <img src={coverSrc(portada)} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
+              {r.isGiftCard && !coverSrc(portada) && (
                 <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', justifyContent:'flex-end', padding:22 }}>
                   <span style={{ fontSize:10, color:S.muted, letterSpacing:3, textTransform:'uppercase', fontWeight:700 }}>House Only</span>
                   <span style={{ fontSize:26, color:S.accent, fontWeight:800, letterSpacing:1, textTransform:'uppercase', lineHeight:1.1 }}>Gift card</span>

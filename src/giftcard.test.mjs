@@ -1,7 +1,7 @@
 // npm test  (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GIFT_CARD, EXCLUIR_TARJETAS, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante } from './giftcard.mjs';
+import { GIFT_CARD, EXCLUIR_TARJETAS, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from './giftcard.mjs';
 import { clausulasDeSeccion, partesDeBusqueda } from './catalogo.mjs';
 import { productosDelCatalogo, renderSitemap } from '../scripts/prerender.mjs';
 
@@ -65,4 +65,14 @@ test('ruta propia e importes', () => {
   assert.ok(esRutaTarjeta('/gift-card') && esRutaTarjeta('/gift-card/'));
   assert.ok(!esRutaTarjeta('/products/gift-card/'));
   assert.equal(importeDeVariante({ option: '€50', price: 50 }), '€50');
+});
+
+test('la portada de la tarjeta cambia con el importe; la de un disco no', () => {
+  const tarjeta = { isGiftCard: true, coverUrl: 'producto.png' };
+  const v = n => ({ option: `€${n}`, imagen: `giftcard-${n}.png` });
+  assert.equal(portadaDe(tarjeta, v(25)), 'giftcard-25.png');
+  assert.equal(portadaDe(tarjeta, v(75)), 'giftcard-75.png');
+  assert.equal(portadaDe(tarjeta, v(100)), 'giftcard-100.png');
+  assert.equal(portadaDe(tarjeta, { option: '€25' }), 'producto.png');
+  assert.equal(portadaDe({ coverUrl: 'disco.jpg' }, { imagen: 'otra.png' }), 'disco.jpg');
 });
