@@ -645,6 +645,66 @@
      "valor": "resenas-cliente",
      "url": "https://shop.kudosrecords.co.uk/artist/294001/geoff-kirkwood-fiona-brice",
      "sinValidar": false
+    },
+    "data:data-fancybox": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Galería ampliable de imágenes",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-fancybox",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "data:data-slide-to": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Galería ampliable de imágenes",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-slide-to",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "aria:aria-controls": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "aria",
+     "valor": "aria-controls",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "aria:aria-label": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "aria",
+     "valor": "aria-label",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "data:data-type": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-type",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "rutas:/release": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "rutas",
+     "valor": "/release",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
     }
    },
    "funciones": {
@@ -659,6 +719,13 @@
      "fecha": "2026-10-19",
      "queEs": "Valoraciones y opiniones de compradores sobre la tienda o el disco.",
      "encaje": "Daría confianza a una tienda pequeña y nueva frente a las grandes.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Galería ampliable de imágenes": {
+     "fecha": "2026-10-19",
+     "queEs": "En la ficha, el cliente pasa por varias imágenes del disco y las amplía a pantalla grande.",
+     "encaje": "Permitiría ver contraportada y el color real del vinilo antes de elegir entre Black y Coloured.",
      "distinto": "",
      "decision": "reportada"
     }
