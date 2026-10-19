@@ -8,7 +8,9 @@ import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/h
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
-import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, DNB_GENRE_ID, generoDeTags, resolveGenre, tagsConHijos, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
+import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante } from "./giftcard.mjs";
+import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -137,46 +139,11 @@ function parseProduct({ node }) {
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, descTracks, desc, g:'135deg,#1a1a2e,#16213e',
     tags, releaseDate,
+    isGiftCard: esTarjetaRegalo(node),
     // Alta en Shopify (ISO DateTime). Solo lo usa forthcomingPhase() para
     // caducar los pre-orders que no traen fecha de salida.
     createdAt: node.createdAt || '',
   };
-}
-
-// La seccion de Drum & Bass se define por el GENERO CANONICO, leido del modulo
-// compartido (src/lib/genres.mjs), no por una lista de grafias. Antes habia un
-// DNB_TAGS con seis escrituras a mano que no cubria "Drum + Bass" ni
-// "Jungle / Drum 'n' Bass", y esos discos se colaban entre el house.
-const DNB_TAG = genreTag(DNB_GENRE_ID);
-
-// Las clausulas que definen una seccion de la tienda. Las comparten la rejilla
-// (fetchShopifyProducts) y la comprobacion de pildoras (hayDiscosEnSeccion), para
-// que "hay discos" signifique exactamente lo que la rejilla va a mostrar.
-function clausulasDeSeccion({ filterTags = [], forthcoming = false, dnb = false } = {}) {
-  // Build a tag-AND query string for server-side filtering. Each filterTag is a
-  // raw tag value like "label:Word and Sound" or "year:2025".
-  //
-  // Forthcoming handling (mutually exclusive, drives the Forthcoming section vs
-  // the main catalogue):
-  //   - forthcoming=true  → REQUIRE the `forthcoming` tag  → only pre-orders
-  //   - forthcoming=false → EXCLUDE it via `-tag:'forthcoming'` so pre-orders
-  //     never leak into the main catalogue.
-  // Negation ("-tag:...") is supported by Shopify's search query grammar
-  // (verified against docs: a "-" modifier excludes documents with that value).
-  //
-  // Drum & Bass handling (separate "Drum & Bass Only" section):
-  //   - dnb=true  → REQUIRE any D&B tag  → only the D&B catalogue
-  //   - dnb=false → EXCLUDE all D&B tags so they never appear among the house
-  //     genres on the main page. (Forthcoming is exempt — pre-orders can be D&B.)
-  const clauses = filterTags.map(t => `tag:'${t}'`);
-  clauses.push(forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`);
-  if (dnb) {
-    clauses.push(`tag:'${DNB_TAG}'`);
-  } else if (!forthcoming) {
-    // Main catalogue: hide every D&B record from the house genres.
-    clauses.push(`-tag:'${DNB_TAG}'`);
-  }
-  return clauses;
 }
 
 // ¿Hay al menos un disco con este tag en esta seccion? Cache por sesion; si la
@@ -203,14 +170,15 @@ async function fetchShopifyProducts({ cursor=null, sortKey='CREATED_AT', reverse
       edges {
         cursor
         node {
-          id handle title vendor descriptionHtml tags createdAt
+          id handle title vendor descriptionHtml tags createdAt isGiftCard productType
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
       }
     }
   }`);
-  const { edges, pageInfo } = data.products;
+  const { pageInfo } = data.products;
+  const edges = sinTarjetas(data.products.edges);
   return { products: edges.map(parseProduct), cursors: edges.map(e => e.cursor), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
 
@@ -256,30 +224,7 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
    * Si el termino no resuelve —"pampa", "fokuz", "deep house pampa"— sigue
    * siendo texto libre, igual que siempre.
    */
-  const termino = searchTerm.trim();
-  const genero = resolveGenre([termino]);
-  // Un genero con hijos los arrastra: "house" trae tambien deep house y tech
-  // house. La lista sale del modulo y es cerrada.
-  const texto = genero
-    ? (t => t.length > 1 ? `(${t.map(x => `tag:'${x}'`).join(' OR ')})` : `tag:'${t[0]}'`)(tagsConHijos(genero.id))
-    : termino;
-  const queryParts = [texto, forthcoming ? `tag:'forthcoming'` : `-tag:'forthcoming'`];
-  for (const t of filterTags) queryParts.push(`tag:'${t}'`);
-  // El BUSCADOR no se reparte por secciones. La separacion entre house y drum &
-  // bass es para navegar; buscar es otra cosa: quien escribe "Fokuz" quiere sus
-  // discos, y Fokuz es un sello de D&B. Con el filtro de seccion puesto, esa
-  // busqueda devolvia "No records found" con 81 discos en la tienda, y lo mismo
-  // cualquier artista de jungle buscado desde la portada.
-  //
-  // Lo de `forthcoming` si se mantiene: un pre-order no es lo mismo que algo en
-  // stock, y ahi la separacion es de estado, no de estilo.
-  /**
-   * `products(query:)` y no `search(...)`: medido contra el catalogo, el
-   * conector `search` NO respeta el OR booleano —devolvia MENOS resultados que
-   * el texto solo— y sin OR no hay forma de sumar el tag del genero. La
-   * coincidencia por prefijo se conserva igual ("pamp" encuentra los 10 de
-   * Pampa), y las descripciones se siguen indexando.
-   */
+  const queryParts = partesDeBusqueda({ termino: searchTerm, forthcoming, filterTags });
   const combinedQuery = JSON.stringify(queryParts.join(' '));
   const data = await shopifyQuery(`{
     products(first: 24${after}, query: ${combinedQuery}) {
@@ -287,14 +232,15 @@ async function fetchShopifyProductSearch({ cursor=null, searchTerm='', filterTag
       edges {
         cursor
         node {
-          id handle title vendor descriptionHtml tags createdAt
+          id handle title vendor descriptionHtml tags createdAt isGiftCard productType
           variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
           images(first:1) { edges { node { url } } }
         }
       }
     }
   }`);
-  const { edges, pageInfo } = data.products;
+  const { pageInfo } = data.products;
+  const edges = sinTarjetas(data.products.edges);
   const products = edges.map(e => parseProduct({ node: e.node }));
   return { products, cursors: edges.map(e => e.cursor), hasNextPage: pageInfo.hasNextPage, endCursor: pageInfo.endCursor };
 }
@@ -374,6 +320,51 @@ async function fetchShopifyProductByHandle(handle) {
   if (!data.product) return null;
   return parseProduct({ node: data.product });
 }
+
+// La tarjeta regalo (src/giftcard.mjs). Consulta propia: sus variantes son
+// importes, y lo que dice si se pueden comprar es `availableForSale` —una
+// tarjeta no lleva inventario, asi que quantityAvailable no sirve—. null si no
+// esta publicada en el canal de la tienda (en borrador, por ejemplo).
+async function fetchGiftCard() {
+  const data = await shopifyQuery(`
+    query($h: String!) {
+      product(handle: $h) {
+        id handle title descriptionHtml isGiftCard productType
+        variants(first:10) { edges { node { id title price { amount } availableForSale } } }
+        images(first:1) { edges { node { url } } }
+      }
+    }`, { h: GIFT_CARD.handle });
+  const p = data.product;
+  if (!p || !esTarjetaRegalo(p)) return null;
+  const variants = p.variants.edges.map(e => ({
+    id: e.node.id, option: e.node.title, price: parseFloat(e.node.price?.amount || 0),
+    disponible: !!e.node.availableForSale,
+  }));
+  return tarjetaRegalo({ id: p.id, title: p.title, descriptionHtml: p.descriptionHtml, coverUrl: p.images.edges[0]?.node?.url || null, variants });
+}
+
+// El registro con la forma que esperan la ficha y el carrito, sin nada de
+// disco (ni artista, ni sello, ni formato, ni pistas).
+function tarjetaRegalo({ id, title, descriptionHtml = '', coverUrl = null, variants, preview = false }) {
+  const v = variants[0] || {};
+  return {
+    id, handle: GIFT_CARD.handle, isGiftCard: true, preview,
+    title, desc: descripcionDeProducto(descriptionHtml).texto,
+    variants, shopifyVariantId: v.id, price: v.price || 0,
+    coverUrl, slug: GIFT_CARD.handle, g: '135deg,#1a1a2e,#16213e',
+    artist: '', label: '', catalog: '', genre: '', year: '', tracks: [], descTracks: [], tags: [],
+  };
+}
+
+// Solo fuera de produccion y solo si Shopify no la sirve (en borrador no la
+// sirve): la ficha se pinta con los importes de verdad para poder revisarla en
+// el preview, pero sin boton de compra. En houseonly.store nunca.
+const ES_PRODUCCION = typeof window !== 'undefined' && /^(houseonly\.store|www\.houseonly\.store|houseonly\.pages\.dev)$/.test(window.location.hostname);
+const TARJETA_DE_PREVIEW = () => tarjetaRegalo({
+  id: 'gift-card-preview', preview: true, title: 'House Only Gift Card',
+  descriptionHtml: "<p>Not sure which record they'd pick? Let them choose. The gift card is delivered by email and can be used on any order at houseonly.store. No expiry.</p>",
+  variants: [25, 50, 100].map(n => ({ id: `preview-${n}`, option: `€${n}`, price: n, disponible: false })),
+});
 
 // Varios productos por handle, en el orden pedido (la pagina /ig respeta el del
 // feed). NO con `products(query:"handle:a OR handle:b")`: `handle` no es un
@@ -2274,6 +2265,12 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
           <div style={{ width:240, flexShrink:0, position:'relative' }}>
             <div style={{ paddingBottom:'100%', position:'relative', background:`linear-gradient(${r.g})` }}>
               {coverSrc(r.coverUrl) && <img src={coverSrc(r.coverUrl)} alt="" style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />}
+              {r.isGiftCard && !coverSrc(r.coverUrl) && (
+                <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', justifyContent:'flex-end', padding:22 }}>
+                  <span style={{ fontSize:10, color:S.muted, letterSpacing:3, textTransform:'uppercase', fontWeight:700 }}>House Only</span>
+                  <span style={{ fontSize:26, color:S.accent, fontWeight:800, letterSpacing:1, textTransform:'uppercase', lineHeight:1.1 }}>Gift card</span>
+                </div>
+              )}
             </div>
           </div>
           <div style={{ flex:1, minWidth:220, padding:'28px 26px 24px' }}>
@@ -2283,6 +2280,10 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
                 negativos devuelven la caja de flujo a su tamaño anterior
                 (24x25) para que el icono no se mueva ni empuje al sello. */}
             <button onClick={onClose} aria-label="Close" style={{ float:'right', background:'none', border:'none', color:S.text, cursor:'pointer', fontSize:20, padding:'12px 16px', margin:'-11px -10px' }}>×</button>
+            {r.isGiftCard ? (
+              <FichaTarjetaRegalo r={r} variants={variants} selVariant={selVariant} setVariantId={setVariantId}
+                onAdd={()=>{addSelected(r);onClose();}} />
+            ) : (<>
             {/* Fase 5b: el sello y el artista llevan a su ficha de entidad. Si el
                 nombre no resuelve, EntityLink pinta el texto de siempre. */}
             {/* El sello con su control; el catno baja a su propia linea para que
@@ -2420,10 +2421,51 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
                 </div>
               </>
             )}
+            </>)}
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * El cuerpo de la ficha cuando es la tarjeta regalo: el mismo marco del Modal,
+ * pero solo titulo, texto, importe y compra. Nada de sello, artista, formato,
+ * pistas ni envio: no es un disco y no se envia (llega por email).
+ */
+function FichaTarjetaRegalo({ r, variants, selVariant, setVariantId, onAdd }) {
+  // Su titulo mientras esta abierta, como /ig y las politicas.
+  useEffect(()=>{
+    const antes = document.title;
+    document.title = GIFT_CARD.title;
+    return () => { document.title = antes; };
+  },[]);
+  const comprable = !r.preview && !!selVariant?.disponible;
+  return (
+    <>
+      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:6 }}>{GIFT_CARD.label}</div>
+      <h2 style={{ margin:'0 0 14px', fontSize:18, fontWeight:800, color:S.text }}>{r.title}</h2>
+      {r.desc && <p style={{ fontSize:11, color:S.muted, lineHeight:1.75, marginBottom:16 }}>{r.desc}</p>}
+      <div style={{ fontSize:9, color:S.muted, letterSpacing:2, textTransform:'uppercase', marginBottom:8 }}>Amount</div>
+      <div role="radiogroup" aria-label="Amount" style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+        {variants.map(v => {
+          const sel = selVariant && v.id === selVariant.id;
+          return (
+            <button key={v.id} role="radio" aria-checked={!!sel} onClick={()=>setVariantId(v.id)}
+              style={{ background:sel?'rgba(198,255,0,0.08)':'transparent', border:`1px solid ${sel?S.accent:S.border}`, color:sel?S.accent:S.muted, borderRadius:2, padding:'7px 14px', cursor:'pointer', fontSize:11, fontFamily:'inherit', letterSpacing:1.5, fontWeight:700, transition:'all 0.15s' }}>
+              {importeDeVariante(v)}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ marginTop:20, display:'flex', alignItems:'center', gap:10 }}>
+        <span style={{ fontSize:22, fontWeight:800, color:S.accent }}>€{(selVariant?.price || 0).toFixed(2)}</span>
+        {comprable
+          ? <Btn ch="Add to Cart" onClick={onAdd} full />
+          : <Btn ch={r.preview ? 'Preview only' : 'Unavailable'} disabled full />}
+      </div>
+    </>
   );
 }
 
@@ -14686,7 +14728,12 @@ export default function App() {
   const directFetchedSlug = useRef(null);
   useEffect(()=>{
     const m = path.match(/^\/products\/([^/]+)\/?$/);
-    if (!m) { if (selected) setSelected(null); directFetchedSlug.current = null; return; }
+    if (!m) {
+      // En /gift-card/ la ficha abierta es la de la tarjeta (efecto de abajo).
+      if (selected && !(esRutaTarjeta(path) && selected.isGiftCard)) setSelected(null);
+      directFetchedSlug.current = null;
+      return;
+    }
     const slug = m[1];
     if (selected && selected.slug === slug) return;
     const found = records.find(r => r.slug === slug);
@@ -14745,6 +14792,24 @@ export default function App() {
     return ()=>registerAlertsHook(null);
   },[auth?.session, alertsState]);
 
+  // La tarjeta regalo (src/giftcard.mjs). Los enlaces de cabecera y pie solo
+  // salen si Shopify la sirve: mientras esta en borrador no hay enlace a una
+  // ficha vacia. Fuera de produccion se usa la de preview para poder revisarla.
+  const [tarjeta, setTarjeta] = useState(null);
+  useEffect(()=>{
+    fetchGiftCard()
+      .catch(() => null)
+      .then(t => setTarjeta(t || (ES_PRODUCCION ? null : TARJETA_DE_PREVIEW())));
+  },[]);
+  useEffect(()=>{
+    if (esRutaTarjeta(path) && tarjeta && selected?.id !== tarjeta.id) setSelected(tarjeta);
+  },[path, tarjeta, selected?.id]);
+  const openGiftCard = () => {
+    if (!esRutaTarjeta(path) && !path.startsWith('/products/')) volverA.current = path || '/';
+    setCartOpen(false);
+    navigate(GIFT_CARD.path);
+  };
+
   // A donde vuelve closeProduct (lo fija openProduct; ver alli).
   const volverA = useRef('/');
   // Rutas del portal (fase 5b). /account pide sesion; las fichas de entidad no.
@@ -14779,7 +14844,7 @@ export default function App() {
   };
   const closeProduct = () => {
     setSelected(null);
-    if (path.startsWith('/products/')) navigate(volverA.current);
+    if (path.startsWith('/products/') || esRutaTarjeta(path)) navigate(volverA.current);
     volverA.current = '/';
   };
 
@@ -14885,7 +14950,7 @@ export default function App() {
   const filtered = useMemo(() => {
     // La portada enseña lo que se puede comprar o pedir: fuera el agotado que no
     // es pre-order, y fuera el pre-order que vencio sin llegar nunca.
-    const visibles = records.filter(esVisibleEnTienda);
+    const visibles = records.filter(r => esVisibleEnTienda(r) && !esTarjetaRegalo(r));
     if (filters.forthcoming && filters.sort === 'release-asc') {
       return [...visibles].sort((a, b) => {
         const da = a.releaseDate || '';
@@ -14957,9 +15022,16 @@ export default function App() {
           </button>
         </div>
         {/* FORTHCOMING + Search — inline on desktop, full-width row 2 on mobile */}
-        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0}}>
+        {/* En movil la fila se parte: con Gift card, los tres botones ocupan el
+            ancho de un telefono (340 de 345 px a 375) y el buscador baja a su
+            propia fila, entero. Sin partir, el buscador se salia de la pantalla. */}
+        <div style={{display:'flex',gap:6,alignItems:'center',order:navMobile?2:1,flex:navMobile?'1 1 100%':'1 1 auto',justifyContent:navMobile?'stretch':'flex-end',minWidth:0,flexWrap:navMobile?'wrap':'nowrap'}}>
           <button onClick={()=>setFilters(f=>({...f, forthcoming:!f.forthcoming, dnb:false, genre:null}))} title={filters.forthcoming?'Exit Forthcoming — back to all records':'Forthcoming pre-orders'} style={{background:filters.forthcoming?S.accent:'transparent',color:filters.forthcoming?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.forthcoming?'✕ Forthcoming':'Forthcoming'}</button>
           <button onClick={()=>setFilters(f=>({...f, dnb:!f.dnb, forthcoming:false, genre:null}))} title={filters.dnb?'Exit Drum & Bass — back to all records':'Drum & Bass Only'} style={{background:filters.dnb?S.accent:'transparent',color:filters.dnb?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0}}>{filters.dnb?'✕ Drum & Bass':'Drum & Bass'}</button>
+          {tarjeta && (
+            <a href={GIFT_CARD.path} onClick={e=>{ if (e.metaKey||e.ctrlKey||e.shiftKey||e.button) return; e.preventDefault(); openGiftCard(); }}
+              style={{background:esRutaTarjeta(path)?S.accent:'transparent',color:esRutaTarjeta(path)?'#080808':S.accent,border:`1.5px solid ${S.accent}`,borderRadius:2,padding:'5px 12px',cursor:'pointer',fontSize:10,fontWeight:800,letterSpacing:1.5,textTransform:'uppercase',whiteSpace:'nowrap',transition:'all 0.15s',fontFamily:'inherit',flexShrink:0,textDecoration:'none',display:'inline-flex',alignItems:'center',lineHeight:'normal',boxSizing:'border-box'}}>{GIFT_CARD.label}</a>
+          )}
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{background:S.surf,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'5px 10px',fontSize:11,fontFamily:'inherit',outline:'none',maxWidth:navMobile?'none':180,minWidth:80,flex:1,boxSizing:'border-box'}} />
         </div>
       </Nav>
@@ -15056,6 +15128,9 @@ export default function App() {
             misma pestana. La lista vive en src/policies.mjs, compartida con el
             pie del HTML prerenderizado. */}
         <nav aria-label="Store policies" style={{marginTop:14,display:'flex',gap:16,justifyContent:'center',flexWrap:'wrap'}}>
+          {tarjeta && (
+            <ILink to={GIFT_CARD.path} onNavigate={openGiftCard} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{GIFT_CARD.label}</ILink>
+          )}
           {POLICY_PAGES.map(pg=>(
             <ILink key={pg.path} to={pg.path} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
           ))}
