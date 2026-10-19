@@ -2,17 +2,13 @@
 /**
  * scout — el vigia semanal de tiendas de discos.
  *
- * Visita las tiendas de sites.json, saca de cada pagina una huella de su
- * INTERFAZ —no de su contenido— y la compara con la de la semana pasada. Lo que
- * cambia de una semana a otra en el catalogo (discos, precios, stock) no dice
- * nada; lo que dice algo es que aparezca un boton nuevo, un filtro nuevo o un
- * script de terceros nuevo, porque eso es una funcion que alguien ha montado.
+ * Visita las tiendas de sites.json —y houseonly.store, con la misma huella—,
+ * saca de cada pagina su ESTRUCTURA y la compara con todo lo que esa tienda
+ * habia ensenado antes. Que es estructura y por que, en filtro.mjs; el juicio
+ * de si lo nuevo es una funcion que nos interese, en report.mjs.
  *
- * La huella son tres cosas:
- *   controls     textos de botones, etiquetas, filtros y selects, normalizados
- *   scriptHosts  dominios de los <script> de terceros — el mejor chivato: un
- *                cdn.judge.me es resenas, un klaviyo es avisos de stock
- *   signals      presencia de reproductores, wishlist, pre-order, chat…
+ * Paginas, por orden de importancia: ficha de un disco, carrito, listado,
+ * portada. El carrito se mira vacio: aqui no se anade nada ni se compra nada.
  *
  * Solo paginas publicas, una tienda cada vez y con pausas: esto no es un
  * crawler. Respeta robots.txt. No copia diseno, ni textos, ni imagenes: de aqui
@@ -26,10 +22,15 @@ import { chromium } from 'playwright-core';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { huella, compara } from './filtro.mjs';
 
 const AQUI  = dirname(fileURLToPath(import.meta.url));
 const RAIZ  = join(AQUI, '..', '..');
-const SNAPS = join(RAIZ, 'docs', 'scout', 'snapshots');
+// Huellas v2 en su propia carpeta: la de la version anterior queda intacta y
+// solo se lee una vez, como punto de partida de formularios, scripts y
+// funciones.
+const SNAPS    = join(RAIZ, 'docs', 'scout', 'snapshots-v2');
+const SNAPS_V1 = join(RAIZ, 'docs', 'scout', 'snapshots');
 
 const args     = process.argv.slice(2);
 const soloUna  = (args.find(a => a.startsWith('--only=')) || '').split('=')[1] || '';
@@ -67,93 +68,46 @@ const prohibido = (reglas, url) => {
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
-// ── LA HUELLA ───────────────────────────────────────────────────────
-// Se ejecuta dentro de la pagina. Todo lo que huela a contenido —nombres de
-// discos, precios, catalogos— se descarta: cambia cada semana y no es una
-// funcion.
-const HUELLA = () => {
+// ── LO CRUDO ────────────────────────────────────────────────────────
+// Se ejecuta dentro de la pagina y devuelve materia prima; filtro.mjs decide
+// que es estructura. Los textos solo viajan para buscar palabras-funcion y no
+// se guardan nunca.
+const CRUDO = () => {
   const limpia = s => String(s || '').replace(/\s+/g, ' ').trim();
-  // Un precio en cualquier posicion delata catalogo: "cassette — £out of stock"
-  // es una variante de un disco concreto, no una funcion de la tienda.
-  const esContenido = t =>
-    !t || t.length > 38 || (t.match(/\d/g) || []).length >= 3 ||
-    /[€$£¥]/.test(t) || /\b(19|20)\d{2}\b/.test(t);
+  const host = src => { try { const h = new URL(src, location.href).host; return h && h !== location.host ? h.replace(/^www\./, '') : null; } catch { return null; } };
 
-  // "cantiga de longe play" es el boton de reproducir de un disco concreto: la
-  // funcion es "play" y el resto es catalogo, que cambia cada semana. Se recorta
-  // al verbo para que la huella no se llene de ruido.
-  const ACCION_FINAL = /(add to (cart|basket|bag)|play|listen|preview|buy( now)?|pre-?order|wishlist|notify me|download)$/;
-  const controls = new Set();
-  const anota = t => {
-    let n = limpia(t).toLowerCase();
-    const m = n.match(ACCION_FINAL);
-    if (m && n !== m[0] && n.split(' ').length > 1) n = m[0];
-    if (!esContenido(n)) controls.add(n);
-  };
+  const forms = [...document.querySelectorAll('form')].map(f => ({
+    action: f.getAttribute('action') || '',
+    campos: [...f.querySelectorAll('input[name], select[name], textarea[name]')].map(i => i.name),
+  }));
+  const scripts = [...document.querySelectorAll('script[src]')].map(s => host(s.src));
+  const iframes = [...document.querySelectorAll('iframe[src]')].map(f => host(f.src));
 
-  document.querySelectorAll('button, [role="button"], summary, label, legend, fieldset > legend')
-    .forEach(el => anota(el.textContent));
-  document.querySelectorAll('input[type="submit"], input[type="button"]').forEach(el => anota(el.value));
-  document.querySelectorAll('[aria-label]').forEach(el => anota(el.getAttribute('aria-label')));
-  document.querySelectorAll('input[placeholder], textarea[placeholder]').forEach(el => anota(el.getAttribute('placeholder')));
-  // Filtros y ordenaciones: donde mejor se ve lo que una tienda cree que
-  // importa de un disco.
-  document.querySelectorAll('select').forEach(sel => {
-    anota(sel.getAttribute('name') || sel.id);
-    [...sel.options].slice(0, 12).forEach(o => anota(o.textContent));
-  });
-  document.querySelectorAll('[class*="filter" i] a, [class*="facet" i] a, [id*="filter" i] a')
-    .forEach(el => anota(el.textContent));
-  // No todas las tiendas usan <button>. Muchas ponen un <a> con clase de boton,
-  // y ahi es donde vive "add to cart" o "notify me".
-  document.querySelectorAll('[class*="btn" i], [class*="button" i], [class*="action" i]')
-    .forEach(el => anota(el.textContent));
-  document.querySelectorAll('a[href]').forEach(a => {
-    const pista = `${a.getAttribute('href') || ''} ${a.className || ''}`;
-    if (/cart|basket|warenkorb|wish|merk|notify|alert|pre-?order|account|login|compare/i.test(pista)) {
-      anota(a.textContent || a.getAttribute('title'));
+  const aria = new Set(), data = new Set();
+  for (const el of document.querySelectorAll('*')) {
+    for (const a of el.attributes) {
+      if (a.name.startsWith('aria-')) aria.add(a.name);
+      else if (a.name.startsWith('data-')) data.add(a.name);
     }
+  }
+
+  // Rutas solo de cabecera, menus y pie: el centro de la pagina es catalogo.
+  const rutas = new Set();
+  document.querySelectorAll('header a[href], nav a[href], footer a[href], [role="navigation"] a[href]').forEach(a => {
+    try { const u = new URL(a.href, location.href); if (u.host === location.host) rutas.add(u.pathname); } catch { /* href raro */ }
   });
 
-  // Lo que la tienda es capaz de RECIBIR: un form a /wishlist/add dice mas que
-  // cualquier texto, y no depende del idioma ni del tema.
-  const forms = new Set();
-  document.querySelectorAll('form').forEach(f => {
-    const accion = (f.getAttribute('action') || '').split('?')[0].replace(/^https?:\/\/[^/]+/, '');
-    const campos = [...f.querySelectorAll('input[name], select[name]')]
-      .map(i => i.name).filter(n => n && n.length < 24).slice(0, 6).sort();
-    if (accion || campos.length) forms.add(`${accion || '(misma pagina)'} [${campos.join(',')}]`.slice(0, 90));
-  });
-
-  const scriptHosts = new Set();
-  document.querySelectorAll('script[src]').forEach(s => {
-    try {
-      const h = new URL(s.src, location.href).host;
-      if (h && h !== location.host) scriptHosts.add(h.replace(/^www\./, ''));
-    } catch { /* src raro */ }
-  });
-
-  const hay = sel => !!document.querySelector(sel);
-  const texto = document.body.innerText.toLowerCase();
-  const signals = {
-    audio:        hay('audio') || hay('[class*="player" i]') || hay('[class*="waveform" i]'),
-    embedSonido:  hay('iframe[src*="soundcloud"], iframe[src*="bandcamp"], iframe[src*="youtube"], iframe[src*="spotify"]'),
-    wishlist:     /wishlist|favourite|favorite|watchlist/.test(texto),
-    preorder:     /pre-?order/.test(texto),
-    backorder:    /back-?order|request a copy|notify me|back in stock/.test(texto),
-    suscripcion:  /subscription|record club|membership/.test(texto),
-    chat:         hay('[class*="chat" i], [id*="chat" i]'),
-    resenas:      /review|rating/.test(texto),
-    listas:       /staff pick|editor|curated|chart/.test(texto),
-    newsletter:   hay('input[type="email"]'),
-  };
+  const textos = new Set();
+  const anota = t => { const n = limpia(t); if (n && n.length <= 40) textos.add(n); };
+  document.querySelectorAll('button, [role="button"], summary, label, a, input[type="submit"], input[type="button"]')
+    .forEach(el => anota(el.value || el.textContent));
+  document.querySelectorAll('[aria-label], [title]').forEach(el => { anota(el.getAttribute('aria-label')); anota(el.getAttribute('title')); });
+  document.querySelectorAll('input[placeholder]').forEach(el => anota(el.getAttribute('placeholder')));
 
   return {
     title: limpia(document.title).slice(0, 120),
-    controls: [...controls].sort(),
-    forms: [...forms].sort(),
-    scriptHosts: [...scriptHosts].sort(),
-    signals,
+    forms, scripts, iframes,
+    aria: [...aria], data: [...data], rutas: [...rutas], textos: [...textos],
   };
 };
 
@@ -213,20 +167,21 @@ async function miraPagina(page, url) {
   await page.waitForTimeout(2000);
   const consent = await fueraElMuro(page);
   await page.waitForTimeout(1500);            // que arranque lo que carga tarde
-  const h = await page.evaluate(HUELLA);
-  if (ES_RETO.test(h.title)) return { url, reto: h.title.slice(0, 40) };
-  return { url, consent, ...h };
+  const crudo = await page.evaluate(CRUDO);
+  if (ES_RETO.test(crudo.title)) return { url, reto: crudo.title.slice(0, 40) };
+  return { consent, ...huella({ url: page.url(), ...crudo }) };
 }
 
-async function primerDisco(page, listing) {
+async function primerDisco(page) {
   // El primer enlace que parece una ficha. Solo se usa para mirar UNA ficha:
   // no se recorre el catalogo de nadie.
   return page.evaluate(() => {
     // Formas habituales de una ficha, incluida la de id numerico de Hard Wax.
-    const pistas = /\/(product|products|release|releases|item|items|artikel|detail|album|records?|vinyl|lp|12|catalog(ue)?)\/[^/]|\/\d{4,}\//i;
+    // Clone usa /item12345.html y Deejay /Artista_Titulo__1234567.
+    const pistas = /\/(product|products|release|releases|item|items|artikel|detail|album|records?|vinyl|lp|12|catalog(ue)?)\/[^/]|\/\d{4,}\/|\/item\d+\.html$|__\d{6,}$/i;
     for (const a of document.querySelectorAll('a[href]')) {
-      const href = a.href;
-      if (pistas.test(new URL(href, location.href).pathname)) return href;
+      const u = new URL(a.href, location.href);
+      if (u.host === location.host && pistas.test(u.pathname)) return u.href;
     }
     return null;
   }).catch(() => null);
@@ -234,65 +189,43 @@ async function primerDisco(page, listing) {
 
 async function visita(browser, site) {
   const reglas = await robots(site.home);
-  const out = { key: site.key, name: site.name, visto: new Date().toISOString(), paginas: {}, errores: [] };
+  const out = { key: site.key, name: site.name, visto: new Date().toISOString(), paginas: {}, errores: [], notas: [] };
   const page = PERFIL ? await browser.newPage() : await browser.newPage({ userAgent: UA, viewport: { width: 1440, height: 1000 } });
 
-  const objetivos = [['home', site.home], ['listing', site.listing]];
-  for (const [nombre, url] of objetivos) {
-    if (!url) continue;
-    if (prohibido(reglas, url)) { out.errores.push(`${nombre}: robots.txt lo prohibe`); continue; }
+  const mira = async (nombre, url, { opcional = false } = {}) => {
+    const fallo = msg => (opcional ? out.notas : out.errores).push(`${nombre}: ${msg}`);
+    if (prohibido(reglas, url)) { fallo('robots.txt lo prohibe'); return false; }
     try {
       const visto = await miraPagina(page, url);
-      if (visto.reto) { out.errores.push(`${nombre}: reto de verificacion (${visto.reto}) — no se pasa por diseno`); }
-      else { out.paginas[nombre] = visto; visto.shot = await captura(page, site.key, nombre); }
-      if (nombre === 'listing' && out.paginas.listing) {
-        // Si la tienda pinta el listado con JS o usa una forma de URL rara, se
-        // le pone la ficha a mano en sites.json y se deja de adivinar.
-        const ficha = (await primerDisco(page, url)) || site.product || null;
-        if (!ficha) out.errores.push('listing: no se encontro enlace a ficha de disco');
-        if (ficha && !prohibido(reglas, ficha)) {
-          await dormir(PAUSA_MS);
-          const vistoF = await miraPagina(page, ficha);
-          if (vistoF.reto) out.errores.push(`product: reto de verificacion — no se pasa por diseno`);
-          else { out.paginas.product = vistoF; vistoF.shot = await captura(page, site.key, 'product'); }
-        }
-      }
+      if (visto.reto) { fallo(`reto de verificacion (${visto.reto}) — no se pasa por diseno`); return false; }
+      out.paginas[nombre] = visto;
+      visto.shot = await captura(page, site.key, nombre);
+      return true;
     } catch (e) {
-      out.errores.push(`${nombre}: ${String(e.message || e).split('\n')[0].slice(0, 120)}`);
+      fallo(String(e.message || e).split('\n')[0].slice(0, 120));
+      return false;
+    } finally {
+      await dormir(PAUSA_MS);
     }
-    await dormir(PAUSA_MS);
+  };
+
+  await mira('home', site.home);
+  // La ficha sale del listado, o de la portada si la tienda no tiene listado
+  // mirable. Si pinta los enlaces con JS raro, se le pone en sites.json.
+  const desde = site.listing
+    ? ((await mira('listing', site.listing)) ? site.listing : null)
+    : (out.paginas.home ? site.home : null);
+  if (desde) {
+    const ficha = site.product || (await primerDisco(page));
+    if (!ficha) out.errores.push('product: no se encontro enlace a ficha de disco');
+    else await mira('product', ficha);
   }
+  // Carrito vacio: lo que la tienda ofrece antes de pagar (envios, notas,
+  // regalos). Shopify lo prohibe en robots.txt y se respeta; no es un error.
+  if (site.cart !== null) await mira('cart', site.cart || new URL('/cart', site.home).href, { opcional: true });
+
   await page.close();
   return out;
-}
-
-// ── DIFERENCIA ──────────────────────────────────────────────────────
-const menos = (a, b) => (a || []).filter(x => !(b || []).includes(x));
-
-function compara(viejo, nuevo) {
-  const cambios = [];
-  for (const nombre of Object.keys(nuevo.paginas)) {
-    const n = nuevo.paginas[nombre];
-    const v = viejo?.paginas?.[nombre];
-    if (!v) { cambios.push({ pagina: nombre, url: n.url, nuevaPagina: true }); continue; }
-    // En la ficha NO se comparan controles: cada semana toca un disco distinto y
-    // sus tallas, formatos y agotados cambiarian siempre sin que nadie haya
-    // construido nada. De la ficha interesan los scripts, los formularios y las
-    // señales, que si son de la tienda y no del disco.
-    const soloDisco = nombre === 'product';
-    const c = {
-      pagina: nombre, url: n.url, shot: n.shot || null,
-      controlsNuevos: soloDisco ? [] : menos(n.controls, v.controls),
-      controlsIdos:   soloDisco ? [] : menos(v.controls, n.controls),
-      formsNuevos:    menos(n.forms, v.forms),
-      scriptsNuevos:  menos(n.scriptHosts, v.scriptHosts),
-      scriptsIdos:    menos(v.scriptHosts, n.scriptHosts),
-      signalsNuevas:  Object.keys(n.signals).filter(k => n.signals[k] && !v.signals[k]),
-    };
-    if (c.controlsNuevos.length || c.scriptsNuevos.length || c.signalsNuevas.length ||
-        c.formsNuevos.length || c.controlsIdos.length || c.scriptsIdos.length) cambios.push(c);
-  }
-  return cambios;
 }
 
 // ── PRINCIPAL ───────────────────────────────────────────────────────
@@ -320,33 +253,43 @@ const headless = process.env.SCOUT_HEADLESS === '1';
 const browser = PERFIL
   ? await chromium.launchPersistentContext(PERFIL, { channel: 'chrome', headless, args: ARGS, viewport: { width: 1440, height: 1000 } })
   : await chromium.launch({ channel: 'chrome', headless, args: ARGS });
-const informe = { fecha: new Date().toISOString().slice(0, 10), tiendas: [] };
+const informe = { version: 2, fecha: new Date().toISOString().slice(0, 10), tiendas: [] };
+
+const leeJson = ruta => (existsSync(ruta) ? JSON.parse(readFileSync(ruta, 'utf8')) : null);
 
 for (const site of lista) {
   process.stdout.write(`  ${site.name}… `);
   const nuevo = await visita(browser, site);
   const ruta = join(SNAPS, `${site.key}.json`);
-  const viejo = existsSync(ruta) ? JSON.parse(readFileSync(ruta, 'utf8')) : null;
-  const cambios = viejo ? compara(viejo, nuevo) : [];
+  const viejo = leeJson(ruta) || leeJson(join(SNAPS_V1, `${site.key}.json`));
+  const vistas = Object.keys(nuevo.paginas).length;
+  const { candidatos, desaparecidos, vistos, capturas } = vistas
+    ? compara(viejo, nuevo)
+    : { candidatos: [], desaparecidos: [], vistos: null, capturas: 0 };
 
   informe.tiendas.push({
-    key: site.key, name: site.name,
-    paginas: Object.keys(nuevo.paginas).length,
+    key: site.key, name: site.name, propia: !!site.propia,
+    paginas: Object.keys(nuevo.paginas),
     primeraVez: !viejo,
     desde: viejo?.visto || null,
     errores: nuevo.errores,
-    cambios,
+    candidatos,
+    // De las demas tiendas no importa lo que quitan; de la nuestra, si.
+    desaparecidos: site.propia ? desaparecidos : [],
+    // Para el juicio: lo que la tienda tenia antes y tiene ahora, por pagina.
+    antes: viejo?.version === 2 ? viejo.paginas : null,
+    ahora: nuevo.paginas,
+    shots: Object.fromEntries(Object.entries(nuevo.paginas).map(([n, p]) => [n, p.shot || null])),
   });
 
-  // Lo que esta semana no se dejo ver conserva su huella anterior: mejor un dato
-  // de hace siete dias que un agujero que finge que la tienda cambio.
-  if (viejo) for (const [n, p] of Object.entries(viejo.paginas || {})) if (!nuevo.paginas[n]) nuevo.paginas[n] = p;
-
-  if (guardar && Object.keys(nuevo.paginas).length) {
+  if (guardar && vistas) {
+    // Lo que esta semana no se dejo ver conserva su huella anterior: mejor un
+    // dato de hace siete dias que un agujero que finge que la tienda cambio.
+    const paginas = { ...(viejo?.version === 2 ? viejo.paginas : {}), ...nuevo.paginas };
     mkdirSync(dirname(ruta), { recursive: true });
-    writeFileSync(ruta, JSON.stringify(nuevo, null, 1));
+    writeFileSync(ruta, JSON.stringify({ version: 2, key: site.key, visto: nuevo.visto, capturas, paginas, vistos }, null, 1));
   }
-  console.log(`${Object.keys(nuevo.paginas).length} pág · ${viejo ? `${cambios.length} con cambios` : 'primera huella'}${nuevo.errores.length ? ` · ${nuevo.errores.length} error(es)` : ''}`);
+  console.log(`${vistas} pág · ${viejo ? `${candidatos.length} candidato(s)` : 'primera huella'}${nuevo.errores.length ? ` · ${nuevo.errores.length} error(es)` : ''}`);
 }
 
 await browser.close();
