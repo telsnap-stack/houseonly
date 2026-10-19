@@ -62,6 +62,7 @@ Reglas:
 - Solo ideas: nunca propongas copiar diseño, textos ni imágenes.
 - Lo que no sea una función para el cliente (analítica, publicidad, trackers, píxeles, CDN, cambios de framework o de build, accesibilidad genérica, muros de cookies) → descartar: true.
 - Lo que no encaje con House Only → descartar: true. Sin explicarlo.
+- Lo que features.md pone en "Descartar siempre" → descartar: true, sin excepción.
 - Si House Only ya lo tiene → yaLoTenemos: true; en "distinto" una frase SOLO si la otra tienda lo resuelve de forma claramente distinta (si no, cadena vacía).
 - En "ids" copia los id de TODOS los candidatos que cubre la función; cada candidato en una sola función.
 - Cada tienda trae "yaReportadas": funciones suyas que ya salieron otra semana. Si un candidato es una de ellas, usa EXACTAMENTE ese nombre.

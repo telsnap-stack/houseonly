@@ -26,9 +26,14 @@
 
 export const TIPOS = ['forms', 'scripts', 'iframes', 'aria', 'data', 'rutas', 'funciones'];
 
-/** Tipos todavia sin validar con capturas reales: el informe los marca. */
+/**
+ * Tipos todavia sin validar con capturas reales: el informe los marca mientras
+ * la tienda tenga menos de CAPTURAS_PARA_VALIDAR capturas v2 anteriores. Hubo
+ * dos el 2026-10-19 (prueba + job lanzado a mano); Eduardo quiere la marca
+ * hasta despues del informe del 26, que es la tercera.
+ */
 export const TIPOS_NUEVOS = new Set(['aria', 'data', 'rutas']);
-export const CAPTURAS_PARA_VALIDAR = 2;
+export const CAPTURAS_PARA_VALIDAR = 3;
 
 /** Orden del informe: ficha y carrito dicen mas de una tienda que la portada. */
 export const PRIORIDAD = ['product', 'cart', 'listing', 'home'];

@@ -77,13 +77,14 @@ test('desde la huella v1: formularios, scripts y funciones comparan; aria/data/r
   assert.equal(r.capturas, 1);
 });
 
-test('aria/data/rutas salen "sin validar" hasta dos capturas reales', () => {
+test('aria/data/rutas salen "sin validar" hasta tres capturas (la del 26 incluida)', () => {
   const vacio = { forms: [], scripts: [], iframes: [], aria: [], data: [], rutas: [], funciones: [] };
   const nuevo = { paginas: { home: pag({ rutas: ['/gift-cards'], forms: ['/x []'] }) } };
   const c1 = compara(v2({ home: pag() }, vacio, 1), nuevo).candidatos;
   assert.equal(c1.find(c => c.tipo === 'rutas').sinValidar, true);
   assert.equal(c1.find(c => c.tipo === 'forms').sinValidar, false);
-  assert.equal(compara(v2({ home: pag() }, vacio, 2), nuevo).candidatos.find(c => c.tipo === 'rutas').sinValidar, false);
+  assert.equal(compara(v2({ home: pag() }, vacio, 2), nuevo).candidatos.find(c => c.tipo === 'rutas').sinValidar, true);
+  assert.equal(compara(v2({ home: pag() }, vacio, 3), nuevo).candidatos.find(c => c.tipo === 'rutas').sinValidar, false);
 });
 
 test('desaparecidos: solo paginas vistas en las dos capturas', () => {
