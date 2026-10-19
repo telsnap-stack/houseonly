@@ -30,7 +30,7 @@ const stock = (n: number | null) => vi.mocked(shopifyAdmin.getVariantsStock)
 	.mockImplementation(async (_e, ids) => new Map(ids.map((id) => [id, n])));
 
 async function wipe() {
-	for (const prefix of ["sales-detected:", "lock:", "listing:", "sku:", "alerted:", "meta:"]) {
+	for (const prefix of ["sales-detected:", "lock:", "listing:", "sku:", "alerted:", "meta:", "manual:"]) {
 		const { keys } = await env.SYNC_STATE.list({ prefix });
 		for (const k of keys) await env.SYNC_STATE.delete(k.name);
 	}
@@ -47,6 +47,9 @@ beforeEach(async () => {
 	} as any);
 	vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({ ok: true, orderId: "gid://shopify/Order/1", orderName: "#1050" } as any);
 	stock(1);
+	// No Shopify order carries this sale yet (see discogs-skip.ts).
+	vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockResolvedValue(
+		{ data: { orders: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } as any);
 });
 
 // 147628-C-31: the only copy shipped with web order #1040, the listing stayed

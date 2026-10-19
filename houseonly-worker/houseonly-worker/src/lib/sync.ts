@@ -46,6 +46,13 @@ import {
   type ShopifyAdminEnv,
 } from './shopify-admin';
 import { sendSyncAlerts, type SyncAlertSummary } from './sync-alerts';
+import {
+  loadShopifyDiscogsIndex,
+  decideSkip,
+  SHOPIFY_INDEX_LOOKBACK_DAYS,
+  type ShopifyDiscogsIndex,
+  type ShopifyDiscogsOrder,
+} from './discogs-skip';
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
@@ -210,6 +217,116 @@ function closeAudit(audit: any, discogsStatus: string): void {
   };
 }
 
+// ── SALES THE POLL LEAVES ALONE (2026-10-19) ───────────────────────
+// See discogs-skip.ts for the rules. manual:<order_id> is set by hand
+// (wrangler kv key put); any value works, a short reason is kindest.
+const MANUAL_KEY_PREFIX = 'manual:';
+// lock:order value for a sale already in Shopify. Durable TTL like a created
+// order: it never needs looking up again while it is inside the window.
+const ORDER_LOCK_IN_SHOPIFY = 'shopify-existing';
+
+/** One Shopify read per poll, shared by the parked pass and the scan. */
+function shopifyIndexLoader(env: SyncAdminEnv): () => Promise<ShopifyDiscogsIndex> {
+  let pending: Promise<ShopifyDiscogsIndex> | null = null;
+  return () => (pending ||= loadShopifyDiscogsIndex(
+    (q, v) => shopifyAdminGraphQL(env, q, v),
+    new Date(Date.now() - SHOPIFY_INDEX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+  ));
+}
+
+async function readAudit(env: SyncEnv, orderId: string): Promise<any | null> {
+  try {
+    const raw = await env.SYNC_STATE.get(`sales-detected:${orderId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+/**
+ * manual:<id> is set: close whatever audit exists so neither the parked pass
+ * nor the stuck-sale alert touches it again. No lock: the key itself persists.
+ */
+async function skipManual(env: SyncEnv, orderId: string, note: string, result: PollResult): Promise<void> {
+  result.skipped_manual++;
+  const audit = await readAudit(env, orderId);
+  if (!audit || audit.order_creation?.manual) return;
+  audit.processed_at = new Date().toISOString();
+  audit.order_creation = {
+    ok: false,
+    closed: true,
+    manual: true,
+    will_retry: false,
+    error: `handled by hand (${MANUAL_KEY_PREFIX}${orderId}${note ? `: ${note.slice(0, 120)}` : ''}); no Shopify order will be created`,
+  };
+  await recordOrderAttempt(env, orderId, audit);
+}
+
+/** Already a Shopify order: record it as synced and lock it like one. */
+async function skipInShopify(
+  env: SyncEnv,
+  orderId: string,
+  audit: any,
+  order: ShopifyDiscogsOrder,
+  result: PollResult,
+): Promise<void> {
+  result.skipped_in_shopify++;
+  await env.SYNC_STATE.put(`lock:order:${orderId}`, ORDER_LOCK_IN_SHOPIFY, {
+    expirationTtl: ORDER_LOCK_TTL_SECONDS,
+  });
+  audit.order_creation = {
+    ok: true,
+    already_in_shopify: true,
+    shopify_order_id: order.id,
+    shopify_order_name: order.name,
+  };
+  await recordOrderAttempt(env, orderId, audit, result);
+}
+
+/**
+ * Shopify check for one sale. Returns true when the caller must stop here:
+ * either the sale is already in Shopify (recorded as synced) or it cannot be
+ * safely decided (recorded as a retryable failure; nothing created).
+ */
+async function stopIfInShopify(
+  env: SyncEnv,
+  orderId: string,
+  discogsUnits: number,
+  audit: any,
+  loadIndex: () => Promise<ShopifyDiscogsIndex>,
+  result: PollResult,
+): Promise<boolean> {
+  let index: ShopifyDiscogsIndex;
+  try {
+    index = await loadIndex();
+  } catch (e: any) {
+    // Fail closed: if this sale WAS built by hand, creating it now would be a
+    // duplicate factura. Waiting 15 minutes costs nothing.
+    audit.order_creation = {
+      ok: false,
+      will_retry: true,
+      error: `Shopify order lookup failed: ${e?.message || e}; nothing created`,
+    };
+    await recordOrderAttempt(env, orderId, audit, result);
+    return true;
+  }
+  const d = decideSkip(orderId, discogsUnits, null, index);
+  if (d.kind === 'in-shopify') {
+    await skipInShopify(env, orderId, audit, d.order, result);
+    return true;
+  }
+  if (d.kind === 'partial-in-shopify') {
+    audit.order_creation = {
+      ok: false,
+      needs_manual: true,
+      will_retry: true,
+      shopify_order_name: d.order.name,
+      error: `Shopify order ${d.order.name} has ${d.order.units} of ${d.needed} records for this sale; nothing created — fix it by hand`,
+    };
+    await recordOrderAttempt(env, orderId, audit, result);
+    return true;
+  }
+  return false;
+}
+
 async function closeUnsyncedAudit(env: SyncEnv, orderId: string, discogsStatus: string): Promise<void> {
   const raw = await env.SYNC_STATE.get(`sales-detected:${orderId}`);
   if (!raw) return;
@@ -271,6 +388,7 @@ async function retryParkedSales(
   env: SyncAdminEnv,
   mode: SyncMode,
   result: PollResult,
+  loadShopifyIndex: () => Promise<ShopifyDiscogsIndex>,
 ): Promise<void> {
   const { keys } = await env.SYNC_STATE.list({ prefix: 'sales-detected:' });
 
@@ -290,6 +408,12 @@ async function retryParkedSales(
     const lockKey = `lock:order:${orderIdStr}`;
     if (await env.SYNC_STATE.get(lockKey) === ORDER_LOCK_COMMITTED) continue;
 
+    const manualNote = await env.SYNC_STATE.get(`${MANUAL_KEY_PREFIX}${orderIdStr}`);
+    if (manualNote !== null) {
+      await skipManual(env, orderIdStr, manualNote, result);
+      continue;
+    }
+
     // Only sales whose items are ALREADY resolved; anything else needs the full
     // resolution path and belongs to the window scan.
     const items = (audit.items || []) as any[];
@@ -308,6 +432,11 @@ async function retryParkedSales(
     audit.processed_at = new Date().toISOString();
     audit.attempts = (audit.attempts || 0) + 1;
     audit.retry_pass = 'parked';
+
+    // Built by hand in Shopify while it sat parked? Then a restock must not
+    // turn it into a second factura.
+    const units = items.reduce((n, i) => n + (i.quantity || 1), 0);
+    if (await stopIfInShopify(env, orderIdStr, units, audit, loadShopifyIndex, result)) continue;
 
     // Oversell guard before any Discogs call: a stuck oversold sale must not
     // spend the Discogs budget every 15 minutes.
@@ -949,6 +1078,9 @@ interface PollResult {
   variant_not_found: number;
   parked_retried: number;
   parked_recovered: number;
+  // Left alone: already a Shopify order / manual:<id> set (discogs-skip.ts).
+  skipped_in_shopify: number;
+  skipped_manual: number;
   new_cursor: string | null;
   errors?: string[];
   // Why each unsynced sale is unsynced. Without this the run reported
@@ -1002,14 +1134,18 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
     variant_not_found: 0,
     parked_retried: 0,
     parked_recovered: 0,
+    skipped_in_shopify: 0,
+    skipped_manual: 0,
     new_cursor: null,
   };
+
+  const loadShopifyIndex = shopifyIndexLoader(env);
 
   // ── 0. Finish what we already started ───────────────────────────
   // Runs BEFORE the window scan so a refused getOrders cannot starve a sale
   // that is one call from done. Never allowed to break the scan behind it.
   try {
-    await retryParkedSales(env, mode, result);
+    await retryParkedSales(env, mode, result, loadShopifyIndex);
   } catch (e: any) {
     errors.push(`retryParkedSales failed: ${e?.message || e}`);
   }
@@ -1094,6 +1230,12 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       continue;
     }
 
+    const manualNote = await env.SYNC_STATE.get(`${MANUAL_KEY_PREFIX}${orderIdStr}`);
+    if (manualNote !== null) {
+      await skipManual(env, orderIdStr, manualNote, result);
+      continue;
+    }
+
     // ── LOCK STAGE 1: in-flight ─────────────────────────────────
     // Claim the order for THIS run only. Everything between here and the
     // creation call below is read-only (Discogs + Shopify lookups), so if any
@@ -1131,6 +1273,9 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       items: [],
       order_creation: null as any,
     };
+
+    // Before any variant lookup: a sale already in Shopify is done.
+    if (await stopIfInShopify(env, orderIdStr, (order.items || []).length, audit, loadShopifyIndex, result)) continue;
 
     // ── Resolve every item to a Shopify variant (NO inventory calls here) ──
     // Fase 3G: we create ONE paid Shopify order per Discogs order so the sale
@@ -1454,6 +1599,7 @@ export async function handleSyncPending(
       // false only where the code deliberately gives up; see the audit paths.
       will_retry: a.order_creation?.will_retry !== false,
       needs_manual: Boolean(a.order_creation?.needs_manual),
+      manual: Boolean(a.order_creation?.manual),
       error: a.order_creation?.error || null,
       items: (a.items || []).map((i: any) => ({ sku: i.sku, title: i.release_title, outcome: i.outcome })),
     });
