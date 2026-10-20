@@ -1,0 +1,785 @@
+{
+ "tiendas": {
+  "hhv": {
+   "candidatos": {
+    "funciones:tarjeta-regalo": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Tarjeta regalo",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "tarjeta-regalo",
+     "url": "https://www.hhv.de/en/records/item/fontaines-d-c-dopamine-chamber-blue-marbled-vinyl-edition-1445665",
+     "sinValidar": false
+    },
+    "forms:/newsletter/optin [data[*]]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Alta en la newsletter",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/newsletter/optin [data[*]]",
+     "url": "https://www.hhv.de/warenkorb",
+     "sinValidar": false
+    },
+    "forms:/profil/:id [e_mail,validate]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Cuenta de cliente",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/profil/:id [e_mail,validate]",
+     "url": "https://www.hhv.de/warenkorb",
+     "sinValidar": false
+    },
+    "forms:/profil/einloggen [checkout_mode,e_mail,keep_signed_in,password,validate]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Cuenta de cliente",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/profil/einloggen [checkout_mode,e_mail,keep_signed_in,password,validate]",
+     "url": "https://www.hhv.de/warenkorb",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Tarjeta regalo": {
+     "fecha": "2026-10-19",
+     "queEs": "Se compra un vale de importe fijo para regalar a otra persona.",
+     "encaje": "Los discos se regalan mucho y es una venta sin stock ni envío físico.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Alta en la newsletter": {
+     "fecha": "2026-10-19",
+     "queEs": "Suscribirse al correo de novedades de la tienda.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Cuenta de cliente": {
+     "fecha": "2026-10-19",
+     "queEs": "Entrar o registrarse con email y contraseña, con opción de comprar como invitado.",
+     "encaje": "Ya tenemos cuentas.",
+     "distinto": "Usan contraseña y mantener sesión; nosotros código por email.",
+     "decision": "ya-lo-tenemos"
+    }
+   }
+  },
+  "phonica": {
+   "candidatos": {
+    "funciones:tarjeta-regalo": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Tarjeta regalo",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "tarjeta-regalo",
+     "url": "https://www.phonicarecords.com/product/nala-sinephro-space-18-lp-deluxe-2lp-version-warp/213710",
+     "sinValidar": false
+    },
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://www.phonicarecords.com/product/nala-sinephro-space-18-lp-deluxe-2lp-version-warp/213710",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Tarjeta regalo": {
+     "fecha": "2026-10-19",
+     "queEs": "Se compra un vale de importe fijo para regalar a otra persona.",
+     "encaje": "Los discos se regalan mucho y es una venta sin stock ni envío físico.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  },
+  "hardwax": {
+   "candidatos": {},
+   "funciones": {}
+  },
+  "clone": {
+   "candidatos": {
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://clone.nl/item85337.html",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  },
+  "rushhour": {
+   "candidatos": {
+    "funciones:tarjeta-regalo": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Tarjeta regalo",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "tarjeta-regalo",
+     "url": "https://www.rushhour.nl/record/vinyl/daydreaming-0",
+     "sinValidar": false
+    },
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://www.rushhour.nl/record/vinyl/daydreaming-0",
+     "sinValidar": false
+    },
+    "funciones:wishlist": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Wishlist",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "wishlist",
+     "url": "https://www.rushhour.nl/record/vinyl/daydreaming-0",
+     "sinValidar": false
+    },
+    "forms:(misma pagina) [add_to_wishlist_user,form_build_id,form_id,product_id,quantity]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Wishlist",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "(misma pagina) [add_to_wishlist_user,form_build_id,form_id,product_id,quantity]",
+     "url": "https://www.rushhour.nl/record/vinyl/daydreaming-0",
+     "sinValidar": false
+    },
+    "funciones:preventa": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Preventa",
+     "pagina": "listing",
+     "tipo": "funciones",
+     "valor": "preventa",
+     "url": "https://www.rushhour.nl/new-this-week",
+     "sinValidar": false
+    },
+    "forms:(misma pagina) [genre,week]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Filtro por género",
+     "pagina": "listing",
+     "tipo": "forms",
+     "valor": "(misma pagina) [genre,week]",
+     "url": "https://www.rushhour.nl/new-this-week",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Tarjeta regalo": {
+     "fecha": "2026-10-19",
+     "queEs": "Se compra un vale de importe fijo para regalar a otra persona.",
+     "encaje": "Los discos se regalan mucho y es una venta sin stock ni envío físico.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Wishlist": {
+     "fecha": "2026-10-19",
+     "queEs": "Guardar discos para más tarde desde la ficha.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Preventa": {
+     "fecha": "2026-10-19",
+     "queEs": "Reservar discos que aún no han salido.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Filtro por género": {
+     "fecha": "2026-10-19",
+     "queEs": "Filtrar el listado por género; Rush Hour también por semana.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "Rush Hour añade filtro por semana de lanzamiento.",
+     "decision": "ya-lo-tenemos"
+    }
+   }
+  },
+  "bleep": {
+   "candidatos": {
+    "forms:/cart/update [country]": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Selector de país en carrito",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/cart/update [country]",
+     "url": "https://bleep.com/cart",
+     "sinValidar": false
+    },
+    "forms:/cart/action []": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Añadir al carrito y filtro de formato",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/cart/action []",
+     "url": "https://bleep.com/cart",
+     "sinValidar": false
+    },
+    "forms:(misma pagina) [_format-cassette,_format-cd,_format-digital,_format-vinyl,_select-all-formats,format-cassette,format-cd,format-digital]": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Añadir al carrito y filtro de formato",
+     "pagina": "listing",
+     "tipo": "forms",
+     "valor": "(misma pagina) [_format-cassette,_format-cd,_format-digital,_format-vinyl,_select-all-formats,format-cassette,format-cd,format-digital]",
+     "url": "https://bleep.com/stream/new-warehouse-arrivals",
+     "sinValidar": false
+    },
+    "forms:/redemption/update [hash,origin]": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Canje de códigos",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "/redemption/update [hash,origin]",
+     "url": "https://bleep.com/cart",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Selector de país en carrito": {
+     "fecha": "2026-10-19",
+     "queEs": "Elegir el país de envío en el carrito para ver el coste antes de pagar.",
+     "encaje": "Vendemos al mundo y el envío varía mucho por zona; evita sorpresas.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  },
+  "boomkat": {
+   "candidatos": {
+    "funciones:tarjeta-regalo": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Tarjeta regalo",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "tarjeta-regalo",
+     "url": "https://boomkat.com/artists/various-artists/releases/c78q3x6b/american-dub-electronics-469820",
+     "sinValidar": false
+    },
+    "forms:/crate_items [authenticity_token,commit,crate_item[*],turbo_frame]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Wishlist",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/crate_items [authenticity_token,commit,crate_item[*],turbo_frame]",
+     "url": "https://boomkat.com/artists/various-artists/releases/c78q3x6b/american-dub-electronics-469820",
+     "sinValidar": false
+    },
+    "forms:/player-queue [_method,authenticity_token,commit]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Cola de escucha",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/player-queue [_method,authenticity_token,commit]",
+     "url": "https://boomkat.com/artists/various-artists/releases/c78q3x6b/american-dub-electronics-469820",
+     "sinValidar": false
+    },
+    "forms:/newsletter-registrations [authenticity_token,commit]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Alta en la newsletter",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/newsletter-registrations [authenticity_token,commit]",
+     "url": "https://boomkat.com/artists/various-artists/releases/c78q3x6b/american-dub-electronics-469820",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Tarjeta regalo": {
+     "fecha": "2026-10-19",
+     "queEs": "Se compra un vale de importe fijo para regalar a otra persona.",
+     "encaje": "Los discos se regalan mucho y es una venta sin stock ni envío físico.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Wishlist": {
+     "fecha": "2026-10-19",
+     "queEs": "Guardar discos para más tarde desde la ficha.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Cola de escucha": {
+     "fecha": "2026-10-19",
+     "queEs": "Añadir discos a una cola de reproducción para escucharlos seguidos.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Alta en la newsletter": {
+     "fecha": "2026-10-19",
+     "queEs": "Suscribirse al correo de novedades de la tienda.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    }
+   }
+  },
+  "juno": {
+   "candidatos": {
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://www.juno.co.uk/products/rotation-soundsystem-everything-youre-about-to-hear-is-vinyl/1181602-01/",
+     "sinValidar": false
+    },
+    "funciones:resenas-cliente": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Reseñas de cliente",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "resenas-cliente",
+     "url": "https://www.juno.co.uk/products/rotation-soundsystem-everything-youre-about-to-hear-is-vinyl/1181602-01/",
+     "sinValidar": false
+    },
+    "scripts:widget.trustpilot.com": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Reseñas de cliente",
+     "pagina": "product",
+     "tipo": "scripts",
+     "valor": "widget.trustpilot.com",
+     "url": "https://www.juno.co.uk/products/rotation-soundsystem-everything-youre-about-to-hear-is-vinyl/1181602-01/",
+     "sinValidar": false
+    },
+    "scripts:applepay.cdn-apple.com": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Apple Pay y Google Pay",
+     "pagina": "product",
+     "tipo": "scripts",
+     "valor": "applepay.cdn-apple.com",
+     "url": "https://www.juno.co.uk/products/rotation-soundsystem-everything-youre-about-to-hear-is-vinyl/1181602-01/",
+     "sinValidar": false
+    },
+    "scripts:pay.google.com": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Apple Pay y Google Pay",
+     "pagina": "product",
+     "tipo": "scripts",
+     "valor": "pay.google.com",
+     "url": "https://www.juno.co.uk/products/rotation-soundsystem-everything-youre-about-to-hear-is-vinyl/1181602-01/",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Reseñas de cliente": {
+     "fecha": "2026-10-19",
+     "queEs": "Valoraciones y opiniones de compradores sobre la tienda o el disco.",
+     "encaje": "Daría confianza a una tienda pequeña y nueva frente a las grandes.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Apple Pay y Google Pay": {
+     "fecha": "2026-10-19",
+     "queEs": "Pagar con un toque desde el móvil sin teclear la tarjeta.",
+     "encaje": "Reduce abandonos en compras impulsivas de un disco; se activa en el checkout de Shopify.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  },
+  "deejay": {
+   "candidatos": {
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://www.deejay.de/The_Brand_New_Heavies_Get_Used_To_It_2x12_4029759222156_Vinyl__1270180",
+     "sinValidar": false
+    },
+    "funciones:preventa": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Preventa",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "preventa",
+     "url": "https://www.deejay.de/The_Brand_New_Heavies_Get_Used_To_It_2x12_4029759222156_Vinyl__1270180",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Preventa": {
+     "fecha": "2026-10-19",
+     "queEs": "Reservar discos que aún no han salido.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    }
+   }
+  },
+  "rubadub": {
+   "candidatos": {
+    "funciones:tarjeta-regalo": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Tarjeta regalo",
+     "pagina": "listing",
+     "tipo": "funciones",
+     "valor": "tarjeta-regalo",
+     "url": "https://rubadub.co.uk/collections/all?sort_by=created-descending",
+     "sinValidar": false
+    },
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "funciones:preventa": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Preventa",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "preventa",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "forms:/account [customer[*],form_type,utfN]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Cuenta de cliente",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/account [customer[*],form_type,utfN]",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "forms:/cart [attributes[*],ck_lumise,discount]": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Código de descuento en carrito",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/cart [attributes[*],ck_lumise,discount]",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "forms:(misma pagina) [attributes[*],ck_lumise,note]": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Nota en el pedido",
+     "pagina": "cart",
+     "tipo": "forms",
+     "valor": "(misma pagina) [attributes[*],ck_lumise,note]",
+     "url": "https://rubadub.co.uk/cart",
+     "sinValidar": false
+    },
+    "forms:/search [options[*],q,type]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Búsqueda de texto",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/search [options[*],q,type]",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "forms:/cart/add [form_type,id,product-id,quantity,section-id,utfN]": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Añadir al carrito y filtro de formato",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/cart/add [form_type,id,product-id,quantity,section-id,utfN]",
+     "url": "https://rubadub.co.uk/products/wicked-game-trinity-versions",
+     "sinValidar": false
+    },
+    "forms:/cart/add [form_type,id,quantity]": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Añadir al carrito y filtro de formato",
+     "pagina": "listing",
+     "tipo": "forms",
+     "valor": "/cart/add [form_type,id,quantity]",
+     "url": "https://rubadub.co.uk/collections/all?sort_by=created-descending",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Tarjeta regalo": {
+     "fecha": "2026-10-19",
+     "queEs": "Se compra un vale de importe fijo para regalar a otra persona.",
+     "encaje": "Los discos se regalan mucho y es una venta sin stock ni envío físico.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Preventa": {
+     "fecha": "2026-10-19",
+     "queEs": "Reservar discos que aún no han salido.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    },
+    "Cuenta de cliente": {
+     "fecha": "2026-10-19",
+     "queEs": "Entrar o registrarse con email y contraseña, con opción de comprar como invitado.",
+     "encaje": "Ya tenemos cuentas.",
+     "distinto": "Usan contraseña y mantener sesión; nosotros código por email.",
+     "decision": "ya-lo-tenemos"
+    },
+    "Código de descuento en carrito": {
+     "fecha": "2026-10-19",
+     "queEs": "Campo para escribir un código promocional antes de pagar.",
+     "encaje": "Permitiría promociones y códigos en Instagram sin esperar al checkout.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Nota en el pedido": {
+     "fecha": "2026-10-19",
+     "queEs": "Escribir una nota al vendedor en el carrito.",
+     "encaje": "Sirve para dedicatorias o instrucciones de envío.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Búsqueda de texto": {
+     "fecha": "2026-10-19",
+     "queEs": "Buscar discos por texto.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "",
+     "decision": "ya-lo-tenemos"
+    }
+   }
+  },
+  "kudos": {
+   "candidatos": {
+    "funciones:aviso-reposicion": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Aviso de vuelta a stock",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "aviso-reposicion",
+     "url": "https://shop.kudosrecords.co.uk/artist/294001/geoff-kirkwood-fiona-brice",
+     "sinValidar": false
+    },
+    "funciones:resenas-cliente": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Reseñas de cliente",
+     "pagina": "product",
+     "tipo": "funciones",
+     "valor": "resenas-cliente",
+     "url": "https://shop.kudosrecords.co.uk/artist/294001/geoff-kirkwood-fiona-brice",
+     "sinValidar": false
+    },
+    "data:data-fancybox": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Galería ampliable de imágenes",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-fancybox",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "data:data-slide-to": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Galería ampliable de imágenes",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-slide-to",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "aria:aria-controls": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "aria",
+     "valor": "aria-controls",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "aria:aria-label": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "aria",
+     "valor": "aria-label",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "data:data-type": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "data",
+     "valor": "data-type",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    },
+    "rutas:/release": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Atributos genéricos",
+     "pagina": "product",
+     "tipo": "rutas",
+     "valor": "/release",
+     "url": "https://shop.kudosrecords.co.uk/release/mtka001/babo-moreno-babo-moreno",
+     "sinValidar": true
+    }
+   },
+   "funciones": {
+    "Aviso de vuelta a stock": {
+     "fecha": "2026-10-19",
+     "queEs": "El cliente deja su email en un disco agotado y recibe un aviso cuando vuelve.",
+     "encaje": "Hoy solo tenemos Request en agotados recientes; esto cubriría cualquier disco y mediría la demanda.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Reseñas de cliente": {
+     "fecha": "2026-10-19",
+     "queEs": "Valoraciones y opiniones de compradores sobre la tienda o el disco.",
+     "encaje": "Daría confianza a una tienda pequeña y nueva frente a las grandes.",
+     "distinto": "",
+     "decision": "reportada"
+    },
+    "Galería ampliable de imágenes": {
+     "fecha": "2026-10-19",
+     "queEs": "En la ficha, el cliente pasa por varias imágenes del disco y las amplía a pantalla grande.",
+     "encaje": "Permitiría ver contraportada y el color real del vinilo antes de elegir entre Black y Coloured.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  },
+  "triplevision": {
+   "candidatos": {
+    "forms:/filter/releases [genre[*]]": {
+     "fecha": "2026-10-19",
+     "decision": "ya-lo-tenemos",
+     "funcion": "Filtro por género",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/filter/releases [genre[*]]",
+     "url": "https://www.triplevision.nl/releases/new/#",
+     "sinValidar": false
+    },
+    "forms:/filter/releases [recordlabel[*]]": {
+     "fecha": "2026-10-19",
+     "decision": "reportada",
+     "funcion": "Filtro por sello",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/filter/releases [recordlabel[*]]",
+     "url": "https://www.triplevision.nl/releases/new/#",
+     "sinValidar": false
+    },
+    "forms:/filter/releases [format[*]]": {
+     "fecha": "2026-10-19",
+     "decision": "descartada",
+     "funcion": "Añadir al carrito y filtro de formato",
+     "pagina": "product",
+     "tipo": "forms",
+     "valor": "/filter/releases [format[*]]",
+     "url": "https://www.triplevision.nl/releases/new/#",
+     "sinValidar": false
+    }
+   },
+   "funciones": {
+    "Filtro por género": {
+     "fecha": "2026-10-19",
+     "queEs": "Filtrar el listado por género; Rush Hour también por semana.",
+     "encaje": "Ya lo tenemos.",
+     "distinto": "Rush Hour añade filtro por semana de lanzamiento.",
+     "decision": "ya-lo-tenemos"
+    },
+    "Filtro por sello": {
+     "fecha": "2026-10-19",
+     "queEs": "Filtrar el listado de novedades por sello.",
+     "encaje": "Los compradores de house y techno siguen sellos; hoy solo se llega por la página del sello.",
+     "distinto": "",
+     "decision": "reportada"
+    }
+   }
+  }
+ }
+}
