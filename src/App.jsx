@@ -9,7 +9,7 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
+import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -10457,7 +10457,10 @@ function PreorderImporter() {
       // QUIEN vino cada uno: si el mismo disco esta pedido a dos distribuidores
       // llegara por duplicado, y eso hay que avisarlo antes de que pase.
       const srcs = new Set([...(prev?.srcs || []), d.src].filter(Boolean));
-      pedidoPorCatno.set(k, { ...prev, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v != null && v !== '')), srcs });
+      // La fecha que cuenta para "pedido antiguo" es la del pedido MAS RECIENTE:
+      // el indice va de nuevo a viejo y el spread dejaria la del mas viejo.
+      const _fechaPedido = [prev?._fechaPedido, d._fecha].filter(Boolean).sort().pop() || '';
+      pedidoPorCatno.set(k, { ...prev, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v != null && v !== '')), srcs, _fechaPedido });
     };
 
     for (const e of mailIdx.filter(x => x.prefix === 'WSORD')) {
@@ -10482,7 +10485,7 @@ function PreorderImporter() {
       const casan = material.filter(m => m.prefix === 'RD' && (m.subject.startsWith(base) || base.startsWith(m.subject)));
       if (casan.length) {
         const sig = parseOrderSignal(await traer(p.name));
-        for (const m of casan) señales.set(m.name, sig);
+        for (const m of casan) señales.set(m.name, { ...sig, _fecha: p.date });
       }
       paso();
     }
@@ -10518,15 +10521,18 @@ function PreorderImporter() {
           // LOG86, el de UNI10-002 a UNI10-001 y -003, que no tienen.
           const trackers = row._zipLinks || [];
           const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
-                         _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers };
+                         _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers,
+                         _fechaPedido: pedidoRd ? (sig._fecha || '') : '' };
           const prev = best.get(k);
           if (!prev || cand._rank > prev._rank || (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
             // Una revision (ART-UPDATE…) gana por fecha pero suele venir sin
             // enlace: entonces se conserva el del anuncio al que corrige.
             best.set(k, { ...cand, _trackers: trackers.length ? trackers : (prev?._trackers || []),
-                          _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null });
+                          _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null,
+                          _fechaPedido: [cand._fechaPedido, prev?._fechaPedido].filter(Boolean).sort().pop() || '' });
           } else if (cand._ordered && prev) {
-            best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
+            best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null,
+                          _fechaPedido: [cand._fechaPedido, prev._fechaPedido].filter(Boolean).sort().pop() || '' });
           }
         }
       }
@@ -10539,6 +10545,7 @@ function PreorderImporter() {
         // El precio del pedido es el pactado; gana al del anuncio.
         const srcs = new Set([...(ped.srcs || []), ...(r._ordered ? [r.source] : [])]);
         best.set(k, { ...r, _ordered: true, _qty: ped.qty ?? r._qty,
+                      _fechaPedido: [ped._fechaPedido, r._fechaPedido].filter(Boolean).sort().pop() || '',
                       dealerPrice: ped.dealerPrice ?? r.dealerPrice,
                       zipUrl: r.zipUrl || ped.zipUrl || '', _ready: ped.ready,
                       _ordSrcs: [...srcs] });
@@ -10550,6 +10557,7 @@ function PreorderImporter() {
           release: '', dealerPrice: ped.dealerPrice ?? null, format: '', coverUrl: '',
           zipUrl: ped.zipUrl || '', source: ped.src, forthcoming: true,
           _ordered: true, _qty: ped.qty ?? null, _ready: ped.ready, _ordSrcs: [...(ped.srcs || [])],
+          _fechaPedido: ped._fechaPedido || '',
           _warnings: ['sin email de anuncio — ficha montada desde la confirmación de pedido'],
           _trackers: [],
         });
@@ -10629,7 +10637,8 @@ function PreorderImporter() {
 
   const mailAddPicked = async () => {
     const vivos = new Set((mailRows || []).filter(r => r._live).map(r => rdKey(r.catno)));
-    const visibles = new Set(clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos }).visibles.map(r => rdKey(r.catno)));
+    const cl = clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos });
+    const visibles = new Set([...cl.visibles, ...cl.antiguos].map(r => rdKey(r.catno)));
     const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && visibles.has(rdKey(r.catno)) && !r._added);
     if (!picked.length) return;
     // Las filas rojas —lo que no salio en ninguna señal de pedido— no se
@@ -10658,7 +10667,8 @@ function PreorderImporter() {
     // descripcion salia del ZIP o de ningun sitio. 71 pre-orders vivos no tienen
     // texto por esto. Se queda en el manifest para que process() pueda usarla.
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
-                                _live, _qty, _ready, _ordSrcs, _trackers, ...row }) => row);
+                                _live, _qty, _ready, _ordSrcs, _trackers,
+                                _liveComo, _rechazadoEl, _fechaPedido, ...row }) => row);
     setManifest(prev => {
       const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
@@ -11193,7 +11203,7 @@ function PreorderImporter() {
               // tienda por SKU y lo rechazado no se listan; cada uno queda tras
               // su contador desplegable.
               const liveKeys = new Set(mailRows.filter(r=>r._live).map(r=>rdKey(r.catno)));
-              const { visibles, yaEnTienda: live, rechazados } = clasificaFilas(mailRows, { enTienda: k => liveKeys.has(k), rechazos: mailRechazos });
+              const { visibles, antiguos, yaEnTienda: live, rechazados } = clasificaFilas(mailRows, { enTienda: k => liveKeys.has(k), rechazos: mailRechazos });
               const ord  = visibles.filter(r=>r._ordered);
               const rest = visibles.filter(r=>!r._ordered);
               const botonRechazo = {background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:8,padding:'2px 7px',borderRadius:2,fontFamily:'inherit',flexShrink:0,whiteSpace:'nowrap'};
@@ -11248,6 +11258,7 @@ function PreorderImporter() {
                       buscar ↗
                     </a>
                   )}
+                  {esPedidoAntiguo(r)&&<span title={`Pedido hace más de ${DIAS_PEDIDO_ANTIGUO} días y sin alta en la tienda`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>pedido el {fechaCorta(r._fechaPedido)}</span>}
                   {r._liveComo&&<span title="Mismo disco con otro sufijo o ceros en Shopify" style={{fontSize:8,color:S.muted,flexShrink:0,whiteSpace:'nowrap'}}>en tienda como {r._liveComo}</span>}
                   {r._rechazadoEl&&<span title={`"No, por ahora" caducado: pasaron ${DIAS_RECHAZO_TEMPORAL} días`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>rechazado el {fechaCorta(r._rechazadoEl)}</span>}
                   {!r._live && !r._added && (
@@ -11267,6 +11278,7 @@ function PreorderImporter() {
                 <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',marginBottom:8,alignItems:'center'}}>
                   <span><b style={{color:S.accent}}>{ord.length}</b> pedidos</span>
                   <span><b style={{color:S.danger}}>{rest.length}</b> sin pedir</span>
+                  <span><b style={{color:'#ff8800'}}>{antiguos.length}</b> pedidos sin alta</span>
                   <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
                   <span><b style={{color:S.muted}}>{rechazados.length}</b> rechazados</span>
                   <span>· <b style={{color:S.text}}>{n}</b> seleccionados</span>
@@ -11290,6 +11302,17 @@ function PreorderImporter() {
                   {rest.map(fila)}
                   {!visibles.length&&<div style={{fontSize:10,color:S.muted,padding:'14px 8px',textAlign:'center'}}>Nada nuevo: todo está ya en la tienda o rechazado.</div>}
                 </div>
+                {/* Pedidos de hace mas de 4 semanas que no estan en la tienda: ni
+                    se marcan solos ni se ocultan solos. Salen de aqui al darlos de
+                    alta o al rechazarlos. lib/preorder-rechazos.mjs */}
+                {antiguos.length>0&&(
+                  <details style={{marginTop:8,border:'1px solid #ff880066',borderRadius:3}}>
+                    <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:'#ff8800',letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>
+                      {antiguos.length} pedidos sin alta en la tienda <span style={{fontWeight:400,textTransform:'none',letterSpacing:0,color:S.muted}}>— pedidos hace más de {DIAS_PEDIDO_ANTIGUO} días y sin producto en Shopify; no se marcan solos</span>
+                    </summary>
+                    <div style={{maxHeight:320,overflowY:'auto'}}>{antiguos.map(fila)}</div>
+                  </details>
+                )}
                 {live.length>0&&(
                   <details style={{marginTop:8,border:`1px solid ${S.border}`,borderRadius:3}}>
                     <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:S.muted,letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>

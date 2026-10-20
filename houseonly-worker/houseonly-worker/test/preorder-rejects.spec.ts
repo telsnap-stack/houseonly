@@ -12,6 +12,8 @@ import {
 	fechaCorta,
 	indiceTienda,
 	buscaEnTienda,
+	esPedidoAntiguo,
+	DIAS_PEDIDO_ANTIGUO,
 } from "../src/lib/preorder-rechazos.mjs";
 
 const SECRET = "test-secret";
@@ -110,6 +112,35 @@ describe("filtro 2: rechazados, los dos tipos", () => {
 		const rechazos = new Map([[claveCatno("YORE-011LTD"), rechazo("YORE-011LTD", "definitivo", 1)]]);
 		expect(clasificaFilas([fila("YORE 011 LTD")], { rechazos, ahora: HOY }).rechazados).toHaveLength(1);
 		expect(claveKV("yore-011ltd")).toBe("preorder:rejected:YORE011LTD");
+	});
+});
+
+describe("pedidos sin alta en la tienda (mas de 4 semanas)", () => {
+	const pedido = (catno: string, haceDias: number, extra = {}) =>
+		fila(catno, { _ordered: true, _fechaPedido: new Date(HOY - haceDias * DIA).toISOString().slice(0, 10), ...extra });
+
+	it("mas de 28 dias va a su bloque; 27 sigue en la lista", () => {
+		expect(DIAS_PEDIDO_ANTIGUO).toBe(28);
+		const r = clasificaFilas([pedido("FRLP44", 160), pedido("ARK010", 1), pedido("X27", 27)], { ahora: HOY });
+		expect(r.antiguos.map(x => x.catno)).toEqual(["FRLP44"]);
+		expect(r.visibles.map(x => x.catno)).toEqual(["ARK010", "X27"]);
+	});
+
+	it("nunca se oculta solo: a los 400 dias sigue en el bloque", () => {
+		expect(clasificaFilas([pedido("PAMPA045", 400)], { ahora: HOY }).antiguos).toHaveLength(1);
+	});
+
+	it("sale del bloque solo al darlo de alta o al rechazarlo", () => {
+		const rechazos = new Map([["ENV014R", rechazo("env014r", "temporal", 3)]]);
+		const r = clasificaFilas([pedido("env014r", 160), pedido("UR-025", 120)], { rechazos, enTienda: k => k === "UR025", ahora: HOY });
+		expect(r.antiguos).toEqual([]);
+		expect(r.rechazados.map(x => x.catno)).toEqual(["env014r"]);
+		expect(r.yaEnTienda.map(x => x.catno)).toEqual(["UR-025"]);
+	});
+
+	it("solo cuenta lo pedido: un anuncio viejo sin pedido no es pedido sin alta", () => {
+		expect(esPedidoAntiguo(fila("RD123", { _fechaPedido: "2026-01-01" }), HOY)).toBe(false);
+		expect(esPedidoAntiguo(fila("RD123", { _ordered: true }), HOY)).toBe(false);   // sin fecha: no se adivina
 	});
 });
 
