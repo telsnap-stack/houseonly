@@ -922,7 +922,7 @@ import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './li
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed';
-import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo } from './lib/preorder-rejects';
+import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo, handlePreorderUnlisted } from './lib/preorder-rejects';
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
 
@@ -1475,6 +1475,9 @@ export default {
     }
     if (action === 'preorder-reject' && request.method === 'DELETE') {
       return await handlePreorderRejectUndo(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'preorder-unlisted' && request.method === 'GET') {
+      return await handlePreorderUnlisted(env, bearerAdminValido(request, env));
     }
 
     // ── POLITICAS DE LA TIENDA ──────────────────────────────
