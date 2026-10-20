@@ -83,26 +83,42 @@ export function estadoRechazo(rec, ahora = Date.now()) {
 }
 
 /**
+ * Pedido hace mas de 4 semanas y sin producto en la tienda (2026-10-20: 68 de
+ * los 124 pedidos de W&S sin alta, el mas viejo de marzo). Van a su propio
+ * bloque desplegable, sin marcar solos, con los mismos botones de rechazo.
+ * NUNCA se ocultan solos: solo salen del bloque si se dan de alta o se
+ * rechazan. `_fechaPedido` es la del pedido mas reciente de ese disco.
+ */
+export const DIAS_PEDIDO_ANTIGUO = 28;
+export function esPedidoAntiguo(r, ahora = Date.now()) {
+  if (!r?._ordered || !r._fechaPedido) return false;
+  const t = Date.parse(r._fechaPedido);
+  return Number.isFinite(t) && ahora - t > DIAS_PEDIDO_ANTIGUO * DIA_MS;
+}
+
+/**
  * @param rows      filas del parseo ({catno, ...})
  * @param enTienda  (clave) => boolean — existe en Shopify por SKU/handle
  * @param rechazos  Map clave → registro de KV
- * @returns { visibles, yaEnTienda, rechazados }
+ * @returns { visibles, antiguos, yaEnTienda, rechazados }
  *   visibles    lo que se lista; un temporal caducado lleva _rechazadoEl
+ *   antiguos    pedidos de hace mas de 4 semanas sin alta (esPedidoAntiguo)
  *   rechazados  vigentes, con _rechazo y _estadoRechazo
+ * Orden: en tienda > rechazado > antiguo > visible.
  */
 export function clasificaFilas(rows, { enTienda = () => false, rechazos = new Map(), ahora = Date.now() } = {}) {
-  const visibles = [], yaEnTienda = [], rechazados = [];
+  const visibles = [], antiguos = [], yaEnTienda = [], rechazados = [];
   for (const r of rows || []) {
     const k = claveCatno(r.catno);
     // En tienda gana: si ya esta en Shopify da igual que se rechazara.
     if (enTienda(k)) { yaEnTienda.push(r); continue; }
     const rec = rechazos.get(k);
     const est = estadoRechazo(rec, ahora);
-    if (est === 'oculto' || est === 'definitivo') rechazados.push({ ...r, _rechazo: rec, _estadoRechazo: est });
-    else if (est === 'caducado') visibles.push({ ...r, _rechazadoEl: rec.fecha });
-    else visibles.push(r);
+    if (est === 'oculto' || est === 'definitivo') { rechazados.push({ ...r, _rechazo: rec, _estadoRechazo: est }); continue; }
+    const fila = est === 'caducado' ? { ...r, _rechazadoEl: rec.fecha } : r;
+    (esPedidoAntiguo(fila, ahora) ? antiguos : visibles).push(fila);
   }
-  return { visibles, yaEnTienda, rechazados };
+  return { visibles, antiguos, yaEnTienda, rechazados };
 }
 
 const texto = (v, max = 120) => String(v ?? '').trim().slice(0, max);
