@@ -922,6 +922,7 @@ import { slugifyRelease as nlSlugify, makeReleaseSlug as nlMakeSlug } from './li
 
 import { runGraduation, getGraduationMode, setGraduationMode } from './lib/graduation';
 import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed';
+import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo } from './lib/preorder-rejects';
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
 
@@ -1462,6 +1463,18 @@ export default {
     }
     if (action === 'ig-feed-remove' && request.method === 'POST') {
       return await handleIgFeedRemove(request, env, bearerAdminValido(request, env));
+    }
+
+    // Rechazos del tab Pre-order: "No, por ahora" (90 dias) y "Nunca".
+    // lib/preorder-rejects.ts. Todo con Bearer admin.
+    if (action === 'preorder-rejects' && request.method === 'GET') {
+      return await handlePreorderRejects(env, bearerAdminValido(request, env));
+    }
+    if (action === 'preorder-reject' && request.method === 'POST') {
+      return await handlePreorderReject(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'preorder-reject' && request.method === 'DELETE') {
+      return await handlePreorderRejectUndo(request, env, bearerAdminValido(request, env));
     }
 
     // ── POLITICAS DE LA TIENDA ──────────────────────────────
