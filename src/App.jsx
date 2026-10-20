@@ -10593,8 +10593,9 @@ function PreorderImporter() {
     let unlisted = [];
     try { unlisted = await preorderUnlistedFetch(mailSecret); }
     catch (e) { setMailError(`No se pudieron leer los productos unlisted (${e.message}); pueden salir como sin alta.`); }
-    const clavesUnlisted = new Set(unlisted.flatMap(u => [rdKey(u.sku), rdKey(u.handle)]).filter(Boolean));
-    const skuUnlisted = new Map(unlisted.flatMap(u => [[rdKey(u.sku), u.sku], [rdKey(u.handle), u.sku || u.handle]]));
+    // El worker solo da SKU y estado: se cruza por SKU.
+    const clavesUnlisted = new Set(unlisted.map(u => rdKey(u.sku)).filter(Boolean));
+    const skuUnlisted = new Map(unlisted.map(u => [rdKey(u.sku), u.sku]));
     const indice = indiceTienda([...live, ...clavesUnlisted]);
     const all = [...best.values()].map(r => {
       const como = buscaEnTienda(indice, r.catno);
