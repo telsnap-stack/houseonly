@@ -9,7 +9,7 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
+import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -9699,6 +9699,14 @@ async function preorderRechazosFetch(secret) {
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   return new Map((d.items || []).map(x => [rdKey(x.catno), x]));
 }
+// SKUs de los productos UNLISTED (worker, Admin API): el listado de la
+// Storefront API no los trae y salian como "sin alta" teniendolos.
+async function preorderUnlistedFetch(secret) {
+  const r = await fetch(`${WORKER_URL}?action=preorder-unlisted`, { headers: { 'Authorization': `Bearer ${secret}` } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d.items || [];
+}
 async function preorderRechazoSend(secret, method, body) {
   const r = await fetch(`${WORKER_URL}?action=preorder-reject`, {
     method, headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -10208,10 +10216,11 @@ function PreorderImporter() {
     //     WITH CORS, letting us await each blob to full completion.
     //   • W&S  → https://wordandsound.net/release/{id}-{catno}-.../assets — this
     //     is a session-authenticated direct ZIP download. A cross-origin fetch()
-    //     would be blocked AND would not carry the W&S session cookies, so we do
-    //     a plain anchor-click on the real URL (same as opening it by hand): the
-    //     browser downloads it with the user's cookies. Pop-up blockers kill
-    //     window.open, but a same-gesture anchor-click on a stagger works.
+    //     would be blocked AND would not carry the W&S session cookies, so the
+    //     real URL is opened as a normal navigation (same as by hand) — in ONE
+    //     helper tab opened within the click, never in the admin's own tab: a
+    //     W&S answer that is a page instead of a ZIP used to navigate the admin
+    //     away and kill the run (2026-10-20, WHYT085). See below.
     const isLiveDl = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     const skipped = { live: 0, dropped: 0 };
     const rows = manifest
@@ -10235,6 +10244,27 @@ function PreorderImporter() {
         ? `Nothing new to download — every ZIP is already live or excluded (${skipped.live} live, ${skipped.dropped} dropped).`
         : 'No ZIP URLs in the manifest to download.');
       return;
+    }
+    // W&S en una pestaña AUXILIAR, nunca en la del admin (2026-10-20). Con el
+    // anchor-click en la misma pestaña, si W&S contestaba una pagina en vez del
+    // ZIP —reto de Cloudflare, login, un release sin assets como WHYT085— el
+    // navegador abandonaba el admin y la descarga en curso moria. La auxiliar se
+    // abre AQUI, antes de cualquier await, para que cuente como parte del clic y
+    // el bloqueador de ventanas no la frene; despues solo se le cambia la URL.
+    // Es navegacion normal, asi que lleva tu sesion de W&S. Desde aqui no se
+    // puede leer que contesto (otro dominio): lo que no baje se ve alli.
+    const hayWs = rows.some(r => !r.proxiable && !r.isDbh);
+    let wsWin = null;
+    if (hayWs) {
+      wsWin = window.open('about:blank', 'houseonly-descargas-ws');
+      if (wsWin) {
+        try {
+          wsWin.document.title = 'Descargas W&S — House Only';
+          wsWin.document.body.innerHTML = '<p style="font:13px system-ui;padding:20px">Descargas de Word &amp; Sound en curso desde el admin. No cierres esta pestaña hasta que termine. Si alguna no baja, aquí verás la página que devolvió W&amp;S.</p>';
+        } catch { /* ya era de otro dominio: da igual */ }
+      } else {
+        setError('El navegador bloqueó la pestaña de descargas de W&S: permite ventanas emergentes para este sitio y repite. Los de W&S no se han tocado.');
+      }
     }
     setDownloadDone(false);
     setDownloadProgress(0);
@@ -10315,12 +10345,15 @@ function PreorderImporter() {
           // it for security) — the server's content-disposition decides the
           // filename, which for W&S already carries the cat-no. We let it open
           // in the same gesture; the browser saves the ZIP with W&S cookies.
-          const a = document.createElement('a');
-          a.href = url;
-          a.rel = 'noreferrer';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+          // En la pestaña auxiliar (ver arriba). Sin ella —bloqueada o cerrada
+          // a medias— no se intenta en la del admin: se cuenta como fallido.
+          if (!wsWin || wsWin.closed) {
+            failed++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            continue;
+          }
+          wsWin.location.href = url;
           ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
@@ -10457,7 +10490,10 @@ function PreorderImporter() {
       // QUIEN vino cada uno: si el mismo disco esta pedido a dos distribuidores
       // llegara por duplicado, y eso hay que avisarlo antes de que pase.
       const srcs = new Set([...(prev?.srcs || []), d.src].filter(Boolean));
-      pedidoPorCatno.set(k, { ...prev, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v != null && v !== '')), srcs });
+      // La fecha que cuenta para "pedido antiguo" es la del pedido MAS RECIENTE:
+      // el indice va de nuevo a viejo y el spread dejaria la del mas viejo.
+      const _fechaPedido = [prev?._fechaPedido, d._fecha].filter(Boolean).sort().pop() || '';
+      pedidoPorCatno.set(k, { ...prev, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v != null && v !== '')), srcs, _fechaPedido });
     };
 
     for (const e of mailIdx.filter(x => x.prefix === 'WSORD')) {
@@ -10482,7 +10518,7 @@ function PreorderImporter() {
       const casan = material.filter(m => m.prefix === 'RD' && (m.subject.startsWith(base) || base.startsWith(m.subject)));
       if (casan.length) {
         const sig = parseOrderSignal(await traer(p.name));
-        for (const m of casan) señales.set(m.name, sig);
+        for (const m of casan) señales.set(m.name, { ...sig, _fecha: p.date });
       }
       paso();
     }
@@ -10518,15 +10554,18 @@ function PreorderImporter() {
           // LOG86, el de UNI10-002 a UNI10-001 y -003, que no tienen.
           const trackers = row._zipLinks || [];
           const cand = { ...row, _email: b.e.name, _emailDate: b.e.date, _rank: rank(b.e),
-                         _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers };
+                         _ordered: pedidoRd, _qty: pedidoRd ? (sig.qty || null) : null, _trackers: trackers,
+                         _fechaPedido: pedidoRd ? (sig._fecha || '') : '' };
           const prev = best.get(k);
           if (!prev || cand._rank > prev._rank || (cand._rank === prev._rank && (cand._emailDate || '') > (prev._emailDate || ''))) {
             // Una revision (ART-UPDATE…) gana por fecha pero suele venir sin
             // enlace: entonces se conserva el del anuncio al que corrige.
             best.set(k, { ...cand, _trackers: trackers.length ? trackers : (prev?._trackers || []),
-                          _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null });
+                          _ordered: cand._ordered || prev?._ordered || false, _qty: cand._qty ?? prev?._qty ?? null,
+                          _fechaPedido: [cand._fechaPedido, prev?._fechaPedido].filter(Boolean).sort().pop() || '' });
           } else if (cand._ordered && prev) {
-            best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null });
+            best.set(k, { ...prev, _ordered: true, _qty: prev._qty ?? cand._qty ?? null,
+                          _fechaPedido: [cand._fechaPedido, prev._fechaPedido].filter(Boolean).sort().pop() || '' });
           }
         }
       }
@@ -10539,6 +10578,7 @@ function PreorderImporter() {
         // El precio del pedido es el pactado; gana al del anuncio.
         const srcs = new Set([...(ped.srcs || []), ...(r._ordered ? [r.source] : [])]);
         best.set(k, { ...r, _ordered: true, _qty: ped.qty ?? r._qty,
+                      _fechaPedido: [ped._fechaPedido, r._fechaPedido].filter(Boolean).sort().pop() || '',
                       dealerPrice: ped.dealerPrice ?? r.dealerPrice,
                       zipUrl: r.zipUrl || ped.zipUrl || '', _ready: ped.ready,
                       _ordSrcs: [...srcs] });
@@ -10550,6 +10590,7 @@ function PreorderImporter() {
           release: '', dealerPrice: ped.dealerPrice ?? null, format: '', coverUrl: '',
           zipUrl: ped.zipUrl || '', source: ped.src, forthcoming: true,
           _ordered: true, _qty: ped.qty ?? null, _ready: ped.ready, _ordSrcs: [...(ped.srcs || [])],
+          _fechaPedido: ped._fechaPedido || '',
           _warnings: ['sin email de anuncio — ficha montada desde la confirmación de pedido'],
           _trackers: [],
         });
@@ -10571,14 +10612,25 @@ function PreorderImporter() {
     const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
     // No solo igual: UR-025 del pedido es UR-025A / UR-025J en la tienda, y
     // FR315 es FR315R. Las reglas, en lib/preorder-rechazos.mjs (buscaEnTienda).
-    const indice = indiceTienda(live);
+    // UNLISTED: en la tienda pero fuera del listado de la Storefront API. Si el
+    // worker no contesta se avisa y se sigue sin ellos: saldrian como sin alta,
+    // que es lo de antes, no algo peor.
+    let unlisted = [];
+    try { unlisted = await preorderUnlistedFetch(mailSecret); }
+    catch (e) { setMailError(`No se pudieron leer los productos unlisted (${e.message}); pueden salir como sin alta.`); }
+    // El worker solo da SKU y estado: se cruza por SKU.
+    const clavesUnlisted = new Set(unlisted.map(u => rdKey(u.sku)).filter(Boolean));
+    const skuUnlisted = new Map(unlisted.map(u => [rdKey(u.sku), u.sku]));
+    const indice = indiceTienda([...live, ...clavesUnlisted]);
     const all = [...best.values()].map(r => {
       const como = buscaEnTienda(indice, r.catno);
+      const esUnlisted = !!como && clavesUnlisted.has(como) && !live.has(como);
       return {
       ...r,
       _live: !!como,
+      _unlisted: esUnlisted,
       // Con que SKU encajo cuando no es el mismo catno: se ve en "ya en tienda".
-      _liveComo: como && como !== rdKey(r.catno) ? (live.skuReal?.get(como) || como) : '',
+      _liveComo: como && como !== rdKey(r.catno) ? (live.skuReal?.get(como) || skuUnlisted.get(como) || como) : '',
       _ordSrcs: r._ordSrcs || (r._ordered ? [r.source] : []),
       };
     });
@@ -10629,7 +10681,8 @@ function PreorderImporter() {
 
   const mailAddPicked = async () => {
     const vivos = new Set((mailRows || []).filter(r => r._live).map(r => rdKey(r.catno)));
-    const visibles = new Set(clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos }).visibles.map(r => rdKey(r.catno)));
+    const cl = clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos });
+    const visibles = new Set([...cl.visibles, ...cl.antiguos].map(r => rdKey(r.catno)));
     const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && visibles.has(rdKey(r.catno)) && !r._added);
     if (!picked.length) return;
     // Las filas rojas —lo que no salio en ninguna señal de pedido— no se
@@ -10658,7 +10711,8 @@ function PreorderImporter() {
     // descripcion salia del ZIP o de ningun sitio. 71 pre-orders vivos no tienen
     // texto por esto. Se queda en el manifest para que process() pueda usarla.
     const clean = picked.map(({ _gbp, _warnings, _digest, _email, _emailDate, _rank, _ordered,
-                                _live, _qty, _ready, _ordSrcs, _trackers, ...row }) => row);
+                                _live, _qty, _ready, _ordSrcs, _trackers,
+                                _liveComo, _rechazadoEl, _fechaPedido, _unlisted, ...row }) => row);
     setManifest(prev => {
       const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
       for (const row of clean) byCatno.set(row.catno.toUpperCase(), row);
@@ -11193,12 +11247,14 @@ function PreorderImporter() {
               // tienda por SKU y lo rechazado no se listan; cada uno queda tras
               // su contador desplegable.
               const liveKeys = new Set(mailRows.filter(r=>r._live).map(r=>rdKey(r.catno)));
-              const { visibles, yaEnTienda: live, rechazados } = clasificaFilas(mailRows, { enTienda: k => liveKeys.has(k), rechazos: mailRechazos });
+              const { visibles, antiguos, yaEnTienda: live, rechazados } = clasificaFilas(mailRows, { enTienda: k => liveKeys.has(k), rechazos: mailRechazos });
               const ord  = visibles.filter(r=>r._ordered);
               const rest = visibles.filter(r=>!r._ordered);
               const botonRechazo = {background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:8,padding:'2px 7px',borderRadius:2,fontFamily:'inherit',flexShrink:0,whiteSpace:'nowrap'};
               const n = Object.values(mailPick).filter(Boolean).length;
-              const fila = (r)=>{
+              // map() pasa (fila, indice, array): conZip va cuarto para que el
+              // array no lo active. Solo el bloque de pedidos sin alta lo pide.
+              const fila = (r, _i, _arr, conZip=false)=>{
                 const k = rdKey(r.catno);
                 const on = !!mailPick[k];
                 // El mismo disco pedido a dos distribuidores llega dos veces.
@@ -11248,6 +11304,26 @@ function PreorderImporter() {
                       buscar ↗
                     </a>
                   )}
+                  {esPedidoAntiguo(r)&&<span title={`Pedido hace más de ${DIAS_PEDIDO_ANTIGUO} días y sin alta en la tienda`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>pedido el {fechaCorta(r._fechaPedido)}</span>}
+                  {r._unlisted&&<span title="Existe en Shopify con estado Unlisted: se vende por enlace directo pero no sale en la tienda" style={{fontSize:8,color:'#ff8800',fontWeight:700,flexShrink:0,whiteSpace:'nowrap'}}>en tienda, unlisted</span>}
+                  {conZip&&(()=>{
+                    // ¿Se puede importar ya? Lo seguro: el ZIP en la carpeta de
+                    // Drive. Si W&S lo sigue sirviendo no se puede saber desde
+                    // aqui —su web responde con un reto de Cloudflare a todo lo que
+                    // no sea tu navegador con sesion—, asi que se abre para mirarlo.
+                    const esWs = /wordandsound\.net/.test(r.zipUrl||'');
+                    return (
+                      <span style={{fontSize:8,width:92,flexShrink:0,whiteSpace:'nowrap',textAlign:'right'}}>
+                        <span style={{color:S.muted,letterSpacing:1}}>ZIP </span>
+                        {enCarpeta
+                          ? <b style={{color:S.accent}}>📁 en carpeta</b>
+                          : r.zipUrl
+                          ? <a href={r.zipUrl} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()}
+                               title={esWs?'Abre la descarga de W&S con tu sesión: si baja, se puede importar':'Abre el enlace del promopack'}
+                               style={{color:'#ff8800',textDecoration:'none',border:'1px solid #ff880066',borderRadius:2,padding:'1px 5px'}}>{esWs?'comprobar ↗':'abrir ↗'}</a>
+                          : <span style={{color:S.muted}}>—</span>}
+                      </span>);
+                  })()}
                   {r._liveComo&&<span title="Mismo disco con otro sufijo o ceros en Shopify" style={{fontSize:8,color:S.muted,flexShrink:0,whiteSpace:'nowrap'}}>en tienda como {r._liveComo}</span>}
                   {r._rechazadoEl&&<span title={`"No, por ahora" caducado: pasaron ${DIAS_RECHAZO_TEMPORAL} días`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>rechazado el {fechaCorta(r._rechazadoEl)}</span>}
                   {!r._live && !r._added && (
@@ -11267,6 +11343,7 @@ function PreorderImporter() {
                 <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',marginBottom:8,alignItems:'center'}}>
                   <span><b style={{color:S.accent}}>{ord.length}</b> pedidos</span>
                   <span><b style={{color:S.danger}}>{rest.length}</b> sin pedir</span>
+                  <span><b style={{color:'#ff8800'}}>{antiguos.length}</b> pedidos sin alta</span>
                   <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
                   <span><b style={{color:S.muted}}>{rechazados.length}</b> rechazados</span>
                   <span>· <b style={{color:S.text}}>{n}</b> seleccionados</span>
@@ -11290,6 +11367,17 @@ function PreorderImporter() {
                   {rest.map(fila)}
                   {!visibles.length&&<div style={{fontSize:10,color:S.muted,padding:'14px 8px',textAlign:'center'}}>Nada nuevo: todo está ya en la tienda o rechazado.</div>}
                 </div>
+                {/* Pedidos de hace mas de 4 semanas que no estan en la tienda: ni
+                    se marcan solos ni se ocultan solos. Salen de aqui al darlos de
+                    alta o al rechazarlos. lib/preorder-rechazos.mjs */}
+                {antiguos.length>0&&(
+                  <details style={{marginTop:8,border:'1px solid #ff880066',borderRadius:3}}>
+                    <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:'#ff8800',letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>
+                      {antiguos.length} pedidos sin alta en la tienda <span style={{fontWeight:400,textTransform:'none',letterSpacing:0,color:S.muted}}>— pedidos hace más de {DIAS_PEDIDO_ANTIGUO} días y sin producto en Shopify; no se marcan solos</span>
+                    </summary>
+                    <div style={{maxHeight:320,overflowY:'auto'}}>{antiguos.map((r,i)=>fila(r,i,null,true))}</div>
+                  </details>
+                )}
                 {live.length>0&&(
                   <details style={{marginTop:8,border:`1px solid ${S.border}`,borderRadius:3}}>
                     <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:S.muted,letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>

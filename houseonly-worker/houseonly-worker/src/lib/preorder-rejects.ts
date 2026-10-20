@@ -5,8 +5,10 @@
  *   GET    ?action=preorder-rejects            todos          Bearer admin
  *   POST   ?action=preorder-reject  {catno, tipo, distribuidor, artist, title}
  *   DELETE ?action=preorder-reject  {catno}    recuperar (tambien los definitivos)
+ *   GET    ?action=preorder-unlisted          solo lectura: [{sku, estado}] de los UNLISTED
  */
 import { REJECT_PREFIX, claveKV, claveCatno, nuevoRechazo } from './preorder-rechazos.mjs';
+import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
 export interface PreorderRejectsEnv {
   SYNC_STATE: KVNamespace;
@@ -72,4 +74,45 @@ export async function handlePreorderRejectUndo(request: Request, env: PreorderRe
   if ((await env.SYNC_STATE.get(key)) == null) return json({ error: 'not rejected' }, 404);
   await env.SYNC_STATE.delete(key);
   return json({ ok: true, catno: body.catno });
+}
+
+/**
+ * Productos en estado UNLISTED: existen y se venden por enlace directo, pero
+ * el listado `products` de la Storefront API —con el que el tab sabe que hay en
+ * la tienda— no los devuelve. El 2026-10-20 eran 6 (WARPLP324, PFR36, ...) y
+ * cinco salian como "pedidos sin alta". Solo la Admin API conoce el estado.
+ */
+// Solo lectura (una consulta, ninguna mutacion) y solo SKU y estado: el tab no
+// necesita mas para saber que esta en la tienda, y no se expone nada mas.
+export async function listUnlisted(env: ShopifyAdminEnv): Promise<{ sku: string; estado: string }[]> {
+  const out: { sku: string; estado: string }[] = [];
+  let after: string | null = null;
+  for (let pagina = 0; pagina < 20; pagina++) {
+    const r: any = await shopifyAdminGraphQL(env, `
+      query($after: String) {
+        products(first: 250, after: $after, query: "status:unlisted") {
+          pageInfo { hasNextPage endCursor }
+          nodes { status variants(first: 5) { nodes { sku } } }
+        }
+      }`, { after });
+    const conn = r?.data?.products;
+    if (r?.errors?.length || !conn) throw new Error(`Shopify products(status:unlisted): ${JSON.stringify(r?.errors || r).slice(0, 200)}`);
+    for (const n of conn.nodes) {
+      if (n.status !== 'UNLISTED') continue;          // por si el filtro dejara pasar otro estado
+      const skus = (n.variants?.nodes || []).map((v: any) => String(v.sku || '').trim()).filter(Boolean);
+      for (const sku of skus) out.push({ sku, estado: n.status });   // sin SKU no hay con que cruzar
+    }
+    if (!conn.pageInfo?.hasNextPage) return out;
+    after = conn.pageInfo.endCursor;
+  }
+  throw new Error('Shopify products(status:unlisted): demasiadas paginas');
+}
+
+export async function handlePreorderUnlisted(env: ShopifyAdminEnv, autorizado: boolean): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  try {
+    return json({ ok: true, items: await listUnlisted(env) });
+  } catch (e: any) {
+    return json({ error: String(e?.message || e).slice(0, 300) }, 502);
+  }
 }
