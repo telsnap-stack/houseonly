@@ -10216,10 +10216,11 @@ function PreorderImporter() {
     //     WITH CORS, letting us await each blob to full completion.
     //   • W&S  → https://wordandsound.net/release/{id}-{catno}-.../assets — this
     //     is a session-authenticated direct ZIP download. A cross-origin fetch()
-    //     would be blocked AND would not carry the W&S session cookies, so we do
-    //     a plain anchor-click on the real URL (same as opening it by hand): the
-    //     browser downloads it with the user's cookies. Pop-up blockers kill
-    //     window.open, but a same-gesture anchor-click on a stagger works.
+    //     would be blocked AND would not carry the W&S session cookies, so the
+    //     real URL is opened as a normal navigation (same as by hand) — in ONE
+    //     helper tab opened within the click, never in the admin's own tab: a
+    //     W&S answer that is a page instead of a ZIP used to navigate the admin
+    //     away and kill the run (2026-10-20, WHYT085). See below.
     const isLiveDl = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     const skipped = { live: 0, dropped: 0 };
     const rows = manifest
@@ -10243,6 +10244,27 @@ function PreorderImporter() {
         ? `Nothing new to download — every ZIP is already live or excluded (${skipped.live} live, ${skipped.dropped} dropped).`
         : 'No ZIP URLs in the manifest to download.');
       return;
+    }
+    // W&S en una pestaña AUXILIAR, nunca en la del admin (2026-10-20). Con el
+    // anchor-click en la misma pestaña, si W&S contestaba una pagina en vez del
+    // ZIP —reto de Cloudflare, login, un release sin assets como WHYT085— el
+    // navegador abandonaba el admin y la descarga en curso moria. La auxiliar se
+    // abre AQUI, antes de cualquier await, para que cuente como parte del clic y
+    // el bloqueador de ventanas no la frene; despues solo se le cambia la URL.
+    // Es navegacion normal, asi que lleva tu sesion de W&S. Desde aqui no se
+    // puede leer que contesto (otro dominio): lo que no baje se ve alli.
+    const hayWs = rows.some(r => !r.proxiable && !r.isDbh);
+    let wsWin = null;
+    if (hayWs) {
+      wsWin = window.open('about:blank', 'houseonly-descargas-ws');
+      if (wsWin) {
+        try {
+          wsWin.document.title = 'Descargas W&S — House Only';
+          wsWin.document.body.innerHTML = '<p style="font:13px system-ui;padding:20px">Descargas de Word &amp; Sound en curso desde el admin. No cierres esta pestaña hasta que termine. Si alguna no baja, aquí verás la página que devolvió W&amp;S.</p>';
+        } catch { /* ya era de otro dominio: da igual */ }
+      } else {
+        setError('El navegador bloqueó la pestaña de descargas de W&S: permite ventanas emergentes para este sitio y repite. Los de W&S no se han tocado.');
+      }
     }
     setDownloadDone(false);
     setDownloadProgress(0);
@@ -10323,12 +10345,15 @@ function PreorderImporter() {
           // it for security) — the server's content-disposition decides the
           // filename, which for W&S already carries the cat-no. We let it open
           // in the same gesture; the browser saves the ZIP with W&S cookies.
-          const a = document.createElement('a');
-          a.href = url;
-          a.rel = 'noreferrer';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+          // En la pestaña auxiliar (ver arriba). Sin ella —bloqueada o cerrada
+          // a medias— no se intenta en la del admin: se cuenta como fallido.
+          if (!wsWin || wsWin.closed) {
+            failed++;
+            setDownloadStats({ ok, missing, failed });
+            setDownloadProgress(i + 1);
+            continue;
+          }
+          wsWin.location.href = url;
           ok++;
           setDownloadStats({ ok, missing, failed });
           setDownloadProgress(i + 1);
