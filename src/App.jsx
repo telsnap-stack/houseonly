@@ -9,7 +9,7 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
+import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -10569,11 +10569,19 @@ function PreorderImporter() {
     // ── 5. Clasificar ────────────────────────────────────────
     setMailProgress(x => ({ ...x, fase: 'comprobando qué hay ya en la tienda' }));
     const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
-    const all = [...best.values()].map(r => ({
+    // No solo igual: UR-025 del pedido es UR-025A / UR-025J en la tienda, y
+    // FR315 es FR315R. Las reglas, en lib/preorder-rechazos.mjs (buscaEnTienda).
+    const indice = indiceTienda(live);
+    const all = [...best.values()].map(r => {
+      const como = buscaEnTienda(indice, r.catno);
+      return {
       ...r,
-      _live: live.has(rdKey(r.catno)),
+      _live: !!como,
+      // Con que SKU encajo cuando no es el mismo catno: se ve en "ya en tienda".
+      _liveComo: como && como !== rdKey(r.catno) ? (live.skuReal?.get(como) || como) : '',
       _ordSrcs: r._ordSrcs || (r._ordered ? [r.source] : []),
-    }));
+      };
+    });
     all.sort((x, y) => Number(y._ordered) - Number(x._ordered) || (y.release || '').localeCompare(x.release || ''));
 
     // Lo ya rechazado ("No, por ahora" / "Nunca") vive en el worker. Si no se
@@ -11240,6 +11248,7 @@ function PreorderImporter() {
                       buscar ↗
                     </a>
                   )}
+                  {r._liveComo&&<span title="Mismo disco con otro sufijo o ceros en Shopify" style={{fontSize:8,color:S.muted,flexShrink:0,whiteSpace:'nowrap'}}>en tienda como {r._liveComo}</span>}
                   {r._rechazadoEl&&<span title={`"No, por ahora" caducado: pasaron ${DIAS_RECHAZO_TEMPORAL} días`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>rechazado el {fechaCorta(r._rechazadoEl)}</span>}
                   {!r._live && !r._added && (
                     <>
