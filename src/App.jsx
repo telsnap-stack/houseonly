@@ -8,6 +8,8 @@ import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/h
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
+// Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
+import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -9689,6 +9691,23 @@ function useMailSecret() {
   return [v, set];
 }
 
+// Rechazos del tab Pre-order (worker: lib/preorder-rejects.ts), con el mismo
+// Bearer que el archivo. Map rdKey(catno) → {catno, tipo, fecha, distribuidor…}.
+async function preorderRechazosFetch(secret) {
+  const r = await fetch(`${WORKER_URL}?action=preorder-rejects`, { headers: { 'Authorization': `Bearer ${secret}` } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return new Map((d.items || []).map(x => [rdKey(x.catno), x]));
+}
+async function preorderRechazoSend(secret, method, body) {
+  const r = await fetch(`${WORKER_URL}?action=preorder-reject`, {
+    method, headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d.item || d;
+}
+
 // Indice del archivo ya clasificado. Lanza con un mensaje que dice contra que.
 async function mailFetchIndex(secret) {
   let r;
@@ -9988,6 +10007,8 @@ function PreorderImporter() {
   const [mailShowDone, setMailShowDone] = useState(false);
   const [mailRows, setMailRows]     = useState(null);  // vista unica de releases
   const [mailPick, setMailPick]     = useState({});    // rdKey(catno) -> elegido
+  const [mailRechazos, setMailRechazos] = useState(() => new Map()); // rdKey(catno) -> rechazo guardado en el worker
+  const [mailRechazando, setMailRechazando] = useState('');  // rdKey en vuelo, para no pulsar dos veces
   const [mailProgress, setMailProgress] = useState({ done:0, total:0 });
   // Carpeta local de promopacks (Assets/). El handle sobrevive a la recarga.
   const [zipDir, setZipDir]         = useState(null);   // {idx:Map, vistos:number}
@@ -10548,21 +10569,68 @@ function PreorderImporter() {
     // ── 5. Clasificar ────────────────────────────────────────
     setMailProgress(x => ({ ...x, fase: 'comprobando qué hay ya en la tienda' }));
     const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
-    const all = [...best.values()].map(r => ({
+    // No solo igual: UR-025 del pedido es UR-025A / UR-025J en la tienda, y
+    // FR315 es FR315R. Las reglas, en lib/preorder-rechazos.mjs (buscaEnTienda).
+    const indice = indiceTienda(live);
+    const all = [...best.values()].map(r => {
+      const como = buscaEnTienda(indice, r.catno);
+      return {
       ...r,
-      _live: live.has(rdKey(r.catno)),
+      _live: !!como,
+      // Con que SKU encajo cuando no es el mismo catno: se ve en "ya en tienda".
+      _liveComo: como && como !== rdKey(r.catno) ? (live.skuReal?.get(como) || como) : '',
       _ordSrcs: r._ordSrcs || (r._ordered ? [r.source] : []),
-    }));
+      };
+    });
     all.sort((x, y) => Number(y._ordered) - Number(x._ordered) || (y.release || '').localeCompare(x.release || ''));
 
+    // Lo ya rechazado ("No, por ahora" / "Nunca") vive en el worker. Si no se
+    // puede leer, se avisa y no se oculta nada: mejor ver de mas que perder un
+    // disco sin saberlo.
+    let rechazos = new Map();
+    try { rechazos = await preorderRechazosFetch(mailSecret); }
+    catch (e) { setMailError(`No se pudieron leer los rechazos (${e.message}); se lista todo.`); }
+    setMailRechazos(rechazos);
+    const { visibles } = clasificaFilas(all, { enTienda: k => live.has(k), rechazos });
+
     setMailRows(all);
-    setMailPick(Object.fromEntries(all.map(r => [rdKey(r.catno), r._ordered && !r._live])));
+    // Solo se marcan solos los pedidos que se ven: un rechazado no se cuela.
+    setMailPick(Object.fromEntries(visibles.map(r => [rdKey(r.catno), !!r._ordered])));
     setMailBusy('');
     if (!all.length) setMailError('No salió ningún release del archivo.');
   };
 
+  // "No, por ahora" (temporal, 90 dias) o "Nunca" (definitivo). Se guarda en el
+  // worker y la fila pasa al contador de rechazados sin volver a parsear.
+  const mailRechazar = async (r, tipo) => {
+    const k = rdKey(r.catno);
+    setMailRechazando(k);
+    try {
+      const item = await preorderRechazoSend(mailSecret, 'POST', {
+        catno: r.catno, tipo, distribuidor: (r._ordSrcs?.length ? r._ordSrcs : [r.source]).filter(Boolean).join('+'),
+        artist: r.artist || '', title: r.title || '',
+      });
+      setMailRechazos(m => new Map(m).set(k, item));
+      setMailPick(p => ({ ...p, [k]: false }));
+    } catch (e) {
+      setMailError(`No se pudo rechazar ${r.catno}: ${e.message}`);
+    } finally { setMailRechazando(''); }
+  };
+  const mailRecuperar = async (r) => {
+    const k = rdKey(r.catno);
+    setMailRechazando(k);
+    try {
+      await preorderRechazoSend(mailSecret, 'DELETE', { catno: r.catno });
+      setMailRechazos(m => { const n = new Map(m); n.delete(k); return n; });
+    } catch (e) {
+      setMailError(`No se pudo recuperar ${r.catno}: ${e.message}`);
+    } finally { setMailRechazando(''); }
+  };
+
   const mailAddPicked = async () => {
-    const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && !r._live && !r._added);
+    const vivos = new Set((mailRows || []).filter(r => r._live).map(r => rdKey(r.catno)));
+    const visibles = new Set(clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos }).visibles.map(r => rdKey(r.catno)));
+    const picked = (mailRows || []).filter(r => mailPick[rdKey(r.catno)] && visibles.has(rdKey(r.catno)) && !r._added);
     if (!picked.length) return;
     // Las filas rojas —lo que no salio en ninguna señal de pedido— no se
     // resolvieron al parsear, para no gastar cientos de peticiones en discos que
@@ -11121,9 +11189,14 @@ function PreorderImporter() {
                   : <Btn ch="📖 Parsear todo el archivo" onClick={mailParseAll} full />}
               </div>
             ):(()=>{
-              const ord  = mailRows.filter(r=>r._ordered&&!r._live);
-              const live = mailRows.filter(r=>r._live);
-              const rest = mailRows.filter(r=>!r._ordered&&!r._live);
+              // Dos filtros (lib/preorder-rechazos.mjs): lo que ya esta en la
+              // tienda por SKU y lo rechazado no se listan; cada uno queda tras
+              // su contador desplegable.
+              const liveKeys = new Set(mailRows.filter(r=>r._live).map(r=>rdKey(r.catno)));
+              const { visibles, yaEnTienda: live, rechazados } = clasificaFilas(mailRows, { enTienda: k => liveKeys.has(k), rechazos: mailRechazos });
+              const ord  = visibles.filter(r=>r._ordered);
+              const rest = visibles.filter(r=>!r._ordered);
+              const botonRechazo = {background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:8,padding:'2px 7px',borderRadius:2,fontFamily:'inherit',flexShrink:0,whiteSpace:'nowrap'};
               const n = Object.values(mailPick).filter(Boolean).length;
               const fila = (r)=>{
                 const k = rdKey(r.catno);
@@ -11175,6 +11248,16 @@ function PreorderImporter() {
                       buscar ↗
                     </a>
                   )}
+                  {r._liveComo&&<span title="Mismo disco con otro sufijo o ceros en Shopify" style={{fontSize:8,color:S.muted,flexShrink:0,whiteSpace:'nowrap'}}>en tienda como {r._liveComo}</span>}
+                  {r._rechazadoEl&&<span title={`"No, por ahora" caducado: pasaron ${DIAS_RECHAZO_TEMPORAL} días`} style={{fontSize:8,color:'#ff8800',flexShrink:0,whiteSpace:'nowrap'}}>rechazado el {fechaCorta(r._rechazadoEl)}</span>}
+                  {!r._live && !r._added && (
+                    <>
+                      <button disabled={mailRechazando===k} onClick={e=>{e.stopPropagation(); mailRechazar(r,'temporal');}}
+                        title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={botonRechazo}>No, por ahora</button>
+                      <button disabled={mailRechazando===k} onClick={e=>{e.stopPropagation(); mailRechazar(r,'definitivo');}}
+                        title="No vuelve a salir (se puede recuperar en Rechazados)" style={{...botonRechazo,color:S.danger,borderColor:`${S.danger}55`}}>Nunca</button>
+                    </>
+                  )}
                   {r._added&&<span style={{fontSize:8,color:S.accent,fontWeight:700,flexShrink:0}}>✓ EN EL MANIFEST</span>}
                   {dup&&<span title="Pedido a dos distribuidores — llegará por duplicado" style={{fontSize:8,color:S.danger,fontWeight:700,flexShrink:0}}>⚠ DOBLE</span>}
                 </div>);
@@ -11183,11 +11266,12 @@ function PreorderImporter() {
               <>
                 <div style={{fontSize:10,color:S.muted,display:'flex',gap:14,flexWrap:'wrap',marginBottom:8,alignItems:'center'}}>
                   <span><b style={{color:S.accent}}>{ord.length}</b> pedidos</span>
-                  <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
                   <span><b style={{color:S.danger}}>{rest.length}</b> sin pedir</span>
+                  <span><b style={{color:S.muted}}>{live.length}</b> ya en tienda</span>
+                  <span><b style={{color:S.muted}}>{rechazados.length}</b> rechazados</span>
                   <span>· <b style={{color:S.text}}>{n}</b> seleccionados</span>
                   {mailRows.some(r=>r._added)&&<span>· <b style={{color:S.accent}}>{mailRows.filter(r=>r._added).length}</b> en el manifest</span>}
-                  <button onClick={()=>setMailPick(Object.fromEntries(mailRows.filter(r=>!r._live&&!r._added).map(r=>[rdKey(r.catno),true])))} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
+                  <button onClick={()=>setMailPick(Object.fromEntries(visibles.filter(r=>!r._added).map(r=>[rdKey(r.catno),true])))} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Todos</button>
                   <button onClick={()=>setMailPick({})} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Ninguno</button>
                   <button onClick={()=>{setMailRows(null);setMailPick({});}} style={{background:'none',border:`1px solid ${S.border}`,color:S.muted,cursor:'pointer',fontSize:9,padding:'2px 10px',borderRadius:2,fontFamily:'inherit'}}>Volver a parsear</button>
                 </div>
@@ -11204,9 +11288,37 @@ function PreorderImporter() {
                   {ord.map(fila)}
                   {rest.length>0&&<div style={{fontSize:8,color:S.danger,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Sin pedir — márcalos si los quieres</div>}
                   {rest.map(fila)}
-                  {live.length>0&&<div style={{fontSize:8,color:S.muted,letterSpacing:1,textTransform:'uppercase',padding:'5px 8px',background:S.surf}}>Ya en tienda — llegada de stock, no se importan</div>}
-                  {live.map(fila)}
+                  {!visibles.length&&<div style={{fontSize:10,color:S.muted,padding:'14px 8px',textAlign:'center'}}>Nada nuevo: todo está ya en la tienda o rechazado.</div>}
                 </div>
+                {live.length>0&&(
+                  <details style={{marginTop:8,border:`1px solid ${S.border}`,borderRadius:3}}>
+                    <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:S.muted,letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>
+                      {live.length} ya en tienda <span style={{fontWeight:400,textTransform:'none',letterSpacing:0}}>— existen en Shopify por SKU; llegada de stock, no se importan</span>
+                    </summary>
+                    <div style={{maxHeight:260,overflowY:'auto'}}>{live.map(fila)}</div>
+                  </details>
+                )}
+                {rechazados.length>0&&(
+                  <details style={{marginTop:8,border:`1px solid ${S.border}`,borderRadius:3}}>
+                    <summary style={{cursor:'pointer',padding:'6px 10px',fontSize:9,color:S.muted,letterSpacing:1,textTransform:'uppercase',fontWeight:700}}>
+                      {rechazados.length} rechazados <span style={{fontWeight:400,textTransform:'none',letterSpacing:0}}>— {rechazados.filter(r=>r._estadoRechazo==='definitivo').length} nunca · {rechazados.filter(r=>r._estadoRechazo!=='definitivo').length} por ahora</span>
+                    </summary>
+                    <div style={{maxHeight:260,overflowY:'auto'}}>
+                      {rechazados.map(r=>{
+                        const k = rdKey(r.catno);
+                        const def = r._estadoRechazo==='definitivo';
+                        return (
+                          <div key={k} style={{display:'flex',gap:8,alignItems:'center',padding:'5px 8px',borderLeft:`3px solid ${def?S.danger:'#ff8800'}`,borderBottom:`1px solid ${S.border}44`,minHeight:30}}>
+                            <span style={{fontSize:10,color:S.muted,fontFamily:'monospace',width:104,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.catno}</span>
+                            <span style={{fontSize:10,color:S.text,flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.artist ? `${r.artist} — ${r.title}` : r.title}</span>
+                            <span style={{fontSize:8,fontWeight:700,flexShrink:0,color:def?S.danger:'#ff8800',textTransform:'uppercase',letterSpacing:1}}>{def?'Nunca':'Por ahora'}</span>
+                            <span style={{fontSize:9,color:S.muted,flexShrink:0,whiteSpace:'nowrap'}}>{fechaCorta(r._rechazo.fecha)}{r._rechazo.distribuidor?` · ${r._rechazo.distribuidor.toUpperCase()}`:''}</span>
+                            <button disabled={mailRechazando===k} onClick={()=>mailRecuperar(r)} style={{background:'none',border:`1px solid ${S.accent}66`,color:S.accent,cursor:'pointer',fontSize:8,padding:'2px 8px',borderRadius:2,fontFamily:'inherit',flexShrink:0}}>Recuperar</button>
+                          </div>);
+                      })}
+                    </div>
+                  </details>
+                )}
                 <div style={{marginTop:10}}>
   {mailLinking
                     ? (()=>{const pc = mailLinking.total ? Math.round((mailLinking.done/mailLinking.total)*100) : 0; return (
