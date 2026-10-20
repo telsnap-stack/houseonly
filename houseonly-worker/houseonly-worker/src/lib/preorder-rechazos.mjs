@@ -26,6 +26,51 @@ export const claveCatno = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]+
 export const claveKV = catno => `${REJECT_PREFIX}${claveCatno(catno)}`;
 
 /**
+ * ¿Esta ya en la tienda? El catno del email y el SKU de Shopify no siempre se
+ * escriben igual (2026-10-20: UR-025 llega por email y en Shopify son UR-025A y
+ * UR-025J, asi que salia marcado como nuevo teniendo stock). Encaja si:
+ *   - son iguales (claveCatno), o
+ *   - solo cambian ceros a la izquierda (LOG88 = LOG088), o
+ *   - uno lleva un sufijo de letras y el otro no (UR-025 = UR-025A,
+ *     TURBO249 = TURBO249V).
+ * No encaja si los dos llevan sufijos distintos (ABC001A ≠ ABC001B: partes de
+ * una serie) ni si cambia un numero (UR-02 ≠ UR-025).
+ */
+const sinCeros = k => k.replace(/\d+/g, n => String(Number(n)));
+function partes(clave) {
+  const z = sinCeros(clave);
+  const m = z.match(/^(.*\d)([A-Z]*)$/);   // nucleo hasta el ultimo digito + sufijo de letras
+  return m ? { nucleo: m[1], sufijo: m[2] } : { nucleo: z, sufijo: '' };
+}
+
+/** Indice de las claves de la tienda (claveCatno de SKUs y handles). */
+export function indiceTienda(claves) {
+  const exactas = new Set();
+  const porNucleo = new Map();
+  for (const c of claves || []) {
+    const k = claveCatno(c);
+    if (!k) continue;
+    exactas.add(k);
+    const { nucleo, sufijo } = partes(k);
+    if (!porNucleo.has(nucleo)) porNucleo.set(nucleo, []);
+    porNucleo.get(nucleo).push({ clave: k, sufijo });
+  }
+  return { exactas, porNucleo };
+}
+
+/** La clave de la tienda con la que encaja el catno, o null. */
+export function buscaEnTienda(indice, catno) {
+  const k = claveCatno(catno);
+  if (!k || !indice) return null;
+  if (indice.exactas.has(k)) return k;
+  const { nucleo, sufijo } = partes(k);
+  if (!/\d/.test(nucleo)) return null;       // sin numero no hay catno que comparar
+  const cand = (indice.porNucleo.get(nucleo) || [])
+    .filter(x => x.sufijo === sufijo || !x.sufijo || !sufijo);
+  return cand.length ? cand[0].clave : null;
+}
+
+/**
  * 'definitivo' | 'oculto' (temporal vigente) | 'caducado' (temporal de hace
  * 90 dias o mas) | null (sin rechazo).
  */

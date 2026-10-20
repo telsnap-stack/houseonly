@@ -10,6 +10,8 @@ import {
 	clasificaFilas,
 	nuevoRechazo,
 	fechaCorta,
+	indiceTienda,
+	buscaEnTienda,
 } from "../src/lib/preorder-rechazos.mjs";
 
 const SECRET = "test-secret";
@@ -56,6 +58,35 @@ describe("filtro 1: ya en tienda por SKU", () => {
 		const r = clasificaFilas([fila("HT001")], { enTienda: () => true, rechazos, ahora: HOY });
 		expect(r.yaEnTienda).toHaveLength(1);
 		expect(r.rechazados).toHaveLength(0);
+	});
+});
+
+describe("filtro 1: el mismo disco escrito distinto en Shopify", () => {
+	// Casos reales del parseo del 2026-10-20 (SKUs de la tienda ese dia).
+	const indice = indiceTienda(["UR-025A", "UR-025J", "FR315R", "LOG088", "ABC001A", "PAMPA046", "PURESHORES-001", "ENVLP00215"]);
+
+	it("UR-025 (pedido W&S) es UR-025A / UR-025J; FR315 es FR315R", () => {
+		expect(buscaEnTienda(indice, "UR-025")).toBe("UR025A");
+		expect(buscaEnTienda(indice, "FR315")).toBe("FR315R");
+		expect(buscaEnTienda(indice, "ur-025j")).toBe("UR025J");
+	});
+
+	it("solo ceros a la izquierda: LOG88 = LOG088", () => {
+		expect(buscaEnTienda(indice, "LOG88")).toBe("LOG088");
+	});
+
+	it("no confunde discos distintos", () => {
+		expect(buscaEnTienda(indice, "ABC001B")).toBeNull();      // otra parte de la serie
+		expect(buscaEnTienda(indice, "PAMPA045")).toBeNull();     // 046 si esta; 045 no
+		expect(buscaEnTienda(indice, "PURESHORES-002")).toBeNull();
+		expect(buscaEnTienda(indice, "UR-02")).toBeNull();
+		expect(buscaEnTienda(indice, "env014r")).toBeNull();      // ENVLP00215 es otro disco
+	});
+
+	it("clasificaFilas lo manda a ya en tienda", () => {
+		const r = clasificaFilas([fila("UR-025"), fila("PAMPA045")], { enTienda: k => !!buscaEnTienda(indice, k), ahora: HOY });
+		expect(r.yaEnTienda.map(x => x.catno)).toEqual(["UR-025"]);
+		expect(r.visibles.map(x => x.catno)).toEqual(["PAMPA045"]);
 	});
 });
 
