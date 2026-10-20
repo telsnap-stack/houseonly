@@ -1,6 +1,14 @@
 {
-  "_comment": "Tiendas que se vigilan cada semana. `listing` es una pagina de novedades o de un genero: de ahi sale el primer enlace a disco para mirar tambien una ficha. Quitar o anadir tiendas aqui; el resto del script no cambia.",
+  "_comment": "Tiendas que se vigilan cada semana. `listing` es una pagina de novedades: de ahi sale el primer enlace a ficha. `product` fija una ficha a mano cuando el listado no la da. `cart` cambia la URL del carrito (null: no se mira). `propia` es houseonly.store: se compara con las demas y se avisa si pierde algo. Las cuatro URLs de listado que daban 404 desde septiembre se arreglaron el 2026-10-19.",
   "sites": [
+    {
+      "key": "houseonly",
+      "name": "House Only",
+      "propia": true,
+      "home": "https://houseonly.store/",
+      "listing": null,
+      "nota": "Nuestra web, con la misma huella: lo que ya tenemos se descarta y lo que desaparezca entre capturas sale en el informe."
+    },
     {
       "key": "hhv",
       "name": "HHV",
@@ -24,13 +32,13 @@
       "key": "clone",
       "name": "Clone",
       "home": "https://clone.nl/",
-      "listing": "https://clone.nl/new-arrivals"
+      "listing": "https://clone.nl/all/new"
     },
     {
       "key": "rushhour",
       "name": "Rush Hour",
-      "home": "https://rushhour.nl/",
-      "listing": "https://rushhour.nl/collections/new-in"
+      "home": "https://www.rushhour.nl/",
+      "listing": "https://www.rushhour.nl/new-this-week"
     },
     {
       "key": "bleep",
@@ -62,8 +70,8 @@
     {
       "key": "rubadub",
       "name": "Rubadub",
-      "home": "https://www.rubadub.co.uk/",
-      "listing": "https://www.rubadub.co.uk/collections/new-releases"
+      "home": "https://rubadub.co.uk/",
+      "listing": "https://rubadub.co.uk/collections/all?sort_by=created-descending"
     },
     {
       "key": "kudos",
@@ -75,7 +83,7 @@
       "key": "triplevision",
       "name": "Triple Vision",
       "home": "https://www.triplevision.nl/",
-      "listing": "https://www.triplevision.nl/music"
+      "listing": "https://www.triplevision.nl/releases/new/"
     }
   ]
 }
