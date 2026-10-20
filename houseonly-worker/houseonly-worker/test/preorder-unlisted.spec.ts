@@ -19,7 +19,7 @@ async function viaWorker(request: Request) {
 	await waitOnExecutionContext(ctx);
 	return res;
 }
-const nodo = (handle: string, sku: string, status = "UNLISTED") => ({ handle, title: handle, status, variants: { nodes: [{ sku }] } });
+const nodo = (_handle: string, sku: string, status = "UNLISTED") => ({ status, variants: { nodes: [{ sku }] } });
 
 beforeEach(() => {
 	(env as any).BOOTSTRAP_AUTH_SECRET = SECRET;
@@ -37,6 +37,11 @@ describe("preorder-unlisted", () => {
 		   .mockResolvedValueOnce({ data: { products: { pageInfo: { hasNextPage: false }, nodes: [nodo("mslp015", "MSLP015"), nodo("activo", "ACT1", "ACTIVE")] } } });
 		const d = await (await viaWorker(get())).json() as any;
 		expect(d.items.map((i: any) => i.sku)).toEqual(["WARPLP324", "PFR36", "MSLP015"]);
+		// Solo SKU y estado: nada de handle, titulo ni otros datos del producto
+		for (const it of d.items) expect(Object.keys(it).sort()).toEqual(["estado", "sku"]);
+		expect(d.items[0].estado).toBe("UNLISTED");
+		// Solo lectura: ninguna mutacion
+		for (const [, q] of gql.mock.calls) expect(String(q)).not.toMatch(/mutation/i);
 		expect(String(gql.mock.calls[0][1])).toContain('status:unlisted');
 		expect(gql.mock.calls[1][2]).toEqual({ after: "c1" });
 	});
