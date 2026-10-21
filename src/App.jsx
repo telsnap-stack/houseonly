@@ -10,6 +10,7 @@ import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
+import { limpiaSkuRd, enTiendaODuplicado, comoEnTienda, fueraDelCsv, skuEnTienda } from "./duplicados.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -3423,6 +3424,7 @@ function ZipImporter() {
   // "graduar" con Overwrite, que FIJA la cantidad y borraba lo pre-vendido; el
   // tag forthcoming lo quita la graduacion del worker por fecha.
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
   const excelRef = useRef(null);
@@ -3586,7 +3588,7 @@ function ZipImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}</script>` : '';
         processed.push({
           _catno: catno, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _alreadyLive: estaEnTienda(vivos, catno),
+          ...enTiendaODuplicado(vivos, catno),
           'Handle': handle, 'Title': title || catno, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': ['vinyl', 'source:ws', label ? `label:${label}` : '', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year)].filter(Boolean).join(', '),
@@ -3625,7 +3627,7 @@ function ZipImporter() {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
@@ -3644,7 +3646,7 @@ function ZipImporter() {
   const covered=results.filter(r=>r._coverUrl).length;
   const withAudio=results.filter(r=>r._tracks?.length>0).length;
   const errors=results.filter(r=>r._error).length;
-  const enTienda=results.filter(r=>r._alreadyLive).length;
+  const enTienda=results.filter(r=>comoEnTienda(r, dup)).length;
 
   return (
     <div>
@@ -3712,10 +3714,10 @@ function ZipImporter() {
                 </div>
               </div>
             )}
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="ws" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="ws" dup={dup} setDup={setDup} />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -3734,7 +3736,7 @@ function ZipImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} /></div>
         </div>
       )}
     </div>
@@ -3845,6 +3847,7 @@ function TripleVisionImporter() {
   const [error, setError]         = useState('');
   const [margin, setMargin]       = useState(60);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const pdfRef  = useRef(null);
   const metaRef = useRef(null);
   const zipRef  = useRef(null);
@@ -3965,7 +3968,7 @@ function TripleVisionImporter() {
 
         processed.push({
           _catno: key, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
-          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile, _alreadyLive: estaEnTienda(vivos, key),
+          _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile, ...enTiendaODuplicado(vivos, key),
           'Handle': handle, 'Title': title || key, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -4001,7 +4004,7 @@ function TripleVisionImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
@@ -4064,10 +4067,10 @@ function TripleVisionImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}</span></div>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="tv" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="tv" dup={dup} setDup={setDup} />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -4087,7 +4090,7 @@ function TripleVisionImporter() {
               </div>
             ))}
           </div>
-          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} /></div>
+          <div style={{ marginTop:14, display:'flex', justifyContent:'flex-end' }}><BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} /></div>
         </div>
       )}
     </div>
@@ -4183,7 +4186,8 @@ async function parseRubadubInvoicePdf(pdfBlob) {
     const body = m[2].trim();
     const cost = gbp(m[4]);                 // dealer £ (Item net), per unit
     const parts = body.split(/\s+/);
-    const sku  = parts.length > 1 ? parts[parts.length - 1] : body;
+    // "AD002dub" -> "AD002": la version pegada no es catno (src/duplicados.mjs).
+    const sku  = limpiaSkuRd(parts.length > 1 ? parts[parts.length - 1] : body);
     // Drop shipping / postage / fee lines (not records).
     if (/Z-?EU|SHIPPING|POSTAGE|CARRIAGE/i.test(sku)) continue;
     const key = rdKey(sku);
@@ -4262,6 +4266,8 @@ function parseRubadubColumns(pages) {
   if (!cols) return null;
   const res = {};
   for (const f of filas) {
+    // "AD002dub" -> "AD002": la version pegada no es catno (src/duplicados.mjs).
+    f.sku = limpiaSkuRd(f.sku);
     const key = rdKey(f.sku);
     if (!key) continue;
     // El mismo SKU en dos lineas (WO-KJHBCS en el presupuesto del 14-09) son
@@ -4384,6 +4390,7 @@ function RubadubImporter() {
   const genero = useGeneroPorDisco();
   const salespaperLeido = useRef(new WeakMap());   // File -> genero crudo del SALESPAPER
   const [liveHandles, setLiveHandles] = useState(null); // null = not fetched yet
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const [mailSecret, setMailSecret] = useMailSecret();  // compartido con Pre-order
   const [find, setFind]         = useState({});     // invoice key -> {estado, detalle, email}
   // Lo que el email de cada disco aporta y el promopack no: Rubadub no mete la
@@ -4756,12 +4763,13 @@ function RubadubImporter() {
 
         // Compared on the normalized key, so "YORE-011LTD" on the invoice finds
         // the live product whether it was created as yore011ltd or yore-011ltd.
-        const alreadyLive = liveHandles ? liveHandles.has(rdKey(inv.sku)) : false;
+        // Igual: ya en tienda. Salvo sufijo (AD002 / AD002dub): posible duplicado.
+        const enTienda = enTiendaODuplicado(liveHandles, inv.sku);
 
         processed.push({
           _catno: inv.sku, _title: title, _artist: artist, _coverUrl: coverUrl, _tracks: tracks,
           _error: itemError, _priceFlag: priceFlag, _noZip: !zipFile,
-          _alreadyLive: alreadyLive,
+          ...enTienda,
           'Handle': handle, 'Title': title || inv.sku, 'Body (HTML)': `${descHtml}${audioHtml}`, 'Vendor': artist,
           'Product Category': 'Media > Music & Sound Recordings > Vinyl', 'Type': '',
           'Tags': tags,
@@ -4794,7 +4802,7 @@ function RubadubImporter() {
     // Rows already in the shop never travel. That makes Shopify's "Overwrite
     // products with matching handles" checkbox irrelevant for them: there is
     // no row to match, so neither answer can damage the existing product.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     // Sin filas nuevas no hay CSV (el boton ya no se muestra; esto es por si acaso).
     if (!kept.length) { alert('No hay CSV que generar: todos los discos de la factura ya están en la tienda. Usa Add stock y Completar media.'); return; }
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
@@ -4816,7 +4824,7 @@ function RubadubImporter() {
   const errors=results.filter(r=>r._error).length;
   const noPrice=results.filter(r=>r._priceFlag).length;
   const noZip=results.filter(r=>r._noZip).length;
-  const liveRows = results.filter(r=>r._alreadyLive);
+  const liveRows = results.filter(r=>comoEnTienda(r, dup));
   const invCount = invoice ? Object.keys(invoice).length : 0;
   const ready = !!invoice;
   const sampleCost = invoice ? (Object.values(invoice).find(r=>typeof r.cost==='number')?.cost || 9.99) : 9.99;
@@ -4976,16 +4984,14 @@ function RubadubImporter() {
         <div>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12, flexWrap:'wrap', gap:8 }}>
             <div><span style={{ fontSize:11, color:S.accent, fontWeight:700 }}>✓ {results.length} records processed</span><span style={{ fontSize:9, color:S.muted, marginLeft:10 }}>{covered} covers · {withAudio} with audio{noZip>0?` · ${noZip} cover-less`:''}{errors>0?` · ${errors} errors`:''}{noPrice>0?` · ${noPrice} no price`:''}{liveRows.length>0?` · ${liveRows.length} ya en tienda`:''}</span></div>
-            {results.length - liveRows.length > 0
-              ? <Btn ch={`⬇ Download Shopify CSV (${results.length - liveRows.length})`} onClick={downloadCSV} />
-              : <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {liveRows.length} discos ya están en la tienda. Para ellos, Add stock y Completar media (abajo).</span>}
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
           {liveHandles===null&&(
             <div style={{marginBottom:10,padding:'8px 12px',background:S.bg,border:`1px solid ${S.border}`,borderRadius:4,fontSize:10,color:S.muted}}>
               Comprobando cuáles ya existen en la tienda…
             </div>
           )}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rd" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rd" dup={dup} setDup={setDup} />
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))', gap:8, maxHeight:500, overflowY:'auto', padding:4 }}>
             {results.map((r,i)=>(
               <div key={i} style={{ background:S.surf, border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`, borderRadius:3, overflow:'hidden' }}>
@@ -5075,6 +5081,7 @@ function KudosImporter() {
   const [margin, setMargin] = useState(60);
   const [minRetail, setMinRetail] = useState(9.99);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const pickRef = useRef(null);
   const jsonRef = useRef(null);
 
@@ -5199,7 +5206,7 @@ function KudosImporter() {
     return {
       _r: r, _catno: r.sku, _title: title, _artist: artist, _label: label, _genero: [genre,subgenre].filter(Boolean).join(', '),
       _coverUrl: imgUrl, _tracks: tracksMedia, _handle: handle, _grams: grams, _retail: retailP, _cost: costEUR,
-      _alreadyLive: estaEnTienda(liveHandles, r.sku),
+      ...enTiendaODuplicado(liveHandles, r.sku),
       'Variant SKU': r.sku, 'Variant Inventory Qty': String(r.fulfilled), 'Body (HTML)': bodyHtml||'<p></p>',
     };
   }
@@ -5210,7 +5217,7 @@ function KudosImporter() {
     if (liveHandles===null) { alert('Todavía se está comprobando qué discos ya están en la tienda. Espera un momento y repite.'); return; }
     const cols=['Handle','Title','Body (HTML)','Vendor','Product Category','Type','Tags','Published','Option1 Name','Option1 Value','Option1 Linked To','Option2 Name','Option2 Value','Option2 Linked To','Option3 Name','Option3 Value','Option3 Linked To','Variant SKU','Variant Grams','Variant Inventory Tracker','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service','Variant Price','Variant Compare At Price','Variant Requires Shipping','Variant Taxable','Variant Barcode','Image Src','Image Position','Image Alt Text','Gift Card','SEO Title','SEO Description','Variant Image','Variant Weight Unit','Variant Tax Code','Cost per item','Status'];
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = filas.filter(x => !x._alreadyLive);
+    const kept = filas.filter(x => !fueraDelCsv(x, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const csvRows=[cols];
     kept.forEach(x=>{
@@ -5233,7 +5240,8 @@ function KudosImporter() {
 
   const importable  = pickingRows.filter(r=>!r.isBlack&&r.fulfilled>0);
   const filas = useMemo(() => importable.map(filaKudos), [pickingRows, enrichment, fx, margin, minRetail, liveHandles]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const enTienda = filas.filter(x => x._alreadyLive).length;
+  const enTienda = filas.filter(x => comoEnTienda(x, dup)).length;
+  const enCsv = filas.filter(x => !fueraDelCsv(x, dup)).length;
   // El numero va en el nombre del fichero: "K235566 Picking Summary.csv".
   const documento = { tipo: 'factura', etiqueta: 'picking', placeholder: 'KUDOS-K…',
     numero: claveDocumento('KUDOS', (pickFile || '').match(/\b(K\d{5,})\b/i)?.[1] || '') };
@@ -5293,9 +5301,9 @@ function KudosImporter() {
             </div>
           ))}
           <div style={{flex:1}} />
-          {filas.length>0&&enTienda===filas.length
-            ? <span style={{fontSize:9,color:S.muted,maxWidth:300,lineHeight:1.5}}>Sin CSV: los {enTienda} discos ya están en la tienda. Add stock y Completar media (abajo).</span>
-            : <Btn ch={`⬇ Export Shopify CSV (${filas.length-enTienda})`} onClick={exportShopify} disabled={importable.length===0||liveHandles===null} />}
+          {filas.length>0&&enCsv===0
+            ? <BotonCsvImporter results={filas} onClick={exportShopify} dup={dup} />
+            : <Btn ch={`⬇ Export Shopify CSV (${enCsv})`} onClick={exportShopify} disabled={importable.length===0||liveHandles===null} />}
         </div>
       )}
 
@@ -5310,7 +5318,7 @@ function KudosImporter() {
           <span>Ya en tienda: <b style={{color:enTienda>0?'#ff8800':S.muted}}>{liveHandles===null?'…':enTienda}</b>{enTienda>0?' (fuera del CSV)':''}</span>
         </div>
       )}
-      {pickFile && <EnTiendaBloque results={filas} live={liveHandles} documento={documento} source="kudos" />}
+      {pickFile && <EnTiendaBloque results={filas} live={liveHandles} documento={documento} source="kudos" dup={dup} setDup={setDup} />}
 
       {/* Table */}
       {pickingRows.length > 0 && (
@@ -5376,6 +5384,7 @@ function DBHImporter() {
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const csvRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -5544,7 +5553,7 @@ function DBHImporter() {
         processed.push({
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _isPresale: isPresale, _zipFound: !!zipFile, _alreadyLive: estaEnTienda(vivos, catno),
+          _isPresale: isPresale, _zipFound: !!zipFile, ...enTiendaODuplicado(vivos, catno),
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -5602,7 +5611,7 @@ function DBHImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
@@ -5701,11 +5710,11 @@ function DBHImporter() {
                 {errors>0?` · ${errors} errors`:''}
               </span>
             </div>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
 
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="dbh" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="dbh" dup={dup} setDup={setDup} />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden'}}>
@@ -5731,7 +5740,7 @@ function DBHImporter() {
           </div>
 
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
         </div>
       )}
@@ -5829,6 +5838,7 @@ function MotherTongueImporter() {
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(75);   // 75 es el estandar de MT (confirmado 2026-09-28)
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const [documento, setDocumento] = useState(null);       // {tipo, numero} del PDF
   const pdfRef    = useRef(null);
   const htmlRef   = useRef(null);
@@ -6556,7 +6566,7 @@ function MotherTongueImporter() {
           _catno: item.catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _hasMeta: hasMeta, _hasAssets: !!(assets.covers.length || assets.audio.length),
-          _draft: productStatus === 'draft', _alreadyLive: estaEnTienda(vivos, item.catno),
+          _draft: productStatus === 'draft', ...enTiendaODuplicado(vivos, item.catno),
           'Handle': handle,
           'Title': title || item.catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -6607,7 +6617,7 @@ function MotherTongueImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
@@ -6764,10 +6774,10 @@ function MotherTongueImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="mt" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="mt" dup={dup} setDup={setDup} />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:r._draft?'#ff8800':S.border}`,borderRadius:3,overflow:'hidden',opacity:r._draft?0.7:1}}>
@@ -6792,7 +6802,7 @@ function MotherTongueImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
         </div>
       )}
@@ -6842,6 +6852,7 @@ function RushHourImporter() {
   const [error, setError]     = useState('');
   const [margin, setMargin]   = useState(60);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const [documento, setDocumento] = useState(null);       // {tipo, numero} del orderNumber
   const jsonRef = useRef(null);
   const zipRef  = useRef(null);
@@ -7086,7 +7097,7 @@ function RushHourImporter() {
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
         processed.push({
-          _catno: catno, _title: title, _artist: artist, _alreadyLive: estaEnTienda(vivos, catno),
+          _catno: catno, _title: title, _artist: artist, ...enTiendaODuplicado(vivos, catno),
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _draft: false,
           'Handle': handle,
@@ -7139,7 +7150,7 @@ function RushHourImporter() {
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
     // sale con la celda vacia y NO frena la importacion.
     // Los discos en tienda no viajan: Add stock y Completar media.
-    const kept = results.filter(r => !r._alreadyLive);
+    const kept = results.filter(r => !fueraDelCsv(r, dup));
     if (!kept.length) { alert('No hay CSV que generar: todos los discos ya están en la tienda. Usa Add stock y Completar media.'); return; }
     const ent = await withEntityColumns(kept);
     if (ent.reason) alert(`CSV generated WITHOUT entity columns: ${ent.reason}`);
@@ -7256,10 +7267,10 @@ function RushHourImporter() {
                 {results.filter(r=>r._error).length>0 ? ` · ${results.filter(r=>r._error).length} errors` : ''}
               </span>
             </div>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
-          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rh" />
+          <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="rh" dup={dup} setDup={setDup} />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
               <div key={i} style={{background:S.surf,border:`1px solid ${r._error?S.danger:S.border}`,borderRadius:3,overflow:'hidden'}}>
@@ -7283,7 +7294,7 @@ function RushHourImporter() {
             ))}
           </div>
           <div style={{marginTop:14,display:'flex',justifyContent:'flex-end'}}>
-            <BotonCsvImporter results={results} onClick={downloadCSV} />
+            <BotonCsvImporter results={results} onClick={downloadCSV} dup={dup} />
           </div>
         </div>
       )}
@@ -9994,6 +10005,7 @@ function PreorderImporter() {
   const [results, setResults]       = useState([]);
   const [excluded, setExcluded]     = useState({}); // catno -> true: dropped from CSV export
   const [liveHandles, setLiveHandles] = useState(null); // Set of lowercased live handles+SKUs (null = not yet fetched)
+  const [dup, setDup] = useState({});   // posibles duplicados: clave -> mismo|crear (src/duplicados.mjs)
   const [error, setError]           = useState('');
   const [margin, setMargin]         = useState(60);
   const [ignoredKeys, setIgnoredKeys] = useState([]);  // manifest fields normalizeRow dropped
@@ -11056,6 +11068,8 @@ function PreorderImporter() {
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
           _zipFound: !!zipFile, _release: release,
           _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
+          // Salvo sufijo o ceros (UR-025 / UR-025A): no entra sin confirmar.
+          _posibleDuplicado: m._alreadyLive ? '' : enTiendaODuplicado(liveHandles, catno)._posibleDuplicado,
           _genre: genre,                              // editable in review; rebuilds Tags
           _label: label, _source: (m.source || 'dbh'), _year: year ? String(year) : '',
           _forthcoming: m.forthcoming !== false,      // keeps tagsForRow in step with process()
@@ -11119,7 +11133,7 @@ function PreorderImporter() {
   const downloadCSV = async () => {
     // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
-    const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
+    const kept = results.filter(r => !excluded[r._catno] && !fueraDelCsv(r, dup));
     if (!kept.length) return;
     // Fase 4 (docs/entities.md): el slug canonico de artista y sello viaja en
     // el CSV, en dos columnas de metafield. Lo que este en la cola de revision
@@ -11732,7 +11746,7 @@ function PreorderImporter() {
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
             <div>
-              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]&&!r._alreadyLive).length} pre-orders</span>
+              <span style={{fontSize:11,color:S.accent,fontWeight:700}}>✓ {results.filter(r=>!excluded[r._catno]&&!fueraDelCsv(r, dup)).length} pre-orders</span>
               <span style={{fontSize:9,color:S.muted,marginLeft:10}}>
                 {covered} covers · {withAudio} audio
                 {errors>0?` · ${errors} errors`:''}
@@ -11742,15 +11756,16 @@ function PreorderImporter() {
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
 
+          <PosiblesDuplicados results={results} dup={dup} setDup={setDup} textoMismo="Es el mismo (fuera)" />
           <div style={{padding:'8px 12px',background:'#0a1200',border:`1px solid ${S.accent}33`,borderRadius:4,marginBottom:12,fontSize:9,color:S.muted,lineHeight:1.6}}>
             After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>{
-              const isOut = !!excluded[r._catno] || r._alreadyLive;
+              const isOut = !!excluded[r._catno] || fueraDelCsv(r, dup);
               return (
-              <div key={i} style={{background:S.surf,border:`1px solid ${r._alreadyLive?'#ff8800':isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
+              <div key={i} style={{background:S.surf,border:`1px solid ${r._alreadyLive||r._posibleDuplicado?'#ff8800':isOut?S.danger:r._error?S.danger:r._coverUrl?S.border:'#ff8800'}`,borderRadius:3,overflow:'hidden',opacity:isOut?0.4:1,transition:'opacity 0.15s'}}>
                 <div style={{position:'relative',paddingBottom:'100%',background:'#1a1a2e'}}>
                   {r._coverUrl
                     ?<img src={r._coverUrl} alt="" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover'}} onError={e=>e.target.style.display='none'} />
@@ -12171,12 +12186,14 @@ const estaEnTienda = (live, catno) => !!live && live.has(rdKey(catno));
 const claveDocumento = (prefijo, numero) =>
   numero ? `${prefijo}-${String(numero).toUpperCase().replace(/[^A-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}` : '';
 
-function EnTiendaBloque({ results, live, documento, source }) {
-  const liveRows = results.filter(r => r._alreadyLive);
+// `dup`/`setDup`: lo decidido con los posibles duplicados (src/duplicados.mjs).
+function EnTiendaBloque({ results, live, documento, source, dup = {}, setDup }) {
+  const liveRows = results.filter(r => comoEnTienda(r, dup));
   // El SKU tal cual esta en Shopify: el worker no adivina.
-  const skuDe = (r) => live?.skuReal?.get(rdKey(r._catno)) || r._catno;
+  const skuDe = (r) => skuEnTienda(r, live);
   const titulo = (r) => `${r._artist ? r._artist + ' — ' : ''}${r._title || ''}`;
   return (<>
+    <PosiblesDuplicados results={results} dup={dup} setDup={setDup} />
     {live?.error&&(
       <div style={{marginBottom:10,padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}44`,borderRadius:4,fontSize:10,color:S.danger}}>
         No se pudo comprobar qué discos ya están en la tienda ({live.error}). El CSV puede llevar discos que ya existen: vuelve a procesar antes de importarlo.
@@ -12192,10 +12209,48 @@ function EnTiendaBloque({ results, live, documento, source }) {
   </>);
 }
 
-function BotonCsvImporter({ results, onClick }) {
-  const n = results.filter(r => !r._alreadyLive).length;
+function BotonCsvImporter({ results, onClick, dup = {} }) {
+  const n = results.filter(r => !fueraDelCsv(r, dup)).length;
   if (n > 0) return <Btn ch={`⬇ Download Shopify CSV (${n})`} onClick={onClick} />;
-  return <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">Sin CSV: los {results.length} discos ya están en la tienda. Para ellos, Add stock y Completar media.</span>;
+  const pendientes = results.filter(r => r._posibleDuplicado && fueraDelCsv(r, dup) && !comoEnTienda(r, dup)).length;
+  return <span style={{fontSize:9,color:S.muted,maxWidth:360,lineHeight:1.5}} title="El CSV solo crea productos nuevos">
+    {pendientes ? `Sin CSV: ${pendientes} posible(s) duplicado(s) por decidir; el resto ya está en la tienda.` : `Sin CSV: los ${results.length} discos ya están en la tienda. Para ellos, Add stock y Completar media.`}
+  </span>;
+}
+
+// Discos que coinciden con uno de la tienda salvo sufijo o ceros (AD002 frente
+// a AD002dub). No entran en el CSV hasta que se decide: "Es el mismo" los pasa
+// a ya en tienda; "Crear igualmente", al CSV. `textoMismo` lo cambia el tab
+// Pre-order, donde no hay stock que sumar.
+function PosiblesDuplicados({ results, dup = {}, setDup, textoMismo = 'Es el mismo (sumar stock)' }) {
+  const filas = results.filter(r => r._posibleDuplicado);
+  if (!filas.length) return null;
+  const pendientes = filas.filter(r => !dup[rdKey(r._catno)]).length;
+  const boton = (activo, color) => ({ background: activo ? color : 'none', border: `1px solid ${color}`, color: activo ? '#080808' : color,
+    cursor: setDup ? 'pointer' : 'default', fontSize: 8, padding: '2px 8px', borderRadius: 2, fontFamily: 'inherit', whiteSpace: 'nowrap', fontWeight: 700 });
+  return (
+    <div style={{marginBottom:10,padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880066',borderRadius:4,fontSize:10}}>
+      <div style={{color:'#ff8800',fontWeight:700,marginBottom:6}}>
+        ⚠ {filas.length} posible(s) duplicado(s){pendientes ? ` · ${pendientes} sin decidir, fuera del CSV` : ''}
+      </div>
+      <table style={{width:'100%',borderCollapse:'collapse'}}><tbody>
+        {filas.map(r => {
+          const k = rdKey(r._catno), d = dup[k];
+          const elegir = (v) => setDup && setDup(prev => ({ ...prev, [k]: prev[k] === v ? undefined : v }));
+          return (
+            <tr key={k} style={{borderTop:`1px solid ${S.border}`}}>
+              <td style={{padding:'4px 8px 4px 0',color:S.text,whiteSpace:'nowrap'}}><b>{r._catno}</b> <span style={{color:S.muted}}>↔ en tienda</span> <b>{r._posibleDuplicado}</b></td>
+              <td style={{padding:'4px 8px',color:S.muted,overflow:'hidden',textOverflow:'ellipsis'}}>{r._artist ? `${r._artist} — ` : ''}{r._title || ''}</td>
+              <td style={{padding:'4px 0',textAlign:'right',whiteSpace:'nowrap'}}>
+                <button onClick={() => elegir('mismo')} disabled={!setDup} style={boton(d === 'mismo', S.accent)}>{textoMismo}</button>{' '}
+                <button onClick={() => elegir('crear')} disabled={!setDup} style={boton(d === 'crear', '#ff8800')}>Crear igualmente</button>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody></table>
+    </div>
+  );
 }
 
 async function descargarCsvDeImporter(contenido, nombreFichero, source, opciones = {}) {
