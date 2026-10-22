@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { pollDiscogsForSales } from "../src/lib/sync";
 import * as discogs from "../src/lib/discogs";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
+import * as discogsSkip from "../src/lib/discogs-skip";
 
 // Mock only the network-touching functions; keep the pure helpers (e.g.
 // parseDiscogsShippingAddress) real so the poll exercises its real logic.
@@ -15,6 +16,14 @@ vi.mock("../src/lib/discogs", async (importOriginal) => {
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
 	return { ...actual, findVariantBySku: vi.fn(), findVariantBySkuLoose: vi.fn(), createDiscogsOrder: vi.fn(), getVariantsStock: vi.fn() };
+});
+// The poll reads Shopify's Discogs orders before creating one (8bef6a6,
+// 2026-10-19). Unmocked, it hit the real Admin client with no credentials and
+// every sale stopped at "Shopify order lookup failed" — 21 red tests. The
+// decision logic (decideSkip) stays real; only the network read is mocked.
+vi.mock("../src/lib/discogs-skip", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/lib/discogs-skip")>();
+	return { ...actual, loadShopifyDiscogsIndex: vi.fn() };
 });
 
 
@@ -66,6 +75,8 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({
 			variantId: "gid://shopify/ProductVariant/1",
 		} as any);
+		// Nothing in Shopify yet unless a test says otherwise.
+		vi.mocked(discogsSkip.loadShopifyDiscogsIndex).mockResolvedValue(new Map());
 		// In stock unless a test says otherwise (oversell guard).
 		vi.mocked(shopifyAdmin.getVariantsStock).mockImplementation(async (_e, ids) =>
 			new Map(ids.map((id) => [id, 5])));
@@ -596,5 +607,122 @@ describe("pollDiscogsForSales - pending to firm order recovery", () => {
 		const second = await pollDiscogsForSales(env as any);
 		expect(second.skipped_duplicate).toBe(1);
 		expect(second.shopify_adjustments_attempted).toBe(0);
+	});
+
+	// Sales the poll must leave alone (8bef6a6) and today's catno-qualifier
+	// fallback (#118), end to end through the poll in live mode.
+	describe("skips and fallbacks before an order is created", () => {
+		async function lockTtlSeconds() {
+			const { keys } = await env.SYNC_STATE.list({ prefix: `lock:order:${ORDER_ID}` });
+			expect(keys).toHaveLength(1);
+			return keys[0].expiration! - Math.floor(Date.now() / 1000);
+		}
+		const audit = async () =>
+			JSON.parse((await env.SYNC_STATE.get(`sales-detected:${ORDER_ID}`))!);
+
+		beforeEach(async () => {
+			await env.SYNC_STATE.delete(`manual:${ORDER_ID}`);
+			await env.SYNC_STATE.put("meta:sync_3e_mode", "live");
+			vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({
+				ok: true, orderId: "gid://shopify/Order/1", orderName: "#1001",
+			} as any);
+			vi.mocked(discogs.getOrders).mockResolvedValue(ordersPage([firmOrder]) as any);
+		});
+
+		it("skips an order already in Shopify with the same discogs_order_id", async () => {
+			vi.mocked(discogsSkip.loadShopifyDiscogsIndex).mockResolvedValue(new Map([[ORDER_ID,
+				{ id: "gid://shopify/Order/9", name: "#1067", discogsOrderId: ORDER_ID, units: 1 }]]));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.skipped_in_shopify).toBe(1);
+			expect(res.shopify_adjustments_succeeded).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			expect(shopifyAdmin.findVariantBySkuLoose).not.toHaveBeenCalled();
+			// Locked like a synced sale, so the next poll does not look again.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("shopify-existing");
+			const a = await audit();
+			expect(a.order_creation.already_in_shopify).toBe(true);
+			expect(a.order_creation.shopify_order_name).toBe("#1067");
+		});
+
+		it("skips an order with a manual:<order_id> key", async () => {
+			await env.SYNC_STATE.put(`manual:${ORDER_ID}`, "shipped from Discogs");
+			try {
+				const res = await pollDiscogsForSales(env as any);
+
+				expect(res.skipped_manual).toBe(1);
+				expect(res.shopify_adjustments_attempted).toBe(0);
+				expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+				expect(shopifyAdmin.findVariantBySkuLoose).not.toHaveBeenCalled();
+			} finally {
+				await env.SYNC_STATE.delete(`manual:${ORDER_ID}`);
+			}
+		});
+
+		it("creates nothing and stays retryable when the Shopify lookup fails", async () => {
+			vi.mocked(discogsSkip.loadShopifyDiscogsIndex).mockRejectedValue(
+				new Error("Shopify orders query failed: 503"));
+			const res = await pollDiscogsForSales(env as any);
+
+			expect(res.shopify_adjustments_succeeded).toBe(0);
+			expect(res.skipped_in_shopify).toBe(0);
+			expect(shopifyAdmin.createDiscogsOrder).not.toHaveBeenCalled();
+			// Short in-flight claim only — never the 60-day durable lock.
+			expect(await env.SYNC_STATE.get(`lock:order:${ORDER_ID}`)).toBe("in-flight");
+			expect(await lockTtlSeconds()).toBeLessThanOrEqual(10 * 60);
+			const a = await audit();
+			expect(a.order_creation.ok).toBe(false);
+			expect(a.order_creation.will_retry).toBe(true);
+			expect(a.order_creation.error).toMatch(/Shopify order lookup failed.*nothing created/);
+		});
+
+		// 147628-C-51 (2026-10-22): Discogs catno "SJU12R24 (RED)", one Shopify
+		// product SJU12R24 titled "Afro Gente (Red Vinyl Repress)". The REAL
+		// findVariantBySkuLoose runs here against a stubbed Admin API.
+		it("resolves a catno with a (RED) qualifier and logs it", async () => {
+			const actual = await vi.importActual<typeof import("../src/lib/shopify-admin")>("../src/lib/shopify-admin");
+			vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockImplementation(
+				(e: any, sku: string) => actual.findVariantBySkuLoose(e, sku));
+			await env.WISHLIST.put("shopify_admin_token",
+				JSON.stringify({ token: "test", expiresAt: Date.now() + 10 * 3600000 }));
+			await env.SYNC_STATE.put(`listing:${LISTING_ID}`,
+				JSON.stringify({ sku: "SJU12R24 (RED)", status: "Sold" }));
+			const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_u: any, init: any) => {
+				const q: string = JSON.parse(init.body).variables.q;
+				const edges = q === 'sku:"SJU12R24"' ? [{ node: {
+					id: "gid://shopify/ProductVariant/58103784309120", sku: "SJU12R24", title: "Default Title",
+					inventoryItem: { id: "gid://shopify/InventoryItem/1" },
+					product: { id: "gid://shopify/Product/1", title: "Afro Gente (Red Vinyl Repress)" } } }] : [];
+				return new Response(JSON.stringify({ data: { productVariants: { edges } } }), { status: 200 });
+			});
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				const res = await pollDiscogsForSales(env as any);
+
+				expect(res.variant_not_found).toBe(0);
+				expect(res.shopify_adjustments_succeeded).toBe(1);
+				expect(shopifyAdmin.createDiscogsOrder).toHaveBeenCalledTimes(1);
+				expect(vi.mocked(shopifyAdmin.createDiscogsOrder).mock.calls[0][2])
+					.toEqual([{ variantId: "gid://shopify/ProductVariant/58103784309120", quantity: 1 }]);
+
+				const logged = warn.mock.calls.map((c) => { try { return JSON.parse(String(c[0])); } catch { return null; } })
+					.find((l) => l?.event === "discogs_sale_resolved_via_catno_qualifier");
+				expect(logged).toMatchObject({
+					order_id: ORDER_ID, listing_id: LISTING_ID,
+					discogs_sku: "SJU12R24 (RED)", shopify_sku: "SJU12R24",
+					shopify_title: "Afro Gente (Red Vinyl Repress)",
+				});
+				const item = (await audit()).items[0];
+				expect(item.resolved_via).toBe("catno_qualifier");
+				expect(item.sku_from_discogs).toBe("SJU12R24 (RED)");
+				expect(item.sku).toBe("SJU12R24");
+				// The real SKU is written back, so the next sale resolves directly.
+				expect(JSON.parse((await env.SYNC_STATE.get(`listing:${LISTING_ID}`))!).sku).toBe("SJU12R24");
+			} finally {
+				fetchSpy.mockRestore();
+				warn.mockRestore();
+				await env.WISHLIST.delete("shopify_admin_token");
+			}
+		});
 	});
 });
