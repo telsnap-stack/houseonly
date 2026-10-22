@@ -11,7 +11,9 @@
  *   fix         exactly one Shopify SKU matches (exact / case / separators) → written with --commit
  *   ambiguous   several match → pick one in the approvals file
  *   unresolved  none match; hints are prefix candidates (BOND12081 → BOND12081C)
- *   conflict    the Shopify SKU is already linked to another listing — check by hand
+ *   conflict    the Shopify SKU is already linked to another listing, or two or more
+ *               live listings in this run resolve to it — check by hand; never written
+ *   sold        the listing is Sold: reported only, never creates or changes sku:
  * and every listing FOR SALE on Discogs with 0 Shopify stock.
  *
  * Required env:
@@ -45,7 +47,7 @@ if (!BS) {
   process.exit(1);
 }
 
-const totals = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0 };
+const totals = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0, sold: 0 };
 const needsYou = [];
 const noStock = [];
 
@@ -81,6 +83,9 @@ console.log(`\nTotals: ${JSON.stringify(totals)}`);
 if (noStock.length) {
   console.log(`\nFOR SALE on Discogs with no Shopify stock (${noStock.length}) — take these down on Discogs:`);
   for (const n of noStock) console.log(`  ${n.listing_id}  ${n.sku}  stock ${n.stock}  ${n.title}`);
+}
+if (totals.sold) {
+  console.log(`\n${totals.sold} sold listing(s) matched a SKU. Sold listings never create or change a mapping.`);
 }
 if (needsYou.length) {
   console.log(`\n${needsYou.length} listing(s) need a decision. Put confirmed pairs in an approvals file, e.g.`);
