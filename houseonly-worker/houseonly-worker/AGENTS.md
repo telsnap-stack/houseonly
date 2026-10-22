@@ -39,8 +39,15 @@ produccion** hasta que se revirtio con `wrangler rollback`.
    vieja.
 4. **Hay cambios sin commitear en `src/`**, porque wrangler sube el disco y se
    desplegaria algo que no esta en ningun commit.
+5. **La suite de tests falla** (`npx vitest run`). Imprime el recuento
+   (`Tests  N failed | M passed`) y los tests en rojo. No hay CI: este freno es
+   lo unico que corre la suite antes de produccion. 8bef6a6 llego a prod el
+   19-10 con 21 tests en rojo en `index.spec.ts` (#119, #121). Tarda ~10 s.
 
 Escotilla de emergencia, a sabiendas: `DEPLOY_SIN_FRENOS=1 npm run deploy`.
+Desactiva **los cinco** frenos, tests incluidos — no hay forma de saltarse solo
+uno. Si se usa porque un test falla, que sea porque el test esta mal y no el
+codigo, y que quede dicho en el commit o en el PR.
 
 ### Si hay que revertir
 

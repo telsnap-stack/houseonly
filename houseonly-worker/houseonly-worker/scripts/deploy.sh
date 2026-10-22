@@ -1,5 +1,5 @@
 #!/bin/bash
-# Despliegue del worker con dos frenos que abortan.
+# Despliegue del worker con cinco frenos que abortan (git, rutas, borrados, disco sucio, tests).
 #
 # POR QUE EXISTE
 # El 2026-09-28 se desplego a produccion desde `claude/genero-garage`, una rama
@@ -85,6 +85,24 @@ else
       "$(echo "$SUCIO" | tr '\n' ' ')"
   fi
   verde "✓ src/ sin cambios pendientes"
+
+  # ── FRENO 5: la suite de tests tiene que pasar ────────────────
+  # 8bef6a6 llego a produccion el 2026-10-19 con 21 tests en rojo en
+  # index.spec.ts: ningun freno ejecutaba la suite y no hay CI (#121). Se corre
+  # sobre el disco, que es lo mismo que sube wrangler (FRENO 4 ya garantiza que
+  # src/ coincide con el commit).
+  gris "  ejecutando la suite (npx vitest run)…"
+  if SALIDA="$(npx vitest run 2>&1)"; then OK_TESTS=1; else OK_TESTS=0; fi
+  LIMPIA="$(printf '%s\n' "$SALIDA" | sed $'s/\x1b\\[[0-9;]*m//g')"
+  RECUENTO="$(printf '%s\n' "$LIMPIA" | grep -E '^ +Tests +' | tail -1 | sed -E 's/^ +Tests +//' || true)"
+  FICHEROS="$(printf '%s\n' "$LIMPIA" | grep -E '^ +Test Files +' | tail -1 | sed -E 's/^ +Test Files +//' || true)"
+  if [ "$OK_TESTS" != "1" ]; then
+    abortar "la suite de tests falla: ${RECUENTO:-sin recuento (vitest no llego a ejecutar)}" \
+      "ficheros: ${FICHEROS:-?}" \
+      "$(printf '%s\n' "$LIMPIA" | grep -E '^ *FAIL ' | sed -E 's/^ *//' | sort -u | head -10 || true)" \
+      "Detalle:  npx vitest run"
+  fi
+  verde "✓ tests: ${RECUENTO} · ficheros: ${FICHEROS}"
   echo
 fi
 
