@@ -51,7 +51,10 @@ export interface DiscogsListingInput {
 
 export interface DiscogsListing {
   id: number;
-  status: DiscogsListingStatus;
+  // Read side only: Discogs also returns 'Sold' (inventory ?status=Sold, seen
+  // in prod 2026-10-22). Not part of DiscogsListingStatus, which is what we may
+  // SET when creating or editing a listing.
+  status: DiscogsListingStatus | 'Sold';
   price: { currency: string; value: number };
   release: {
     id: number;

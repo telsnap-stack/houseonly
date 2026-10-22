@@ -310,4 +310,104 @@ describe("sync-relink", () => {
 		expect(r.counts.ambiguous).toBe(1);
 		expect(await env.SYNC_STATE.get("listing:3")).toBeNull();
 	});
+
+	// 2026-10-22: the Sold dry run proposed sku:SJU12R24 → 4190851683 right
+	// after that mapping was cleared on purpose (the record is Shopify-only).
+	describe("sold listings never create or change a mapping", () => {
+		const variant = (sku: string, n = 1) => ({ id: `v-${sku}`, sku, inventoryQuantity: n, title: sku, status: "ACTIVE" });
+
+		it("reports a sold listing as 'sold' and writes nothing, even with commit=1", async () => {
+			await env.SYNC_STATE.put("listing:4190851683", JSON.stringify({ sku: "SJU12R24", status: "Sold" }));
+			inv([{ id: 4190851683, status: "Sold", release: { catalog_number: "SJU12R24 (RED)", description: "Afro Gente" } }]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("SJU12R24")]);
+
+			const r = await run("&commit=1");
+			expect(r.counts.sold).toBe(1);
+			expect(r.counts.fix).toBe(0);
+			expect(r.listings[0]).toMatchObject({ listing_id: 4190851683, outcome: "sold", shopify_sku: "SJU12R24" });
+			expect(await env.SYNC_STATE.get("sku:SJU12R24")).toBeNull();
+			expect(JSON.parse((await env.SYNC_STATE.get("listing:4190851683"))!)).toEqual({ sku: "SJU12R24", status: "Sold" });
+		});
+
+		it("ignores an approval for a sold listing", async () => {
+			inv([{ id: 7, status: "Sold", release: { catalog_number: "BOND 12081", description: "x" } }]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("BOND12081C")]);
+
+			const r = await run("&commit=1", { approve: { 7: "BOND12081C" } });
+			expect(r.counts.sold).toBe(1);
+			expect(r.counts.approved).toBe(0);
+			expect(await env.SYNC_STATE.get("sku:BOND12081C")).toBeNull();
+			expect(await env.SYNC_STATE.get("listing:7")).toBeNull();
+		});
+
+		it("never re-points a SKU from its live listing to a sold one", async () => {
+			await env.SYNC_STATE.put("sku:DEFCL001LP", JSON.stringify({ listing_id: 4337947446, status: "For Sale" }));
+			inv([{ id: 4211215539, status: "Sold", release: { catalog_number: "DEFCL001LP", description: "x" } }]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("DEFCL001LP")]);
+
+			const r = await run("&commit=1");
+			expect(r.counts.sold).toBe(1);
+			expect(JSON.parse((await env.SYNC_STATE.get("sku:DEFCL001LP"))!).listing_id).toBe(4337947446);
+		});
+
+		it("a sold copy does not block the live one from linking", async () => {
+			inv([
+				{ id: 4269081744, status: "Sold", release: { catalog_number: "DAT 114", description: "x" } },
+				{ id: 4400000001, status: "For Sale", release: { catalog_number: "DAT 114", description: "x" } },
+			]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("DAT114")]);
+
+			const r = await run("&commit=1");
+			expect(r.counts).toMatchObject({ sold: 1, fix: 1, conflict: 0 });
+			expect(JSON.parse((await env.SYNC_STATE.get("sku:DAT114"))!).listing_id).toBe(4400000001);
+			expect(await env.SYNC_STATE.get("listing:4269081744")).toBeNull();
+		});
+	});
+
+	describe("two or more live listings for one SKU", () => {
+		const variant = (sku: string, n = 2) => ({ id: `v-${sku}`, sku, inventoryQuantity: n, title: sku, status: "ACTIVE" });
+
+		it("reports both as conflict and writes nothing when neither is linked yet", async () => {
+			inv([
+				{ id: 4246949688, status: "For Sale", release: { catalog_number: "VP014", description: "The Remixes" } },
+				{ id: 4258358799, status: "For Sale", release: { catalog_number: "VP014", description: "The Remixes" } },
+			]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("VP014")]);
+
+			const r = await run("&commit=1");
+			expect(r.counts.conflict).toBe(2);
+			expect(r.counts.fix).toBe(0);
+			expect(r.listings.find((l: any) => l.listing_id === 4246949688).hints[0].other_live_listings).toEqual([4258358799]);
+			expect(await env.SYNC_STATE.get("sku:VP014")).toBeNull();
+			expect(await env.SYNC_STATE.get("listing:4246949688")).toBeNull();
+			expect(await env.SYNC_STATE.get("listing:4258358799")).toBeNull();
+		});
+
+		it("keeps the linked one and flags the other copy (RMCE021)", async () => {
+			await env.SYNC_STATE.put("sku:RMCE021", JSON.stringify({ listing_id: 4164934932, status: "For Sale" }));
+			await env.SYNC_STATE.put("listing:4164934932", JSON.stringify({ sku: "RMCE021", status: "For Sale" }));
+			inv([
+				{ id: 4164934932, status: "For Sale", release: { catalog_number: "RMCE021", description: "Work It EP" } },
+				{ id: 4156961652, status: "For Sale", release: { catalog_number: "RMCE021", description: "Work It EP" } },
+			]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("RMCE021", 3)]);
+
+			const r = await run("&commit=1");
+			expect(r.counts).toMatchObject({ ok: 1, conflict: 1, fix: 0 });
+			expect(JSON.parse((await env.SYNC_STATE.get("sku:RMCE021"))!).listing_id).toBe(4164934932);
+			expect(await env.SYNC_STATE.get("listing:4156961652")).toBeNull();
+		});
+
+		it("flags two different releases whose catnos normalise to one SKU (SOULR055)", async () => {
+			inv([
+				{ id: 4197674571, status: "For Sale", release: { catalog_number: "SOULR055", description: "Album Sampler" } },
+				{ id: 4200252492, status: "For Sale", release: { catalog_number: "SOUL:R 055", description: "Count To Ten" } },
+			]);
+			vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([variant("SOULR055")]);
+
+			const r = await run("&commit=1");
+			expect(r.counts.conflict).toBe(2);
+			expect(await env.SYNC_STATE.get("sku:SOULR055")).toBeNull();
+		});
+	});
 });

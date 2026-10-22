@@ -2201,8 +2201,16 @@ function jsonResponse(data: any, status = 200): Response {
 // only if Eduardo approves that listing → SKU pair in the body. Existing keys
 // are never deleted, and a SKU already linked to ANOTHER listing is reported,
 // never overwritten.
+//
+// Two more rules (2026-10-22):
+//   - A SOLD listing never creates or changes a mapping ('sold', report only).
+//     The Sold dry run proposed sku:SJU12R24 → 4190851683 right after that
+//     mapping was cleared on purpose (the record is Shopify-only now).
+//   - Two or more live listings resolving to the same SKU in one run are all
+//     'conflict': which one owns the SKU is a human call (VP014, RMCE021 had
+//     two live copies; SOULR055 had two different releases sharing a catno).
 
-type RelinkOutcome = 'ok' | 'fix' | 'approved' | 'ambiguous' | 'unresolved' | 'conflict';
+type RelinkOutcome = 'ok' | 'fix' | 'approved' | 'ambiguous' | 'unresolved' | 'conflict' | 'sold';
 
 const normSku = (s: string) => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -2256,8 +2264,24 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
   };
 
   const report: any[] = [];
-  const counts: Record<RelinkOutcome, number> = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0 };
+  const counts: Record<RelinkOutcome, number> = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0, sold: 0 };
   const noStock: any[] = [];
+
+  // Pass 1: every listing's candidate SKU, before anything is written, so two
+  // live listings claiming one SKU are seen together (the per-listing check
+  // below only sees mappings already in KV).
+  const proposed = rows.map(({ l, cands }) => {
+    const approvedSku = approve[String(l.id)];
+    if (approvedSku) return variants.find((v) => v.sku === approvedSku)?.sku;
+    const m = matchFor(cands);
+    return m.length === 1 ? m[0].sku : undefined;
+  });
+  const liveBySku = new Map<string, number[]>();
+  rows.forEach(({ l }, i) => {
+    const sku = proposed[i];
+    if (!sku || l.status === 'Sold') return;
+    liveBySku.set(sku, [...(liveBySku.get(sku) || []), l.id]);
+  });
 
   for (const { l, cached, cands } of rows) {
     const approvedSku = approve[String(l.id)];
@@ -2289,11 +2313,19 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
 
     if (target) {
       const current = await getSkuMapping(env, target.sku);
-      if (current?.listing_id && current.listing_id !== l.id) {
+      const siblings = (liveBySku.get(target.sku) || []).filter((id) => id !== l.id);
+      if (cached === target.sku && current?.listing_id === l.id) {
+        outcome = 'ok';
+      } else if (l.status === 'Sold') {
+        // Report only: a sold copy must never claim (or re-claim) the SKU.
+        outcome = 'sold';
+        hints = [{ sku: target.sku, would_link: false, sku_linked_to: current?.listing_id ?? null }];
+      } else if (siblings.length > 0) {
+        outcome = 'conflict';
+        hints = [{ sku: target.sku, other_live_listings: siblings, already_linked_to: current?.listing_id ?? null }];
+      } else if (current?.listing_id && current.listing_id !== l.id) {
         outcome = 'conflict';
         hints = [{ sku: target.sku, already_linked_to: current.listing_id }];
-      } else if (cached === target.sku && current?.listing_id === l.id) {
-        outcome = 'ok';
       } else if (commit) {
         const now = new Date().toISOString();
         await env.SYNC_STATE.put(`listing:${l.id}`, JSON.stringify({ sku: target.sku, status: l.status }));
