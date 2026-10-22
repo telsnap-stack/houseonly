@@ -78,6 +78,8 @@ describe("findVariantBySkuLoose - edition qualifier in the catno", () => {
 		shop = { SJU12R24: { product: "Afro Gente (Red Vinyl Repress)" } };
 		const v = await findVariantBySkuLoose(env as any, "SJU12R24 (RED)");
 		expect(v?.sku).toBe("SJU12R24");
+		// Flagged so the sync logs it and marks the audit for review.
+		expect(v?.via).toBe("catno_qualifier");
 		expect(asked).toEqual(["SJU12R24 (RED)", "SJU12R24RED", "SJU12R24"]);
 	});
 
@@ -103,7 +105,9 @@ describe("findVariantBySkuLoose - edition qualifier in the catno", () => {
 
 	it("prefers a real SKU that carries the edition", async () => {
 		shop = { SJU12R24RED: { product: "Afro Gente (Red)" }, SJU12R24: { product: "Afro Gente (Red)" } };
-		expect((await findVariantBySkuLoose(env as any, "SJU12R24 (RED)"))?.sku).toBe("SJU12R24RED");
+		const v = await findVariantBySkuLoose(env as any, "SJU12R24 (RED)");
+		expect(v?.sku).toBe("SJU12R24RED");
+		expect(v?.via).toBeUndefined();
 	});
 
 	it("leaves catnos without a qualifier alone", async () => {

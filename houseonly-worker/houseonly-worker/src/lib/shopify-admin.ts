@@ -184,6 +184,7 @@ export interface VariantInventoryInfo {
   productId: string;        // gid://shopify/Product/...
   sku: string;
   title?: string;           // product title + variant title (if not "Default Title")
+  via?: 'catno_qualifier';  // set only when findVariantByQualifiedCatno resolved it
 }
 
 /**
@@ -309,7 +310,7 @@ async function findVariantByQualifiedCatno(
   if (!hit?.variantId) return null;
 
   const titleWords = new Set((hit.title || '').toUpperCase().split(/[^A-Z0-9]+/));
-  return words.every(w => titleWords.has(w)) ? hit : null;
+  return words.every(w => titleWords.has(w)) ? { ...hit, via: 'catno_qualifier' } : null;
 }
 
 /**
