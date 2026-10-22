@@ -1356,6 +1356,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       }
       if (!variant?.variantId) {
         itemAudit.outcome = 'variant_not_found';
+        // Without this the order error was a bare "no resolvable line items".
+        itemAudit.error = `no Shopify variant for SKU "${sku}"`;
         result.variant_not_found++;
         hadUnresolved = true;
         audit.items.push(itemAudit);

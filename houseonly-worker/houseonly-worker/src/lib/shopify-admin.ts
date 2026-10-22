@@ -183,6 +183,7 @@ export interface VariantInventoryInfo {
   inventoryItemId: string;  // gid://shopify/InventoryItem/...
   productId: string;        // gid://shopify/Product/...
   sku: string;
+  title?: string;           // product title + variant title (if not "Default Title")
 }
 
 /**
@@ -206,8 +207,9 @@ export async function findVariantBySku(
           node {
             id
             sku
+            title
             inventoryItem { id }
-            product { id }
+            product { id title }
           }
         }
       }
@@ -235,6 +237,8 @@ export async function findVariantBySku(
     inventoryItemId: exact.node.inventoryItem?.id,
     productId: exact.node.product?.id,
     sku: exact.node.sku,
+    title: [exact.node.product?.title, exact.node.title]
+      .filter((t: any) => t && t !== 'Default Title').join(' '),
   };
 }
 
@@ -270,9 +274,42 @@ export async function findVariantBySkuLoose(
 
   const normalized = normalizeSku(sku);
   // Nothing to gain if the SKU had no separators to begin with.
-  if (!normalized || normalized === sku) return null;
+  if (normalized && normalized !== sku) {
+    const loose = await findVariantBySku(env, normalized);
+    if (loose?.variantId) return loose;
+  }
 
-  return await findVariantBySku(env, normalized);
+  return await findVariantByQualifiedCatno(env, sku);
+}
+
+/**
+ * Discogs splits colour/edition pressings into separate releases and writes the
+ * edition into the catalogue number itself: the red repress of SJU12R24 is
+ * catno "SJU12R24 (RED)", while Shopify has one product, SKU SJU12R24, titled
+ * "Afro Gente (Red Vinyl Repress)". Stripping separators gives SJU12R24RED and
+ * still misses, so order 147628-C-51 (2026-10-22) never resolved.
+ *
+ * The qualifier is dropped only when OUR Shopify data confirms it: every word
+ * of "(RED)" must appear in the product/variant title of the base SKU. If the
+ * shop only has the black SJU12R24, a sale of the red listing resolves to
+ * nothing (manual) instead of decrementing the wrong record.
+ */
+async function findVariantByQualifiedCatno(
+  env: ShopifyAdminEnv,
+  sku: string,
+): Promise<VariantInventoryInfo | null> {
+  const m = /^(.*\S)\s*\(([^()]+)\)\s*$/.exec(sku);
+  if (!m) return null;
+  const [, base, qualifier] = m;
+  const words = qualifier.toUpperCase().split(/[^A-Z0-9]+/).filter(w => w.length >= 2);
+  if (!words.length) return null;
+
+  const hit = (await findVariantBySku(env, base.trim()))
+    || (normalizeSku(base) !== base.trim() ? await findVariantBySku(env, normalizeSku(base)) : null);
+  if (!hit?.variantId) return null;
+
+  const titleWords = new Set((hit.title || '').toUpperCase().split(/[^A-Z0-9]+/));
+  return words.every(w => titleWords.has(w)) ? hit : null;
 }
 
 /**

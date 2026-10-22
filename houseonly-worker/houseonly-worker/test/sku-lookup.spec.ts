@@ -47,3 +47,68 @@ describe("findVariantBySku - case", () => {
 		expect(await findVariantBySku(env as any, "satltd008")).toBeNull();
 	});
 });
+
+// 147628-C-51 (2026-10-22): Discogs catno "SJU12R24 (RED)" (the red repress is
+// its own release) vs one Shopify product SKU SJU12R24 titled "... (Red Vinyl
+// Repress)". Normalising gave SJU12R24RED and the order never resolved.
+describe("findVariantBySkuLoose - edition qualifier in the catno", () => {
+	// SKU → { product title, variant title }
+	let shop: Record<string, { product: string; variant?: string }> = {};
+	let asked: string[] = [];
+
+	beforeEach(async () => {
+		await env.WISHLIST.put("shopify_admin_token",
+			JSON.stringify({ token: "test", expiresAt: Date.now() + 10 * 3600000 }));
+		asked = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: any, init: any) => {
+			const q: string = JSON.parse(init.body).variables.q;
+			const sku = /^sku:"(.*)"$/.exec(q)![1];
+			asked.push(sku);
+			const p = shop[sku];
+			const edges = p ? [{ node: { id: `gid://shopify/ProductVariant/${sku}`, sku,
+				title: p.variant || "Default Title",
+				inventoryItem: { id: "gid://shopify/InventoryItem/1" },
+				product: { id: "gid://shopify/Product/1", title: p.product } } }] : [];
+			return new Response(JSON.stringify({ data: { productVariants: { edges } } }), { status: 200 });
+		});
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("resolves SJU12R24 (RED) to SJU12R24 when the Shopify title says Red", async () => {
+		shop = { SJU12R24: { product: "Afro Gente (Red Vinyl Repress)" } };
+		const v = await findVariantBySkuLoose(env as any, "SJU12R24 (RED)");
+		expect(v?.sku).toBe("SJU12R24");
+		expect(asked).toEqual(["SJU12R24 (RED)", "SJU12R24RED", "SJU12R24"]);
+	});
+
+	it("accepts the qualifier from the variant title (colour editions)", async () => {
+		shop = { DJ001: { product: "Some Record", variant: "Red" } };
+		expect((await findVariantBySkuLoose(env as any, "DJ001 (Red)"))?.sku).toBe("DJ001");
+	});
+
+	it("does NOT resolve the red listing to a product that is not the red edition", async () => {
+		shop = { SJU12R24: { product: "Afro Gente / Fuego De Sangre" } };
+		expect(await findVariantBySkuLoose(env as any, "SJU12R24 (RED)")).toBeNull();
+	});
+
+	it("needs every word of the qualifier", async () => {
+		shop = { ABC1: { product: "Title (Red Vinyl)" } };
+		expect(await findVariantBySkuLoose(env as any, "ABC1 (RED REPRESS)")).toBeNull();
+	});
+
+	it("does not match the qualifier inside another word", async () => {
+		shop = { ABC1: { product: "Redshift" } };
+		expect(await findVariantBySkuLoose(env as any, "ABC1 (RED)")).toBeNull();
+	});
+
+	it("prefers a real SKU that carries the edition", async () => {
+		shop = { SJU12R24RED: { product: "Afro Gente (Red)" }, SJU12R24: { product: "Afro Gente (Red)" } };
+		expect((await findVariantBySkuLoose(env as any, "SJU12R24 (RED)"))?.sku).toBe("SJU12R24RED");
+	});
+
+	it("leaves catnos without a qualifier alone", async () => {
+		shop = {};
+		expect(await findVariantBySkuLoose(env as any, "TEMPA 131")).toBeNull();
+		expect(asked).toEqual(["TEMPA 131", "TEMPA131"]);
+	});
+});
