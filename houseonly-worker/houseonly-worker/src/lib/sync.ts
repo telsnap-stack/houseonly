@@ -1356,6 +1356,8 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       }
       if (!variant?.variantId) {
         itemAudit.outcome = 'variant_not_found';
+        // Without this the order error was a bare "no resolvable line items".
+        itemAudit.error = `no Shopify variant for SKU "${sku}"`;
         result.variant_not_found++;
         hadUnresolved = true;
         audit.items.push(itemAudit);
@@ -1365,6 +1367,18 @@ export async function pollDiscogsForSales(env: SyncAdminEnv): Promise<PollResult
       // SKU Shopify does not have (a raw Discogs catno). Write the real one
       // back so this listing resolves directly from now on and no one has to
       // repair KV by hand.
+      // The qualifier fallback drops "(RED)" on the strength of the Shopify
+      // title alone. Every such sale is logged and flagged in the audit so it
+      // can be reviewed: a wrong edition here ships the wrong record.
+      if (variant.via === 'catno_qualifier') {
+        itemAudit.resolved_via = 'catno_qualifier';
+        itemAudit.shopify_title = variant.title || '';
+        console.warn(JSON.stringify({
+          event: 'discogs_sale_resolved_via_catno_qualifier',
+          order_id: orderIdStr, listing_id: item.id,
+          discogs_sku: sku, shopify_sku: variant.sku, shopify_title: variant.title || '',
+        }));
+      }
       if (variant.sku && variant.sku !== sku) {
         itemAudit.sku_from_discogs = sku;
         sku = variant.sku;
