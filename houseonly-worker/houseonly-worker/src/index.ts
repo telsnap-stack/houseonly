@@ -52,6 +52,13 @@ interface Env {
   // / newsletter-confirm) and Broadcasts. Sending-access key scoped to the account.
   // Set via `wrangler secret put RESEND_API_KEY` (separately for staging).
   RESEND_API_KEY: string;
+  // eBay, third sales channel (src/lib/ebay.ts, docs/ebay.md). All optional:
+  // unset = eBay is "not configured" and nothing calls eBay. Set via
+  // `wrangler secret put EBAY_… --env staging` once eBay approves the keyset.
+  EBAY_CLIENT_ID?: string;
+  EBAY_CLIENT_SECRET?: string;
+  EBAY_REFRESH_TOKEN?: string;
+  EBAY_VERIFICATION_TOKEN?: string;
 }
 
 const R2_PUBLIC = 'https://pub-7e5c9e2f45b3409383e7f23a2cb7028d.r2.dev';
@@ -855,6 +862,7 @@ import {
   handlePendingReviewApprove,
   handlePendingReviewReject,
   pollDiscogsForSales,
+  runRelinkCron,
 } from './lib/sync';
 
 import { searchRelease } from './lib/discogs';
@@ -925,6 +933,10 @@ import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed
 import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo, handlePreorderUnlisted } from './lib/preorder-rejects';
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
+import {
+  EBAY_CRON, runEbayAutolist, pollEbayOrders, handleEbayNotification,
+  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun,
+} from './lib/ebay';
 
 import {
   buildAuthorizeUrl,
@@ -2062,6 +2074,34 @@ export default {
     // POST ?action=sync35-mode → set mode (Bearer BOOTSTRAP_AUTH_SECRET)
     if (action === 'sync35-mode') {
       return await handleAutoListMode(request, env);
+    }
+
+    // ── EBAY: TERCER CANAL (src/lib/ebay.ts, docs/ebay.md) ──
+    // ebay-notify   GET challenge / POST notificaciones (firma de eBay, sin Bearer)
+    // ebay-mode     GET publico · POST Bearer {autolist?, sync?}
+    // ebay-items    GET Bearer — cola, modos, ultimas pasadas (&sku= uno entero)
+    // ebay-exclude / ebay-include  POST Bearer {skus}
+    // ebay-backfill POST Bearer {count?} — siguiente tanda del catalogo
+    // ebay-run      POST Bearer {what: autolist|orders|both, force?}
+    // Los productos nuevos entran solos (products/create, ver sync.ts).
+    // Independiente de sync35-mode: el auto-add de Discogs no se toca.
+    if (action === 'ebay-notify') {
+      return await handleEbayNotification(request, env, ctx);
+    }
+    if (action === 'ebay-mode') {
+      return await handleEbayMode(request, env);
+    }
+    if (action === 'ebay-items' && request.method === 'GET') {
+      return await handleEbayItems(request, env);
+    }
+    if ((action === 'ebay-exclude' || action === 'ebay-include') && request.method === 'POST') {
+      return await handleEbayExclude(request, env, action === 'ebay-exclude');
+    }
+    if (action === 'ebay-backfill' && request.method === 'POST') {
+      return await handleEbayBackfill(request, env);
+    }
+    if (action === 'ebay-run' && request.method === 'POST') {
+      return await handleEbayRun(request, env);
     }
 
     // ── FASE 3.5C: REVIEW DASHBOARD ─────────────────────────
@@ -3218,6 +3258,26 @@ export default {
             JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
         ),
       );
+      return;
+    }
+
+    // ── EBAY (src/lib/ebay.ts) ──────────────────────────────
+    // Su propia expresion de cron, fuera del poll de Discogs: ni compite por su
+    // cupo ni depende de que vaya bien. Cada parte lee su propio modo de KV
+    // (meta:ebay_autolist_mode / meta:ebay_sync_mode, ambos 'dry' por defecto)
+    // y sin claves de eBay no llama a eBay.
+    if (event.cron === EBAY_CRON) {
+      const at = new Date(event.scheduledTime).toISOString();
+      // Conciliacion SKU↔Discogs: una pagina del inventario por pasada. Va en
+      // este hueco (:03) y no en el del poll (:07), donde el cupo de Discogs
+      // ya llega gastado. Mantiene sku: al dia para los listings hechos a mano
+      // — de ahi sale el precio de eBay y el delist de Discogs en las ventas web.
+      ctx.waitUntil(runRelinkCron(env).catch((err) => env.SYNC_STATE.put('meta:relink_cron_last_run',
+        JSON.stringify({ at, ok: false, error: err?.message || String(err) }))));
+      ctx.waitUntil(runEbayAutolist(env).catch((err) => env.SYNC_STATE.put('meta:ebay_autolist_last_run',
+        JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }))));
+      ctx.waitUntil(pollEbayOrders(env).catch((err) => env.SYNC_STATE.put('meta:ebay_orders_last_run',
+        JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }))));
       return;
     }
 
