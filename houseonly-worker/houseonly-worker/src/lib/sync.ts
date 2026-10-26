@@ -53,6 +53,7 @@ import {
   type ShopifyDiscogsIndex,
   type ShopifyDiscogsOrder,
 } from './discogs-skip';
+import { withdrawOnEbayForShopifyOrder, type EbayFullEnv } from './ebay';
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
@@ -789,6 +790,8 @@ interface ShopifyOrderWebhookBody {
   id?: number;
   order_number?: number;
   email?: string;
+  source_name?: string;
+  note_attributes?: Array<{ name?: string; value?: string }>;
   line_items?: Array<{
     id?: number;
     sku?: string;
@@ -876,6 +879,11 @@ export async function handleShopifyOrderWebhook(
   if (resolved.length > 0) {
     ctx.waitUntil(delistOnDiscogs(env, orderId, resolved));
   }
+  // Third channel: end the eBay listing of anything this order sold. Covers
+  // Discogs sales too — the poll turns them into Shopify orders, which land
+  // here. Independent of the Discogs delist above; see src/lib/ebay.ts.
+  ctx.waitUntil(withdrawOnEbayForShopifyOrder(env as unknown as EbayFullEnv, orderId, body)
+    .catch((e: any) => console.error(JSON.stringify({ event: 'ebay_withdraw_failed', order_id: orderId, error: e?.message || String(e) }))));
 
   return jsonResponse({
     ok: true,

@@ -8870,6 +8870,140 @@ function DiscogsReviewPanel() {
   );
 }
 
+// ── EBAY PANEL (tercer canal; worker src/lib/ebay.ts, docs/ebay.md) ─────────
+// Seleccion disco a disco + dos interruptores PROPIOS de eBay: el auto-list
+// (meta:ebay_autolist_mode) y la sync de ventas eBay→Shopify
+// (meta:ebay_sync_mode). Ninguno toca el auto-add de Discogs (sync35-mode).
+// El cron de eBay lista en tandas; aqui se ve el estado de cada disco.
+// WORKER_URL sigue a staging/prod segun VITE_WORKER_URL.
+const EBAY_STATUS_COLOR = { queued:'#ffd24a', would_list:'#9ad0ff', listed:'#4ade80', sold:'#4ade80', skipped:'#ff9a4a', failed:'#ff5a5a', withdrawn:'#888' };
+
+function EbayPanel() {
+  const [secret, setSecret] = useState(() => mailSecretStore.v);
+  const [data, setData]     = useState(null);
+  const [skus, setSkus]     = useState('');
+  const [busy, setBusy]     = useState('');
+  const [error, setError]   = useState('');
+  const [msg, setMsg]       = useState('');
+
+  const call = async (action, body) => {
+    const r = await fetch(`${WORKER_URL}?action=${action}`, body === undefined
+      ? { headers: { Authorization: `Bearer ${secret}` } }
+      : { method: 'POST', headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('Unauthorized — check the admin secret.');
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+  const run = async (label, fn) => {
+    setBusy(label); setError(''); setMsg('');
+    try { await fn(); } catch (e) { setError(e.message); }
+    setBusy('');
+  };
+  const load = () => run('load', async () => setData(await call('ebay-items')));
+
+  const setMode = (key, value) => run(key, async () => {
+    if (value === 'live' && !window.confirm(key === 'autolist'
+      ? 'Auto-list LIVE: el cron publicara en eBay los discos seleccionados. ¿Seguro?'
+      : 'Sync LIVE: cada venta de eBay creara un pedido pagado en Shopify (factura). ¿Seguro?')) return;
+    await call('ebay-mode', { [key]: value });
+    setData(await call('ebay-items'));
+  });
+  const select = () => run('select', async () => {
+    const list = skus.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+    if (!list.length) return;
+    const d = await call('ebay-select', { skus: list });
+    setMsg(d.results.map(r => `${r.sku}: ${r.result}`).join(' · '));
+    setSkus('');
+    setData(await call('ebay-items'));
+  });
+  const unselect = (sku) => run(`un:${sku}`, async () => {
+    const d = await call('ebay-unselect', { skus: [sku] });
+    const r = d.results[0];
+    if (r.error) throw new Error(`${sku}: ${r.error}`);
+    setData(await call('ebay-items'));
+  });
+  const runNow = () => run('run', async () => {
+    const d = await call('ebay-run', { what: 'autolist' });
+    const a = d.autolist || {};
+    setMsg(`Pasada ${a.mode}: ${a.listed||0} publicados, ${a.would_list||0} preparados (dry), ${a.skipped||0} saltados, ${a.failed||0} fallidos${a.stopped?` · parada: ${a.stopped}`:''}`);
+    setData(await call('ebay-items'));
+  });
+
+  if (!data) {
+    return (
+      <div style={{maxWidth:340}}>
+        <div style={{fontSize:9,color:S.muted,letterSpacing:2,textTransform:'uppercase',marginBottom:12}}>eBay · Admin Secret</div>
+        <input type="password" value={secret} onChange={e=>setSecret(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load()}
+          placeholder="BOOTSTRAP_AUTH_SECRET"
+          style={{width:'100%',background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'9px 12px',fontSize:12,fontFamily:'inherit',outline:'none',boxSizing:'border-box',marginBottom:12}} />
+        <Btn ch={busy?'Connecting…':'Connect'} onClick={load} disabled={!secret||Boolean(busy)} full />
+        {error && <div style={{fontSize:10,color:S.danger,marginTop:10}}>{error}</div>}
+      </div>
+    );
+  }
+
+  const toggle = (key, label, hint) => (
+    <div style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12,flex:1,minWidth:220}}>
+      <div style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',marginBottom:8}}>{label}</div>
+      <div style={{display:'flex',gap:6,marginBottom:6}}>
+        {['dry','live'].map(v => (
+          <Btn key={v} ch={v} variant={data[key]===v?'primary':'ghost'} onClick={()=>data[key]!==v&&setMode(key,v)} disabled={Boolean(busy)} />
+        ))}
+      </div>
+      <div style={{fontSize:9,color:S.muted,lineHeight:1.5}}>{hint}</div>
+    </div>
+  );
+  const last = data.autolist_last_run;
+  const items = data.items || [];
+
+  return (
+    <div>
+      <div style={{fontSize:10,color:data.configured?S.muted:'#ff9a4a',marginBottom:12}}>
+        {data.configured ? 'Claves de eBay configuradas.' : 'Claves de eBay pendientes: en live no se llama a eBay (ver docs/ebay.md).'}
+        {data.limit_hit && <span style={{color:'#ff9a4a'}}> · Limite de venta alcanzado {data.limit_hit.at?.slice(0,16)}; pausa hasta {data.limit_hit.until?.slice(0,16)}.</span>}
+      </div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+        {toggle('autolist','Auto-list eBay','dry: prepara el anuncio sin llamar a eBay. live: el cron publica en tandas. Independiente de Discogs.')}
+        {toggle('sync','Ventas eBay → Shopify','dry: registra lo que haria. live: cada venta de eBay crea el pedido pagado en Shopify.')}
+      </div>
+
+      <div style={{display:'flex',gap:8,alignItems:'flex-start',marginBottom:8,flexWrap:'wrap'}}>
+        <textarea value={skus} onChange={e=>setSkus(e.target.value)} placeholder="SKUs a publicar en eBay (uno por linea o separados por comas)"
+          style={{flex:1,minWidth:220,minHeight:56,background:S.bg,border:`1px solid ${S.border}`,color:S.text,borderRadius:2,padding:'8px 10px',fontSize:11,fontFamily:'inherit',outline:'none',boxSizing:'border-box'}} />
+        <div style={{display:'flex',flexDirection:'column',gap:6}}>
+          <Btn ch={busy==='select'?'…':'+ Seleccionar'} onClick={select} disabled={!skus.trim()||Boolean(busy)} />
+          <Btn ch={busy==='run'?'…':'▶ Pasada ahora'} variant="ghost" onClick={runNow} disabled={Boolean(busy)} />
+          <Btn ch="↻" variant="dark" onClick={load} disabled={Boolean(busy)} />
+        </div>
+      </div>
+      {msg && <div style={{fontSize:10,color:S.muted,marginBottom:8}}>{msg}</div>}
+      {error && <div style={{fontSize:10,color:S.danger,marginBottom:8}}>{error}</div>}
+      {last && <div style={{fontSize:9,color:S.muted,marginBottom:12}}>Ultima pasada {last.finished_at?.slice(0,16)} ({last.mode}): {last.listed} publicados · {last.would_list} preparados · {last.skipped} saltados · {last.failed} fallidos · {last.remaining_queued} en cola{last.stopped?` · parada: ${last.stopped}`:''}{last.error?` · ${last.error}`:''}</div>}
+
+      {items.length === 0 && <div style={{fontSize:11,color:S.muted,padding:'24px 0',textAlign:'center'}}>Ningun disco seleccionado para eBay.</div>}
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {items.map(it => (
+          <div key={it.sku} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:3,padding:12,display:'flex',gap:12,alignItems:'center'}}>
+            <span style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:'uppercase',color:'#080808',background:EBAY_STATUS_COLOR[it.status]||S.muted,padding:'3px 7px',borderRadius:2,flexShrink:0}}>{it.status}</span>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{fontSize:12,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{it.preview?.title || it.sku}</div>
+              <div style={{fontSize:9,color:S.muted,marginTop:3}}>
+                SKU {it.sku}
+                {it.preview && ` · €${it.preview.price} · ${it.preview.condition} · disco ${it.preview.grades?.media} (${it.preview.grades?.source==='discogs'?'Discogs':'por defecto'})${it.preview.ean?' · EAN':''}`}
+                {it.skip_reason && ` · saltado: ${it.skip_reason}`}
+                {it.error && <span style={{color:S.danger}}> · {it.error}</span>}
+                {it.listing_id && <> · <a href={`https://www.ebay.es/itm/${it.listing_id}`} target="_blank" rel="noreferrer" style={{color:S.accent}}>eBay {it.listing_id}</a></>}
+              </div>
+            </div>
+            {it.status !== 'sold' && <Btn ch={busy===`un:${it.sku}`?'…':(it.status==='listed'?'Retirar':'Quitar')} variant="ghost" onClick={()=>unselect(it.sku)} disabled={Boolean(busy)} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── NEWSLETTER PANEL (build a broadcast draft in Resend) ───────
 // Flow: paste BOOTSTRAP_AUTH_SECRET → load preview (3 sections from the Worker)
 // → tick which records go in the email (✓) and which show large → set subject +
@@ -13613,6 +13747,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
           {tabBtn('review','💿 Discogs Review')}
+          {tabBtn('ebay','🛒 eBay')}
           {tabBtn('entities','🏷️ Entities')}
           {tabBtn('newsletter','✉️ Newsletter')}
         </div>
@@ -13625,6 +13760,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='rd'    && <RubadubImporter />}
         {tab==='preorder' && <PreorderImporter />}
         {tab==='review'&& <DiscogsReviewPanel />}
+        {tab==='ebay'&& <EbayPanel />}
         {tab==='entities'&& <EntitiesPanel />}
         {tab==='newsletter'&& <NewsletterPanel />}
       </div>

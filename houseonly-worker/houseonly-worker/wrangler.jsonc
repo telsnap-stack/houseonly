@@ -60,7 +60,12 @@
     //        compartida en Cloudflare) llega ya gastado (used 69-83, 2026-10-16).
     // 0 6  — avisos de novedades (fase 6). scheduled() bifurca por event.cron;
     //        la expresion tiene que coincidir con DAILY_CRON en src/index.ts.
-    "crons": ["7,22,37,52 * * * *", "0 6 * * *"]
+    // 3,18,33,48 — eBay (auto-list por lotes + ventas de eBay). Expresion
+    //        propia (EBAY_CRON en src/lib/ebay.ts) para no tocar el poll de
+    //        Discogs. Solo en produccion: prod y staging tienen SYNC_STATE
+    //        distinto y sus candados de pedido no se ven, asi que eBay no puede
+    //        correr en los dos. Staging se prueba a mano con ?action=ebay-run.
+    "crons": ["7,22,37,52 * * * *", "0 6 * * *", "3,18,33,48 * * * *"]
   },
   "env": {
     "staging": {

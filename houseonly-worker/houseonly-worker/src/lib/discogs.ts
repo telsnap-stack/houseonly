@@ -63,6 +63,10 @@ export interface DiscogsListing {
   };
   external_id?: string;
   location?: string;
+  // Media / sleeve grades as Discogs spells them ("Near Mint (NM or M-)").
+  // eBay listings reuse them when the record is already linked (ebay.ts).
+  condition?: string;
+  sleeve_condition?: string;
   uri: string;
 }
 

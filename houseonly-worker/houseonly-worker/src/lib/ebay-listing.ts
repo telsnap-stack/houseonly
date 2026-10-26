@@ -1,0 +1,291 @@
+// ── EBAY LISTING CONTENT ─────────────────────────────────────────────
+//
+// Shopify product → eBay inventory item + offer. Pure functions, so the rules
+// are testable without a single network call; ebay.ts does the I/O.
+//
+// Content comes from OUR Shopify product only: title, artist (vendor), label
+// (label: tag), catalogue number (SKU), genre (genre: tag), description,
+// price in EUR and our images. Nothing is pulled from a Discogs release —
+// matches there are not trusted (see discogs-match memory) — except the media
+// and sleeve GRADES of our own Discogs listing when the record is already
+// linked (sku:{SKU} in SYNC_STATE).
+//
+// No shipping/exclusion text is ever added (no "Canarias" line): shipping is
+// the fulfillment policy's job.
+//
+// Catalogue (ePID) matching: "try silently, fall back to standalone". eBay
+// tries to match the product to its catalogue from the EAN/UPC we send; we
+// pass includeCatalogProductDetails=false so a match never overwrites our
+// title, photos or description with a possibly different pressing's. If the
+// publish fails while an EAN was sent, ebay.ts retries once without it.
+
+import { generoDeTags } from './genres.mjs';
+import { decodeHtmlEntities, htmlToText } from './html-text.mjs';
+import { gtinValido } from './google-feed';
+import type { EbayPolicyIds } from './ebay-api';
+import { EBAY_MARKETPLACE } from './ebay-api';
+
+// Vinyl records leaf category. 176985 is "Vinyl Records" across eBay sites;
+// confirm it on EBAY_ES's own tree with `node scripts/ebay-oauth.mjs check`
+// once the keys arrive. Override without a deploy: KV meta:ebay_category_id.
+export const EBAY_DEFAULT_CATEGORY_ID = '176985';
+
+// eBay title limit: 80 characters.
+const TITLE_MAX = 80;
+// product.description limit is 4000 characters (Inventory API spec).
+const PRODUCT_DESCRIPTION_MAX = 4000;
+// Up to 24 images per item; all ours are on cdn.shopify.com (https).
+const IMAGES_MAX = 24;
+// SKU path parameter: max length 50.
+const SKU_MAX = 50;
+
+// Item specifics, in the marketplace language (Content-Language es-ES).
+// Names to confirm against getItemAspectsForCategory on EBAY_ES (the check
+// script prints them); eBay accepts unknown names as custom specifics, so a
+// wrong one costs search relevance, not the listing.
+export const ASPECTS = {
+  artist: 'Artista',
+  release: 'Título del disco',
+  label: 'Discográfica',
+  catno: 'Número de catálogo',
+  genre: 'Género',
+  format: 'Formato',
+  mediaGrade: 'Calidad del disco',
+  sleeveGrade: 'Calidad de la funda',
+};
+
+// Discogs grade names, which eBay's record grading uses too.
+export const GRADE_MINT = 'Mint (M)';
+
+/** What we need of a Shopify product (Admin API) to list it. */
+export interface EbaySourceProduct {
+  productId: string;
+  status: string;
+  title: string;
+  vendor: string;
+  tags: string[];
+  descriptionHtml: string;
+  images: string[];
+  variant: {
+    id: string;
+    sku: string;
+    price: string;
+    barcode: string | null;
+    inventoryQuantity: number | null;
+  };
+}
+
+export interface Grades {
+  media: string;
+  sleeve: string;
+  source: 'discogs' | 'condition-tag';
+}
+
+export type EbayCondition = 'NEW' | 'USED_EXCELLENT';
+
+export type EbaySkipReason =
+  | 'no_activo' | 'forthcoming' | 'sin_stock' | 'sin_sku' | 'sku_largo'
+  | 'sin_imagen' | 'sin_precio' | 'usado_sin_grado';
+
+export interface EbayListingPayload {
+  sku: string;
+  inventoryItem: any;
+  offer: any;
+  ean: string;
+  grades: Grades;
+}
+
+// ── condition & grades ─────────────────────────────────────────────
+
+/**
+ * Condition from Shopify tags. The catalogue has no condition tags today
+ * (checked 2026-10-26: 1,524 products, all new stock), so no tag = new.
+ * Recognised: condition:sealed / condition:new / sealed / new → NEW;
+ * condition:used… / used / second-hand → USED.
+ */
+export function conditionFromTags(tags: string[]): EbayCondition {
+  const t = (tags || []).map(x => String(x).trim().toLowerCase());
+  const used = t.some(x => x === 'used' || x === 'second-hand' || x === 'secondhand'
+    || /^condition:\s*(used|second)/.test(x));
+  return used ? 'USED_EXCELLENT' : 'NEW';
+}
+
+/**
+ * Grades: our Discogs listing's when linked, else Mint for new/sealed stock.
+ * A used record with no Discogs grade has no honest default → null (skip).
+ */
+export function gradesFor(
+  tags: string[],
+  discogs?: { condition?: string; sleeve_condition?: string } | null,
+): Grades | null {
+  if (discogs?.condition) {
+    return { media: discogs.condition, sleeve: discogs.sleeve_condition || discogs.condition, source: 'discogs' };
+  }
+  if (conditionFromTags(tags) === 'NEW') return { media: GRADE_MINT, sleeve: GRADE_MINT, source: 'condition-tag' };
+  return null;
+}
+
+// ── text ───────────────────────────────────────────────────────────
+
+function tagValue(tags: string[], prefix: string): string {
+  const t = (tags || []).find(x => x.toLowerCase().startsWith(prefix));
+  return t ? t.slice(prefix.length).trim() : '';
+}
+
+function artistOf(vendor: string): string {
+  // As google-feed: Shopify's default vendor is the shop, not an artist.
+  const v = decodeHtmlEntities((vendor || '').trim());
+  return v === 'House Only' ? '' : v;
+}
+
+/**
+ * "Artist - Title", then the catalogue number and "Vinilo" while they fit in
+ * 80 characters. A title too long on its own is cut with an ellipsis.
+ */
+export function ebayTitle(artist: string, title: string, catno: string): string {
+  const base = (artist ? `${artist} - ${title}` : title).replace(/\s+/g, ' ').trim();
+  if (base.length > TITLE_MAX) return base.slice(0, TITLE_MAX - 1).trimEnd() + '…';
+  let out = base;
+  for (const extra of [catno, 'Vinilo']) {
+    if (extra && (out + ' ' + extra).length <= TITLE_MAX) out += ' ' + extra;
+  }
+  return out;
+}
+
+const escapeHtml = (s: string) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** Active content is not allowed in eBay descriptions; Shopify's has none, but strip it anyway. */
+function sanitizeHtml(html: string): string {
+  return String(html || '')
+    .replace(/<(script|style|iframe|object|embed|form)[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|iframe|object|embed)[^>]*\/?>/gi, '')
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+}
+
+function listingDescription(f: { artist: string; title: string; label: string; catno: string; genre: string; grades: Grades; html: string }): string {
+  const rows: Array<[string, string]> = [
+    ['Artista', f.artist], ['Título', f.title], ['Sello', f.label],
+    ['Nº de catálogo', f.catno], ['Género', f.genre],
+    ['Disco', f.grades.media], ['Funda', f.grades.sleeve],
+  ];
+  const table = rows.filter(([, v]) => v)
+    .map(([k, v]) => `<tr><td><b>${escapeHtml(k)}</b></td><td>${escapeHtml(v)}</td></tr>`).join('');
+  return `<table>${table}</table>${f.html ? `<div>${sanitizeHtml(f.html)}</div>` : ''}`;
+}
+
+// ── builder ────────────────────────────────────────────────────────
+
+export interface ListingConfig {
+  categoryId: string;
+  policies: EbayPolicyIds;
+  merchantLocationKey: string;
+  withEan: boolean;
+}
+
+/** Can this product be listed at all? Checked before any eBay call. */
+export function skipReason(p: EbaySourceProduct, grades: Grades | null): EbaySkipReason | null {
+  if (p.status !== 'ACTIVE') return 'no_activo';
+  if ((p.tags || []).some(t => t.toLowerCase() === 'forthcoming')) return 'forthcoming';
+  const sku = (p.variant?.sku || '').trim();
+  if (!sku) return 'sin_sku';
+  if (sku.length > SKU_MAX) return 'sku_largo';
+  if ((p.variant.inventoryQuantity ?? 0) <= 0) return 'sin_stock';
+  if (!(Number(p.variant.price) > 0)) return 'sin_precio';
+  if (!p.images.some(u => /^https:\/\//.test(u))) return 'sin_imagen';
+  if (!grades) return 'usado_sin_grado';
+  return null;
+}
+
+export function buildEbayListing(p: EbaySourceProduct, grades: Grades, cfg: ListingConfig): EbayListingPayload {
+  const sku = p.variant.sku.trim();
+  const artist = artistOf(p.vendor);
+  const title = decodeHtmlEntities((p.title || '').trim());
+  const label = tagValue(p.tags, 'label:');
+  const genre = generoDeTags(p.tags)?.label || '';
+  const condition = conditionFromTags(p.tags);
+  const ean = cfg.withEan ? gtinValido(p.variant.barcode) : '';
+
+  const aspects: Record<string, string[]> = { [ASPECTS.format]: ['Vinilo'] };
+  if (artist) aspects[ASPECTS.artist] = [artist];
+  if (title) aspects[ASPECTS.release] = [title];
+  if (label) aspects[ASPECTS.label] = [label];
+  aspects[ASPECTS.catno] = [sku];
+  if (genre) aspects[ASPECTS.genre] = [genre];
+  aspects[ASPECTS.mediaGrade] = [grades.media];
+  aspects[ASPECTS.sleeveGrade] = [grades.sleeve];
+
+  const product: any = {
+    title: ebayTitle(artist, title, sku),
+    description: (htmlToText(p.descriptionHtml || '') || title).slice(0, PRODUCT_DESCRIPTION_MAX),
+    aspects,
+    imageUrls: p.images.filter(u => /^https:\/\//.test(u)).slice(0, IMAGES_MAX),
+  };
+  if (ean) product.ean = [ean];
+
+  const inventoryItem: any = {
+    // One copy per channel, like the Discogs listing: a sale anywhere ends it.
+    availability: { shipToLocationAvailability: { quantity: 1 } },
+    condition,
+    product,
+  };
+  if (condition !== 'NEW') {
+    inventoryItem.conditionDescription = `Disco: ${grades.media} · Funda: ${grades.sleeve}`;
+  }
+
+  const offer = {
+    sku,
+    marketplaceId: EBAY_MARKETPLACE,
+    format: 'FIXED_PRICE',
+    listingDuration: 'GTC',
+    availableQuantity: 1,
+    categoryId: cfg.categoryId,
+    merchantLocationKey: cfg.merchantLocationKey,
+    includeCatalogProductDetails: false,
+    listingDescription: listingDescription({ artist, title, label, catno: sku, genre, grades, html: p.descriptionHtml }),
+    listingPolicies: {
+      fulfillmentPolicyId: cfg.policies.fulfillmentPolicyId,
+      paymentPolicyId: cfg.policies.paymentPolicyId,
+      returnPolicyId: cfg.policies.returnPolicyId,
+    },
+    pricingSummary: { price: { value: Number(p.variant.price).toFixed(2), currency: 'EUR' } },
+  };
+
+  return { sku, inventoryItem, offer, ean, grades };
+}
+
+// ── Shopify fetch ──────────────────────────────────────────────────
+
+export const PRODUCT_BY_SKU_QUERY = `
+  query ebayProductBySku($q: String!) {
+    products(first: 5, query: $q) {
+      nodes {
+        id status title vendor tags descriptionHtml
+        media(first: 24) { nodes { ... on MediaImage { image { url } } } }
+        variants(first: 10) { nodes { id sku price barcode inventoryQuantity } }
+      }
+    }
+  }
+`;
+
+/** Admin API product node → EbaySourceProduct for the exact SKU, or null. */
+export function toSourceProduct(nodes: any[], sku: string): EbaySourceProduct | null {
+  for (const p of nodes || []) {
+    const v = (p.variants?.nodes || []).find((x: any) => (x.sku || '').trim() === sku);
+    if (!v) continue;
+    return {
+      productId: p.id,
+      status: p.status,
+      title: p.title || '',
+      vendor: p.vendor || '',
+      tags: p.tags || [],
+      descriptionHtml: p.descriptionHtml || '',
+      images: (p.media?.nodes || []).map((m: any) => m?.image?.url).filter(Boolean),
+      variant: {
+        id: v.id, sku: v.sku, price: v.price, barcode: v.barcode ?? null,
+        inventoryQuantity: v.inventoryQuantity ?? null,
+      },
+    };
+  }
+  return null;
+}
