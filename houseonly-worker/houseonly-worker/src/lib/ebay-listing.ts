@@ -3,12 +3,16 @@
 // Shopify product → eBay inventory item + offer. Pure functions, so the rules
 // are testable without a single network call; ebay.ts does the I/O.
 //
-// Content comes from OUR Shopify product only: title, artist (vendor), label
-// (label: tag), catalogue number (SKU), genre (genre: tag), description,
-// price in EUR and our images. Nothing is pulled from a Discogs release —
-// matches there are not trusted (see discogs-match memory) — except the media
-// and sleeve GRADES of our own Discogs listing when the record is already
-// linked (sku:{SKU} in SYNC_STATE).
+// Content comes from OUR Shopify product: title, artist (vendor), label
+// (label: tag), catalogue number (SKU), genre (genre: tag), description and our
+// images. Nothing is pulled from a Discogs RELEASE — matches there are not
+// trusted (see discogs-match memory). From our own Discogs LISTING of the
+// record (sku:{SKU} in SYNC_STATE) come the price and the media/sleeve grades.
+//
+// PRICE is never derived from the Shopify price (resolvePrice in ebay.ts):
+//   - linked Discogs listing → its current price (EUR);
+//   - product tagged `discogs:no` → Shopify unitCost × multiplier;
+//   - neither → no listing; the record waits in the queue.
 //
 // No shipping/exclusion text is ever added (no "Canarias" line): shipping is
 // the fulfillment policy's job.
@@ -54,6 +58,12 @@ export const ASPECTS = {
   sleeveGrade: 'Calidad de la funda',
 };
 
+// Products that will never go to Discogs. Set by hand in Shopify; their eBay
+// price comes from the unit cost instead of a Discogs listing.
+export const NOT_FOR_DISCOGS_TAG = 'discogs:no';
+export const notForDiscogs = (tags: string[]) =>
+  (tags || []).some(t => String(t).trim().toLowerCase() === NOT_FOR_DISCOGS_TAG);
+
 // Discogs grade names, which eBay's record grading uses too.
 export const GRADE_MINT = 'Mint (M)';
 
@@ -72,7 +82,14 @@ export interface EbaySourceProduct {
     price: string;
     barcode: string | null;
     inventoryQuantity: number | null;
+    unitCost: number | null;      // inventoryItem.unitCost.amount (EUR)
   };
+}
+
+export interface EbayPrice {
+  value: number;                  // EUR
+  source: 'discogs' | 'cost';
+  detail: string;                 // e.g. "Discogs listing 4190680911" / "cost 9.50 × 2"
 }
 
 export interface Grades {
@@ -83,9 +100,15 @@ export interface Grades {
 
 export type EbayCondition = 'NEW' | 'USED_EXCELLENT';
 
-export type EbaySkipReason =
-  | 'no_activo' | 'forthcoming' | 'sin_stock' | 'sin_sku' | 'sku_largo'
-  | 'sin_imagen' | 'sin_precio' | 'usado_sin_grado';
+// Why a record cannot be listed right now. All are re-checked by the cron.
+export type EbayHoldReason =
+  | 'no_en_shopify' | 'no_activo' | 'forthcoming' | 'sin_stock' | 'sin_sku' | 'sku_largo' | 'sin_imagen'
+  | 'usado_sin_grado'
+  | 'esperando_discogs'       // no Discogs listing linked yet
+  | 'discogs_no_disponible'   // linked listing is Sold / not For Sale or Draft
+  | 'discogs_no_eur'          // linked listing priced in another currency
+  | 'discogs_error'           // Discogs did not answer (usually 429): try next run
+  | 'sin_fuente_de_precio';   // discogs:no and no unit cost: flagged in the admin
 
 export interface EbayListingPayload {
   sku: string;
@@ -93,6 +116,7 @@ export interface EbayListingPayload {
   offer: any;
   ean: string;
   grades: Grades;
+  price: EbayPrice;
 }
 
 // ── condition & grades ─────────────────────────────────────────────
@@ -183,21 +207,27 @@ export interface ListingConfig {
   withEan: boolean;
 }
 
-/** Can this product be listed at all? Checked before any eBay call. */
-export function skipReason(p: EbaySourceProduct, grades: Grades | null): EbaySkipReason | null {
+/** Can this product be listed right now (price aside)? Checked before any eBay or Discogs call. */
+export function holdReason(p: EbaySourceProduct): EbayHoldReason | null {
   if (p.status !== 'ACTIVE') return 'no_activo';
   if ((p.tags || []).some(t => t.toLowerCase() === 'forthcoming')) return 'forthcoming';
   const sku = (p.variant?.sku || '').trim();
   if (!sku) return 'sin_sku';
   if (sku.length > SKU_MAX) return 'sku_largo';
   if ((p.variant.inventoryQuantity ?? 0) <= 0) return 'sin_stock';
-  if (!(Number(p.variant.price) > 0)) return 'sin_precio';
   if (!p.images.some(u => /^https:\/\//.test(u))) return 'sin_imagen';
-  if (!grades) return 'usado_sin_grado';
   return null;
 }
 
-export function buildEbayListing(p: EbaySourceProduct, grades: Grades, cfg: ListingConfig): EbayListingPayload {
+/** discogs:no records: unit cost × multiplier, or nothing. Never a guess. */
+export function priceFromCost(p: EbaySourceProduct, multiplier: number): EbayPrice | null {
+  const cost = p.variant.unitCost;
+  if (!(cost && cost > 0) || !(multiplier > 0)) return null;
+  return { value: Math.round(cost * multiplier * 100) / 100, source: 'cost', detail: `cost ${cost.toFixed(2)} × ${multiplier}` };
+}
+
+export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: EbayPrice, cfg: ListingConfig): EbayListingPayload {
+  if (!(price.value > 0)) throw new Error('buildEbayListing: no price');
   const sku = p.variant.sku.trim();
   const artist = artistOf(p.vendor);
   const title = decodeHtmlEntities((p.title || '').trim());
@@ -248,10 +278,10 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, cfg: List
       paymentPolicyId: cfg.policies.paymentPolicyId,
       returnPolicyId: cfg.policies.returnPolicyId,
     },
-    pricingSummary: { price: { value: Number(p.variant.price).toFixed(2), currency: 'EUR' } },
+    pricingSummary: { price: { value: price.value.toFixed(2), currency: 'EUR' } },
   };
 
-  return { sku, inventoryItem, offer, ean, grades };
+  return { sku, inventoryItem, offer, ean, grades, price };
 }
 
 // ── Shopify fetch ──────────────────────────────────────────────────
@@ -262,7 +292,7 @@ export const PRODUCT_BY_SKU_QUERY = `
       nodes {
         id status title vendor tags descriptionHtml
         media(first: 24) { nodes { ... on MediaImage { image { url } } } }
-        variants(first: 10) { nodes { id sku price barcode inventoryQuantity } }
+        variants(first: 10) { nodes { id sku price barcode inventoryQuantity inventoryItem { unitCost { amount currencyCode } } } }
       }
     }
   }
@@ -284,6 +314,9 @@ export function toSourceProduct(nodes: any[], sku: string): EbaySourceProduct | 
       variant: {
         id: v.id, sku: v.sku, price: v.price, barcode: v.barcode ?? null,
         inventoryQuantity: v.inventoryQuantity ?? null,
+        // The shop currency is EUR; a cost in anything else is not used.
+        unitCost: v.inventoryItem?.unitCost && (v.inventoryItem.unitCost.currencyCode || 'EUR') === 'EUR'
+          ? Number(v.inventoryItem.unitCost.amount) || null : null,
       },
     };
   }

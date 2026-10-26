@@ -4,26 +4,28 @@ import worker from "../src/index";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
-	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, skipReason, toSourceProduct, GRADE_MINT, ASPECTS,
-	type EbaySourceProduct,
+	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
+	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, selectSkus, withdrawOnEbayForShopifyOrder, EBAY_BATCH_SIZE,
+	runEbayAutolist, pollEbayOrders, includeSkus, withdrawOnEbayForShopifyOrder, runEbayBackfill,
+	EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
+import { runRelinkCron } from "../src/lib/sync";
 
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
 	return {
 		...actual, shopifyAdminGraphQL: vi.fn(), findVariantBySkuLoose: vi.fn(), getVariantsStock: vi.fn(),
-		createDiscogsOrder: vi.fn(), validateShopifyWebhookHmac: vi.fn(),
+		createDiscogsOrder: vi.fn(), validateShopifyWebhookHmac: vi.fn(), searchVariantsBySkus: vi.fn(),
 	};
 });
 vi.mock("../src/lib/discogs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/discogs")>();
-	return { ...actual, getListing: vi.fn(), updateListingStatus: vi.fn() };
+	return { ...actual, getListing: vi.fn(), updateListingStatus: vi.fn(), getInventory: vi.fn(), searchRelease: vi.fn() };
 });
 
 const SECRET = "test-secret";
@@ -39,19 +41,61 @@ const product = (over: Partial<EbaySourceProduct> = {}, v: Partial<EbaySourcePro
 	tags: ["vinyl", "label:Bond Street", "genre:deephouse", "source:ws"],
 	descriptionHtml: "<p>Deep cuts.</p><script>alert(1)</script>",
 	images: ["https://cdn.shopify.com/s/files/a.jpg"],
-	variant: { id: "gid://shopify/ProductVariant/9", sku: "BOND12081C", price: "14.99", barcode: "4006381333931", inventoryQuantity: 2, ...v },
+	variant: { id: "gid://shopify/ProductVariant/9", sku: "BOND12081C", price: "14.99", barcode: "4006381333931", inventoryQuantity: 2, unitCost: 9.5, ...v },
 	...over,
 });
 const CFG = {
 	categoryId: "176985", merchantLocationKey: "madrid",
 	policies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" },
 };
+const DISCOGS_PRICE: EbayPrice = { value: 21.5, source: "discogs", detail: "Discogs listing 555" };
 // Admin API node as PRODUCT_BY_SKU_QUERY returns it.
 const node = (p = product()) => ({
 	id: p.productId, status: p.status, title: p.title, vendor: p.vendor, tags: p.tags, descriptionHtml: p.descriptionHtml,
 	media: { nodes: p.images.map(url => ({ image: { url } })) },
-	variants: { nodes: [p.variant] },
+	variants: { nodes: [{ ...p.variant, inventoryItem: p.variant.unitCost ? { unitCost: { amount: String(p.variant.unitCost), currencyCode: "EUR" } } : null }] },
 });
+
+// ── Shopify + Discogs fakes ─────────────────────────────────────────
+// catalog: what the Admin API knows, by SKU. backfillList: the catalogue in
+// CREATED_AT order for the backfill query. listings: our Discogs listings.
+let catalog: Map<string, EbaySourceProduct>;
+let backfillList: string[];
+let listings: Map<number, any>;
+const addProduct = (sku: string, over: Partial<EbaySourceProduct> = {}, v: Partial<EbaySourceProduct["variant"]> = {}) =>
+	catalog.set(sku, product(over, { sku, ...v }));
+const linkDiscogs = async (sku: string, listingId: number, listing: any = {}) => {
+	await E.SYNC_STATE.put(`sku:${sku}`, JSON.stringify({ listing_id: listingId, status: "For Sale", synced_at: "x" }));
+	listings.set(listingId, { id: listingId, status: "For Sale", price: { value: 21.5, currency: "EUR" }, condition: "Near Mint (NM or M-)", sleeve_condition: "Near Mint (NM or M-)", ...listing });
+};
+function installShopifyAndDiscogs() {
+	catalog = new Map();
+	backfillList = [];
+	listings = new Map();
+	addProduct("BOND12081C");
+	vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockImplementation(async (_e, q: string, vars: any) => {
+		if (q.includes("ebayProductBySku")) {
+			const sku = /sku:"(.+)"/.exec(vars.q)![1];
+			const p = catalog.get(sku);
+			return { data: { products: { nodes: p ? [node(p)] : [] } } } as any;
+		}
+		if (q.includes("ebayBackfill")) {
+			const start = vars.after ? Number(vars.after) : 0;
+			const slice = backfillList.slice(start, start + vars.first);
+			const end = start + slice.length;
+			return { data: { products: {
+				pageInfo: { hasNextPage: end < backfillList.length, endCursor: String(end) },
+				nodes: slice.map(sku => ({ variants: { nodes: [{ sku }] } })),
+			} } } as any;
+		}
+		return { data: { orders: { pageInfo: { hasNextPage: false }, nodes: [] }, productVariants: { nodes: [] } } } as any;
+	});
+	vi.mocked(discogs.getListing).mockImplementation(async (_t, id: number) => {
+		const l = listings.get(id);
+		if (!l) throw new Error(`Discogs getListing failed: 404`);
+		return l;
+	});
+}
 
 // ── a tiny eBay fake on top of fetch ─────────────────────────────────
 
@@ -79,6 +123,7 @@ function installFetch() {
 	route("POST", /^\/sell\/inventory\/v1\/offer$/, { offerId: "OFF-1" });
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/publish$/, { listingId: "LIST-1" });
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/withdraw$/, { listingId: "LIST-1" });
+	route("GET", /^\/sell\/account\/v1\/privilege$/, { sellerRegistrationCompleted: true });
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any, init?: any) => {
 		const url = new URL(typeof input === "string" ? input : input.url);
 		if (url.origin !== "https://api.ebay.com") throw new Error(`unexpected fetch ${url}`);
@@ -123,18 +168,22 @@ beforeEach(async () => {
 	E.EBAY_VERIFICATION_TOKEN = "verification_token_abcdefghijklmnopqrstuvwxyz_0123";
 	E.DISCOGS_TOKEN = "dtok";
 	installFetch();
-	vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockResolvedValue({ data: { products: { nodes: [node()] } } } as any);
+	installShopifyAndDiscogs();
+	await linkDiscogs("BOND12081C", 555);
 	vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({ variantId: "gid://shopify/ProductVariant/9", sku: "BOND12081C" } as any);
 	vi.mocked(shopifyAdmin.getVariantsStock).mockImplementation(async (_e, ids) => new Map(ids.map(id => [id, 1])));
 	vi.mocked(shopifyAdmin.createDiscogsOrder).mockResolvedValue({ ok: true, orderId: "gid://shopify/Order/7", orderName: "#1077" } as any);
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
+const item = async (sku: string) => JSON.parse(await E.SYNC_STATE.get(`ebay:item:${sku}`));
+const live = () => E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
+
 // ── listing content ─────────────────────────────────────────────────
 
 describe("listing content from the Shopify product", () => {
-	it("maps title, artist, label, catno, genre, price, images and grades", () => {
-		const p = buildEbayListing(product(), gradesFor(product().tags)!, { ...CFG, withEan: true });
+	it("maps title, artist, label, catno, genre, images and grades; price is the one passed in", () => {
+		const p = buildEbayListing(product(), gradesFor(product().tags)!, DISCOGS_PRICE, { ...CFG, withEan: true });
 		const pr = p.inventoryItem.product;
 		expect(pr.title).toBe("Dilby & Pornbugs - Between Us BOND12081C Vinilo");
 		expect(pr.aspects[ASPECTS.artist]).toEqual(["Dilby & Pornbugs"]);
@@ -149,15 +198,25 @@ describe("listing content from the Shopify product", () => {
 		expect(p.offer).toMatchObject({
 			sku: "BOND12081C", marketplaceId: "EBAY_ES", format: "FIXED_PRICE", categoryId: "176985",
 			availableQuantity: 1, merchantLocationKey: "madrid", includeCatalogProductDetails: false,
-			pricingSummary: { price: { value: "14.99", currency: "EUR" } },
+			// Discogs price, NOT the Shopify 14.99.
+			pricingSummary: { price: { value: "21.50", currency: "EUR" } },
 			listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" },
 		});
 	});
 
+	it("refuses to build without a price", () => {
+		expect(() => buildEbayListing(product(), gradesFor([])!, { value: 0, source: "cost", detail: "" }, { ...CFG, withEan: true })).toThrow();
+	});
+
+	it("cost price: unitCost x multiplier, nothing without a cost", () => {
+		expect(priceFromCost(product(), 2)).toEqual({ value: 19, source: "cost", detail: "cost 9.50 × 2" });
+		expect(priceFromCost(product({}, { unitCost: 7.33 }), 2.5)?.value).toBe(18.33);
+		expect(priceFromCost(product({}, { unitCost: null }), 2)).toBeNull();
+	});
+
 	it("never adds Canarias / exclusion text and strips active content", () => {
-		const p = buildEbayListing(product(), gradesFor([])!, { ...CFG, withEan: true });
-		const all = JSON.stringify(p);
-		expect(all).not.toMatch(/canari|excluid|península/i);
+		const p = buildEbayListing(product(), gradesFor([])!, DISCOGS_PRICE, { ...CFG, withEan: true });
+		expect(JSON.stringify(p)).not.toMatch(/canari|excluid|península/i);
 		expect(p.offer.listingDescription).not.toMatch(/<script/i);
 		expect(p.offer.listingDescription).toContain("<p>Deep cuts.</p>");
 	});
@@ -166,33 +225,28 @@ describe("listing content from the Shopify product", () => {
 		expect(gradesFor([], { condition: "Near Mint (NM or M-)", sleeve_condition: "Very Good Plus (VG+)" }))
 			.toEqual({ media: "Near Mint (NM or M-)", sleeve: "Very Good Plus (VG+)", source: "discogs" });
 		expect(gradesFor(["condition:sealed"])).toEqual({ media: GRADE_MINT, sleeve: GRADE_MINT, source: "condition-tag" });
-		expect(gradesFor([])).toMatchObject({ media: GRADE_MINT });
-		// Used and not on Discogs: no honest grade -> not listable.
 		expect(gradesFor(["used"])).toBeNull();
 		expect(conditionFromTags(["condition:used-vg"])).toBe("USED_EXCELLENT");
 	});
 
 	it("drops an invalid barcode and keeps the title within 80 chars", () => {
-		const p = buildEbayListing(product({}, { barcode: "123" }), gradesFor([])!, { ...CFG, withEan: true });
+		const p = buildEbayListing(product({}, { barcode: "123" }), gradesFor([])!, DISCOGS_PRICE, { ...CFG, withEan: true });
 		expect(p.inventoryItem.product.ean).toBeUndefined();
-		const long = ebayTitle("A Very Long Artist Name Indeed", "An Extremely Long Title That Goes On And On Forever More", "CAT001");
-		expect(long.length).toBeLessThanOrEqual(80);
+		expect(ebayTitle("A Very Long Artist Name Indeed", "An Extremely Long Title That Goes On And On Forever More", "CAT001").length).toBeLessThanOrEqual(80);
 		expect(ebayTitle("Artist", "Title", "X1")).toBe("Artist - Title X1 Vinilo");
 	});
 
-	it("refuses what cannot be sold right now", () => {
-		const g = gradesFor([]);
-		expect(skipReason(product({ tags: ["forthcoming"] }), g)).toBe("forthcoming");
-		expect(skipReason(product({}, { inventoryQuantity: 0 }), g)).toBe("sin_stock");
-		expect(skipReason(product({ images: [] }), g)).toBe("sin_imagen");
-		expect(skipReason(product({ status: "DRAFT" }), g)).toBe("no_activo");
-		expect(skipReason(product(), null)).toBe("usado_sin_grado");
-		expect(skipReason(product(), g)).toBeNull();
+	it("holds what cannot be sold right now", () => {
+		expect(holdReason(product({ tags: ["forthcoming"] }))).toBe("forthcoming");
+		expect(holdReason(product({}, { inventoryQuantity: 0 }))).toBe("sin_stock");
+		expect(holdReason(product({ images: [] }))).toBe("sin_imagen");
+		expect(holdReason(product({ status: "DRAFT" }))).toBe("no_activo");
+		expect(holdReason(product())).toBeNull();
 	});
 
-	it("picks the exact SKU variant out of the Admin search", () => {
+	it("picks the exact SKU variant out of the Admin search, with its unit cost", () => {
 		const other = { ...node(), variants: { nodes: [{ ...product().variant, sku: "BOND12081" }] } };
-		expect(toSourceProduct([other, node()], "BOND12081C")?.variant.sku).toBe("BOND12081C");
+		expect(toSourceProduct([other, node()], "BOND12081C")?.variant).toMatchObject({ sku: "BOND12081C", unitCost: 9.5 });
 		expect(toSourceProduct([other], "BOND12081C")).toBeNull();
 	});
 });
@@ -205,7 +259,7 @@ describe("policies", () => {
 		const q = ebayCalls("GET", /get_by_policy_name/).map(c => decodeURIComponent(c.path));
 		expect(q.some(p => p.includes("marketplace_id=EBAY_ES") && p.includes(EBAY_POLICY_NAMES.return))).toBe(true);
 		await getPolicyIds(E);
-		expect(ebayCalls("GET", /get_by_policy_name/)).toHaveLength(3);   // second time from KV
+		expect(ebayCalls("GET", /get_by_policy_name/)).toHaveLength(3);
 	});
 
 	it("uses the refresh token with Basic auth and caches the access token", async () => {
@@ -220,29 +274,113 @@ describe("policies", () => {
 	});
 });
 
-// ── auto-list ───────────────────────────────────────────────────────
+// ── how records get in ──────────────────────────────────────────────
 
-describe("auto-list cron", () => {
-	it("does nothing without selected records - not even a token", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		const r = await runEbayAutolist(E);
-		expect(r).toMatchObject({ processed: 0, listed: 0 });
+describe("new Shopify products are queued automatically (products/create)", () => {
+	const productCreate = (body: any, qs = "") => new Request(`https://w/?action=webhook-shopify-product${qs}`, {
+		method: "POST", body: JSON.stringify(body), headers: { "x-shopify-hmac-sha256": "x" },
+	});
+	beforeEach(() => { vi.mocked(shopifyAdmin.validateShopifyWebhookHmac).mockResolvedValue(true); });
+
+	it("eBay live: queued, even when the Discogs filters skip the product", async () => {
+		await live();
+		// No source: tag → the Discogs auto-add ignores it; eBay still takes it.
+		const r = await (await viaWorker(productCreate({ id: 1, tags: "vinyl", variants: [{ sku: "NEW001" }] }))).json() as any;
+		expect(r).toMatchObject({ reason: "no recognized source tag", ebay: "queued" });
+		expect((await item("NEW001"))).toMatchObject({ status: "queued", origin: "webhook" });
+		expect(discogs.searchRelease).not.toHaveBeenCalled();
+	});
+
+	it("eBay dry: not queued", async () => {
+		const r = await (await viaWorker(productCreate({ id: 2, tags: "vinyl", variants: [{ sku: "NEW002" }] }))).json() as any;
+		expect(r.ebay).toBe("off");
+		expect(await E.SYNC_STATE.get("ebay:item:NEW002")).toBeNull();
+	});
+
+	it("an excluded record is never re-queued, and ?sync=1 re-sends don't queue", async () => {
+		await live();
+		await viaWorker(post("ebay-exclude", { skus: ["NEW003"] }));
+		const r = await (await viaWorker(productCreate({ id: 3, tags: "vinyl", variants: [{ sku: "NEW003" }] }))).json() as any;
+		expect(r.ebay).toBe("exists");
+		expect((await item("NEW003")).status).toBe("excluded");
+		await viaWorker(productCreate({ id: 4, tags: "vinyl", variants: [{ sku: "OLD004" }] }, "&sync=1"));
+		expect(await E.SYNC_STATE.get("ebay:item:OLD004")).toBeNull();
+	});
+});
+
+describe("backfill of the existing catalogue", () => {
+	beforeEach(() => { backfillList = Array.from({ length: 60 }, (_, i) => `CAT${String(i).padStart(3, "0")}`); });
+
+	it(`first batch is ${EBAY_BACKFILL_FIRST}, then ${EBAY_BACKFILL_NEXT}, resuming where it stopped`, async () => {
+		const a = await runEbayBackfill(E);
+		expect(a.queued).toEqual(["CAT000", "CAT001", "CAT002", "CAT003", "CAT004"]);
+		// Even asking for more, the first batch stays small.
+		await E.SYNC_STATE.delete("meta:ebay_backfill");
+		for (const s of a.queued) await E.SYNC_STATE.delete(`ebay:item:${s}`);
+		expect((await runEbayBackfill(E, { count: 50 })).queued).toHaveLength(EBAY_BACKFILL_FIRST);
+		const b = await runEbayBackfill(E);
+		expect(b.queued[0]).toBe("CAT005");
+		expect(b.queued).toHaveLength(EBAY_BACKFILL_NEXT);
+		expect((await item("CAT005")).origin).toBe("backfill");
+	});
+
+	it("skips records already in the queue (excluded stays excluded) without counting them", async () => {
+		await viaWorker(post("ebay-exclude", { skus: ["CAT001"] }));
+		const a = await runEbayBackfill(E);
+		expect(a.queued).toEqual(["CAT000", "CAT002", "CAT003", "CAT004", "CAT005"]);
+		expect(a.already_in_queue).toBe(1);
+		expect((await item("CAT001")).status).toBe("excluded");
+	});
+
+	it("respects the monthly selling limit from getPrivileges", async () => {
+		route("GET", /^\/sell\/account\/v1\/privilege$/, { sellingLimit: { quantity: 7 } });
+		await runEbayBackfill(E);                               // 5 queued
+		const b = await runEbayBackfill(E);                     // room for 2 more
+		expect(b).toMatchObject({ selling_limit: 7, batch: 2 });
+		expect(b.queued).toHaveLength(2);
+		const c = await runEbayBackfill(E);
+		expect(c.ok).toBe(false);
+		expect(c.error).toMatch(/selling limit 7/);
+	});
+
+	it("refused while the 25026 pause is on (endpoint answers 409)", async () => {
+		await E.SYNC_STATE.put("meta:ebay_limit_hit", JSON.stringify({ until: new Date(Date.now() + 3600e3).toISOString() }));
+		const r = await viaWorker(post("ebay-backfill", {}));
+		expect(r.status).toBe(409);
+		expect(await E.SYNC_STATE.get("ebay:item:CAT000")).toBeNull();
+	});
+
+	it("reports done at the end of the catalogue", async () => {
+		backfillList = ["A1", "A2"];
+		const r = await runEbayBackfill(E);
+		expect(r).toMatchObject({ done: true, queued: ["A1", "A2"] });
+		expect((await runEbayBackfill(E)).queued).toEqual([]);
+	});
+});
+
+// ── auto-list & price ───────────────────────────────────────────────
+
+describe("auto-list cron and price sources", () => {
+	it("does nothing with an empty queue - not even a token", async () => {
+		await live();
+		expect(await runEbayAutolist(E)).toMatchObject({ checked: 0, listed: 0 });
 		expect(calls).toHaveLength(0);
 	});
 
-	it("dry: builds the listing, calls no eBay endpoint", async () => {
-		await selectSkus(E, ["BOND12081C"]);
+	it("dry: prices from Discogs and builds the listing, calls no eBay endpoint", async () => {
+		await includeSkus(E, ["BOND12081C"]);
 		const r = await runEbayAutolist(E);
 		expect(r).toMatchObject({ mode: "dry", would_list: 1 });
 		expect(calls).toHaveLength(0);
-		const it = JSON.parse(await E.SYNC_STATE.get("ebay:item:BOND12081C"));
+		const it = await item("BOND12081C");
 		expect(it.status).toBe("would_list");
-		expect(it.preview).toMatchObject({ price: "14.99", condition: "NEW" });
+		expect(it.preview).toMatchObject({ price: "21.50", price_source: "Discogs listing 555", condition: "NEW" });
 	});
 
-	it("live: inventory item -> offer -> publish, with Content-Language es-ES", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		await selectSkus(E, ["BOND12081C"]);
+	it("live: lists at the CURRENT Discogs listing price, never the Shopify price", async () => {
+		await live();
+		listings.get(555).price = { value: 24.0, currency: "EUR" };     // repriced on Discogs
+		await includeSkus(E, ["BOND12081C"]);
 		const r = await runEbayAutolist(E);
 		expect(r).toMatchObject({ mode: "live", listed: 1, failed: 0 });
 		const seq = ebayCalls().filter(c => /inventory_item|offer/.test(c.path)).map(c => `${c.method} ${c.path.split("?")[0]}`);
@@ -252,107 +390,214 @@ describe("auto-list cron", () => {
 			"POST /sell/inventory/v1/offer",
 			"POST /sell/inventory/v1/offer/OFF-1/publish",
 		]);
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price).toEqual({ value: "24.00", currency: "EUR" });
 		expect(ebayCalls("PUT", /inventory_item/)[0].headers["Content-Language"]).toBe("es-ES");
-		const it = JSON.parse(await E.SYNC_STATE.get("ebay:item:BOND12081C"));
-		expect(it).toMatchObject({ status: "listed", offer_id: "OFF-1", listing_id: "LIST-1" });
+		expect(await item("BOND12081C")).toMatchObject({ status: "listed", offer_id: "OFF-1", listing_id: "LIST-1" });
 		expect(await E.SYNC_STATE.get("ebay:listing:LIST-1")).toBe("BOND12081C");
 	});
 
-	it("takes the grades of our Discogs listing when the SKU is linked", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		await E.SYNC_STATE.put("sku:BOND12081C", JSON.stringify({ listing_id: 555, status: "For Sale" }));
-		vi.mocked(discogs.getListing).mockResolvedValue({ id: 555, condition: "Near Mint (NM or M-)", sleeve_condition: "Very Good Plus (VG+)" } as any);
-		await selectSkus(E, ["BOND12081C"]);
+	it("no Discogs listing yet: held, re-checked every run, listed once the listing exists", async () => {
+		await live();
+		addProduct("HAND01");
+		await includeSkus(E, ["HAND01"]);
 		await runEbayAutolist(E);
-		const aspects = ebayCalls("PUT", /inventory_item/)[0].body.product.aspects;
-		expect(aspects[ASPECTS.sleeveGrade]).toEqual(["Very Good Plus (VG+)"]);
+		expect(await item("HAND01")).toMatchObject({ status: "held", hold_reason: "esperando_discogs" });
+		expect(ebayCalls("PUT")).toHaveLength(0);
+		await runEbayAutolist(E);
+		expect((await item("HAND01")).status).toBe("held");
+		// The relink cron maps the hand-made Discogs listing.
+		await linkDiscogs("HAND01", 777, { price: { value: 30, currency: "EUR" } });
+		await runEbayAutolist(E);
+		expect(await item("HAND01")).toMatchObject({ status: "listed" });
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("30.00");
+	});
+
+	it("Discogs listing sold or in another currency: held, not listed", async () => {
+		await live();
+		addProduct("SOLD01"); await linkDiscogs("SOLD01", 801, { status: "Sold" });
+		addProduct("USD01"); await linkDiscogs("USD01", 802, { price: { value: 20, currency: "USD" } });
+		await includeSkus(E, ["SOLD01", "USD01"]);
+		await runEbayAutolist(E);
+		expect((await item("SOLD01")).hold_reason).toBe("discogs_no_disponible");
+		expect((await item("USD01")).hold_reason).toBe("discogs_no_eur");
+		expect(ebayCalls("PUT")).toHaveLength(0);
+	});
+
+	it("discogs:no with unit cost: cost x 2 (multiplier from KV)", async () => {
+		await live();
+		addProduct("NODISC1", { tags: ["vinyl", "discogs:no"] }, { unitCost: 8 });
+		await includeSkus(E, ["NODISC1"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("16.00");
+		expect(discogs.getListing).not.toHaveBeenCalled();
+		await E.SYNC_STATE.put("meta:ebay_cost_multiplier", "2.5");
+		addProduct("NODISC2", { tags: ["discogs:no"] }, { unitCost: 8 });
+		await includeSkus(E, ["NODISC2"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("20.00");
+	});
+
+	it("discogs:no without unit cost: held as 'no price source', never listed", async () => {
+		await live();
+		addProduct("NOCOST", { tags: ["discogs:no"] }, { unitCost: null });
+		await includeSkus(E, ["NOCOST"]);
+		const r = await runEbayAutolist(E);
+		expect(r.held_by_reason).toEqual({ sin_fuente_de_precio: 1 });
+		expect(await item("NOCOST")).toMatchObject({ status: "held", hold_reason: "sin_fuente_de_precio" });
+		expect(ebayCalls("PUT")).toHaveLength(0);
+		const items = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(items.holds).toEqual({ sin_fuente_de_precio: 1 });
+		expect(items.items.find((i: any) => i.sku === "NOCOST")).toMatchObject({ s: "held", r: "sin_fuente_de_precio" });
+	});
+
+	it("takes the grades of our Discogs listing", async () => {
+		await live();
+		listings.get(555).sleeve_condition = "Very Good Plus (VG+)";
+		await includeSkus(E, ["BOND12081C"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("PUT", /inventory_item/)[0].body.product.aspects[ASPECTS.sleeveGrade]).toEqual(["Very Good Plus (VG+)"]);
+	});
+
+	it(`spends at most ${EBAY_DISCOGS_READS_PER_RUN} Discogs reads and ${EBAY_CHECKS_PER_RUN} checks per run`, async () => {
+		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 5; i++) {
+			const sku = `M${String(i).padStart(2, "0")}`;
+			addProduct(sku); await linkDiscogs(sku, 1000 + i);
+		}
+		await includeSkus(E, [...catalog.keys()].filter(s => s.startsWith("M")));
+		E.SYNC_STATE.put("meta:ebay_autolist_mode", "dry");
+		const r = await runEbayAutolist(E);
+		expect(vi.mocked(discogs.getListing).mock.calls.length).toBeLessThanOrEqual(EBAY_DISCOGS_READS_PER_RUN);
+		expect(r.would_list).toBe(EBAY_BATCH_SIZE);
+		expect(r.checked).toBeLessThanOrEqual(EBAY_CHECKS_PER_RUN);
+	});
+
+	it("held records come round: the oldest check goes first", async () => {
+		await live();
+		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 10; i++) addProduct(`W${String(i).padStart(2, "0")}`);   // none on Discogs
+		await includeSkus(E, [...catalog.keys()].filter(s => s.startsWith("W")));
+		await runEbayAutolist(E);
+		const first = await item("W00");
+		const unchecked = await item(`W${EBAY_CHECKS_PER_RUN + 5}`);
+		expect(first.checked_at).toBeDefined();
+		expect(unchecked.checked_at).toBeUndefined();
+		await runEbayAutolist(E);
+		expect((await item(`W${EBAY_CHECKS_PER_RUN + 5}`)).checked_at).toBeDefined();
 	});
 
 	it("does not touch the Discogs auto-add switch", async () => {
 		await E.SYNC_STATE.put("meta:sync_35_mode", "dry");
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		await selectSkus(E, ["BOND12081C"]);
+		await live();
+		await includeSkus(E, ["BOND12081C"]);
 		await runEbayAutolist(E);
 		expect(await E.SYNC_STATE.get("meta:sync_35_mode")).toBe("dry");
 		expect(discogs.updateListingStatus).not.toHaveBeenCalled();
 	});
 
-	it("selling limit (25026): stops the batch, keeps records queued, pauses the cron", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
+	it("selling limit (25026): stops the batch, keeps records pending, pauses the cron", async () => {
+		await live();
 		route("POST", /\/publish$/, () => ebayError(400, 25026, "Selling limit exceeded."));
-		await selectSkus(E, ["A1", "A2", "A3"]);
-		vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockImplementation(async (_e, _q, vars: any) => {
-			const sku = /sku:"(.+)"/.exec(vars.q)![1];
-			return { data: { products: { nodes: [node(product({}, { sku }))] } } } as any;
-		});
+		for (const s of ["A1", "A2", "A3"]) { addProduct(s); await linkDiscogs(s, s.charCodeAt(1)); }
+		await includeSkus(E, ["A1", "A2", "A3"]);
 		const r = await runEbayAutolist(E);
-		expect(r).toMatchObject({ stopped: "selling_limit", processed: 1, failed: 0, remaining_queued: 3 });
+		expect(r).toMatchObject({ stopped: "selling_limit", failed: 0, pending: 3 });
 		expect(ebayCalls("POST", /\/publish$/)).toHaveLength(1);
-		for (const s of ["A1", "A2", "A3"]) expect(JSON.parse(await E.SYNC_STATE.get(`ebay:item:${s}`)).status).toBe("queued");
-		expect(JSON.parse(await E.SYNC_STATE.get("meta:ebay_limit_hit")).sku).toBe("A1");
-		// Next cron run: paused, no eBay call at all.
+		for (const s of ["A1", "A2", "A3"]) expect((await item(s)).status).toBe("queued");
 		calls.length = 0;
 		expect((await runEbayAutolist(E)).stopped).toBe("cooldown");
 		expect(ebayCalls()).toHaveLength(0);
 	});
 
-	it(`lists at most ${EBAY_BATCH_SIZE} per run`, async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		const skus = Array.from({ length: EBAY_BATCH_SIZE + 3 }, (_, i) => `S${String(i).padStart(2, "0")}`);
-		vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockImplementation(async (_e, _q, vars: any) => {
-			const sku = /sku:"(.+)"/.exec(vars.q)![1];
-			return { data: { products: { nodes: [node(product({}, { sku }))] } } } as any;
-		});
-		await selectSkus(E, skus);
-		const r = await runEbayAutolist(E);
-		expect(r).toMatchObject({ listed: EBAY_BATCH_SIZE, remaining_queued: 3 });
-	});
-
 	it("catalogue match refused: retries once as a standalone listing (no EAN)", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
+		await live();
 		let n = 0;
 		route("POST", /\/publish$/, () => (n++ === 0 ? ebayError(400, 25604, "Product not found for the EAN.") : jsonResponse({ listingId: "LIST-2" })));
-		await selectSkus(E, ["BOND12081C"]);
-		const r = await runEbayAutolist(E);
-		expect(r.listed).toBe(1);
+		await includeSkus(E, ["BOND12081C"]);
+		expect((await runEbayAutolist(E)).listed).toBe(1);
 		const puts = ebayCalls("PUT", /inventory_item/);
 		expect(puts[0].body.product.ean).toEqual(["4006381333931"]);
 		expect(puts[1].body.product.ean).toBeUndefined();
 	});
 
 	it("a refused record is marked failed and the batch carries on", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
+		await live();
 		route("PUT", /inventory_item/, () => ebayError(400, 25005, "Invalid category ID."));
-		vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockImplementation(async (_e, _q, vars: any) => {
-			const sku = /sku:"(.+)"/.exec(vars.q)![1];
-			return { data: { products: { nodes: [node(product({}, { sku, barcode: null }))] } } } as any;
-		});
-		await selectSkus(E, ["B1", "B2"]);
-		const r = await runEbayAutolist(E);
-		expect(r).toMatchObject({ failed: 2, listed: 0 });
-		expect(JSON.parse(await E.SYNC_STATE.get("ebay:item:B1")).error).toContain("25005");
+		for (const s of ["B1", "B2"]) { addProduct(s, {}, { barcode: null }); await linkDiscogs(s, s.charCodeAt(1) + 100); }
+		await includeSkus(E, ["B1", "B2"]);
+		expect(await runEbayAutolist(E)).toMatchObject({ failed: 2, listed: 0 });
+		expect((await item("B1")).error).toContain("25005");
 	});
 
 	it("live without keys: stops as not_configured, no calls", async () => {
 		delete E.EBAY_REFRESH_TOKEN;
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		await selectSkus(E, ["BOND12081C"]);
+		await live();
+		await includeSkus(E, ["BOND12081C"]);
 		expect((await runEbayAutolist(E)).stopped).toBe("not_configured");
 		expect(calls).toHaveLength(0);
 	});
 
-	it("skips a pre-order without calling eBay", async () => {
-		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
-		vi.mocked(shopifyAdmin.shopifyAdminGraphQL).mockResolvedValue({ data: { products: { nodes: [node(product({ tags: ["forthcoming"] }))] } } } as any);
-		await selectSkus(E, ["BOND12081C"]);
-		const r = await runEbayAutolist(E);
-		expect(r.skipped).toBe(1);
-		expect(ebayCalls("PUT")).toHaveLength(0);
-		expect(JSON.parse(await E.SYNC_STATE.get("ebay:item:BOND12081C")).skip_reason).toBe("forthcoming");
+	it("a pre-order is held until it graduates", async () => {
+		await live();
+		addProduct("PRE1", { tags: ["forthcoming"] }); await linkDiscogs("PRE1", 901);
+		await includeSkus(E, ["PRE1"]);
+		await runEbayAutolist(E);
+		expect((await item("PRE1")).hold_reason).toBe("forthcoming");
+		addProduct("PRE1");                                   // graduated
+		await runEbayAutolist(E);
+		expect((await item("PRE1")).status).toBe("listed");
 	});
 });
 
-// ── Shopify / Discogs sale -> eBay ───────────────────────────────────
+// ── SKU↔Discogs reconciliation on the cron ──────────────────────────
+
+describe("relink cron keeps sku: mappings current for hand-made listings", () => {
+	const inv = (pages: number, ls: any[]) => ({ pagination: { page: 1, pages, items: ls.length, per_page: 100 }, listings: ls });
+	beforeEach(() => {
+		vi.mocked(shopifyAdmin.searchVariantsBySkus).mockResolvedValue([
+			{ id: "gid://v/1", sku: "HAND01", inventoryQuantity: 1, title: "Hand made", status: "ACTIVE" },
+		] as any);
+	});
+
+	it("maps a listing with no external_id by its catno, one page per run", async () => {
+		vi.mocked(discogs.getInventory).mockResolvedValue(inv(2, [
+			{ id: 777, status: "For Sale", release: { catalog_number: "HAND01", description: "x" }, price: { value: 30, currency: "EUR" } },
+		]) as any);
+		const r = await runRelinkCron(E);
+		expect(r).toMatchObject({ ok: true, status: "For Sale", page: 1, pages: 2 });
+		expect(JSON.parse(await E.SYNC_STATE.get("sku:HAND01")).listing_id).toBe(777);
+		expect(discogs.getInventory).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_cursor"))).toEqual({ status: "For Sale", page: 2 });
+	});
+
+	it("walks For Sale, then Draft, then starts over", async () => {
+		vi.mocked(discogs.getInventory).mockResolvedValue(inv(1, []) as any);
+		await runRelinkCron(E);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_cursor"))).toEqual({ status: "Draft", page: 1 });
+		await runRelinkCron(E);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_cursor"))).toEqual({ status: "For Sale", page: 1 });
+	});
+
+	it("never overwrites a SKU linked to another listing; a failed page is retried", async () => {
+		await E.SYNC_STATE.put("sku:HAND01", JSON.stringify({ listing_id: 1, status: "For Sale" }));
+		vi.mocked(discogs.getInventory).mockResolvedValueOnce(inv(1, [
+			{ id: 777, status: "For Sale", release: { catalog_number: "HAND01", description: "x" } },
+		]) as any);
+		const r = await runRelinkCron(E);
+		expect(r.counts.conflict).toBe(1);
+		expect(JSON.parse(await E.SYNC_STATE.get("sku:HAND01")).listing_id).toBe(1);
+		vi.mocked(discogs.getInventory).mockRejectedValueOnce(new Error("429"));
+		await E.SYNC_STATE.put("meta:relink_cron_cursor", JSON.stringify({ status: "For Sale", page: 4 }));
+		expect((await runRelinkCron(E)).ok).toBe(false);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_cursor"))).toEqual({ status: "For Sale", page: 4 });
+	});
+
+	it("kill switch: meta:relink_cron_mode = off", async () => {
+		await E.SYNC_STATE.put("meta:relink_cron_mode", "off");
+		expect(await runRelinkCron(E)).toEqual({ skipped: "off" });
+		expect(discogs.getInventory).not.toHaveBeenCalled();
+	});
+});
+
+// ── Shopify / Discogs sale -> eBay ──────────────────────────────────
 
 describe("sale elsewhere ends the eBay listing", () => {
 	const listed = (sku: string) => E.SYNC_STATE.put(`ebay:item:${sku}`, JSON.stringify({
@@ -363,7 +608,7 @@ describe("sale elsewhere ends the eBay listing", () => {
 		await listed("BOND12081C");
 		await withdrawOnEbayForShopifyOrder(E, "5001", { line_items: [{ sku: "BOND12081C" }, { sku: "NOT-ON-EBAY" }] });
 		expect(ebayCalls("POST", /withdraw/).map(c => c.path)).toEqual(["/sell/inventory/v1/offer/OFF-9/withdraw"]);
-		expect(JSON.parse(await E.SYNC_STATE.get("ebay:item:BOND12081C")).status).toBe("withdrawn");
+		expect((await item("BOND12081C")).status).toBe("withdrawn");
 	});
 
 	it("leaves eBay alone when the Shopify order IS the eBay sale", async () => {
@@ -374,11 +619,11 @@ describe("sale elsewhere ends the eBay listing", () => {
 		expect(ebayCalls()).toHaveLength(0);
 	});
 
-	it("a queued record that sells before listing is dropped from the queue", async () => {
-		await selectSkus(E, ["BOND12081C"]);
+	it("a record not listed yet stays in the queue (the cron's stock check decides)", async () => {
+		await includeSkus(E, ["BOND12081C"]);
 		await withdrawOnEbayForShopifyOrder(E, "5003", { line_items: [{ sku: "BOND12081C" }] });
 		expect(ebayCalls()).toHaveLength(0);
-		expect(JSON.parse(await E.SYNC_STATE.get("ebay:item:BOND12081C")).status).toBe("withdrawn");
+		expect((await item("BOND12081C")).status).toBe("queued");
 	});
 
 	it("is wired into the Shopify orders/create webhook", async () => {
@@ -600,21 +845,30 @@ describe("admin endpoints", () => {
 		expect(await E.SYNC_STATE.get("meta:sync_35_mode")).toBe("dry");
 	});
 
-	it("select -> items -> unselect (a live listing is withdrawn first)", async () => {
-		expect((await viaWorker(post("ebay-select", { skus: ["A1"] }, null))).status).toBe(401);
-		const sel = await (await viaWorker(post("ebay-select", { skus: ["A1", "A1", " A2 "] }))).json() as any;
-		expect(sel.results).toEqual([{ sku: "A1", result: "queued" }, { sku: "A2", result: "queued" }]);
+	it("exclude (a live listing is withdrawn first) and re-add", async () => {
+		expect((await viaWorker(post("ebay-exclude", { skus: ["A1"] }, null))).status).toBe(401);
+		await includeSkus(E, ["A1"]);
 		await E.SYNC_STATE.put("ebay:item:A2", JSON.stringify({ sku: "A2", status: "listed", offer_id: "OFF-2", listing_id: "L2", selected_at: "x", updated_at: "x" }));
-		const items = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
-		expect(items.items.map((i: any) => i.sku).sort()).toEqual(["A1", "A2"]);
-		const un = await (await viaWorker(post("ebay-unselect", { skus: ["A1", "A2"] }))).json() as any;
-		expect(un.results).toEqual([{ sku: "A1", result: "removed" }, { sku: "A2", result: "withdrawn" }]);
+		const ex = await (await viaWorker(post("ebay-exclude", { skus: ["A1", "A2", "A1"] }))).json() as any;
+		expect(ex.results).toEqual([{ sku: "A1", result: "excluded" }, { sku: "A2", result: "withdrawn_and_excluded" }]);
 		expect(ebayCalls("POST", /OFF-2\/withdraw/)).toHaveLength(1);
-		expect(await E.SYNC_STATE.get("ebay:item:A2")).toBeNull();
+		expect((await item("A2")).status).toBe("excluded");
+		const inc = await (await viaWorker(post("ebay-include", { skus: ["A2"] }))).json() as any;
+		expect(inc.results).toEqual([{ sku: "A2", result: "queued" }]);
+		expect((await item("A2")).status).toBe("queued");
+	});
+
+	it("ebay-items: summary from list metadata, one full record with &sku=", async () => {
+		await includeSkus(E, ["BOND12081C", "Z9"]);
+		const d = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(d.counts).toEqual({ queued: 2 });
+		expect(d.cost_multiplier).toBe(2);
+		const one = await (await viaWorker(new Request("https://w/?action=ebay-items&sku=Z9", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(one).toMatchObject({ sku: "Z9", status: "queued", origin: "admin" });
 	});
 
 	it("ebay-run drives the cron by hand (staging has no eBay cron)", async () => {
-		await selectSkus(E, ["BOND12081C"]);
+		await includeSkus(E, ["BOND12081C"]);
 		const r = await (await viaWorker(post("ebay-run", { what: "autolist" }))).json() as any;
 		expect(r.autolist).toMatchObject({ mode: "dry", would_list: 1 });
 		expect(r.orders).toBeUndefined();

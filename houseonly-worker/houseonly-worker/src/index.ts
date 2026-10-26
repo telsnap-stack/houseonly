@@ -862,6 +862,7 @@ import {
   handlePendingReviewApprove,
   handlePendingReviewReject,
   pollDiscogsForSales,
+  runRelinkCron,
 } from './lib/sync';
 
 import { searchRelease } from './lib/discogs';
@@ -934,7 +935,7 @@ import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './
 import { handleShopPolicies } from './lib/shop-policies';
 import {
   EBAY_CRON, runEbayAutolist, pollEbayOrders, handleEbayNotification,
-  handleEbayMode, handleEbayItems, handleEbaySelect, handleEbayRun,
+  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun,
 } from './lib/ebay';
 
 import {
@@ -2078,9 +2079,11 @@ export default {
     // ── EBAY: TERCER CANAL (src/lib/ebay.ts, docs/ebay.md) ──
     // ebay-notify   GET challenge / POST notificaciones (firma de eBay, sin Bearer)
     // ebay-mode     GET publico · POST Bearer {autolist?, sync?}
-    // ebay-items    GET Bearer — cola, modos, ultimas pasadas
-    // ebay-select / ebay-unselect  POST Bearer {skus}
+    // ebay-items    GET Bearer — cola, modos, ultimas pasadas (&sku= uno entero)
+    // ebay-exclude / ebay-include  POST Bearer {skus}
+    // ebay-backfill POST Bearer {count?} — siguiente tanda del catalogo
     // ebay-run      POST Bearer {what: autolist|orders|both, force?}
+    // Los productos nuevos entran solos (products/create, ver sync.ts).
     // Independiente de sync35-mode: el auto-add de Discogs no se toca.
     if (action === 'ebay-notify') {
       return await handleEbayNotification(request, env, ctx);
@@ -2091,8 +2094,11 @@ export default {
     if (action === 'ebay-items' && request.method === 'GET') {
       return await handleEbayItems(request, env);
     }
-    if ((action === 'ebay-select' || action === 'ebay-unselect') && request.method === 'POST') {
-      return await handleEbaySelect(request, env, action === 'ebay-select');
+    if ((action === 'ebay-exclude' || action === 'ebay-include') && request.method === 'POST') {
+      return await handleEbayExclude(request, env, action === 'ebay-exclude');
+    }
+    if (action === 'ebay-backfill' && request.method === 'POST') {
+      return await handleEbayBackfill(request, env);
     }
     if (action === 'ebay-run' && request.method === 'POST') {
       return await handleEbayRun(request, env);
@@ -3262,6 +3268,12 @@ export default {
     // y sin claves de eBay no llama a eBay.
     if (event.cron === EBAY_CRON) {
       const at = new Date(event.scheduledTime).toISOString();
+      // Conciliacion SKU↔Discogs: una pagina del inventario por pasada. Va en
+      // este hueco (:03) y no en el del poll (:07), donde el cupo de Discogs
+      // ya llega gastado. Mantiene sku: al dia para los listings hechos a mano
+      // — de ahi sale el precio de eBay y el delist de Discogs en las ventas web.
+      ctx.waitUntil(runRelinkCron(env).catch((err) => env.SYNC_STATE.put('meta:relink_cron_last_run',
+        JSON.stringify({ at, ok: false, error: err?.message || String(err) }))));
       ctx.waitUntil(runEbayAutolist(env).catch((err) => env.SYNC_STATE.put('meta:ebay_autolist_last_run',
         JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }))));
       ctx.waitUntil(pollEbayOrders(env).catch((err) => env.SYNC_STATE.put('meta:ebay_orders_last_run',

@@ -15,6 +15,7 @@
 //                      PUT  /offer/{id} · POST /offer/{id}/publish · POST /offer/{id}/withdraw
 //   Location           GET  /sell/inventory/v1/location
 //   Policies           GET  /sell/account/v1/{fulfillment|payment|return}_policy/get_by_policy_name
+//   Selling limit      GET  /sell/account/v1/privilege  → sellingLimit.quantity (optional)
 //   Orders             GET  /sell/fulfillment/v1/order?filter=… · GET /order/{id}
 //   Public key         GET  /commerce/notification/v1/public_key/{kid}   (app token)
 //
@@ -230,6 +231,16 @@ export async function getPolicyIds(env: EbayEnv): Promise<EbayPolicyIds> {
   if (missing.length) throw new Error(`eBay policies not found on ${EBAY_MARKETPLACE}: ${missing.join(', ')}`);
   await env.SYNC_STATE.put(POLICIES_KEY, JSON.stringify(ids), { expirationTtl: POLICIES_TTL_S });
   return ids;
+}
+
+/**
+ * Monthly selling limit (quantity) from getPrivileges, or null when the
+ * account has no quantity cap (eBay omits the field then).
+ */
+export async function getSellingLimitQuantity(env: EbayEnv): Promise<number | null> {
+  const data = await ebayRequest(env, 'GET', '/sell/account/v1/privilege');
+  const q = data?.sellingLimit?.quantity;
+  return typeof q === 'number' ? q : null;
 }
 
 // ── INVENTORY ───────────────────────────────────────────────────────

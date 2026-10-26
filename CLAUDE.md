@@ -66,7 +66,7 @@ solo timeout. Se resolvió sola en unas horas.
 | `pending-review-approve` | POST | `{sku, release_id}` → crea listing. |
 | `pending-review-reject` | POST | `{sku}` → descarta. |
 | `sync35-mode` | GET/POST | dry/live del auto-list. |
-| `ebay-mode` · `ebay-items` · `ebay-select` · `ebay-run` · `ebay-notify` | — | eBay, tercer canal: interruptores propios, independientes de Discogs. Ver `docs/ebay.md`. |
+| `ebay-mode` · `ebay-items` · `ebay-exclude` · `ebay-include` · `ebay-backfill` · `ebay-run` · `ebay-notify` | — | eBay, tercer canal: entrada automatica por `products/create`, interruptores propios, independientes de Discogs. Ver `docs/ebay.md`. |
 
 ## Scripts de operación (`houseonly-worker/houseonly-worker/scripts/`)
 

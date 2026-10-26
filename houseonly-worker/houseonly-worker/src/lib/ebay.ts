@@ -3,12 +3,27 @@
 // Mirrors the Discogs channel (sync.ts) without sharing a single switch with
 // it. Full runbook: docs/ebay.md.
 //
-// 1. AUTO-LIST. Records are picked ONE BY ONE in the admin (eBay tab →
-//    ?action=ebay-select) and land in a queue (ebay:item:{SKU}). The eBay cron
-//    (EBAY_CRON in index.ts, its own expression) lists a batch of them:
-//    createOrReplaceInventoryItem → createOffer → publishOffer. Gated by its
-//    OWN mode, meta:ebay_autolist_mode (dry | live, default dry). Discogs'
-//    meta:sync_35_mode is never read here: either channel can run alone.
+// 1. AUTO-LIST. Automatic, not hand-picked:
+//    - every new Shopify product (products/create — the same webhook as the
+//      Discogs auto-add) is queued while meta:ebay_autolist_mode is live;
+//    - the existing catalogue is queued by ?action=ebay-backfill, in batches
+//      (first one small, capped by the monthly selling limit).
+//    The admin's eBay tab shows the queue and can exclude / re-add a record;
+//    an excluded record is never re-queued by the webhook or the backfill.
+//    The eBay cron (EBAY_CRON, its own expression) walks the queue every run
+//    (oldest check first) and lists what is ready:
+//    createOrReplaceInventoryItem → createOffer → publishOffer.
+//    Discogs' meta:sync_35_mode is never read here: either channel runs alone.
+//
+//    PRICE never comes from the Shopify price:
+//    - the CURRENT price of the record's Discogs listing (sku:{SKU} mapping →
+//      GET /marketplace/listings/{id}); without a listing the record is HELD
+//      (esperando_discogs) and re-checked every run — the mapping itself is
+//      kept current by runRelinkCron (sync.ts), which now runs on this cron;
+//    - records tagged `discogs:no`: Shopify unitCost × meta:ebay_cost_multiplier
+//      (default 2); no cost → HELD as sin_fuente_de_precio, flagged in the tab.
+//    Never a guessed price.
+//
 //    Selling limits: publishOffer error 25026 stops the batch, the record stays
 //    queued and the cron pauses for EBAY_LIMIT_COOLDOWN_MS.
 //
@@ -34,12 +49,12 @@
 import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
-  challengeResponse, verifyNotificationSignature, isSellingLimitError,
+  challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
   type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
-  buildEbayListing, gradesFor, skipReason, toSourceProduct, PRODUCT_BY_SKU_QUERY,
-  EBAY_DEFAULT_CATEGORY_ID, type EbaySourceProduct, type Grades,
+  buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, toSourceProduct, PRODUCT_BY_SKU_QUERY,
+  EBAY_DEFAULT_CATEGORY_ID, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
   shopifyAdminGraphQL, findVariantBySkuLoose, getVariantsStock, createDiscogsOrder,
@@ -59,8 +74,10 @@ export const EBAY_CRON = '3,18,33,48 * * * *';
 const AUTOLIST_MODE_KEY = 'meta:ebay_autolist_mode';
 const SYNC_MODE_KEY = 'meta:ebay_sync_mode';
 const CATEGORY_KEY = 'meta:ebay_category_id';
+const COST_MULTIPLIER_KEY = 'meta:ebay_cost_multiplier';
 const LIMIT_KEY = 'meta:ebay_limit_hit';
 const GO_LIVE_KEY = 'meta:ebay_go_live_ts';
+const BACKFILL_KEY = 'meta:ebay_backfill';
 const AUTOLIST_LAST_RUN = 'meta:ebay_autolist_last_run';
 const ORDERS_LAST_RUN = 'meta:ebay_orders_last_run';
 const ITEM_PREFIX = 'ebay:item:';
@@ -69,8 +86,20 @@ const SALE_PREFIX = 'ebay-sale:';
 const LOCK_PREFIX = 'lock:ebay-order:';
 
 // New listings per cron run. Small on purpose: new eBay accounts start with
-// low monthly limits, and each record may cost a Discogs call for its grades.
+// low monthly limits.
 export const EBAY_BATCH_SIZE = 10;
+// Records examined per run (one Shopify query each). Held records are
+// re-checked round-robin, oldest check first, so a long queue is covered
+// every few runs without one run doing hundreds of lookups.
+export const EBAY_CHECKS_PER_RUN = 40;
+// Discogs listing reads per run (price + grades). Discogs' budget is per
+// egress IP and shared; the Discogs poll already finds it spent (memory).
+export const EBAY_DISCOGS_READS_PER_RUN = 10;
+export const EBAY_DEFAULT_COST_MULTIPLIER = 2;
+// Backfill: first batch small enough to check every listing by eye.
+export const EBAY_BACKFILL_FIRST = 5;
+export const EBAY_BACKFILL_NEXT = 25;
+const EBAY_BACKFILL_MAX = 100;
 // After a selling-limit error, don't knock again for a day.
 export const EBAY_LIMIT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // Same reasoning as the Discogs poll (sync.ts): re-scan a window, not a cursor.
@@ -96,25 +125,54 @@ export const getEbaySyncMode = (env: EbayEnv) => readMode(env, SYNC_MODE_KEY);
 // ── queue records ──────────────────────────────────────────────────
 
 export type EbayItemStatus =
-  | 'queued'       // selected, waiting for the cron
+  | 'queued'       // waiting for its first check
+  | 'held'         // not listable yet (hold_reason); re-checked every run
   | 'would_list'   // dry run built the listing; live picks it up
   | 'listed'       // live on eBay
-  | 'skipped'      // not listable (reason in skip_reason); reselect to retry
-  | 'failed'       // eBay refused (error); reselect to retry
-  | 'withdrawn'    // ended because it sold elsewhere, or unselected
+  | 'failed'       // eBay refused (error); re-add to retry
+  | 'excluded'     // taken out by hand; never re-queued automatically
+  | 'withdrawn'    // ended because it sold elsewhere
   | 'sold';        // sold on eBay
+
+export type EbayItemOrigin = 'webhook' | 'backfill' | 'admin';
 
 export interface EbayItem {
   sku: string;
   status: EbayItemStatus;
+  origin?: EbayItemOrigin;
   selected_at: string;
   updated_at: string;
+  checked_at?: string;
+  hold_reason?: EbayHoldReason;
   offer_id?: string;
   listing_id?: string;
   error?: string;
-  skip_reason?: string;
-  preview?: { title: string; price: string; condition: string; grades: Grades; ean: string; images: number };
+  title?: string;
+  price?: EbayPrice;
+  preview?: { title: string; price: string; price_source: string; condition: string; grades: Grades; ean: string; images: number };
   history?: Array<{ at: string; status: EbayItemStatus; note?: string }>;
+}
+
+/**
+ * What KV list() returns for each record, so the queue can be walked and
+ * shown without one KV read per record (1,500 reads would blow the per-run
+ * subrequest budget). Must stay under KV's 1024-byte metadata limit.
+ */
+export interface EbayItemMeta {
+  s: EbayItemStatus; r?: string; c?: string; a: string; t?: string;
+  p?: string; ps?: string; l?: string; e?: string; o?: string;
+}
+
+function metaOf(it: EbayItem): EbayItemMeta {
+  const m: EbayItemMeta = { s: it.status, a: it.selected_at };
+  if (it.hold_reason && it.status === 'held') m.r = it.hold_reason;
+  if (it.checked_at) m.c = it.checked_at;
+  if (it.title) m.t = it.title.slice(0, 70);
+  if (it.price) { m.p = it.price.value.toFixed(2); m.ps = it.price.source; }
+  if (it.listing_id) m.l = it.listing_id;
+  if (it.error && it.status === 'failed') m.e = it.error.slice(0, 160);
+  if (it.origin) m.o = it.origin;
+  return m;
 }
 
 async function getItem(env: EbayEnv, sku: string): Promise<EbayItem | null> {
@@ -123,53 +181,69 @@ async function getItem(env: EbayEnv, sku: string): Promise<EbayItem | null> {
   try { return JSON.parse(raw) as EbayItem; } catch { return null; }
 }
 
+async function putItem(env: EbayEnv, it: EbayItem): Promise<void> {
+  await env.SYNC_STATE.put(ITEM_PREFIX + it.sku, JSON.stringify(it), { metadata: metaOf(it) });
+}
+
 async function saveItem(env: EbayEnv, item: EbayItem, status: EbayItemStatus, note?: string): Promise<EbayItem> {
   const at = new Date().toISOString();
+  const prev = item.history || [];
+  const last = prev[prev.length - 1];
+  // A record held for the same reason run after run doesn't grow its history.
+  const same = last && last.status === status && last.note === (note ? note.slice(0, 300) : undefined);
   const next: EbayItem = {
     ...item, status, updated_at: at,
-    history: [...(item.history || []), { at, status, ...(note ? { note: note.slice(0, 300) } : {}) }].slice(-HISTORY_MAX),
+    history: same ? prev : [...prev, { at, status, ...(note ? { note: note.slice(0, 300) } : {}) }].slice(-HISTORY_MAX),
   };
-  await env.SYNC_STATE.put(ITEM_PREFIX + item.sku, JSON.stringify(next));
+  await putItem(env, next);
   return next;
 }
 
-export async function listItems(env: EbayEnv): Promise<EbayItem[]> {
-  const out: EbayItem[] = [];
+/** Every record's summary, from list() metadata only. */
+export async function listItemMetas(env: EbayEnv): Promise<Array<{ sku: string } & EbayItemMeta>> {
+  const out: Array<{ sku: string } & EbayItemMeta> = [];
   let cursor: string | undefined;
   do {
     const page: any = await env.SYNC_STATE.list({ prefix: ITEM_PREFIX, cursor });
     for (const k of page.keys) {
-      const it = await getItem(env, k.name.slice(ITEM_PREFIX.length));
-      if (it) out.push(it);
+      const m = (k.metadata || {}) as EbayItemMeta;
+      out.push({ sku: k.name.slice(ITEM_PREFIX.length), ...m, s: m.s || 'queued', a: m.a || '' });
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return out;
 }
 
-/** Queue SKUs for eBay. A live listing is left alone; anything else re-queues. */
-export async function selectSkus(env: EbayEnv, skus: string[]): Promise<Array<{ sku: string; result: string }>> {
-  const out: Array<{ sku: string; result: string }> = [];
-  for (const sku of skus) {
-    const prev = await getItem(env, sku);
-    if (prev?.status === 'listed') { out.push({ sku, result: 'already_listed' }); continue; }
-    if (prev?.status === 'queued') { out.push({ sku, result: 'already_queued' }); continue; }
-    const now = new Date().toISOString();
-    const base: EbayItem = prev
-      ? { ...prev, error: undefined, skip_reason: undefined }
-      : { sku, status: 'queued', selected_at: now, updated_at: now };
-    await saveItem(env, base, 'queued', 'selected');
-    out.push({ sku, result: 'queued' });
-  }
-  return out;
+/** Queue a SKU unless it already has a record (an excluded one stays excluded). */
+async function enqueue(env: EbayEnv, sku: string, origin: EbayItemOrigin): Promise<boolean> {
+  if (await getItem(env, sku)) return false;
+  const now = new Date().toISOString();
+  await saveItem(env, { sku, status: 'queued', origin, selected_at: now, updated_at: now }, 'queued', `queued (${origin})`);
+  return true;
 }
 
-/** Take SKUs out of the eBay channel; a live listing is ended first. */
-export async function unselectSkus(env: EbayFullEnv, skus: string[]): Promise<Array<{ sku: string; result: string; error?: string }>> {
+/**
+ * products/create: queue the new product for eBay while the eBay auto-list is
+ * live. Called from handleProductCreateWebhook (sync.ts) BEFORE any of the
+ * Discogs filters, so a product Discogs skips is still an eBay candidate.
+ */
+export async function enqueueNewProductForEbay(
+  env: EbayEnv,
+  body: { variants?: Array<{ sku?: string }> },
+): Promise<'queued' | 'exists' | 'off' | 'no_sku'> {
+  if ((await getEbayAutolistMode(env)) !== 'live') return 'off';
+  const sku = ((body.variants || [])[0]?.sku || '').trim();
+  if (!sku) return 'no_sku';
+  return (await enqueue(env, sku, 'webhook')) ? 'queued' : 'exists';
+}
+
+/** Admin: take records out. A live listing is ended first. */
+export async function excludeSkus(env: EbayFullEnv, skus: string[]): Promise<Array<{ sku: string; result: string; error?: string }>> {
   const out: Array<{ sku: string; result: string; error?: string }> = [];
   for (const sku of skus) {
-    const it = await getItem(env, sku);
-    if (!it) { out.push({ sku, result: 'not_selected' }); continue; }
+    const now = new Date().toISOString();
+    const it = (await getItem(env, sku)) || { sku, status: 'queued' as EbayItemStatus, origin: 'admin' as EbayItemOrigin, selected_at: now, updated_at: now };
+    if (it.status === 'sold') { out.push({ sku, result: 'sold' }); continue; }
     if (it.status === 'listed' && it.offer_id) {
       try {
         await withdrawOffer(env, it.offer_id);
@@ -177,12 +251,71 @@ export async function unselectSkus(env: EbayFullEnv, skus: string[]): Promise<Ar
         out.push({ sku, result: 'withdraw_failed', error: e?.message || String(e) });
         continue;
       }
+      if (it.listing_id) await env.SYNC_STATE.delete(LISTING_PREFIX + it.listing_id);
     }
-    await env.SYNC_STATE.delete(ITEM_PREFIX + sku);
-    if (it.listing_id) await env.SYNC_STATE.delete(LISTING_PREFIX + it.listing_id);
-    out.push({ sku, result: it.status === 'listed' ? 'withdrawn' : 'removed' });
+    const wasListed = it.status === 'listed';
+    await saveItem(env, { ...it, listing_id: undefined }, 'excluded', 'excluded in admin');
+    out.push({ sku, result: wasListed ? 'withdrawn_and_excluded' : 'excluded' });
   }
   return out;
+}
+
+/** Admin: put records (back) in the queue — excluded, failed, withdrawn, or new. */
+export async function includeSkus(env: EbayEnv, skus: string[]): Promise<Array<{ sku: string; result: string }>> {
+  const out: Array<{ sku: string; result: string }> = [];
+  for (const sku of skus) {
+    const it = await getItem(env, sku);
+    if (!it) { await enqueue(env, sku, 'admin'); out.push({ sku, result: 'queued' }); continue; }
+    if (['listed', 'sold', 'queued', 'held', 'would_list'].includes(it.status)) { out.push({ sku, result: `already_${it.status}` }); continue; }
+    await saveItem(env, { ...it, error: undefined, hold_reason: undefined, checked_at: undefined }, 'queued', 're-added in admin');
+    out.push({ sku, result: 'queued' });
+  }
+  return out;
+}
+
+// ── price ──────────────────────────────────────────────────────────
+
+type PriceDecision =
+  | { ok: true; price: EbayPrice; discogs?: { condition?: string; sleeve_condition?: string } }
+  | { ok: false; hold: EbayHoldReason; detail?: string };
+
+async function costMultiplier(env: EbayEnv): Promise<number> {
+  const n = Number(await env.SYNC_STATE.get(COST_MULTIPLIER_KEY));
+  return n > 0 ? n : EBAY_DEFAULT_COST_MULTIPLIER;
+}
+
+/** The only two price sources. Anything else holds the record. */
+async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { discogs: number }): Promise<PriceDecision> {
+  if (notForDiscogs(p.tags)) {
+    const price = priceFromCost(p, await costMultiplier(env));
+    return price ? { ok: true, price } : { ok: false, hold: 'sin_fuente_de_precio', detail: 'discogs:no and no Shopify unit cost' };
+  }
+  const raw = await env.SYNC_STATE.get(`sku:${p.variant.sku.trim()}`);
+  let listingId: number | null = null;
+  try { listingId = raw ? Number(JSON.parse(raw).listing_id) || null : null; } catch { /* treat as unlinked */ }
+  if (!listingId) return { ok: false, hold: 'esperando_discogs' };
+  if (!env.DISCOGS_TOKEN) return { ok: false, hold: 'discogs_error', detail: 'DISCOGS_TOKEN not configured' };
+  if (budget.discogs <= 0) return { ok: false, hold: 'discogs_error', detail: 'Discogs read budget for this run spent' };
+  budget.discogs--;
+  let l;
+  try {
+    l = await getListing(env.DISCOGS_TOKEN, listingId);
+  } catch (e: any) {
+    return { ok: false, hold: 'discogs_error', detail: `getListing ${listingId}: ${e?.message || e}` };
+  }
+  if (l.status !== 'For Sale' && l.status !== 'Draft') {
+    return { ok: false, hold: 'discogs_no_disponible', detail: `Discogs listing ${listingId} is ${l.status}` };
+  }
+  if (l.price?.currency !== 'EUR') {
+    return { ok: false, hold: 'discogs_no_eur', detail: `Discogs listing ${listingId} in ${l.price?.currency}` };
+  }
+  const value = Math.round(Number(l.price.value) * 100) / 100;
+  if (!(value > 0)) return { ok: false, hold: 'discogs_no_disponible', detail: `Discogs listing ${listingId} has no price` };
+  return {
+    ok: true,
+    price: { value, source: 'discogs', detail: `Discogs listing ${listingId}` },
+    discogs: { condition: l.condition, sleeve_condition: l.sleeve_condition },
+  };
 }
 
 // ── auto-list ──────────────────────────────────────────────────────
@@ -190,13 +323,14 @@ export async function unselectSkus(env: EbayFullEnv, skus: string[]): Promise<Ar
 export interface AutolistResult {
   ok: boolean;
   mode: EbayMode;
-  processed: number;
+  checked: number;
   listed: number;
   would_list: number;
-  skipped: number;
+  held: number;
   failed: number;
-  remaining_queued: number;
-  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed';
+  held_by_reason: Record<string, number>;
+  pending: number;          // queued + held + (live) would_list after the run
+  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error';
   error?: string;
   finished_at: string;
 }
@@ -205,22 +339,6 @@ async function fetchSourceProduct(env: EbayFullEnv, sku: string): Promise<EbaySo
   const r = await shopifyAdminGraphQL(env, PRODUCT_BY_SKU_QUERY, { q: `sku:"${sku.replace(/"/g, '\\"')}"` });
   if (r?.errors?.length) throw new Error(`Shopify: ${r.errors[0]?.message || 'query failed'}`);
   return toSourceProduct(r?.data?.products?.nodes || [], sku);
-}
-
-/** Grades of our own Discogs listing, if the SKU is linked. Never fatal. */
-async function discogsGrades(env: EbayFullEnv, sku: string): Promise<{ condition?: string; sleeve_condition?: string } | null> {
-  const raw = await env.SYNC_STATE.get(`sku:${sku}`);
-  if (!raw || !env.DISCOGS_TOKEN) return null;
-  try {
-    const listingId = JSON.parse(raw).listing_id;
-    if (!listingId) return null;
-    const l = await getListing(env.DISCOGS_TOKEN, listingId);
-    return { condition: l.condition, sleeve_condition: l.sleeve_condition };
-  } catch {
-    // Discogs' per-IP budget is often spent (429). New stock defaults to Mint
-    // anyway; a used record with no grade is skipped rather than guessed.
-    return null;
-  }
 }
 
 async function publishListing(env: EbayFullEnv, payload: ReturnType<typeof buildEbayListing>): Promise<{ offerId: string; listingId: string }> {
@@ -240,24 +358,26 @@ async function publishListing(env: EbayFullEnv, payload: ReturnType<typeof build
   return { offerId, listingId };
 }
 
+const pendingStatuses = (mode: EbayMode): Set<EbayItemStatus> =>
+  new Set<EbayItemStatus>(mode === 'live' ? ['queued', 'held', 'would_list'] : ['queued', 'held']);
+
 export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean } = {}): Promise<AutolistResult> {
   const mode = await getEbayAutolistMode(env);
   const result: AutolistResult = {
-    ok: true, mode, processed: 0, listed: 0, would_list: 0, skipped: 0, failed: 0,
-    remaining_queued: 0, finished_at: '',
+    ok: true, mode, checked: 0, listed: 0, would_list: 0, held: 0, failed: 0, held_by_reason: {},
+    pending: 0, finished_at: '',
   };
   const finish = async () => {
+    result.pending = (await listItemMetas(env)).filter(i => pendingStatuses(mode).has(i.s)).length;
     result.finished_at = new Date().toISOString();
     await env.SYNC_STATE.put(AUTOLIST_LAST_RUN, JSON.stringify(result));
     return result;
   };
 
-  // Dry builds from what was just selected; live also takes what dry built.
-  const eligible = new Set<EbayItemStatus>(mode === 'live' ? ['queued', 'would_list'] : ['queued']);
-  const queue = (await listItems(env))
-    .filter(i => eligible.has(i.status))
-    .sort((a, b) => a.selected_at.localeCompare(b.selected_at));
-  result.remaining_queued = queue.length;
+  // Never-checked first, then the oldest check: every held record comes round.
+  const queue = (await listItemMetas(env))
+    .filter(i => pendingStatuses(mode).has(i.s))
+    .sort((a, b) => (a.c || '').localeCompare(b.c || '') || a.a.localeCompare(b.a));
   if (queue.length === 0) return finish();
 
   let cfg: { categoryId: string; policies: any; merchantLocationKey: string } | null = null;
@@ -281,62 +401,73 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     }
   }
 
-  for (const item of queue.slice(0, EBAY_BATCH_SIZE)) {
-    result.processed++;
+  const budget = { discogs: EBAY_DISCOGS_READS_PER_RUN };
+  const hold = async (item: EbayItem, reason: EbayHoldReason, detail?: string) => {
+    await saveItem(env, { ...item, hold_reason: reason }, 'held', detail ? `${reason}: ${detail}` : reason);
+    result.held++;
+    result.held_by_reason[reason] = (result.held_by_reason[reason] || 0) + 1;
+  };
+
+  for (const entry of queue) {
+    if (result.checked >= EBAY_CHECKS_PER_RUN) break;
+    if (result.listed + result.would_list >= EBAY_BATCH_SIZE) break;
+    const stored = await getItem(env, entry.sku);
+    if (!stored || !pendingStatuses(mode).has(stored.status)) continue;
+    result.checked++;
+    const item: EbayItem = { ...stored, checked_at: new Date().toISOString() };
+
     let product: EbaySourceProduct | null;
     try {
       product = await fetchSourceProduct(env, item.sku);
     } catch (e: any) {
-      // Shopify down is not the record's fault: leave it queued.
-      result.ok = false; result.error = e?.message || String(e);
+      // Shopify down is not the record's fault: stop, leave the queue as it is.
+      result.ok = false; result.stopped = 'shopify_error'; result.error = e?.message || String(e);
       break;
     }
-    if (!product) {
-      await saveItem(env, { ...item, skip_reason: 'no_en_shopify' }, 'skipped', 'SKU not found in Shopify');
-      result.skipped++;
-      continue;
-    }
-    const grades = gradesFor(product.tags, await discogsGrades(env, item.sku));
-    const why = skipReason(product, grades);
-    if (why) {
-      await saveItem(env, { ...item, skip_reason: why }, 'skipped', why);
-      result.skipped++;
-      continue;
-    }
+    if (!product) { await hold(item, 'no_en_shopify'); continue; }
+    item.title = [product.vendor, product.title].filter(Boolean).join(' - ');
+    const why = holdReason(product);
+    if (why) { await hold(item, why); continue; }
+
+    const priced = await resolvePrice(env, product, budget);
+    if (!priced.ok) { await hold({ ...item, price: undefined }, priced.hold, priced.detail); continue; }
+    const grades = gradesFor(product.tags, priced.discogs || null);
+    if (!grades) { await hold(item, 'usado_sin_grado'); continue; }
+    item.price = priced.price;
 
     const preview = (p: ReturnType<typeof buildEbayListing>) => ({
-      title: p.inventoryItem.product.title, price: p.offer.pricingSummary.price.value,
+      title: p.inventoryItem.product.title, price: p.offer.pricingSummary.price.value, price_source: p.price.detail,
       condition: p.inventoryItem.condition, grades: p.grades, ean: p.ean,
       images: p.inventoryItem.product.imageUrls.length,
     });
 
     if (mode === 'dry') {
-      const p = buildEbayListing(product, grades!, {
+      const p = buildEbayListing(product, grades, priced.price, {
         categoryId: (await env.SYNC_STATE.get(CATEGORY_KEY)) || EBAY_DEFAULT_CATEGORY_ID,
         policies: { fulfillmentPolicyId: '(dry)', paymentPolicyId: '(dry)', returnPolicyId: '(dry)' },
         merchantLocationKey: '(dry)', withEan: true,
       });
-      await saveItem(env, { ...item, preview: preview(p) }, 'would_list', 'dry run');
+      await saveItem(env, { ...item, hold_reason: undefined, preview: preview(p) }, 'would_list', `dry run at ${priced.price.value.toFixed(2)} (${priced.price.detail})`);
       result.would_list++;
       continue;
     }
 
     // LIVE. First with the EAN (eBay may match its catalogue); if eBay refuses
     // for any reason other than the selling limit, once more as a standalone.
-    let payload = buildEbayListing(product, grades!, { ...cfg!, withEan: true });
+    let payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: true });
     try {
       let ids: { offerId: string; listingId: string };
       try {
         ids = await publishListing(env, payload);
       } catch (e) {
         if (isSellingLimitError(e) || !payload.ean) throw e;
-        payload = buildEbayListing(product, grades!, { ...cfg!, withEan: false });
+        payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: false });
         ids = await publishListing(env, payload);
       }
       await env.SYNC_STATE.put(LISTING_PREFIX + ids.listingId, item.sku);
       await saveItem(env, {
-        ...item, offer_id: ids.offerId, listing_id: ids.listingId, preview: preview(payload), error: undefined,
-      }, 'listed', `listing ${ids.listingId}`);
+        ...item, hold_reason: undefined, offer_id: ids.offerId, listing_id: ids.listingId, preview: preview(payload), error: undefined,
+      }, 'listed', `listing ${ids.listingId} at ${priced.price.value.toFixed(2)} (${priced.price.detail})`);
       result.listed++;
     } catch (e: any) {
       const msg = e?.message || String(e);
@@ -345,7 +476,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
           at: new Date().toISOString(), sku: item.sku, message: msg,
           until: new Date(Date.now() + EBAY_LIMIT_COOLDOWN_MS).toISOString(),
         }));
-        await saveItem(env, item, item.status, `selling limit: ${msg}`);
+        await saveItem(env, item, stored.status, `selling limit: ${msg}`);
         result.stopped = 'selling_limit';
         result.error = msg;
         break;
@@ -355,7 +486,6 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     }
   }
 
-  result.remaining_queued = (await listItems(env)).filter(i => eligible.has(i.status)).length;
   return finish();
 }
 
@@ -364,7 +494,8 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
 /**
  * Called from the Shopify orders/create webhook. Ends the eBay listing of
  * every SKU in the order. Orders that ARE eBay sales (attribute ebay_order_id)
- * are skipped: that listing already sold.
+ * are skipped: that listing already sold. Records not listed yet are left in
+ * the queue — the cron's stock check holds them if nothing is left to sell.
  */
 export async function withdrawOnEbayForShopifyOrder(
   env: EbayFullEnv,
@@ -379,14 +510,7 @@ export async function withdrawOnEbayForShopifyOrder(
   const log: Array<{ sku: string; ok: boolean; error?: string }> = [];
   for (const sku of skus) {
     const it = await getItem(env, sku);
-    if (!it) continue;
-    if (it.status !== 'listed') {
-      // Not live yet: drop it from the queue so the cron doesn't list a sold copy.
-      if (it.status === 'queued' || it.status === 'would_list') {
-        await saveItem(env, it, 'withdrawn', `sold in Shopify order ${orderId} before listing`);
-      }
-      continue;
-    }
+    if (!it || it.status !== 'listed') continue;
     if (!ebayConfigured(env) || !it.offer_id) {
       log.push({ sku, ok: false, error: 'eBay not configured' });
       continue;
@@ -405,6 +529,94 @@ export async function withdrawOnEbayForShopifyOrder(
     await env.SYNC_STATE.put(`ebay-withdraw:${orderId}`, JSON.stringify({ orderId, at: new Date().toISOString(), items: log }),
       { expirationTtl: AUDIT_TTL_S });
   }
+}
+
+// ── backfill: the existing catalogue ───────────────────────────────
+
+const BACKFILL_QUERY = `
+  query ebayBackfill($first: Int!, $after: String) {
+    products(first: $first, after: $after, sortKey: CREATED_AT, query: "status:active AND inventory_total:>0 AND -tag:forthcoming") {
+      pageInfo { hasNextPage endCursor }
+      nodes { variants(first: 1) { nodes { sku } } }
+    }
+  }
+`;
+
+export interface BackfillResult {
+  ok: boolean;
+  queued: string[];
+  already_in_queue: number;
+  batch: number;              // how many this call was allowed to queue
+  batches: number;            // calls so far
+  done: boolean;              // catalogue walked to the end
+  selling_limit?: number | null;
+  error?: string;
+}
+
+/**
+ * Queue the next batch of the existing catalogue (active, in stock, not a
+ * pre-order; oldest first). The first batch is EBAY_BACKFILL_FIRST so every
+ * listing can be checked by eye; later ones EBAY_BACKFILL_NEXT (or `count`).
+ * Respects the selling limit: refused during the 25026 pause, and capped so
+ * listed + pending never exceeds the monthly quantity from getPrivileges.
+ */
+export async function runEbayBackfill(env: EbayFullEnv, opts: { count?: number } = {}): Promise<BackfillResult> {
+  let state: { cursor: string | null; batches: number; done: boolean; queued: number } = { cursor: null, batches: 0, done: false, queued: 0 };
+  try {
+    const raw = await env.SYNC_STATE.get(BACKFILL_KEY);
+    if (raw) state = { ...state, ...JSON.parse(raw) };
+  } catch { /* start over */ }
+  const out: BackfillResult = { ok: true, queued: [], already_in_queue: 0, batch: 0, batches: state.batches, done: state.done };
+  if (state.done) return out;
+
+  const limit = await env.SYNC_STATE.get(LIMIT_KEY);
+  if (limit) {
+    try {
+      const until = JSON.parse(limit).until;
+      if (Date.parse(until) > Date.now()) return { ...out, ok: false, error: `selling limit reached; paused until ${until}` };
+    } catch { /* ignore malformed */ }
+  }
+
+  const asked = Math.floor(opts.count || 0);
+  let batch = asked > 0 ? Math.min(EBAY_BACKFILL_MAX, asked)
+    : (state.batches === 0 ? EBAY_BACKFILL_FIRST : EBAY_BACKFILL_NEXT);
+  if (state.batches === 0) batch = Math.min(batch, EBAY_BACKFILL_FIRST);   // first one always small
+  if (ebayConfigured(env)) {
+    try {
+      const cap = await getSellingLimitQuantity(env);
+      out.selling_limit = cap;
+      if (cap !== null) {
+        const metas = await listItemMetas(env);
+        const committed = metas.filter(i => i.s === 'listed' || pendingStatuses('live').has(i.s)).length;
+        batch = Math.min(batch, Math.max(0, cap - committed));
+        if (batch === 0) return { ...out, ok: false, error: `selling limit ${cap}: ${committed} already listed or queued` };
+      }
+    } catch (e: any) {
+      return { ...out, ok: false, error: `getPrivileges failed: ${e?.message || e}` };
+    }
+  }
+  out.batch = batch;
+
+  let cursor = state.cursor;
+  let done = false;
+  while (out.queued.length < batch) {
+    // Never fetch more than we can still queue, so the saved cursor never
+    // skips products we haven't looked at.
+    const r = await shopifyAdminGraphQL(env, BACKFILL_QUERY, { first: Math.min(50, batch - out.queued.length), after: cursor });
+    if (r?.errors?.length) return { ...out, ok: false, error: `Shopify: ${r.errors[0]?.message}` };
+    const conn = r?.data?.products;
+    for (const n of conn?.nodes || []) {
+      const sku = (n?.variants?.nodes?.[0]?.sku || '').trim();
+      if (!sku) continue;
+      if (await enqueue(env, sku, 'backfill')) out.queued.push(sku); else out.already_in_queue++;
+    }
+    cursor = conn?.pageInfo?.endCursor || cursor;
+    if (!conn?.pageInfo?.hasNextPage) { done = true; break; }
+  }
+
+  const next = { cursor, batches: state.batches + 1, done, queued: state.queued + out.queued.length };
+  await env.SYNC_STATE.put(BACKFILL_KEY, JSON.stringify(next));
+  return { ...out, batches: next.batches, done };
 }
 
 // ── eBay sale → Shopify order ──────────────────────────────────────
@@ -661,13 +873,14 @@ function bearerOk(request: Request, env: EbayFullEnv): boolean {
 const CORS_JSON = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
 const res = (d: unknown, status = 200) => new Response(JSON.stringify(d), { status, headers: CORS_JSON });
 
-async function readSkus(request: Request): Promise<string[] | null> {
-  try {
-    const b: any = await request.json();
-    const list = Array.isArray(b?.skus) ? b.skus : [];
-    const skus = [...new Set(list.map((s: any) => String(s || '').trim()).filter(Boolean))] as string[];
-    return skus.length ? skus : null;
-  } catch { return null; }
+async function readBody(request: Request): Promise<any> {
+  try { return await request.json(); } catch { return {}; }
+}
+
+function skusOf(b: any): string[] | null {
+  const list = Array.isArray(b?.skus) ? b.skus : [];
+  const skus = [...new Set(list.map((s: any) => String(s || '').trim()).filter(Boolean))] as string[];
+  return skus.length ? skus : null;
 }
 
 async function readJsonKey(env: EbayEnv, key: string): Promise<any> {
@@ -683,8 +896,7 @@ async function readJsonKey(env: EbayEnv, key: string): Promise<any> {
 export async function handleEbayMode(request: Request, env: EbayFullEnv): Promise<Response> {
   if (request.method === 'POST') {
     if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
-    let b: any = {};
-    try { b = await request.json(); } catch { /* empty */ }
+    const b = await readBody(request);
     const valid = (v: any) => v === 'dry' || v === 'live';
     if ((b.autolist !== undefined && !valid(b.autolist)) || (b.sync !== undefined && !valid(b.sync))
       || (b.autolist === undefined && b.sync === undefined)) {
@@ -696,38 +908,66 @@ export async function handleEbayMode(request: Request, env: EbayFullEnv): Promis
   return res({ autolist: await getEbayAutolistMode(env), sync: await getEbaySyncMode(env), configured: ebayConfigured(env) });
 }
 
-/** GET ?action=ebay-items (Bearer) — queue, modes, last runs, limit pause. */
+/**
+ * GET ?action=ebay-items (Bearer) — the queue (from list metadata, no per-record
+ * reads), counts per status and hold reason, modes, last runs, backfill state.
+ * `&sku=X` returns that one full record (history, preview).
+ */
 export async function handleEbayItems(request: Request, env: EbayFullEnv): Promise<Response> {
   if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
-  const items = (await listItems(env)).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const one = new URL(request.url).searchParams.get('sku');
+  if (one) {
+    const it = await getItem(env, one);
+    return it ? res(it) : res({ error: 'not in the eBay queue', sku: one }, 404);
+  }
+  const items = (await listItemMetas(env)).sort((a, b) => (b.c || b.a).localeCompare(a.c || a.a));
+  const counts: Record<string, number> = {};
+  const holds: Record<string, number> = {};
+  for (const i of items) {
+    counts[i.s] = (counts[i.s] || 0) + 1;
+    if (i.s === 'held' && i.r) holds[i.r] = (holds[i.r] || 0) + 1;
+  }
   return res({
     configured: ebayConfigured(env),
     autolist: await getEbayAutolistMode(env),
     sync: await getEbaySyncMode(env),
+    cost_multiplier: await costMultiplier(env),
     limit_hit: await readJsonKey(env, LIMIT_KEY),
+    backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),
     orders_last_run: await readJsonKey(env, ORDERS_LAST_RUN),
+    relink_last_run: await readJsonKey(env, 'meta:relink_cron_last_run'),
+    counts,
+    holds,
     items,
   });
 }
 
-/** POST ?action=ebay-select / ebay-unselect {skus: [...]} (Bearer) */
-export async function handleEbaySelect(request: Request, env: EbayFullEnv, select: boolean): Promise<Response> {
+/** POST ?action=ebay-exclude / ebay-include {skus: [...]} (Bearer) */
+export async function handleEbayExclude(request: Request, env: EbayFullEnv, exclude: boolean): Promise<Response> {
   if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
-  const skus = await readSkus(request);
+  const skus = skusOf(await readBody(request));
   if (!skus) return res({ error: 'body: {"skus": ["SKU1", ...]}' }, 400);
-  return res({ ok: true, results: select ? await selectSkus(env, skus) : await unselectSkus(env, skus) });
+  return res({ ok: true, results: exclude ? await excludeSkus(env, skus) : await includeSkus(env, skus) });
+}
+
+/** POST ?action=ebay-backfill {count?} (Bearer) — queue the next catalogue batch. */
+export async function handleEbayBackfill(request: Request, env: EbayFullEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
+  const b = await readBody(request);
+  if (b.reset === true) await env.SYNC_STATE.delete(BACKFILL_KEY);
+  const r = await runEbayBackfill(env, { count: Number(b.count) || undefined });
+  return res(r, r.ok ? 200 : 409);
 }
 
 /**
  * POST ?action=ebay-run {what: 'autolist'|'orders'|'both', force?} (Bearer).
- * Staging has no 15-min cron, so this is how it is exercised there. `force`
+ * Staging has no eBay cron, so this is how it is exercised there. `force`
  * ignores the selling-limit pause (and clears it).
  */
 export async function handleEbayRun(request: Request, env: EbayFullEnv): Promise<Response> {
   if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
-  let b: any = {};
-  try { b = await request.json(); } catch { /* defaults */ }
+  const b = await readBody(request);
   const what = b.what || 'both';
   if (!['autolist', 'orders', 'both'].includes(what)) return res({ error: 'what: autolist | orders | both' }, 400);
   if (b.force) await env.SYNC_STATE.delete(LIMIT_KEY);
