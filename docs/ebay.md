@@ -50,6 +50,36 @@ sigue en `dry` (verificado 2026-10-26) y eBay funciona sin él.
    quedan retenidos como **`sin_fuente_de_precio`**. La pestaña los marca en
    naranja y no se publican.
 
+#### De dónde sale el listing de Discogs: el snapshot (desde 2026-10-27)
+
+Leer un listing por disco no funcionaba. Discogs cuenta su cupo de 60/min por
+IP, y la IP de salida de Cloudflare es compartida, así que casi todas las
+pasadas se quedaban en 429 y retenían todo. Ahora el precio, el estado y los
+grados salen de un **snapshot de nuestro inventario** en KV (`discogs:snapshot`).
+
+- **Semilla**: el CSV que exporta Discogs del inventario (export de hoy cargado
+  a mano en prod). En el CSV no hay moneda, así que se asume EUR. Los grados
+  `MINT`/`NEAR_MINT`/`GENERIC`… se convierten a los textos de Discogs
+  ("Mint (M)", …). La hora del snapshot es la del nombre del fichero (UTC).
+- **Renovación (cron :03, antes de la pasada)**:
+  - Lee `GET /users/houseonly/inventory` en páginas de 100, ordenado por fecha
+    de alta ascendente (~10 llamadas).
+  - **Sin reintentos de 429**: al primer 429 guarda por dónde iba
+    (`discogs:snapshot:building`) y sigue en la pasada siguiente.
+  - Al terminar, sustituye al snapshot. Su hora es la de **inicio** de la lectura.
+  - Con un snapshot de menos de 1 h no lee nada; una lectura a medias de más de 12 h vuelve a empezar.
+  - Resultado en `meta:discogs_snapshot_last_refresh`. Si se lleva un 429, la
+    conciliación de esa pasada se salta.
+- **Caducidad: 48 h**. Pasado ese tiempo, o si no hay snapshot, los discos
+  esperan (`discogs_snapshot_caducado`), no se llama a Discogs y el admin
+  muestra un aviso naranja.
+- Si el snapshot vigente no tiene un listing, se pide ese listing a la API
+  (dentro del tope de 10 lecturas por pasada).
+- **Plan B**: en el admin, "subir CSV de Discogs" (`?action=discogs-snapshot`,
+  POST con el CSV y `&name=` el nombre del fichero). Rechaza un export más viejo que el snapshot en uso.
+- Un disco vendido en Discogs después del snapshot no se publica igualmente:
+  la venta baja el stock en Shopify y la pasada retiene lo que no tiene stock.
+
 El tag `discogs:no` es nuevo: hasta ahora no había forma de marcar un disco
 como "no va a Discogs" (el rechazo de pending-review caduca a los 7 días y
 significa "match equivocado", no "no va a Discogs"). Se pone a mano en Shopify.
@@ -145,6 +175,7 @@ están en la config de producción. Staging se prueba a mano con
 | `ebay-exclude` · `ebay-include` | POST `{skus}` | Bearer |
 | `ebay-backfill` | POST `{count?, reset?}` (409 si el límite de venta lo impide) | Bearer |
 | `ebay-run` | POST `{what: autolist\|orders\|both, force?}` | Bearer |
+| `discogs-snapshot` | GET (edad, tamaño, progreso de la renovación) · POST CSV del export (`&name=` fichero) | Bearer |
 | `ebay-store-categories` | GET (mapa, categorías de la tienda, nombres que faltan) · POST `{apply?}` (pone la categoría en los anuncios ya publicados; sin `apply` solo informa) | Bearer |
 
 ## Puesta en marcha (cuando eBay apruebe las claves)

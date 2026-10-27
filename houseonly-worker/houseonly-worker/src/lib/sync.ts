@@ -55,7 +55,7 @@ import {
 } from './discogs-skip';
 import { withdrawOnEbayForShopifyOrder, enqueueNewProductForEbay, type EbayFullEnv } from './ebay';
 
-const DISCOGS_USERNAME = 'houseonly';
+export const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
 const SHOPIFY_PRODUCTS_CREATE_TOPIC = 'PRODUCTS_CREATE';
 
