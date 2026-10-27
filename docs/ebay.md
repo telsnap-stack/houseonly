@@ -46,7 +46,8 @@ sigue en `dry` (verificado 2026-10-26) y eBay funciona sin él.
    exista. Si el listing está vendido o no está en EUR, también queda retenido.
 2. **Discos marcados como "no van a Discogs"** con el tag de Shopify
    **`discogs:no`**: coste unitario de Shopify (`inventoryItem.unitCost`) × el
-   multiplicador de `meta:ebay_cost_multiplier` (2 por defecto). Sin coste, se
+   multiplicador de `meta:ebay_cost_multiplier` (2 por defecto), **redondeado
+   hacia arriba a ,99** (3,45 × 2 = 6,90 → 6,99). Sin coste, se
    quedan retenidos como **`sin_fuente_de_precio`**. La pestaña los marca en
    naranja y no se publican.
 
@@ -79,6 +80,12 @@ grados salen de un **snapshot de nuestro inventario** en KV (`discogs:snapshot`)
   POST con el CSV y `&name=` el nombre del fichero). Rechaza un export más viejo que el snapshot en uso.
 - Un disco vendido en Discogs después del snapshot no se publica igualmente:
   la venta baja el stock en Shopify y la pasada retiene lo que no tiene stock.
+
+**Precio mínimo** (`meta:ebay_price_floor`, por defecto **12,99 €**, desde
+2026-10-27): se aplica a todo precio de eBay, venga de Discogs o del coste.
+Lo que quede por debajo sube a ese valor, y el origen del precio lo anota
+(`…; floor 12.99`). `"0"` lo desactiva. Los anuncios ya publicados no se
+recalculan.
 
 El tag `discogs:no` es nuevo: hasta ahora no había forma de marcar un disco
 como "no va a Discogs" (el rechazo de pending-review caduca a los 7 días y

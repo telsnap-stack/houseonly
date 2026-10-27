@@ -229,8 +229,9 @@ describe("listing content from the Shopify product", () => {
 	});
 
 	it("cost price: unitCost x multiplier, nothing without a cost", () => {
-		expect(priceFromCost(product(), 2)).toEqual({ value: 19, source: "cost", detail: "cost 9.50 × 2" });
-		expect(priceFromCost(product({}, { unitCost: 7.33 }), 2.5)?.value).toBe(18.33);
+		expect(priceFromCost(product(), 2)).toEqual({ value: 19.99, source: "cost", detail: "cost 9.50 × 2 = 19.00 → 19.99" });
+		expect(priceFromCost(product({}, { unitCost: 7.33 }), 2.5)?.value).toBe(18.99);
+		expect(priceFromCost(product({}, { unitCost: 9.995 }), 2)).toMatchObject({ value: 19.99, detail: "cost 9.99 × 2" });
 		expect(priceFromCost(product({}, { unitCost: null }), 2)).toBeNull();
 	});
 
@@ -530,13 +531,37 @@ describe("auto-list cron and price sources", () => {
 		addProduct("NODISC1", { tags: ["vinyl", "discogs:no"] }, { unitCost: 8 });
 		await includeSkus(E, ["NODISC1"]);
 		await runEbayAutolist(E);
-		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("16.00");
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("16.99");
 		expect(discogs.getListing).not.toHaveBeenCalled();
 		await E.SYNC_STATE.put("meta:ebay_cost_multiplier", "2.5");
 		addProduct("NODISC2", { tags: ["discogs:no"] }, { unitCost: 8 });
 		await includeSkus(E, ["NODISC2"]);
 		await runEbayAutolist(E);
-		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("20.00");
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("20.99");
+	});
+
+	it("price floor (KV, default 12.99): any source below it goes up to it; 0 turns it off", async () => {
+		await live();
+		addProduct("CHEAP1", { tags: ["discogs:no"] }, { unitCost: 3.45 });            // 6.90 → 6.99 → floor
+		addProduct("CHEAP2"); await linkDiscogs("CHEAP2", 811, { price: { value: 7.5, currency: "EUR" } });
+		await includeSkus(E, ["CHEAP1", "CHEAP2"]);
+		await runEbayAutolist(E);
+		const prices = ebayCalls("POST", /offer$/).map(c => c.body.pricingSummary.price.value);
+		expect(prices).toEqual(["12.99", "12.99"]);
+		expect((await item("CHEAP1")).preview.price_source).toBe("cost 3.45 × 2 = 6.90 → 6.99; floor 12.99");
+		await E.SYNC_STATE.put("meta:ebay_price_floor", "15");
+		addProduct("CHEAP3", { tags: ["discogs:no"] }, { unitCost: 7 });                 // 14.00 → 14.99 → 15
+		await E.SYNC_STATE.put("meta:ebay_price_floor", "0");
+		addProduct("CHEAP4", { tags: ["discogs:no"] }, { unitCost: 3.45 });
+		await includeSkus(E, ["CHEAP4"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("6.99");
+		await E.SYNC_STATE.put("meta:ebay_price_floor", "15");
+		await includeSkus(E, ["CHEAP3"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("15.00");
+		const d = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(d.price_floor).toBe(15);
 	});
 
 	it("discogs:no without unit cost: held as 'no price source', never listed", async () => {
