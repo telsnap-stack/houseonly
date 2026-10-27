@@ -143,6 +143,19 @@ descripción, nuestras fotos y 1 unidad.
   fallaron así antes del arreglo (2026-10-27) vuelven solos a la cola en la
   siguiente pasada (`requeueEanFailures`).
 - No se añade texto de envío ni de Canarias.
+- **Nada que lleve fuera de eBay** (`stripOffEbayText`, desde 2026-10-27).
+  - Motivo: eBay ocultó anuncios por "ofrecer comprar o vender fuera de eBay".
+    El detonante fue PFGXX50LP, con "LISTEN LINK: https://open.spotify.com/…"
+    en el texto del distribuidor.
+  - Se quitan, con su frase o su línea: URLs, emails, líneas "Listen link" /
+    "Listen:", houseonly.store, Discogs, Instagram y @onlyhouseonly. Los
+    enlaces `<a>` se quedan en su texto.
+  - Se aplica a la descripción HTML y a la de texto plano. "House Only" como
+    nombre se queda.
+  - `scrubOffEbayTextOnLive` reenvía, limpios, los anuncios vivos que todavía lo llevan.
+  - Catálogo (2026-10-27): 1.380 de 1.524 descripciones tienen algún enlace en
+    el HTML, casi todos reproductores embebidos que ya se quitaban. **30**
+    habrían mandado texto de fuera de eBay (25 activos con stock).
 - **Categoría de la tienda** (`storeCategoryNames`, ruta completa: `["/House"]`).
   Mapa editable en KV `meta:ebay_store_category_map`:
   `{"by_tag": {"minimal": "Minimal", …}, "by_genre": {"house": "House", …}}`.

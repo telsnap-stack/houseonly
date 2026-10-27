@@ -5,14 +5,14 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
 	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
-	roundUpTo99, stripShippingText, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
+	roundUpTo99, stripShippingText, stripOffEbayText, OFF_EBAY_TEXT, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
 	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -1314,5 +1314,57 @@ describe("price floor on live listings", () => {
 		route("GET", /^\/sell\/inventory\/v1\/offer\/OFF-FP$/, { offerId: "OFF-FP", status: "PUBLISHED", categoryId: "176985", pricingSummary: { price: { value: "11.99", currency: "EUR" } } });
 		await applyStoreCategoriesToLive(E, { apply: true });
 		expect(ebayCalls("PUT", /offer\/OFF-FP$/)[0].body.pricingSummary.price.value).toBe("12.99");
+	});
+});
+
+describe("no pointers off eBay in the listing text", () => {
+	const DIRTY = '<p>Deep cuts from Chicago. Buy it at houseonly.store today! More on Discogs.</p>'
+		+ '<p>Follow @onlyhouseonly on Instagram.</p><p>Wholesale: info@houseonly.store. Listen <a href="https://soundcloud.com/x">here</a>.</p>'
+		+ '<p>House Only DJ Series Vol. 4.</p>';
+
+	it("strips links, emails, our shop, Discogs, Instagram and the handle, sentence by sentence", () => {
+		const out = stripOffEbayText(DIRTY);
+		expect(out).toBe("<p>Deep cuts from Chicago.</p><p>Listen here.</p><p>House Only DJ Series Vol. 4.</p>");
+		expect(OFF_EBAY_TEXT.test(out)).toBe(false);
+		expect(OFF_EBAY_TEXT.test(DIRTY)).toBe(true);
+		expect(stripOffEbayText("<p>Released on www.label.com/ep in 2019.</p><p>Classic.</p>")).toBe("<p>Classic.</p>");
+		// PFGXX50LP: the distributor's listen line, in HTML and in plain text.
+		expect(stripOffEbayText("<p>Heavy disco.<br>LISTEN LINK: https://open.spotify.com/album/abc</p>")).toBe("<p>Heavy disco.<br></p>");
+		expect(stripOffEbayText("Heavy disco\nLISTEN LINK: https://open.spotify.com/album/abc\nA1 Track")).toBe("Heavy disco\n\nA1 Track");
+		expect(stripOffEbayText("<p>Listen: soundcloud and bandcamp</p><p>Ok.</p>")).toBe("<p>Ok.</p>");
+		expect(OFF_EBAY_TEXT.test("LISTEN LINK - see below")).toBe(true);
+	});
+
+	it("the builder sends neither the HTML nor the plain description with them", () => {
+		const p = buildEbayListing(product({ descriptionHtml: DIRTY }), { media: GRADE_MINT, sleeve: GRADE_MINT, source: "condition-tag" }, DISCOGS_PRICE, { ...CFG, withEan: true });
+		expect(OFF_EBAY_TEXT.test(p.offer.listingDescription)).toBe(false);
+		expect(OFF_EBAY_TEXT.test(p.inventoryItem.product.description)).toBe(false);
+		expect(p.offer.listingDescription).toContain("Deep cuts from Chicago.");
+	});
+
+	it("live listings: only the affected ones are re-sent, both texts cleaned, the rest as eBay has it", async () => {
+		route("GET", /^\/sell\/inventory\/v1\/inventory_item\?/, { inventoryItems: [{ sku: "D1" }, { sku: "C1" }] });
+		for (const [sku, id, html, text] of [["D1", "OFF-D", DIRTY, "Deep cuts. Buy at houseonly.store."], ["C1", "OFF-C", "<p>Clean.</p>", "Clean."]]) {
+			route("GET", new RegExp(`^/sell/inventory/v1/offer\\?sku=${sku}&`), { offers: [{ offerId: id, status: "PUBLISHED", listing: { listingId: "L" + sku } }] });
+			route("GET", new RegExp(`^/sell/inventory/v1/offer/${id}$`), { offerId: id, sku, status: "PUBLISHED", categoryId: "176985", listingDescription: html,
+				pricingSummary: { price: { value: "15.99", currency: "EUR" } }, storeCategoryNames: ["/House"] });
+			route("GET", new RegExp(`^/sell/inventory/v1/inventory_item/${sku}$`), { sku, locale: "es_ES", condition: "NEW",
+				availability: { shipToLocationAvailability: { quantity: 1 } }, product: { title: "T " + sku, description: text, aspects: { Artista: ["A"] }, imageUrls: ["https://x/a.jpg"], ean: ["No aplicable"] } });
+		}
+		route("PUT", /^\/sell\/inventory\/v1\/(offer|inventory_item)\//, () => new Response(null, { status: 204 }));
+
+		const dry = await scrubOffEbayTextOnLive(E, { apply: false });
+		expect(dry).toEqual({ apply: false, live: 2, affected: [{ sku: "D1", where: ["listingDescription", "product.description"], result: "would_fix" }] });
+		expect(ebayCalls("PUT")).toHaveLength(0);
+
+		const r = await scrubOffEbayTextOnLive(E, { apply: true });
+		expect(r.affected).toEqual([{ sku: "D1", where: ["listingDescription", "product.description"], result: "fixed" }]);
+		const [inv] = ebayCalls("PUT", /inventory_item\/D1$/);
+		expect(inv.body).toEqual({ condition: "NEW", availability: { shipToLocationAvailability: { quantity: 1 } },
+			product: { title: "T D1", description: "Deep cuts.", aspects: { Artista: ["A"] }, imageUrls: ["https://x/a.jpg"], ean: ["No aplicable"] } });
+		const [off] = ebayCalls("PUT", /offer\/OFF-D$/);
+		expect(OFF_EBAY_TEXT.test(off.body.listingDescription)).toBe(false);
+		expect(off.body).toMatchObject({ storeCategoryNames: ["/House"], pricingSummary: { price: { value: "15.99" } } });
+		expect(ebayCalls("PUT", /C1|OFF-C/)).toHaveLength(0);
 	});
 });
