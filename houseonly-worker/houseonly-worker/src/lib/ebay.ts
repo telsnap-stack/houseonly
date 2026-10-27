@@ -384,7 +384,24 @@ async function checkStore(env: EbayEnv): Promise<StoreCheck> {
   return store;
 }
 
+// eBay 25002 "El campo EAN está vacío": a product without a barcode, before
+// EBAY_NO_GTIN_TEXT existed. Not the record's fault — it gets another go.
+const EAN_EMPTY_ERROR = /25002[\s\S]*\bEAN\b/;
+
+/** Failed records that only failed for a missing EAN go back to the queue. */
+export async function requeueEanFailures(env: EbayEnv): Promise<string[]> {
+  const out: string[] = [];
+  for (const m of (await listItemMetas(env)).filter(i => i.s === 'failed')) {
+    const it = await getItem(env, m.sku);
+    if (!it || it.status !== 'failed' || !EAN_EMPTY_ERROR.test(it.error || '')) continue;
+    await saveItem(env, { ...it, error: undefined, hold_reason: undefined, checked_at: undefined }, 'queued', 're-queued: EAN now sent as "No aplicable"');
+    out.push(m.sku);
+  }
+  return out;
+}
+
 export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean } = {}): Promise<AutolistResult> {
+  await requeueEanFailures(env);
   let mode = await getEbayAutolistMode(env);
   const result: AutolistResult = {
     ok: true, mode, checked: 0, listed: 0, would_list: 0, held: 0, failed: 0, held_by_reason: {},

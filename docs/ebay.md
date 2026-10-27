@@ -96,7 +96,13 @@ descripción, nuestras fotos y 1 unidad.
   la política de eBay.
 - **Catálogo (ePID)**: se manda el EAN y se usa
   `includeCatalogProductDetails: false`. Si eBay rechaza el anuncio, se
-  reintenta una vez sin EAN.
+  reintenta una vez sin el EAN real.
+- **Sin código de barras** (o con uno no válido): `product.ean = ["No aplicable"]`,
+  el texto de "no aplica" de eBay España (nota de `Product.ean` en la Inventory
+  API → página "Product Identifier Text"). EBAY_ES exige EAN en 176985: sin él,
+  `publishOffer` falla con **25002 "El campo EAN está vacío"**. Los discos que
+  fallaron así antes del arreglo (2026-10-27) vuelven solos a la cola en la
+  siguiente pasada (`requeueEanFailures`).
 - No se añade texto de envío ni de Canarias.
 - **Retenidos**, se revisan en cada pasada: pre-order (hasta que gradúe), sin
   stock, sin foto, no activo, no está en Shopify.
