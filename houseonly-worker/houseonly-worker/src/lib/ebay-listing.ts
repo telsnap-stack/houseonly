@@ -150,6 +150,7 @@ export interface EbaySourceProduct {
     barcode: string | null;
     inventoryQuantity: number | null;
     unitCost: number | null;      // inventoryItem.unitCost.amount (EUR)
+    weightKg?: number | null;     // inventoryItem.measurement.weight, in kg; null = not set
   };
 }
 
@@ -176,6 +177,7 @@ export type EbayHoldReason =
   | 'discogs_no_eur'          // linked listing priced in another currency
   | 'discogs_error'           // Discogs did not answer (usually 429): try next run
   | 'discogs_snapshot_caducado' // the Discogs inventory snapshot is over 48 h old
+  | 'sin_politica_envio'      // heavy parcel and its shipping policy isn't on eBay yet
   | 'sin_fuente_de_precio';   // discogs:no and no unit cost: flagged in the admin
 
 export interface EbayListingPayload {
@@ -396,7 +398,7 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
     includeCatalogProductDetails: false,
     listingDescription: listingDescription({ artist, title, label, catno: sku, genre, grades: used ? grades : null, html }),
     listingPolicies: {
-      fulfillmentPolicyId: cfg.policies.fulfillmentPolicyId,
+      fulfillmentPolicyId: fulfillmentPolicyFor(shippingBandFor(p.variant.weightKg), cfg.policies) || cfg.policies.fulfillmentPolicyId,
       paymentPolicyId: cfg.policies.paymentPolicyId,
       returnPolicyId: cfg.policies.returnPolicyId,
     },
@@ -416,11 +418,38 @@ export const PRODUCT_BY_SKU_QUERY = `
       nodes {
         id status title vendor tags descriptionHtml
         media(first: 24) { nodes { ... on MediaImage { image { url } } } }
-        variants(first: 10) { nodes { id sku price barcode inventoryQuantity inventoryItem { unitCost { amount currencyCode } } } }
+        variants(first: 10) { nodes { id sku price barcode inventoryQuantity inventoryItem { unitCost { amount currencyCode } measurement { weight { unit value } } } } }
       }
     }
   }
 `;
+
+const KG_PER_UNIT: Record<string, number> = { KILOGRAMS: 1, GRAMS: 0.001, POUNDS: 0.45359237, OUNCES: 0.028349523125 };
+
+/** Shopify Weight → kg. Zero or missing counts as "not set": Shopify stores 0 when nobody filled it in. */
+export function weightToKg(w: { unit?: string; value?: number } | null | undefined): number | null {
+  const k = KG_PER_UNIT[String(w?.unit || '')];
+  const v = Number(w?.value);
+  return k && v > 0 ? Math.round(v * k * 1000) / 1000 : null;
+}
+
+// Shipping by parcel weight (Eduardo, 2026-10-27). 3+ starts at 1.0 kg, not
+// the store's 1.125: our import weights make a 3LP 1.05 kg (0.15 + 3 × 0.30),
+// which must ship as 3+; a 2LP (0.75, or 0.90 on older imports) stays on 2.
+export const SHIPPING_BAND_KG = { standardMax: 0.675, threeFrom: 1.0 };
+export type ShippingBand = 'standard' | 'two' | 'three';
+
+/** Weight band → which eBay shipping policy. No weight: the one-record policy (and the admin flags it). */
+export function shippingBandFor(kg: number | null | undefined): ShippingBand {
+  if (!(kg && kg > 0) || kg <= SHIPPING_BAND_KG.standardMax) return 'standard';
+  return kg < SHIPPING_BAND_KG.threeFrom ? 'two' : 'three';
+}
+
+/** The policy ID for a band, or null when that policy doesn't exist on eBay. */
+export function fulfillmentPolicyFor(band: ShippingBand, policies: EbayPolicyIds): string | null {
+  if (band === 'standard') return policies.fulfillmentPolicyId;
+  return policies.fulfillmentByBand?.[band] || null;
+}
 
 /** Admin API product node → EbaySourceProduct for the exact SKU, or null. */
 export function toSourceProduct(nodes: any[], sku: string): EbaySourceProduct | null {
@@ -441,6 +470,7 @@ export function toSourceProduct(nodes: any[], sku: string): EbaySourceProduct | 
         // The shop currency is EUR; a cost in anything else is not used.
         unitCost: v.inventoryItem?.unitCost && (v.inventoryItem.unitCost.currencyCode || 'EUR') === 'EUR'
           ? Number(v.inventoryItem.unitCost.amount) || null : null,
+        weightKg: weightToKg(v.inventoryItem?.measurement?.weight),
       },
     };
   }

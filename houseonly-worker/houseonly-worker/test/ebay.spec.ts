@@ -5,14 +5,14 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
 	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
-	roundUpTo99, stripShippingText, stripOffEbayText, OFF_EBAY_TEXT, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
+	roundUpTo99, stripShippingText, stripOffEbayText, weightToKg, shippingBandFor, OFF_EBAY_TEXT, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
 	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -43,7 +43,7 @@ const product = (over: Partial<EbaySourceProduct> = {}, v: Partial<EbaySourcePro
 	tags: ["vinyl", "label:Bond Street", "genre:deephouse", "source:ws"],
 	descriptionHtml: "<p>Deep cuts.</p><script>alert(1)</script>",
 	images: ["https://cdn.shopify.com/s/files/a.jpg"],
-	variant: { id: "gid://shopify/ProductVariant/9", sku: "BOND12081C", price: "14.99", barcode: "4006381333931", inventoryQuantity: 2, unitCost: 9.5, ...v },
+	variant: { id: "gid://shopify/ProductVariant/9", sku: "BOND12081C", price: "14.99", barcode: "4006381333931", inventoryQuantity: 2, unitCost: 9.5, weightKg: 0.45, ...v },
 	...over,
 });
 const CFG = {
@@ -55,7 +55,10 @@ const DISCOGS_PRICE: EbayPrice = { value: 21.5, source: "discogs", detail: "Disc
 const node = (p = product()) => ({
 	id: p.productId, status: p.status, title: p.title, vendor: p.vendor, tags: p.tags, descriptionHtml: p.descriptionHtml,
 	media: { nodes: p.images.map(url => ({ image: { url } })) },
-	variants: { nodes: [{ ...p.variant, inventoryItem: p.variant.unitCost ? { unitCost: { amount: String(p.variant.unitCost), currencyCode: "EUR" } } : null }] },
+	variants: { nodes: [{ ...p.variant, inventoryItem: {
+		unitCost: p.variant.unitCost ? { amount: String(p.variant.unitCost), currencyCode: "EUR" } : null,
+		measurement: { weight: p.variant.weightKg ? { unit: "GRAMS", value: Math.round(p.variant.weightKg * 1000) } : { unit: "KILOGRAMS", value: 0 } },
+	} }] },
 });
 
 // ── Shopify + Discogs fakes ─────────────────────────────────────────
@@ -128,7 +131,11 @@ function installFetch() {
 	calls = [];
 	routes = [];
 	route("POST", /^\/identity\/v1\/oauth2\/token$/, { access_token: "tok", expires_in: 7200 });
-	route("GET", /^\/sell\/account\/v1\/fulfillment_policy\/get_by_policy_name/, { fulfillmentPolicyId: "F1", name: EBAY_POLICY_NAMES.fulfillment });
+	route("GET", /^\/sell\/account\/v1\/fulfillment_policy\/get_by_policy_name/, (c) => {
+		const name = new URLSearchParams(c.path.split("?")[1]).get("name");
+		const id = { [EBAY_POLICY_NAMES.fulfillment]: "F1", [EBAY_POLICY_NAMES.fulfillment2]: "F2", [EBAY_POLICY_NAMES.fulfillment3]: "F3" }[name!];
+		return id ? jsonResponse({ fulfillmentPolicyId: id, name }) : ebayError(404, 20403, "No policy found");
+	});
 	route("GET", /^\/sell\/account\/v1\/payment_policy\/get_by_policy_name/, { paymentPolicyId: "P1", name: EBAY_POLICY_NAMES.payment });
 	route("GET", /^\/sell\/account\/v1\/return_policy\/get_by_policy_name/, { returnPolicyId: "R1", name: EBAY_POLICY_NAMES.return });
 	route("GET", /^\/sell\/inventory\/v1\/location/, { locations: [{ merchantLocationKey: "madrid", merchantLocationStatus: "ENABLED" }] });
@@ -317,11 +324,12 @@ describe("listing content from the Shopify product", () => {
 
 describe("policies", () => {
 	it("resolves the three policies by name on EBAY_ES and caches them", async () => {
-		expect(await getPolicyIds(E)).toEqual({ fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" });
+		expect(await getPolicyIds(E)).toEqual({ fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1",
+			fulfillmentByBand: { standard: "F1", two: "F2", three: "F3" } });
 		const q = ebayCalls("GET", /get_by_policy_name/).map(c => decodeURIComponent(c.path));
 		expect(q.some(p => p.includes("marketplace_id=EBAY_ES") && p.includes(EBAY_POLICY_NAMES.return))).toBe(true);
 		await getPolicyIds(E);
-		expect(ebayCalls("GET", /get_by_policy_name/)).toHaveLength(3);
+		expect(ebayCalls("GET", /get_by_policy_name/)).toHaveLength(5);
 	});
 
 	it("uses the refresh token with Basic auth and caches the access token", async () => {
@@ -1366,5 +1374,69 @@ describe("no pointers off eBay in the listing text", () => {
 		expect(OFF_EBAY_TEXT.test(off.body.listingDescription)).toBe(false);
 		expect(off.body).toMatchObject({ storeCategoryNames: ["/House"], pricingSummary: { price: { value: "15.99" } } });
 		expect(ebayCalls("PUT", /C1|OFF-C/)).toHaveLength(0);
+	});
+});
+
+describe("shipping policy by weight", () => {
+	it("Shopify weight in any unit → kg; 0 or missing is 'not set'", () => {
+		expect(weightToKg({ unit: "GRAMS", value: 750 })).toBe(0.75);
+		expect(weightToKg({ unit: "KILOGRAMS", value: 1.05 })).toBe(1.05);
+		expect(weightToKg({ unit: "POUNDS", value: 2 })).toBe(0.907);
+		expect(weightToKg({ unit: "KILOGRAMS", value: 0 })).toBeNull();
+		expect(weightToKg(null)).toBeNull();
+	});
+
+	it("bands: ≤0.675 one record, under 1.0 two, from 1.0 three (3LP 1.05); no weight → one record", () => {
+		expect([0.45, 0.675, 0.676, 0.9, 0.999, 1.0, 1.05, 2.5, null].map(shippingBandFor))
+			.toEqual(["standard", "standard", "two", "two", "two", "three", "three", "three", "standard"]);
+	});
+
+	it("publishes each record with its weight's policy; no weight → one-record policy, flagged", async () => {
+		await live();
+		addProduct("LP1", {}, { weightKg: 0.45 }); addProduct("LP2", {}, { weightKg: 0.75 });
+		addProduct("LP3", {}, { weightKg: 1.35 }); addProduct("NOW", {}, { weightKg: null });
+		for (const [s, id] of [["LP1", 901], ["LP2", 902], ["LP3", 903], ["NOW", 904]] as const) await linkDiscogs(s, id);
+		await includeSkus(E, ["LP1", "LP2", "LP3", "NOW"]);
+		expect((await runEbayAutolist(E)).listed).toBe(4);
+		const pol = Object.fromEntries(ebayCalls("POST", /offer$/).map(c => [c.body.sku, c.body.listingPolicies.fulfillmentPolicyId]));
+		expect(pol).toEqual({ LP1: "F1", LP2: "F2", LP3: "F3", NOW: "F1" });
+		expect((await item("NOW")).no_weight).toBe(true);
+		expect((await item("NOW")).preview.shipping).toBe("Vinilos - envío estándar · SIN PESO");
+		expect((await item("LP3")).preview.shipping).toBe("Vinilos - envío 3+ discos · 1.35 kg");
+		const d = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(d.no_weight).toBe(1);
+		expect(d.items.find((i: any) => i.sku === "NOW").w).toBe(1);
+	});
+
+	it("a heavy record whose policy isn't on eBay yet waits; the rest publish", async () => {
+		await live();
+		route("GET", /^\/sell\/account\/v1\/fulfillment_policy\/get_by_policy_name/, (c) =>
+			new URLSearchParams(c.path.split("?")[1]).get("name") === EBAY_POLICY_NAMES.fulfillment
+				? jsonResponse({ fulfillmentPolicyId: "F1" }) : ebayError(404, 20403, "No policy found"));
+		addProduct("LP1", {}, { weightKg: 0.45 }); addProduct("LP3", {}, { weightKg: 1.35 });
+		await linkDiscogs("LP1", 905); await linkDiscogs("LP3", 906);
+		await includeSkus(E, ["LP1", "LP3"]);
+		const r = await runEbayAutolist(E);
+		expect(r).toMatchObject({ listed: 1, held_by_reason: { sin_politica_envio: 1 } });
+		expect((await item("LP3")).history.at(-1).note).toBe("sin_politica_envio: Vinilos - envío 3+ discos (1.35 kg)");
+	});
+
+	it("live listings move to their weight's policy; only listingPolicies changes", async () => {
+		addProduct("LP2", {}, { weightKg: 0.75 }); addProduct("NOW", {}, { weightKg: null });
+		route("GET", /^\/sell\/inventory\/v1\/inventory_item\?/, { inventoryItems: [{ sku: "BOND12081C" }, { sku: "LP2" }, { sku: "NOW" }] });
+		for (const [sku, id] of [["BOND12081C", "OFF-B"], ["LP2", "OFF-2"], ["NOW", "OFF-N"]]) {
+			route("GET", new RegExp(`^/sell/inventory/v1/offer\\?sku=${sku}&`), { offers: [{ offerId: id, status: "PUBLISHED", listing: { listingId: "L" + sku } }] });
+			route("GET", new RegExp(`^/sell/inventory/v1/offer/${id}$`), { offerId: id, sku, status: "PUBLISHED", categoryId: "176985", listingDescription: "x",
+				listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "24.99", currency: "EUR" } } });
+		}
+		route("PUT", /^\/sell\/inventory\/v1\/offer\//, () => new Response(null, { status: 204 }));
+		const dry = await applyShippingPolicyToLive(E, { apply: false });
+		expect(dry).toMatchObject({ live: 3, moved: 0, no_weight: ["NOW"], by_policy: { "Vinilos - envío estándar": 2, "Vinilos - envío 2 discos": 1 } });
+		expect(ebayCalls("PUT")).toHaveLength(0);
+		const r = await applyShippingPolicyToLive(E, { apply: true });
+		expect(r.moved).toBe(1);
+		const [put] = ebayCalls("PUT", /offer\//);
+		expect(put.path).toMatch(/OFF-2$/);
+		expect(put.body).toMatchObject({ listingPolicies: { fulfillmentPolicyId: "F2", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "24.99" } } });
 	});
 });
