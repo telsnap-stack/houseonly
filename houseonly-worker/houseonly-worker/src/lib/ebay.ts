@@ -76,6 +76,7 @@ const AUTOLIST_MODE_KEY = 'meta:ebay_autolist_mode';
 const SYNC_MODE_KEY = 'meta:ebay_sync_mode';
 const CATEGORY_KEY = 'meta:ebay_category_id';
 const COST_MULTIPLIER_KEY = 'meta:ebay_cost_multiplier';
+const PRICE_FLOOR_KEY = 'meta:ebay_price_floor';   // editable; "0" turns it off
 const LIMIT_KEY = 'meta:ebay_limit_hit';
 const GO_LIVE_KEY = 'meta:ebay_go_live_ts';
 const BACKFILL_KEY = 'meta:ebay_backfill';
@@ -106,6 +107,8 @@ export const EBAY_CHECKS_PER_RUN = 40;
 // egress IP and shared; the Discogs poll already finds it spent (memory).
 export const EBAY_DISCOGS_READS_PER_RUN = 10;
 export const EBAY_DEFAULT_COST_MULTIPLIER = 2;
+// No eBay price below this, whatever the source (Eduardo, 2026-10-27).
+export const EBAY_DEFAULT_PRICE_FLOOR = 12.99;
 // Backfill: first batch small enough to check every listing by eye.
 export const EBAY_BACKFILL_FIRST = 5;
 export const EBAY_BACKFILL_NEXT = 25;
@@ -294,6 +297,12 @@ async function costMultiplier(env: EbayEnv): Promise<number> {
   return n > 0 ? n : EBAY_DEFAULT_COST_MULTIPLIER;
 }
 
+async function priceFloor(env: EbayEnv): Promise<number> {
+  const raw = await env.SYNC_STATE.get(PRICE_FLOOR_KEY);
+  const n = raw === null ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : EBAY_DEFAULT_PRICE_FLOOR;
+}
+
 /** The only two price sources. Anything else holds the record. */
 // The Discogs side of a price: from the inventory snapshot while it is fresh,
 // a single getListing only for a listing the snapshot doesn't have.
@@ -315,7 +324,16 @@ async function discogsListingFor(
   }
 }
 
+/** The source's price, then the floor: anything under it goes up to it. */
 async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { discogs: number }, snap: DiscogsSnapshot | null): Promise<PriceDecision> {
+  const d = await priceFromSource(env, p, budget, snap);
+  if (!d.ok) return d;
+  const floor = await priceFloor(env);
+  if (d.price.value >= floor) return d;
+  return { ...d, price: { ...d.price, value: floor, detail: `${d.price.detail}; floor ${floor.toFixed(2)}` } };
+}
+
+async function priceFromSource(env: EbayFullEnv, p: EbaySourceProduct, budget: { discogs: number }, snap: DiscogsSnapshot | null): Promise<PriceDecision> {
   if (notForDiscogs(p.tags)) {
     const price = priceFromCost(p, await costMultiplier(env));
     return price ? { ok: true, price } : { ok: false, hold: 'sin_fuente_de_precio', detail: 'discogs:no and no Shopify unit cost' };
@@ -1151,6 +1169,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     autolist: await getEbayAutolistMode(env),
     sync: await getEbaySyncMode(env),
     cost_multiplier: await costMultiplier(env),
+    price_floor: await priceFloor(env),
     limit_hit: await readJsonKey(env, LIMIT_KEY),
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),

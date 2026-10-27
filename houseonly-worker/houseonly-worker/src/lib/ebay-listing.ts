@@ -304,7 +304,10 @@ export function holdReason(p: EbaySourceProduct): EbayHoldReason | null {
 export function priceFromCost(p: EbaySourceProduct, multiplier: number): EbayPrice | null {
   const cost = p.variant.unitCost;
   if (!(cost && cost > 0) || !(multiplier > 0)) return null;
-  return { value: Math.round(cost * multiplier * 100) / 100, source: 'cost', detail: `cost ${cost.toFixed(2)} × ${multiplier}` };
+  // Up to .99, like the Discogs prices: 3.45 × 2 = 6.90 → 6.99.
+  const raw = Math.round(cost * multiplier * 100) / 100;
+  const value = roundUpTo99(raw);
+  return { value, source: 'cost', detail: `cost ${cost.toFixed(2)} × ${multiplier}${value === raw ? '' : ` = ${raw.toFixed(2)} → ${value.toFixed(2)}`}` };
 }
 
 export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: EbayPrice, cfg: ListingConfig): EbayListingPayload {
