@@ -119,6 +119,7 @@ const GET_STORE_XML = '<?xml version="1.0" encoding="UTF-8"?><GetStoreResponse x
 	+ '<CustomCategory><CategoryID>54550759012</CategoryID><Name>UK Garage &amp; Breaks</Name><Order>3</Order></CustomCategory>'
 	+ '<CustomCategory><CategoryID>54550760012</CategoryID><Name>Drum &amp; Bass</Name><Order>4</Order></CustomCategory>'
 	+ '<CustomCategory><CategoryID>54550761012</CategoryID><Name>Bass Music</Name><Order>5</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>54550832012</CategoryID><Name>Techno</Name><Order>6</Order></CustomCategory>'
 	+ '<CustomCategory><CategoryID>1</CategoryID><Name>Other</Name><Order>6</Order></CustomCategory>'
 	+ '</CustomCategories></Store></GetStoreResponse>';
 
@@ -1087,7 +1088,8 @@ describe("eBay store categories", () => {
 		expect(cat(["genre:bassmusic", "Dubstep"])).toBe("Bass Music");
 		expect(cat(["genre:techno", "Techno - Minimal"])).toBe("Minimal");
 		expect(cat(["genre:deephouse", "Deep Minimal"])).toBe("Minimal");
-		expect(cat(["genre:techno"])).toBeNull();
+		expect(cat(["genre:techno"])).toBe("Techno");
+		expect(cat(["genre:electro"])).toBeNull();
 		expect(cat(["genre:jazz"])).toBeNull();
 		expect(cat(["vinyl"])).toBeNull();
 	});
@@ -1121,7 +1123,7 @@ describe("eBay store categories", () => {
 	});
 
 	it("one-off on live listings: dry reports, apply puts the offer back whole with the category", async () => {
-		addProduct("T1", { tags: ["genre:techno"] });
+		addProduct("T1", { tags: ["genre:jazz"] });
 		route("GET", /^\/sell\/inventory\/v1\/inventory_item\?/, { inventoryItems: [{ sku: "BOND12081C" }, { sku: "T1" }, { sku: "U1" }] });
 		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=U1/, { offers: [{ offerId: "OFF-U", status: "UNPUBLISHED" }] });
 		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=T1/, { offers: [{ offerId: "OFF-T", status: "PUBLISHED", listing: { listingId: "LT" } }] });
