@@ -935,7 +935,7 @@ import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './
 import { handleShopPolicies } from './lib/shop-policies';
 import {
   EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
-  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun,
+  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun, handleEbayStoreCategories,
 } from './lib/ebay';
 
 import {
@@ -2083,6 +2083,7 @@ export default {
     // ebay-exclude / ebay-include  POST Bearer {skus}
     // ebay-backfill POST Bearer {count?} — siguiente tanda del catalogo
     // ebay-run      POST Bearer {what: autolist|orders|both, force?}
+    // ebay-store-categories GET Bearer (mapa + categorias de la tienda) · POST {apply?} a los anuncios vivos
     // Los productos nuevos entran solos (products/create, ver sync.ts).
     // Independiente de sync35-mode: el auto-add de Discogs no se toca.
     if (action === 'ebay-notify') {
@@ -2102,6 +2103,9 @@ export default {
     }
     if (action === 'ebay-run' && request.method === 'POST') {
       return await handleEbayRun(request, env);
+    }
+    if (action === 'ebay-store-categories') {
+      return await handleEbayStoreCategories(request, env);
     }
 
     // ── FASE 3.5C: REVIEW DASHBOARD ─────────────────────────

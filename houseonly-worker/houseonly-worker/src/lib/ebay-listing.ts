@@ -84,6 +84,40 @@ export const EBAY_GENRE: Record<string, { genero: string; subgenero?: string }> 
   jazz: { genero: 'Jazz' },
 };
 
+// Store categories (our eBay Store, set up by hand in Seller Hub) by genre.
+// Editable in KV as meta:ebay_store_category_map, same shape; these are the
+// defaults. `by_tag` goes first and matches a raw tag (case-insensitive): it
+// catches what our taxonomy keeps as a sub-genre tag and not as a canonical
+// one, like "Minimal" (canonical techno). Then `by_genre`, by genres.mjs id.
+// No match → no store category (eBay files it under "Other").
+export interface StoreCategoryMap {
+  by_tag: Record<string, string>;
+  by_genre: Record<string, string>;
+}
+export const EBAY_STORE_CATEGORY_DEFAULTS: StoreCategoryMap = {
+  by_tag: {
+    'minimal': 'Minimal', 'deep minimal': 'Minimal', 'techno - minimal': 'Minimal',
+    'breakbeat': 'UK Garage & Breaks',
+  },
+  by_genre: {
+    house: 'House', deephouse: 'House', techhouse: 'House',
+    garage: 'UK Garage & Breaks',
+    drumandbass: 'Drum & Bass',
+    bassmusic: 'Bass Music',
+  },
+};
+
+/** The store category name for a product's tags, or null. */
+export function storeCategoryFor(tags: string[], map: StoreCategoryMap): string | null {
+  const byTag = Object.fromEntries(Object.entries(map.by_tag || {}).map(([k, v]) => [k.trim().toLowerCase(), v]));
+  for (const t of tags || []) {
+    const hit = byTag[String(t).trim().toLowerCase()];
+    if (hit) return hit;
+  }
+  const ours = generoDeTags(tags);
+  return (ours && map.by_genre?.[ours.id]) || null;
+}
+
 /** Discogs price → the eBay price: up to the next .99 (12.97 → 12.99, 21.23 → 21.99, 12.99 stays). */
 export function roundUpTo99(value: number): number {
   const cents = Math.round(value * 100);
@@ -249,6 +283,7 @@ export interface ListingConfig {
   policies: EbayPolicyIds;
   merchantLocationKey: string;
   withEan: boolean;
+  storeCategory?: string | null;   // a name the store has (checked by the caller)
 }
 
 /** Can this product be listed right now (price aside)? Checked before any eBay or Discogs call. */
@@ -331,6 +366,8 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
       returnPolicyId: cfg.policies.returnPolicyId,
     },
     pricingSummary: { price: { value: price.value.toFixed(2), currency: 'EUR' } },
+    // Full path from the store root: our categories are all top level.
+    ...(cfg.storeCategory ? { storeCategoryNames: [`/${cfg.storeCategory}`] } : {}),
   };
 
   return { sku, inventoryItem, offer, ean, grades, price };

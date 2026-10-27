@@ -104,6 +104,18 @@ descripción, nuestras fotos y 1 unidad.
   fallaron así antes del arreglo (2026-10-27) vuelven solos a la cola en la
   siguiente pasada (`requeueEanFailures`).
 - No se añade texto de envío ni de Canarias.
+- **Categoría de la tienda** (`storeCategoryNames`, ruta completa: `["/House"]`).
+  Mapa editable en KV `meta:ebay_store_category_map`:
+  `{"by_tag": {"minimal": "Minimal", …}, "by_genre": {"house": "House", …}}`.
+  Primero `by_tag` (tag crudo, sin mayúsculas: recoge lo que la taxonomía deja
+  como sub-tag, p. ej. "Minimal", cuyo canónico es techno), luego `by_genre`
+  (id de `genres.mjs`). Sin mapa en KV, valen los de `EBAY_STORE_CATEGORY_DEFAULTS`.
+  Solo se manda un nombre que la tienda tenga: la lista se lee con Trading
+  **GetStore** (la Stores API REST pide el scope `sell.stores`, que nuestro
+  consentimiento no tiene) y se cachea 6 h en `meta:ebay_store_categories`.
+  Sin coincidencia, o si GetStore falla sin caché, el anuncio sale igual, sin
+  categoría (eBay lo pone en "Other"). Modificar un anuncio es gratis en eBay
+  (salvo mejoras o subir el precio).
 - **Retenidos**, se revisan en cada pasada: pre-order (hasta que gradúe), sin
   stock, sin foto, no activo, no está en Shopify.
 
@@ -133,6 +145,7 @@ están en la config de producción. Staging se prueba a mano con
 | `ebay-exclude` · `ebay-include` | POST `{skus}` | Bearer |
 | `ebay-backfill` | POST `{count?, reset?}` (409 si el límite de venta lo impide) | Bearer |
 | `ebay-run` | POST `{what: autolist\|orders\|both, force?}` | Bearer |
+| `ebay-store-categories` | GET (mapa, categorías de la tienda, nombres que faltan) · POST `{apply?}` (pone la categoría en los anuncios ya publicados; sin `apply` solo informa) | Bearer |
 
 ## Puesta en marcha (cuando eBay apruebe las claves)
 
