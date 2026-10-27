@@ -35,6 +35,12 @@ import { EBAY_MARKETPLACE } from './ebay-api';
 // once the keys arrive. Override without a deploy: KV meta:ebay_category_id.
 export const EBAY_DEFAULT_CATEGORY_ID = '176985';
 
+// EBAY_ES requires an EAN in 176985 (publish fails with 25002 "El campo EAN
+// está vacío"). With no barcode, eBay wants its per-site "does not apply"
+// text in product.ean: "No aplicable" for eBay Spain (Inventory API,
+// Product.ean note → "Product Identifier Text" page, checked 2026-10-27).
+export const EBAY_NO_GTIN_TEXT = 'No aplicable';
+
 // eBay title limit: 80 characters.
 const TITLE_MAX = 80;
 // product.description limit is 4000 characters (Inventory API spec).
@@ -295,7 +301,9 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
     aspects,
     imageUrls: p.images.filter(u => /^https:\/\//.test(u)).slice(0, IMAGES_MAX),
   };
-  if (ean) product.ean = [ean];
+  // A real EAN when we have one (and the catalogue retry hasn't dropped it);
+  // otherwise eBay's "does not apply" text. `ean` in the result stays the real one.
+  product.ean = [ean || EBAY_NO_GTIN_TEXT];
 
   const inventoryItem: any = {
     // One copy per channel, like the Discogs listing: a sale anywhere ends it.
