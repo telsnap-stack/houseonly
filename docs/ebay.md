@@ -109,7 +109,7 @@ descripción, nuestras fotos y 1 unidad.
   `{"by_tag": {"minimal": "Minimal", …}, "by_genre": {"house": "House", …}}`.
   Primero `by_tag` (tag crudo, sin mayúsculas: recoge lo que la taxonomía deja
   como sub-tag, p. ej. "Minimal", cuyo canónico es techno), luego `by_genre`
-  (id de `genres.mjs`). Sin mapa en KV, valen los de `EBAY_STORE_CATEGORY_DEFAULTS`.
+  (id de `genres.mjs`; techno → "Techno" desde 2026-10-27). Sin mapa en KV, valen los de `EBAY_STORE_CATEGORY_DEFAULTS`.
   Solo se manda un nombre que la tienda tenga: la lista se lee con Trading
   **GetStore** (la Stores API REST pide el scope `sell.stores`, que nuestro
   consentimiento no tiene) y se cachea 6 h en `meta:ebay_store_categories`.
