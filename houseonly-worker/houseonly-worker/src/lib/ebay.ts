@@ -50,11 +50,11 @@ import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
   challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
-  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, type StoreCheck, type EbayEnv, type EbayOrder,
+  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, getInventoryItem, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
   buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
-  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
+  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, OFF_EBAY_TEXT, stripOffEbayText, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
   shopifyAdminGraphQL, findVariantBySkuLoose, getVariantsStock, createDiscogsOrder,
@@ -570,6 +570,62 @@ export async function raiseLiveToFloor(env: EbayFullEnv, skus: string[]): Promis
       out.push({ sku, result: 'raised', from, to: floor.toFixed(2) });
     } catch (e: any) {
       out.push({ sku, result: 'failed', from, error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
+// createOrReplaceInventoryItem's request fields (InventoryItem, Inventory API spec).
+const PUT_INVENTORY_ITEM_FIELDS = ['availability', 'condition', 'conditionDescription', 'conditionDescriptors', 'packageWeightAndSize', 'product'];
+
+export interface OffEbayScrubResult {
+  apply: boolean;
+  live: number;
+  affected: Array<{ sku: string; where: string[]; result: 'would_fix' | 'fixed' | 'failed'; error?: string }>;
+}
+
+/**
+ * Live listings whose eBay text still points off eBay (published before
+ * stripOffEbayText existed): the offer's listingDescription and the inventory
+ * item's product.description go back cleaned, everything else as eBay has it.
+ */
+// eBay's Inventory API answers the odd 500 (25001 "system error"): one more try.
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); } catch { await new Promise(r => setTimeout(r, 2000)); return fn(); }
+}
+
+export async function scrubOffEbayTextOnLive(env: EbayFullEnv, opts: { apply: boolean }): Promise<OffEbayScrubResult> {
+  const out: OffEbayScrubResult = { apply: opts.apply, live: 0, affected: [] };
+  for (const sku of await listInventorySkus(env)) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') continue;
+    out.live++;
+    let offer: any, inv: any;
+    try {
+      [offer, inv] = await withOneRetry(() => Promise.all([getOffer(env, summary.offerId), getInventoryItem(env, sku)]));
+    } catch (e: any) {
+      out.affected.push({ sku, where: [], result: 'failed', error: `read: ${e?.message || e}` });
+      continue;
+    }
+    const where: string[] = [];
+    if (OFF_EBAY_TEXT.test(offer?.listingDescription || '')) where.push('listingDescription');
+    if (OFF_EBAY_TEXT.test(inv?.product?.description || '')) where.push('product.description');
+    if (OFF_EBAY_TEXT.test(inv?.product?.title || '')) where.push('title');   // reported only: titles aren't rewritten
+    if (!where.length) continue;
+    if (!opts.apply) { out.affected.push({ sku, where, result: 'would_fix' }); continue; }
+    try {
+      if (where.includes('product.description')) {
+        const body: any = {};
+        for (const k of PUT_INVENTORY_ITEM_FIELDS) if (inv[k] !== undefined) body[k] = inv[k];
+        body.product = { ...inv.product, description: stripOffEbayText(inv.product.description).trim() || inv.product.title };
+        await putInventoryItem(env, sku, body);
+      }
+      if (where.includes('listingDescription')) {
+        await putLiveOffer(env, summary.offerId, { ...offerForUpdate(offer), listingDescription: stripOffEbayText(offer.listingDescription) });
+      }
+      out.affected.push({ sku, where, result: 'fixed' });
+    } catch (e: any) {
+      out.affected.push({ sku, where, result: 'failed', error: e?.message || String(e) });
     }
   }
   return out;
