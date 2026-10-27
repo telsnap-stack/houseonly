@@ -12,7 +12,7 @@ import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -276,7 +276,7 @@ describe("listing content from the Shopify product", () => {
 
 	it("drops an invalid barcode and keeps the title within 80 chars", () => {
 		const p = buildEbayListing(product({}, { barcode: "123" }), gradesFor([])!, DISCOGS_PRICE, { ...CFG, withEan: true });
-		expect(p.inventoryItem.product.ean).toBeUndefined();
+		expect(p.inventoryItem.product.ean).toEqual(["No aplicable"]);
 		expect(ebayTitle("A Very Long Artist Name Indeed", "An Extremely Long Title That Goes On And On Forever More", "CAT001").length).toBeLessThanOrEqual(80);
 		expect(ebayTitle("Artist", "Title", "X1")).toBe("Artist - Title X1 Vinilo");
 	});
@@ -650,7 +650,34 @@ describe("auto-list cron and price sources", () => {
 		expect((await runEbayAutolist(E)).listed).toBe(1);
 		const puts = ebayCalls("PUT", /inventory_item/);
 		expect(puts[0].body.product.ean).toEqual(["4006381333931"]);
-		expect(puts[1].body.product.ean).toBeUndefined();
+		expect(puts[1].body.product.ean).toEqual(["No aplicable"]);   // EAN is required on EBAY_ES
+	});
+
+	it("no barcode: sends eBay Spain's 'No aplicable' as the EAN (25002 otherwise)", async () => {
+		await live();
+		addProduct("NOEAN1", {}, { barcode: "" });
+		addProduct("BADEAN", {}, { barcode: "123" });                  // not a valid GTIN
+		await linkDiscogs("NOEAN1", 950); await linkDiscogs("BADEAN", 951);
+		await includeSkus(E, ["NOEAN1", "BADEAN"]);
+		expect((await runEbayAutolist(E)).listed).toBe(2);
+		for (const c of ebayCalls("PUT", /inventory_item/)) expect(c.body.product.ean).toEqual(["No aplicable"]);
+	});
+
+	it("records that failed on the empty EAN (25002) are re-queued and publish on the next pass", async () => {
+		await live();
+		addProduct("AOW003", {}, { barcode: "" }); await linkDiscogs("AOW003", 960);
+		addProduct("OTHERF"); await linkDiscogs("OTHERF", 961);
+		await includeSkus(E, ["AOW003", "OTHERF"]);
+		const fail = (sku: string, error: string) => E.SYNC_STATE.get(`ebay:item:${sku}`).then(async (raw: string) => {
+			const it = JSON.parse(raw);
+			await E.SYNC_STATE.put(`ebay:item:${sku}`, JSON.stringify({ ...it, status: "failed", error }), { metadata: { s: "failed", a: it.selected_at } });
+		});
+		await fail("AOW003", "eBay 400 25002: A user error has occurred. El campo EAN está vacío. Añade EAN al anuncio y vuelve a intentarlo.");
+		await fail("OTHERF", "eBay 400 25002: A user error has occurred. Falta la marca.");
+		expect(await requeueEanFailures(E)).toEqual(["AOW003"]);
+		expect((await item("OTHERF")).status).toBe("failed");          // other errors stay failed
+		expect(await runEbayAutolist(E)).toMatchObject({ listed: 1 });
+		expect(await item("AOW003")).toMatchObject({ status: "listed" });
 	});
 
 	it("a refused record is marked failed and the batch carries on", async () => {
