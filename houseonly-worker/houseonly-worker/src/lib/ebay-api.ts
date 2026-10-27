@@ -243,6 +243,41 @@ export async function getSellingLimitQuantity(env: EbayEnv): Promise<number | nu
   return typeof q === 'number' ? q : null;
 }
 
+export interface StoreCheck {
+  has_store: boolean;
+  subscriptions: Array<{ type: string; level: string; marketplace: string }>;
+  checked_at: string;
+  error?: string;
+}
+
+// subscriptionType of an eBay Store, as getSubscription returned it for our
+// account on 2026-10-27 (Tienda Avanzada):
+//   {"subscriptionType":"STORE_PLAN","subscriptionLevel":"Featured",
+//    "marketplaceId":"EBAY_ES","term":{"value":1,"unit":"MONTH"}}
+export const EBAY_STORE_SUBSCRIPTION_TYPE = 'STORE_PLAN';
+
+/**
+ * Does the seller have an eBay Store subscription on EBAY_ES (Account API
+ * getSubscription)? Without one, a business seller pays an insertion fee for
+ * every listing (no free allowance), so auto-list must not publish. Exact
+ * match on STORE_PLAN; anything else counts as no store and the admin shows
+ * what eBay returned. A failed call is reported in `error`.
+ */
+export async function getStoreSubscription(env: EbayEnv): Promise<StoreCheck> {
+  const checked_at = new Date().toISOString();
+  try {
+    const data = await ebayRequest(env, 'GET', '/sell/account/v1/subscription?limit=100');
+    const subscriptions = (data?.subscriptions || []).map((s: any) => ({
+      type: String(s?.subscriptionType || ''), level: String(s?.subscriptionLevel || ''), marketplace: String(s?.marketplaceId || ''),
+    }));
+    const has_store = subscriptions.some((s: { type: string; marketplace: string }) =>
+      s.type === EBAY_STORE_SUBSCRIPTION_TYPE && s.marketplace === EBAY_MARKETPLACE);
+    return { has_store, subscriptions, checked_at };
+  } catch (e: any) {
+    return { has_store: false, subscriptions: [], checked_at, error: e?.message || String(e) };
+  }
+}
+
 // ── INVENTORY ───────────────────────────────────────────────────────
 
 /**

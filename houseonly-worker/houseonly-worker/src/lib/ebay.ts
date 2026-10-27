@@ -50,7 +50,7 @@ import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
   challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
-  type EbayEnv, type EbayOrder,
+  getStoreSubscription, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
   buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
@@ -82,6 +82,9 @@ const AUTOLIST_LAST_RUN = 'meta:ebay_autolist_last_run';
 // Continuous backfill (cron): 'off' stops it; the admin button keeps working.
 const AUTOBACKFILL_MODE_KEY = 'meta:ebay_autobackfill_mode';
 const AUTOBACKFILL_LAST_RUN = 'meta:ebay_autobackfill_last_run';
+// Last getSubscription result: no eBay store → auto-list never publishes.
+const STORE_CHECK_KEY = 'meta:ebay_store_check';
+const STORE_CHECK_MAX_AGE_MS = 10 * 60 * 1000;
 const ORDERS_LAST_RUN = 'meta:ebay_orders_last_run';
 const ITEM_PREFIX = 'ebay:item:';
 const LISTING_PREFIX = 'ebay:listing:';
@@ -329,7 +332,10 @@ async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { di
 
 export interface AutolistResult {
   ok: boolean;
-  mode: EbayMode;
+  mode: EbayMode;           // what the pass actually did
+  // Switch set to live but the pass ran dry: no eBay store subscription (every
+  // listing would pay an insertion fee), or the check itself failed.
+  store_guard?: 'no_store' | 'check_failed';
   checked: number;
   listed: number;
   would_list: number;
@@ -371,8 +377,15 @@ async function publishListing(env: EbayFullEnv, payload: ReturnType<typeof build
 const pendingStatuses = (mode: EbayMode): Set<EbayItemStatus> =>
   new Set<EbayItemStatus>(mode === 'live' ? ['queued', 'held', 'would_list'] : ['queued', 'held']);
 
+/** Fresh getSubscription result, saved for the admin. */
+async function checkStore(env: EbayEnv): Promise<StoreCheck> {
+  const store = await getStoreSubscription(env);
+  await env.SYNC_STATE.put(STORE_CHECK_KEY, JSON.stringify(store));
+  return store;
+}
+
 export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean } = {}): Promise<AutolistResult> {
-  const mode = await getEbayAutolistMode(env);
+  let mode = await getEbayAutolistMode(env);
   const result: AutolistResult = {
     ok: true, mode, checked: 0, listed: 0, would_list: 0, held: 0, failed: 0, held_by_reason: {},
     pending: 0, finished_at: '',
@@ -385,9 +398,10 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   };
 
   // Never-checked first, then the oldest check: every held record comes round.
-  const queue = (await listItemMetas(env))
-    .filter(i => pendingStatuses(mode).has(i.s))
+  const metas = await listItemMetas(env);
+  const queueFor = (m: EbayMode) => metas.filter(i => pendingStatuses(m).has(i.s))
     .sort((a, b) => (a.c || '').localeCompare(b.c || '') || a.a.localeCompare(b.a));
+  let queue = queueFor(mode);
   if (queue.length === 0) return finish();
 
   let cfg: { categoryId: string; policies: any; merchantLocationKey: string } | null = null;
@@ -399,6 +413,17 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
         if (Date.parse(JSON.parse(limit).until) > Date.now()) { result.stopped = 'cooldown'; return finish(); }
       } catch { /* malformed → ignore */ }
     }
+    // Checked every pass that has work, before anything is published. No
+    // store subscription (or no answer) → this pass runs dry.
+    const store = await checkStore(env);
+    if (!store.has_store) {
+      mode = 'dry'; result.mode = 'dry';
+      result.store_guard = store.error ? 'check_failed' : 'no_store';
+      queue = queueFor('dry');
+      if (queue.length === 0) return finish();
+    }
+  }
+  if (mode === 'live') {
     try {
       cfg = {
         categoryId: (await env.SYNC_STATE.get(CATEGORY_KEY)) || EBAY_DEFAULT_CATEGORY_ID,
@@ -651,6 +676,7 @@ export async function runEbayAutoBackfill(env: EbayFullEnv, pass: AutolistResult
     return r;
   };
   if ((await env.SYNC_STATE.get(AUTOBACKFILL_MODE_KEY)) === 'off') return skip('off');
+  if (pass.store_guard) return skip(`no eBay store (${pass.store_guard})`);
   if (pass.mode !== 'live') return skip('autolist not live');
   if (pass.stopped) return skip(`pass stopped: ${pass.stopped}`);
   const waiting = (await listItemMetas(env)).filter(i => i.s === 'queued' || i.s === 'would_list').length;
@@ -949,6 +975,14 @@ export async function handleEbayMode(request: Request, env: EbayFullEnv): Promis
   return res({ autolist: await getEbayAutolistMode(env), sync: await getEbaySyncMode(env), configured: ebayConfigured(env) });
 }
 
+/** Store check for the admin: the saved one if recent, else a fresh call. */
+async function storeForAdmin(env: EbayFullEnv): Promise<StoreCheck | null> {
+  if (!ebayConfigured(env)) return null;
+  const saved = await readJsonKey(env, STORE_CHECK_KEY) as StoreCheck | null;
+  if (saved?.checked_at && Date.now() - Date.parse(saved.checked_at) < STORE_CHECK_MAX_AGE_MS) return saved;
+  return checkStore(env);
+}
+
 /**
  * GET ?action=ebay-items (Bearer) — the queue (from list metadata, no per-record
  * reads), counts per status and hold reason, modes, last runs, backfill state.
@@ -976,6 +1010,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     limit_hit: await readJsonKey(env, LIMIT_KEY),
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),
+    store: await storeForAdmin(env),
     autobackfill: (await env.SYNC_STATE.get(AUTOBACKFILL_MODE_KEY)) === 'off' ? 'off' : 'on',
     autobackfill_last_run: await readJsonKey(env, AUTOBACKFILL_LAST_RUN),
     orders_last_run: await readJsonKey(env, ORDERS_LAST_RUN),

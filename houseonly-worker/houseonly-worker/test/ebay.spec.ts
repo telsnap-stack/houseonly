@@ -125,6 +125,7 @@ function installFetch() {
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/publish$/, { listingId: "LIST-1" });
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/withdraw$/, { listingId: "LIST-1" });
 	route("GET", /^\/sell\/account\/v1\/privilege$/, { sellerRegistrationCompleted: true });
+	route("GET", /^\/sell\/account\/v1\/subscription/, { total: 1, subscriptions: [{ subscriptionType: "STORE_PLAN", subscriptionLevel: "Featured", subscriptionId: "681522847", marketplaceId: "EBAY_ES", term: { value: 1, unit: "MONTH" } }] });
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any, init?: any) => {
 		const url = new URL(typeof input === "string" ? input : input.url);
 		if (url.origin !== "https://api.ebay.com") throw new Error(`unexpected fetch ${url}`);
@@ -429,6 +430,7 @@ describe("continuous backfill (cron)", () => {
 	it("does nothing in dry, after a stopped pass, during the 25026 pause, at the end, or when off", async () => {
 		expect(await runEbayAutoBackfill(E, livePass({ mode: "dry" }))).toEqual({ skipped: "autolist not live" });
 		expect(await runEbayAutoBackfill(E, livePass({ stopped: "cooldown" }))).toEqual({ skipped: "pass stopped: cooldown" });
+		expect(await runEbayAutoBackfill(E, livePass({ mode: "dry", store_guard: "no_store" }))).toEqual({ skipped: "no eBay store (no_store)" });
 		await E.SYNC_STATE.put("meta:ebay_limit_hit", JSON.stringify({ until: new Date(Date.now() + 3600e3).toISOString() }));
 		expect(await runEbayAutoBackfill(E, livePass())).toMatchObject({ ok: false, error: expect.stringMatching(/selling limit/) });
 		await E.SYNC_STATE.delete("meta:ebay_limit_hit");
@@ -554,6 +556,42 @@ describe("auto-list cron and price sources", () => {
 		expect(vi.mocked(discogs.getListing).mock.calls.length).toBeLessThanOrEqual(EBAY_DISCOGS_READS_PER_RUN);
 		expect(r.would_list).toBe(EBAY_BATCH_SIZE);
 		expect(r.checked).toBeLessThanOrEqual(EBAY_CHECKS_PER_RUN);
+	});
+
+	it("no eBay store subscription: the switch says live but the pass runs dry, publishes nothing", async () => {
+		route("GET", /^\/sell\/account\/v1\/subscription/, { total: 0 });
+		await live();
+		await includeSkus(E, ["BOND12081C"]);
+		const r = await runEbayAutolist(E);
+		expect(r).toMatchObject({ mode: "dry", store_guard: "no_store", listed: 0, would_list: 1 });
+		expect(ebayCalls("PUT")).toHaveLength(0);
+		expect(ebayCalls("POST", /offer/)).toHaveLength(0);
+		expect(await E.SYNC_STATE.get("meta:ebay_autolist_mode")).toBe("live");   // the switch itself is untouched
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:ebay_store_check"))).toMatchObject({ has_store: false, subscriptions: [] });
+	});
+
+	it("store check: only STORE_PLAN on EBAY_ES counts; a failed check means dry", async () => {
+		route("GET", /^\/sell\/account\/v1\/subscription/, { total: 2, subscriptions: [
+			{ subscriptionType: "SELLING_MANAGER", marketplaceId: "EBAY_ES" },
+			{ subscriptionType: "STORE_PLAN", marketplaceId: "EBAY_DE" },
+		] });
+		await live();
+		await includeSkus(E, ["BOND12081C"]);
+		expect(await runEbayAutolist(E)).toMatchObject({ mode: "dry", store_guard: "no_store" });
+		route("GET", /^\/sell\/account\/v1\/subscription/, () => ebayError(500, 1000, "boom"));
+		await viaWorker(post("ebay-exclude", { skus: ["BOND12081C"] })); await includeSkus(E, ["BOND12081C"]);
+		expect(await runEbayAutolist(E)).toMatchObject({ mode: "dry", store_guard: "check_failed", listed: 0 });
+		expect(ebayCalls("POST", /publish/)).toHaveLength(0);
+	});
+
+	it("with a store the pass publishes as before (and the admin sees the check)", async () => {
+		await live();
+		await includeSkus(E, ["BOND12081C"]);
+		const r = await runEbayAutolist(E);
+		expect(r.store_guard).toBeUndefined();
+		expect(r).toMatchObject({ mode: "live", listed: 1 });
+		const items = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(items.store).toMatchObject({ has_store: true, subscriptions: [{ type: "STORE_PLAN", level: "Featured", marketplace: "EBAY_ES" }] });
 	});
 
 	it("Discogs 429: held, no further Discogs reads this run, flagged for the cron", async () => {

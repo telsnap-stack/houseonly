@@ -8985,6 +8985,13 @@ function EbayPanel() {
         {data.configured ? 'Claves de eBay configuradas.' : 'Claves de eBay pendientes: en live no se llama a eBay (ver docs/ebay.md).'}
         {data.limit_hit && <span style={{color:'#ff9a4a'}}> · Limite de venta alcanzado {data.limit_hit.at?.slice(0,16)}; pausa hasta {data.limit_hit.until?.slice(0,16)}.</span>}
       </div>
+      {data.store && !data.store.has_store && (
+        <div style={{fontSize:11,color:'#ff9a4a',border:'1px solid #ff9a4a',padding:'8px 10px',marginBottom:12}}>
+          ⚠ Sin suscripcion de Tienda eBay: el auto-list NO publica (se queda en dry aunque el interruptor diga live). Sin tienda, cada anuncio paga tarifa de insercion (0,35 €/mes).
+          {data.store.error ? ` No se pudo comprobar: ${data.store.error}.` : ` eBay devuelve: ${data.store.subscriptions.length ? data.store.subscriptions.map(x=>`${x.type} ${x.level} ${x.marketplace}`).join(', ') : 'ninguna suscripcion'}.`}
+          {' '}Comprobado {data.store.checked_at?.slice(0,16)}.
+        </div>
+      )}
       <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
         {toggle('autolist','Auto-list eBay','live: cada producto nuevo entra en la cola y el cron publica en tandas lo que tiene precio. dry: prepara sin llamar a eBay. Independiente de Discogs.')}
         {toggle('sync','Ventas eBay → Shopify','dry: registra lo que haria. live: cada venta de eBay crea el pedido pagado en Shopify.')}
@@ -9000,7 +9007,7 @@ function EbayPanel() {
       </div>
       {msg && <div style={{fontSize:10,color:S.muted,marginBottom:8}}>{msg}</div>}
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:8}}>{error}</div>}
-      {last && <div style={{fontSize:9,color:S.muted,marginBottom:8}}>Ultima pasada {last.finished_at?.slice(0,16)} ({last.mode}): {last.listed} publicados · {last.would_list} preparados · {last.held} retenidos · {last.failed} fallidos · {last.pending} pendientes{last.stopped?` · parada: ${last.stopped}`:''}{last.discogs_429?' · Discogs 429 (conciliacion saltada)':''}{last.error?` · ${last.error}`:''}</div>}
+      {last && <div style={{fontSize:9,color:S.muted,marginBottom:8}}>Ultima pasada {last.finished_at?.slice(0,16)} ({last.mode}): {last.listed} publicados · {last.would_list} preparados · {last.held} retenidos · {last.failed} fallidos · {last.pending} pendientes{last.stopped?` · parada: ${last.stopped}`:''}{last.discogs_429?' · Discogs 429 (conciliacion saltada)':''}{last.store_guard?` · en dry por falta de tienda (${last.store_guard})`:''}{last.error?` · ${last.error}`:''}</div>}
       {(() => { const ab = data.autobackfill_last_run; return (
         <div style={{fontSize:9,color:S.muted,marginBottom:8}}>
           Backfill automatico (cron, tandas de 25 cuando no queda nada por publicar): {data.autobackfill === 'off' ? 'APAGADO (meta:ebay_autobackfill_mode=off)' : 'encendido'}

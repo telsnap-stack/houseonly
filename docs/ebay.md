@@ -21,6 +21,18 @@ Sin claves todo responde "not configured" y no se llama a eBay.
 | Venta en Shopify o Discogs | El webhook `orders/create` retira la oferta de eBay (`withdrawOffer`). | ninguno |
 | Venta en eBay | Cron (`getOrders`) **y** notificación `ORDER_CONFIRMATION` → pedido pagado en Shopify (`createDiscogsOrder` con canal eBay). Ese pedido dispara el webhook, que retira el listing de Discogs. | `meta:ebay_sync_mode` dry/live (dry por defecto) |
 
+**Guarda de Tienda eBay (2026-10-27).** Un vendedor profesional sin
+suscripción de Tienda no tiene anuncios gratis: cada anuncio paga tarifa de
+inserción (0,35 € al mes). Antes de publicar, cada pasada con trabajo llama a
+`GET /sell/account/v1/subscription`. Si no hay una suscripción con
+`subscriptionType` = `STORE_PLAN` en `EBAY_ES`, o si la llamada falla, la pasada
+corre en **dry** aunque el interruptor diga live (`store_guard` en el resumen) y
+el backfill continuo no mete nada. La pestaña muestra un aviso naranja con lo
+que devolvió eBay (`meta:ebay_store_check`). Respuesta real con la Tienda
+Avanzada activa (2026-10-27): `{"subscriptionType":"STORE_PLAN",
+"subscriptionLevel":"Featured","marketplaceId":"EBAY_ES","term":{"value":1,"unit":"MONTH"}}`.
+Antes de activarla, eBay devolvía `{"total":0}`.
+
 **Nada de esto lee ni escribe `meta:sync_35_mode`.** El auto-add de Discogs
 sigue en `dry` (verificado 2026-10-26) y eBay funciona sin él.
 
