@@ -934,7 +934,7 @@ import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo, 
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
 import {
-  EBAY_CRON, runEbayAutolist, pollEbayOrders, handleEbayNotification,
+  EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
   handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun,
 } from './lib/ebay';
 
@@ -3268,16 +3268,22 @@ export default {
     // y sin claves de eBay no llama a eBay.
     if (event.cron === EBAY_CRON) {
       const at = new Date(event.scheduledTime).toISOString();
-      // Conciliacion SKU↔Discogs: una pagina del inventario por pasada. Va en
-      // este hueco (:03) y no en el del poll (:07), donde el cupo de Discogs
-      // ya llega gastado. Mantiene sku: al dia para los listings hechos a mano
-      // — de ahi sale el precio de eBay y el delist de Discogs en las ventas web.
-      ctx.waitUntil(runRelinkCron(env).catch((err) => env.SYNC_STATE.put('meta:relink_cron_last_run',
-        JSON.stringify({ at, ok: false, error: err?.message || String(err) }))));
-      ctx.waitUntil(runEbayAutolist(env).catch((err) => env.SYNC_STATE.put('meta:ebay_autolist_last_run',
-        JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }))));
-      ctx.waitUntil(pollEbayOrders(env).catch((err) => env.SYNC_STATE.put('meta:ebay_orders_last_run',
-        JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }))));
+      const fail = (key: string) => (err: any) => env.SYNC_STATE.put(key,
+        JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }));
+      // En serie, para no repartir el cupo de Discogs (por IP) entre dos tareas:
+      // 1) la pasada de eBay, que publica (lee el precio de cada listing);
+      // 2) el backfill continuo, si ya no queda nada por publicar;
+      // 3) la conciliacion SKU↔Discogs, una pagina del inventario, salvo que la
+      //    pasada acabe de llevarse un 429. Va en este hueco (:03) y no en el del
+      //    poll (:07). Mantiene sku: al dia para los listings hechos a mano — de
+      //    ahi sale el precio de eBay y el delist de Discogs en las ventas web.
+      ctx.waitUntil((async () => {
+        const pass = await runEbayAutolist(env).catch((err) => { fail('meta:ebay_autolist_last_run')(err); return null; });
+        if (pass) await runEbayAutoBackfill(env, pass).catch(fail('meta:ebay_autobackfill_last_run'));
+        await runRelinkCron(env, { discogs429: Boolean(pass?.discogs_429) }).catch(fail('meta:relink_cron_last_run'));
+      })());
+      // Ventas de eBay: no tocan Discogs, van en paralelo.
+      ctx.waitUntil(pollEbayOrders(env).catch(fail('meta:ebay_orders_last_run')));
       return;
     }
 

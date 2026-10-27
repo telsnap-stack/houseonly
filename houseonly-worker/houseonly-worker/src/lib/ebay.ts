@@ -79,6 +79,9 @@ const LIMIT_KEY = 'meta:ebay_limit_hit';
 const GO_LIVE_KEY = 'meta:ebay_go_live_ts';
 const BACKFILL_KEY = 'meta:ebay_backfill';
 const AUTOLIST_LAST_RUN = 'meta:ebay_autolist_last_run';
+// Continuous backfill (cron): 'off' stops it; the admin button keeps working.
+const AUTOBACKFILL_MODE_KEY = 'meta:ebay_autobackfill_mode';
+const AUTOBACKFILL_LAST_RUN = 'meta:ebay_autobackfill_last_run';
 const ORDERS_LAST_RUN = 'meta:ebay_orders_last_run';
 const ITEM_PREFIX = 'ebay:item:';
 const LISTING_PREFIX = 'ebay:listing:';
@@ -335,6 +338,9 @@ export interface AutolistResult {
   held_by_reason: Record<string, number>;
   pending: number;          // queued + held + (live) would_list after the run
   stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error';
+  // Discogs answered 429 (after its own retries): no more Discogs reads this
+  // run, and the cron skips the relink that would hit the same quota.
+  discogs_429?: boolean;
   error?: string;
   finished_at: string;
 }
@@ -434,7 +440,14 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     if (why) { await hold(item, why); continue; }
 
     const priced = await resolvePrice(env, product, budget);
-    if (!priced.ok) { await hold({ ...item, price: undefined }, priced.hold, priced.detail); continue; }
+    if (!priced.ok) {
+      if (priced.hold === 'discogs_error' && /\b429\b/.test(priced.detail || '')) {
+        result.discogs_429 = true;
+        budget.discogs = 0;   // each further read would wait out the same 429 retries
+      }
+      await hold({ ...item, price: undefined }, priced.hold, priced.detail);
+      continue;
+    }
     const grades = gradesFor(product.tags, priced.discogs || null);
     if (!grades) { await hold(item, 'usado_sin_grado'); continue; }
     item.price = priced.price;
@@ -621,6 +634,30 @@ export async function runEbayBackfill(env: EbayFullEnv, opts: { count?: number }
   const next = { cursor, batches: state.batches + 1, done, queued: state.queued + out.queued.length };
   await env.SYNC_STATE.put(BACKFILL_KEY, JSON.stringify(next));
   return { ...out, batches: next.batches, done };
+}
+
+/**
+ * Continuous backfill, run by the cron after the auto-list pass: once nothing
+ * is waiting to be published (no queued / would_list — held records don't
+ * count, they wait on Discogs), queue the next EBAY_BACKFILL_NEXT. Only while
+ * auto-list is live (in dry nothing gets published, so the queue would only
+ * grow) and the pass wasn't stopped. runEbayBackfill itself refuses during the
+ * 25026 pause, caps by the selling limit and stops at the end of the catalogue.
+ */
+export async function runEbayAutoBackfill(env: EbayFullEnv, pass: AutolistResult): Promise<BackfillResult | { skipped: string }> {
+  const skip = async (why: string) => {
+    const r = { skipped: why };
+    await env.SYNC_STATE.put(AUTOBACKFILL_LAST_RUN, JSON.stringify({ at: new Date().toISOString(), ...r }));
+    return r;
+  };
+  if ((await env.SYNC_STATE.get(AUTOBACKFILL_MODE_KEY)) === 'off') return skip('off');
+  if (pass.mode !== 'live') return skip('autolist not live');
+  if (pass.stopped) return skip(`pass stopped: ${pass.stopped}`);
+  const waiting = (await listItemMetas(env)).filter(i => i.s === 'queued' || i.s === 'would_list').length;
+  if (waiting > 0) return skip(`${waiting} still waiting to publish`);
+  const r = await runEbayBackfill(env, { count: EBAY_BACKFILL_NEXT });
+  await env.SYNC_STATE.put(AUTOBACKFILL_LAST_RUN, JSON.stringify({ at: new Date().toISOString(), ...r }));
+  return r;
 }
 
 // ── eBay sale → Shopify order ──────────────────────────────────────
@@ -939,6 +976,8 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     limit_hit: await readJsonKey(env, LIMIT_KEY),
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),
+    autobackfill: (await env.SYNC_STATE.get(AUTOBACKFILL_MODE_KEY)) === 'off' ? 'off' : 'on',
+    autobackfill_last_run: await readJsonKey(env, AUTOBACKFILL_LAST_RUN),
     orders_last_run: await readJsonKey(env, ORDERS_LAST_RUN),
     relink_last_run: await readJsonKey(env, 'meta:relink_cron_last_run'),
     counts,

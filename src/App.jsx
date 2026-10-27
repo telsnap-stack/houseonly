@@ -9000,7 +9000,12 @@ function EbayPanel() {
       </div>
       {msg && <div style={{fontSize:10,color:S.muted,marginBottom:8}}>{msg}</div>}
       {error && <div style={{fontSize:10,color:S.danger,marginBottom:8}}>{error}</div>}
-      {last && <div style={{fontSize:9,color:S.muted,marginBottom:8}}>Ultima pasada {last.finished_at?.slice(0,16)} ({last.mode}): {last.listed} publicados · {last.would_list} preparados · {last.held} retenidos · {last.failed} fallidos · {last.pending} pendientes{last.stopped?` · parada: ${last.stopped}`:''}{last.error?` · ${last.error}`:''}</div>}
+      {last && <div style={{fontSize:9,color:S.muted,marginBottom:8}}>Ultima pasada {last.finished_at?.slice(0,16)} ({last.mode}): {last.listed} publicados · {last.would_list} preparados · {last.held} retenidos · {last.failed} fallidos · {last.pending} pendientes{last.stopped?` · parada: ${last.stopped}`:''}{last.discogs_429?' · Discogs 429 (conciliacion saltada)':''}{last.error?` · ${last.error}`:''}</div>}
+      {(() => { const ab = data.autobackfill_last_run; return (
+        <div style={{fontSize:9,color:S.muted,marginBottom:8}}>
+          Backfill automatico (cron, tandas de 25 cuando no queda nada por publicar): {data.autobackfill === 'off' ? 'APAGADO (meta:ebay_autobackfill_mode=off)' : 'encendido'}
+          {ab && ` · ${ab.at?.slice(0,16)}: ${ab.skipped ? `nada (${ab.skipped})` : ab.ok ? `${ab.queued?.length||0} en cola${ab.done?' · catalogo completo':''}` : `no (${ab.error})`}`}
+        </div>); })()}
       {noPrice > 0 && <div style={{fontSize:10,color:'#ff9a4a',marginBottom:8}}>⚠ {noPrice} disco(s) sin fuente de precio: tienen <code>discogs:no</code> y ningun coste en Shopify. No se publicaran hasta que tengan coste.</div>}
 
       <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
