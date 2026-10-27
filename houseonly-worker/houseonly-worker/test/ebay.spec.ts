@@ -5,6 +5,7 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
 	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
+	roundUpTo99, stripShippingText,
 	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
@@ -189,8 +190,10 @@ describe("listing content from the Shopify product", () => {
 		expect(pr.aspects[ASPECTS.artist]).toEqual(["Dilby & Pornbugs"]);
 		expect(pr.aspects[ASPECTS.label]).toEqual(["Bond Street"]);
 		expect(pr.aspects[ASPECTS.catno]).toEqual(["BOND12081C"]);
-		expect(pr.aspects[ASPECTS.genre]).toEqual(["Deep House"]);
-		expect(pr.aspects[ASPECTS.mediaGrade]).toEqual([GRADE_MINT]);
+		expect(pr.aspects[ASPECTS.genre]).toEqual(["DJ, dance, house"]);
+		expect(pr.aspects[ASPECTS.subgenre]).toEqual(["House"]);
+		// Only eBay's names plus label/catno; no grades on a NEW record.
+		expect(Object.keys(pr.aspects).sort()).toEqual(["Artista", "Discográfica", "Género", "Número de catálogo", "Subgénero"]);
 		expect(pr.imageUrls).toEqual(["https://cdn.shopify.com/s/files/a.jpg"]);
 		expect(pr.ean).toEqual(["4006381333931"]);
 		expect(p.inventoryItem.condition).toBe("NEW");
@@ -219,6 +222,47 @@ describe("listing content from the Shopify product", () => {
 		expect(JSON.stringify(p)).not.toMatch(/canari|excluid|península/i);
 		expect(p.offer.listingDescription).not.toMatch(/<script/i);
 		expect(p.offer.listingDescription).toContain("<p>Deep cuts.</p>");
+	});
+
+	it("drops shipping sentences from the Shopify description, keeps the rest", () => {
+		const html = '<p>Tracklist</p><p>12" vinyl. Worldwide shipping from House Only.</p><p>Envío desde Madrid. Gran disco.</p>';
+		expect(stripShippingText(html)).toBe('<p>Tracklist</p><p>12" vinyl.</p><p> Gran disco.</p>');
+		expect(stripShippingText("<p>Worldwide shipping from House Only.</p>")).toBe("");
+		const p = buildEbayListing(product({ descriptionHtml: html }), gradesFor([])!, DISCOGS_PRICE, { ...CFG, withEan: true });
+		expect(JSON.stringify(p)).not.toMatch(/shipping|env[ií]o/i);
+		expect(p.offer.listingDescription).toContain('12" vinyl.');
+		expect(p.inventoryItem.product.description).toContain("Gran disco.");
+	});
+
+	it("NEW: no grades in aspects or the table; used: grades in both, plus conditionDescription", () => {
+		const nm = { condition: "Near Mint (NM or M-)", sleeve_condition: "Very Good Plus (VG+)" };
+		const n = buildEbayListing(product(), gradesFor(product().tags, nm)!, DISCOGS_PRICE, { ...CFG, withEan: true });
+		expect(n.offer.listingDescription).not.toMatch(/Near Mint|<b>Disco<\/b>|<b>Funda<\/b>/);
+		expect(n.inventoryItem.product.aspects[ASPECTS.mediaGrade]).toBeUndefined();
+		expect(n.inventoryItem.conditionDescription).toBeUndefined();
+		const usedTags = [...product().tags, "used"];
+		const u = buildEbayListing(product({ tags: usedTags }), gradesFor(usedTags, nm)!, DISCOGS_PRICE, { ...CFG, withEan: true });
+		expect(u.inventoryItem.condition).toBe("USED_EXCELLENT");
+		expect(u.inventoryItem.product.aspects[ASPECTS.sleeveGrade]).toEqual(["Very Good Plus (VG+)"]);
+		expect(u.offer.listingDescription).toContain("<b>Funda</b></td><td>Very Good Plus (VG+)");
+		expect(u.inventoryItem.conditionDescription).toBe("Disco: Near Mint (NM or M-) · Funda: Very Good Plus (VG+)");
+	});
+
+	it("maps our genres to eBay's Genero/Subgenero; no genre tag, no genre aspect", () => {
+		const g = (tag: string) => buildEbayListing(product({ tags: ["label:X", tag] }), gradesFor([])!, DISCOGS_PRICE, { ...CFG, withEan: true }).inventoryItem.product.aspects;
+		expect(g("genre:techno")).toMatchObject({ "Género": ["DJ, dance, house"], "Subgénero": ["Techno, electro"] });
+		expect(g("genre:jazz")["Género"]).toEqual(["Jazz"]);
+		expect(g("genre:jazz")["Subgénero"]).toBeUndefined();
+		expect(g("vinyl")["Género"]).toBeUndefined();
+	});
+
+	it("roundUpTo99: up to the next .99", () => {
+		expect(roundUpTo99(12.97)).toBe(12.99);
+		expect(roundUpTo99(21.23)).toBe(21.99);
+		expect(roundUpTo99(12.99)).toBe(12.99);
+		expect(roundUpTo99(24)).toBe(24.99);
+		expect(roundUpTo99(14.15)).toBe(14.99);
+		expect(roundUpTo99(0.5)).toBe(0.99);
 	});
 
 	it("uses the Discogs grades when linked, Mint for new stock otherwise", () => {
@@ -374,7 +418,8 @@ describe("auto-list cron and price sources", () => {
 		expect(calls).toHaveLength(0);
 		const it = await item("BOND12081C");
 		expect(it.status).toBe("would_list");
-		expect(it.preview).toMatchObject({ price: "21.50", price_source: "Discogs listing 555", condition: "NEW" });
+		// Discogs 21.50, rounded up to .99.
+		expect(it.preview).toMatchObject({ price: "21.99", price_source: "Discogs listing 555 (21.50 → 21.99)", condition: "NEW" });
 	});
 
 	it("live: lists at the CURRENT Discogs listing price, never the Shopify price", async () => {
@@ -390,7 +435,7 @@ describe("auto-list cron and price sources", () => {
 			"POST /sell/inventory/v1/offer",
 			"POST /sell/inventory/v1/offer/OFF-1/publish",
 		]);
-		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price).toEqual({ value: "24.00", currency: "EUR" });
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price).toEqual({ value: "24.99", currency: "EUR" });
 		expect(ebayCalls("PUT", /inventory_item/)[0].headers["Content-Language"]).toBe("es-ES");
 		expect(await item("BOND12081C")).toMatchObject({ status: "listed", offer_id: "OFF-1", listing_id: "LIST-1" });
 		expect(await E.SYNC_STATE.get("ebay:listing:LIST-1")).toBe("BOND12081C");
@@ -409,7 +454,7 @@ describe("auto-list cron and price sources", () => {
 		await linkDiscogs("HAND01", 777, { price: { value: 30, currency: "EUR" } });
 		await runEbayAutolist(E);
 		expect(await item("HAND01")).toMatchObject({ status: "listed" });
-		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("30.00");
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("30.99");
 	});
 
 	it("Discogs listing sold or in another currency: held, not listed", async () => {
@@ -450,10 +495,11 @@ describe("auto-list cron and price sources", () => {
 		expect(items.items.find((i: any) => i.sku === "NOCOST")).toMatchObject({ s: "held", r: "sin_fuente_de_precio" });
 	});
 
-	it("takes the grades of our Discogs listing", async () => {
+	it("takes the grades of our Discogs listing (used record)", async () => {
 		await live();
-		listings.get(555).sleeve_condition = "Very Good Plus (VG+)";
-		await includeSkus(E, ["BOND12081C"]);
+		addProduct("USED01", { tags: ["vinyl", "used"] });
+		await linkDiscogs("USED01", 556, { sleeve_condition: "Very Good Plus (VG+)" });
+		await includeSkus(E, ["USED01"]);
 		await runEbayAutolist(E);
 		expect(ebayCalls("PUT", /inventory_item/)[0].body.product.aspects[ASPECTS.sleeveGrade]).toEqual(["Very Good Plus (VG+)"]);
 	});

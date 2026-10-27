@@ -14,8 +14,9 @@
 //   - product tagged `discogs:no` → Shopify unitCost × multiplier;
 //   - neither → no listing; the record waits in the queue.
 //
-// No shipping/exclusion text is ever added (no "Canarias" line): shipping is
-// the fulfillment policy's job.
+// No shipping/exclusion text is ever added (no "Canarias" line), and shipping
+// sentences already in the Shopify description ("Worldwide shipping from House
+// Only.") are removed: shipping is the fulfillment policy's job.
 //
 // Catalogue (ePID) matching: "try silently, fall back to standalone". eBay
 // tries to match the product to its catalogue from the EAN/UPC we send; we
@@ -44,19 +45,44 @@ const IMAGES_MAX = 24;
 const SKU_MAX = 50;
 
 // Item specifics, in the marketplace language (Content-Language es-ES).
-// Names to confirm against getItemAspectsForCategory on EBAY_ES (the check
-// script prints them); eBay accepts unknown names as custom specifics, so a
-// wrong one costs search relevance, not the listing.
+// Artista, Género and Subgénero are eBay's own names for 176985 on EBAY_ES
+// (getItemAspectsForCategory, 2026-10-27). eBay has no aspect for label or
+// catalogue number; they go as custom specifics because record buyers search
+// by them. Grades only on used records: a NEW listing with "Near Mint" reads
+// as second-hand.
 export const ASPECTS = {
   artist: 'Artista',
-  release: 'Título del disco',
+  genre: 'Género',
+  subgenre: 'Subgénero',
   label: 'Discográfica',
   catno: 'Número de catálogo',
-  genre: 'Género',
-  format: 'Formato',
   mediaGrade: 'Calidad del disco',
   sleeveGrade: 'Calidad de la funda',
 };
+
+// Our genre (genres.mjs id) → eBay's Género / Subgénero values for 176985.
+// Both are FREE_TEXT on eBay, but only their listed values feed the filters.
+const DJ = 'DJ, dance, house';
+export const EBAY_GENRE: Record<string, { genero: string; subgenero?: string }> = {
+  house: { genero: DJ, subgenero: 'House' },
+  deephouse: { genero: DJ, subgenero: 'House' },
+  techhouse: { genero: DJ, subgenero: 'House' },
+  techno: { genero: DJ, subgenero: 'Techno, electro' },
+  electro: { genero: DJ, subgenero: 'Techno, electro' },
+  garage: { genero: DJ, subgenero: 'Garage' },
+  brokenbeat: { genero: DJ, subgenero: 'Breakbeat' },
+  drumandbass: { genero: DJ, subgenero: 'Drum and bass, jungle' },
+  bassmusic: { genero: DJ, subgenero: 'Electrónica' },
+  electronica: { genero: DJ, subgenero: 'Electrónica' },
+  soulfunkdisco: { genero: 'R&B, soul' },
+  jazz: { genero: 'Jazz' },
+};
+
+/** Discogs price → the eBay price: up to the next .99 (12.97 → 12.99, 21.23 → 21.99, 12.99 stays). */
+export function roundUpTo99(value: number): number {
+  const cents = Math.round(value * 100);
+  return (Math.floor(cents / 100) * 100 + 99) / 100;
+}
 
 // Products that will never go to Discogs. Set by hand in Shopify; their eBay
 // price comes from the unit cost instead of a Discogs listing.
@@ -187,11 +213,23 @@ function sanitizeHtml(html: string): string {
     .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
 }
 
-function listingDescription(f: { artist: string; title: string; label: string; catno: string; genre: string; grades: Grades; html: string }): string {
+// A sentence that talks about shipping ("Worldwide shipping from House Only.",
+// a Spanish "envío" line, Canarias). Sentences end at . ! ? or at a tag.
+const SHIPPING_SENTENCE = /[^.!?<>]*\b(shipping|env[ií]os?|canarias)\b[^.!?<>]*[.!?]?/gi;
+
+/** Shopify description without its shipping sentences (and without paragraphs they leave empty). */
+export function stripShippingText(html: string): string {
+  return String(html || '')
+    .replace(SHIPPING_SENTENCE, '')
+    .replace(/<p>\s*<\/p>/gi, '')
+    .replace(/[ \t]+(<\/p>)/gi, '$1');
+}
+
+function listingDescription(f: { artist: string; title: string; label: string; catno: string; genre: string; grades: Grades | null; html: string }): string {
   const rows: Array<[string, string]> = [
     ['Artista', f.artist], ['Título', f.title], ['Sello', f.label],
     ['Nº de catálogo', f.catno], ['Género', f.genre],
-    ['Disco', f.grades.media], ['Funda', f.grades.sleeve],
+    ['Disco', f.grades?.media || ''], ['Funda', f.grades?.sleeve || ''],
   ];
   const table = rows.filter(([, v]) => v)
     .map(([k, v]) => `<tr><td><b>${escapeHtml(k)}</b></td><td>${escapeHtml(v)}</td></tr>`).join('');
@@ -232,22 +270,28 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
   const artist = artistOf(p.vendor);
   const title = decodeHtmlEntities((p.title || '').trim());
   const label = tagValue(p.tags, 'label:');
-  const genre = generoDeTags(p.tags)?.label || '';
+  const ours = generoDeTags(p.tags);
+  const genre = ours?.label || '';
+  const ebayGenre = ours ? EBAY_GENRE[ours.id] : undefined;
   const condition = conditionFromTags(p.tags);
+  const used = condition !== 'NEW';
   const ean = cfg.withEan ? gtinValido(p.variant.barcode) : '';
+  const html = stripShippingText(p.descriptionHtml || '');
 
-  const aspects: Record<string, string[]> = { [ASPECTS.format]: ['Vinilo'] };
+  const aspects: Record<string, string[]> = {};
   if (artist) aspects[ASPECTS.artist] = [artist];
-  if (title) aspects[ASPECTS.release] = [title];
+  if (ebayGenre) aspects[ASPECTS.genre] = [ebayGenre.genero];
+  if (ebayGenre?.subgenero) aspects[ASPECTS.subgenre] = [ebayGenre.subgenero];
   if (label) aspects[ASPECTS.label] = [label];
   aspects[ASPECTS.catno] = [sku];
-  if (genre) aspects[ASPECTS.genre] = [genre];
-  aspects[ASPECTS.mediaGrade] = [grades.media];
-  aspects[ASPECTS.sleeveGrade] = [grades.sleeve];
+  if (used) {
+    aspects[ASPECTS.mediaGrade] = [grades.media];
+    aspects[ASPECTS.sleeveGrade] = [grades.sleeve];
+  }
 
   const product: any = {
     title: ebayTitle(artist, title, sku),
-    description: (htmlToText(p.descriptionHtml || '') || title).slice(0, PRODUCT_DESCRIPTION_MAX),
+    description: (htmlToText(html) || title).slice(0, PRODUCT_DESCRIPTION_MAX),
     aspects,
     imageUrls: p.images.filter(u => /^https:\/\//.test(u)).slice(0, IMAGES_MAX),
   };
@@ -259,7 +303,7 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
     condition,
     product,
   };
-  if (condition !== 'NEW') {
+  if (used) {
     inventoryItem.conditionDescription = `Disco: ${grades.media} · Funda: ${grades.sleeve}`;
   }
 
@@ -272,7 +316,7 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
     categoryId: cfg.categoryId,
     merchantLocationKey: cfg.merchantLocationKey,
     includeCatalogProductDetails: false,
-    listingDescription: listingDescription({ artist, title, label, catno: sku, genre, grades, html: p.descriptionHtml }),
+    listingDescription: listingDescription({ artist, title, label, catno: sku, genre, grades: used ? grades : null, html }),
     listingPolicies: {
       fulfillmentPolicyId: cfg.policies.fulfillmentPolicyId,
       paymentPolicyId: cfg.policies.paymentPolicyId,
