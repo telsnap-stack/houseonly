@@ -26,7 +26,8 @@ sigue en `dry` (verificado 2026-10-26) y eBay funciona sin él.
 ### Precio: nunca el de Shopify, nunca adivinado
 
 1. **Listing de Discogs del disco** (`sku:{SKU}` → `GET /marketplace/listings/{id}`):
-   su precio **actual**, en EUR. Se lee al publicar, máximo 10 lecturas de
+   su precio **actual**, en EUR, **redondeado hacia arriba a ,99** (12,97 → 12,99;
+   21,23 → 21,99; 12,99 se queda). La pestaña muestra los dos precios. Se lee al publicar, máximo 10 lecturas de
    Discogs por pasada. Sin listing enlazado, el disco se queda **retenido**
    (`esperando_discogs`) y el cron lo vuelve a mirar en cada pasada hasta que
    exista. Si el listing está vendido o no está en EUR, también queda retenido.
@@ -65,12 +66,21 @@ A 2026-10-26 prod tenía 819 claves `sku:`.
 ### Contenido del anuncio
 
 Sale del producto de Shopify: título (`Artista - Título CATNO Vinilo`, máx. 80),
-artista (vendor), sello (`label:`), nº de catálogo (SKU), género (`genre:`),
 descripción, nuestras fotos y 1 unidad.
 
-- **Grados**: los del listing de Discogs si el disco está enlazado; si no, Mint
-  para producto nuevo (hoy no hay ningún tag de estado). Un usado sin grado se
-  queda retenido (`usado_sin_grado`).
+- **Item specifics** (nombres de eBay para 176985 en EBAY_ES, comprobados el
+  2026-10-27): `Artista` (vendor), `Género` y `Subgénero` (nuestro `genre:`
+  traducido a los valores de eBay; p. ej. Deep House → DJ, dance, house /
+  House; tabla `EBAY_GENRE` en `ebay-listing.ts`). eBay no tiene aspecto para
+  sello ni nº de catálogo: van como específicos propios (`Discográfica`,
+  `Número de catálogo`) porque se busca por ellos.
+- **Grados**: solo en **usados** (aspectos, tabla y `conditionDescription`), y
+  los del listing de Discogs. En un NEW no se ponen: "Near Mint" en un nuevo
+  parece de segunda mano. Un usado sin grado se queda retenido
+  (`usado_sin_grado`).
+- **Envío**: se quitan de la descripción las frases de envío que trae Shopify
+  ("Worldwide shipping from House Only.", "envío…", Canarias). El envío lo dice
+  la política de eBay.
 - **Catálogo (ePID)**: se manda el EAN y se usa
   `includeCatalogProductDetails: false`. Si eBay rechaza el anuncio, se
   reintenta una vez sin EAN.
