@@ -9032,7 +9032,7 @@ function EbayPanel() {
         <Btn ch={busy==='run'?'…':'▶ Pasada ahora'} variant="ghost" onClick={runNow} disabled={Boolean(busy)} />
         <Btn ch="↻" variant="dark" onClick={load} disabled={Boolean(busy)} />
         <span style={{fontSize:9,color:S.muted}}>
-          {bf ? `Backfill: ${bf.queued} en ${bf.batches} tanda(s)${bf.done?' · completo':''}` : 'Backfill sin empezar'} · coste × {data.cost_multiplier} para discogs:no
+          {bf ? `Backfill: ${bf.queued} en ${bf.batches} tanda(s)${bf.done?' · completo':''}` : 'Backfill sin empezar'} · coste × {data.cost_multiplier} para discogs:no{data.price_floor > 0 ? ` · precio minimo ${Number(data.price_floor).toFixed(2)} €` : ''}
         </span>
       </div>
       {msg && <div style={{fontSize:10,color:S.muted,marginBottom:8}}>{msg}</div>}
