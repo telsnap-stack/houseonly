@@ -12,7 +12,7 @@ import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -1274,5 +1274,45 @@ describe("Discogs inventory snapshot (eBay prices)", () => {
 		expect((await up("147628-2026-10-26T09_00_00-EXPORT.csv")).status).toBe(409);
 		const bad = await viaWorker(new Request("https://w/?action=discogs-snapshot", { method: "POST", body: "nope", headers: { Authorization: `Bearer ${SECRET}` } }));
 		expect(bad.status).toBe(400);
+	});
+});
+
+describe("price floor on live listings", () => {
+	const liveOffer = (sku: string, offerId: string, price: string) => {
+		route("GET", new RegExp(`^/sell/inventory/v1/offer\\?sku=${sku}&`), { offers: [{ offerId, status: "PUBLISHED", listing: { listingId: "L" + sku } }] });
+		route("GET", new RegExp(`^/sell/inventory/v1/offer/${offerId}$`), {
+			offerId, sku, status: "PUBLISHED", marketplaceId: "EBAY_ES", format: "FIXED_PRICE", availableQuantity: 1, categoryId: "176985",
+			listingDescription: "x", listingDuration: "GTC", merchantLocationKey: "houseonly-main", includeCatalogProductDetails: false,
+			listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" },
+			pricingSummary: { price: { value: price, currency: "EUR" } }, storeCategoryNames: ["/House"],
+		});
+	};
+	beforeEach(() => { route("PUT", /^\/sell\/inventory\/v1\/offer\//, () => new Response(null, { status: 204 })); });
+
+	it("raises a live listing under the floor, keeps the rest of the offer, notes it on the record", async () => {
+		liveOffer("FP070", "OFF-FP", "11.99");
+		liveOffer("OK1", "OFF-OK", "18.99");
+		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=GONE/, () => ebayError(404, 25713, "none"));
+		await E.SYNC_STATE.put("ebay:item:FP070", JSON.stringify({ sku: "FP070", status: "listed", preview: { price: "11.99" }, history: [], selected_at: "x", updated_at: "x" }));
+		const r = await raiseLiveToFloor(E, ["FP070", "OK1", "GONE"]);
+		expect(r).toEqual([
+			{ sku: "FP070", result: "raised", from: "11.99", to: "12.99" },
+			{ sku: "OK1", result: "at_or_above_floor", from: "18.99" },
+			{ sku: "GONE", result: "not_live" },
+		]);
+		const puts = ebayCalls("PUT", /offer\//);
+		expect(puts).toHaveLength(1);
+		expect(puts[0].body).toMatchObject({ pricingSummary: { price: { value: "12.99", currency: "EUR" } }, storeCategoryNames: ["/House"], categoryId: "176985" });
+		expect(puts[0].body).not.toHaveProperty("offerId");
+		expect((await item("FP070")).preview.price).toBe("12.99");
+	});
+
+	it("any other revision of a live offer (store categories) also lifts it to the floor", async () => {
+		addProduct("FP070", { tags: ["genre:deephouse"] });
+		route("GET", /^\/sell\/inventory\/v1\/inventory_item\?/, { inventoryItems: [{ sku: "FP070" }] });
+		liveOffer("FP070", "OFF-FP", "11.99");
+		route("GET", /^\/sell\/inventory\/v1\/offer\/OFF-FP$/, { offerId: "OFF-FP", status: "PUBLISHED", categoryId: "176985", pricingSummary: { price: { value: "11.99", currency: "EUR" } } });
+		await applyStoreCategoriesToLive(E, { apply: true });
+		expect(ebayCalls("PUT", /offer\/OFF-FP$/)[0].body.pricingSummary.price.value).toBe("12.99");
 	});
 });

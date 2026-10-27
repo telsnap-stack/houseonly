@@ -84,8 +84,10 @@ grados salen de un **snapshot de nuestro inventario** en KV (`discogs:snapshot`)
 **Precio mínimo** (`meta:ebay_price_floor`, por defecto **12,99 €**, desde
 2026-10-27): se aplica a todo precio de eBay, venga de Discogs o del coste.
 Lo que quede por debajo sube a ese valor, y el origen del precio lo anota
-(`…; floor 12.99`). `"0"` lo desactiva. Los anuncios ya publicados no se
-recalculan.
+(`…; floor 12.99`). `"0"` lo desactiva. También vale para los anuncios ya
+publicados: toda modificación de una oferta viva pasa por `putLiveOffer`, que
+sube al mínimo un precio inferior. `raiseLiveToFloor(skus)` sube los que se
+publicaron antes de que existiera el mínimo (FP070, 11,99 → 12,99, el 27-10).
 
 El tag `discogs:no` es nuevo: hasta ahora no había forma de marcar un disco
 como "no va a Discogs" (el rechazo de pending-review caduca a los 7 días y

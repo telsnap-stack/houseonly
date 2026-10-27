@@ -515,17 +515,61 @@ export async function applyStoreCategoriesToLive(env: EbayFullEnv, opts: { apply
     const want = category ? [`/${category}`] : [];
     if (was.join('|') === want.join('|')) { out.items.push({ sku, category, was, result: 'unchanged' }); continue; }
     if (!opts.apply) { out.items.push({ sku, category, was, result: 'would_update' }); continue; }
-    const body: any = {};
-    for (const k of UPDATE_OFFER_FIELDS) if (offer[k] !== undefined) body[k] = offer[k];
+    const body = offerForUpdate(offer);
     if (want.length) body.storeCategoryNames = want; else delete body.storeCategoryNames;
-    body.includeCatalogProductDetails ??= false;   // omitted, eBay would default it to true
     try {
-      await updateOffer(env, summary.offerId, body);
+      await putLiveOffer(env, summary.offerId, body);
       out.updated++;
       out.items.push({ sku, category, was, result: 'updated' });
     } catch (e: any) {
       out.failed++;
       out.items.push({ sku, category, was, result: 'failed', error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
+/** getOffer's answer cut to what updateOffer takes (it replaces the whole offer). */
+function offerForUpdate(offer: any): any {
+  const body: any = {};
+  for (const k of UPDATE_OFFER_FIELDS) if (offer?.[k] !== undefined) body[k] = offer[k];
+  body.includeCatalogProductDetails ??= false;   // omitted, eBay would default it to true
+  return body;
+}
+
+/**
+ * The one way to revise a LIVE offer: the price floor applies here too, so no
+ * revision (price sync, categories, anything later) leaves a listing under it.
+ */
+async function putLiveOffer(env: EbayEnv, offerId: string, body: any): Promise<{ raised_from?: string }> {
+  const floor = await priceFloor(env);
+  const value = Number(body?.pricingSummary?.price?.value);
+  let raised_from: string | undefined;
+  if (floor > 0 && Number.isFinite(value) && value < floor) {
+    raised_from = body.pricingSummary.price.value;
+    body = { ...body, pricingSummary: { ...body.pricingSummary, price: { ...body.pricingSummary.price, value: floor.toFixed(2) } } };
+  }
+  await updateOffer(env, offerId, body);
+  return { raised_from };
+}
+
+/** Live listings priced under the floor (published before it existed) go up to it. */
+export async function raiseLiveToFloor(env: EbayFullEnv, skus: string[]): Promise<Array<{ sku: string; result: string; from?: string; to?: string; error?: string }>> {
+  const floor = await priceFloor(env);
+  const out: Array<{ sku: string; result: string; from?: string; to?: string; error?: string }> = [];
+  for (const sku of skus) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') { out.push({ sku, result: 'not_live' }); continue; }
+    const offer = await getOffer(env, summary.offerId);
+    const from = offer?.pricingSummary?.price?.value;
+    if (!(Number(from) < floor)) { out.push({ sku, result: 'at_or_above_floor', from }); continue; }
+    try {
+      await putLiveOffer(env, summary.offerId, offerForUpdate(offer));
+      const item = await getItem(env, sku);
+      if (item) await saveItem(env, { ...item, preview: item.preview ? { ...item.preview, price: floor.toFixed(2) } : item.preview }, item.status, `price ${from} → ${floor.toFixed(2)} (floor)`);
+      out.push({ sku, result: 'raised', from, to: floor.toFixed(2) });
+    } catch (e: any) {
+      out.push({ sku, result: 'failed', from, error: e?.message || String(e) });
     }
   }
   return out;
