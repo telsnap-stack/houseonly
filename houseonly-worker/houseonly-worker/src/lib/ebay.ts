@@ -50,11 +50,11 @@ import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
   challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
-  getStoreSubscription, type StoreCheck, type EbayEnv, type EbayOrder,
+  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
   buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
-  EBAY_DEFAULT_CATEGORY_ID, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
+  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
   shopifyAdminGraphQL, findVariantBySkuLoose, getVariantsStock, createDiscogsOrder,
@@ -85,6 +85,9 @@ const AUTOBACKFILL_LAST_RUN = 'meta:ebay_autobackfill_last_run';
 // Last getSubscription result: no eBay store → auto-list never publishes.
 const STORE_CHECK_KEY = 'meta:ebay_store_check';
 const STORE_CHECK_MAX_AGE_MS = 10 * 60 * 1000;
+const STORE_CATEGORY_MAP_KEY = 'meta:ebay_store_category_map';   // editable: {by_tag, by_genre}
+const STORE_CATEGORIES_KEY = 'meta:ebay_store_categories';       // GetStore cache: {paths, checked_at}
+const STORE_CATEGORIES_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const ORDERS_LAST_RUN = 'meta:ebay_orders_last_run';
 const ITEM_PREFIX = 'ebay:item:';
 const LISTING_PREFIX = 'ebay:listing:';
@@ -400,6 +403,109 @@ export async function requeueEanFailures(env: EbayEnv): Promise<string[]> {
   return out;
 }
 
+// ── store categories ──────────────────────────────────────────────
+
+export interface StoreCategories {
+  map: StoreCategoryMap;
+  paths: string[] | null;   // what the store has; null = never read
+  error?: string;
+}
+
+/** The editable map; defaults when unset or not valid JSON. No eBay call. */
+async function loadStoreCategoryMap(env: EbayEnv): Promise<StoreCategoryMap> {
+  const raw = await readJsonKey(env, STORE_CATEGORY_MAP_KEY);
+  return raw && typeof raw === 'object' ? { by_tag: raw.by_tag || {}, by_genre: raw.by_genre || {} } : EBAY_STORE_CATEGORY_DEFAULTS;
+}
+
+/** KV map (defaults when unset or not valid JSON) + the store's category paths (cached 6 h). */
+export async function loadStoreCategories(env: EbayEnv, opts: { fresh?: boolean } = {}): Promise<StoreCategories> {
+  const map = await loadStoreCategoryMap(env);
+  const cached = await readJsonKey(env, STORE_CATEGORIES_KEY);
+  if (!opts.fresh && Array.isArray(cached?.paths) && Date.now() - Date.parse(cached.checked_at) < STORE_CATEGORIES_MAX_AGE_MS) {
+    return { map, paths: cached.paths };
+  }
+  try {
+    const paths = await getStoreCategoryPaths(env);
+    await env.SYNC_STATE.put(STORE_CATEGORIES_KEY, JSON.stringify({ paths, checked_at: new Date().toISOString() }));
+    return { map, paths };
+  } catch (e: any) {
+    // Stale list beats none; with none, nothing gets a store category.
+    return { map, paths: Array.isArray(cached?.paths) ? cached.paths : null, error: e?.message || String(e) };
+  }
+}
+
+/** The mapped name only if the store has it; a typo in the map never reaches eBay. */
+export function storeCategoryOf(tags: string[], sc: StoreCategories): string | null {
+  const name = storeCategoryFor(tags, sc.map);
+  return name && sc.paths?.includes(`/${name}`) ? name : null;
+}
+
+export interface StoreCategoryApplyResult {
+  ok: boolean;
+  apply: boolean;
+  live: number;
+  by_category: Record<string, number>;
+  unassigned: number;
+  updated: number;
+  failed: number;
+  items: Array<{ sku: string; category: string | null; was: string[]; result: 'updated' | 'unchanged' | 'would_update' | 'failed' | 'no_en_shopify'; error?: string }>;
+  map_missing_on_store: string[];
+  error?: string;
+}
+
+/**
+ * One-off: set the store category on every PUBLISHED offer (the ones listed
+ * before storeCategoryNames existed). updateOffer replaces the whole offer, so
+ * it goes back as getOffer returned it, with only storeCategoryNames changed.
+ * Revising is free on eBay (no fee unless an upgrade is added or the price raised).
+ */
+export async function applyStoreCategoriesToLive(env: EbayFullEnv, opts: { apply: boolean }): Promise<StoreCategoryApplyResult> {
+  const out: StoreCategoryApplyResult = {
+    ok: true, apply: opts.apply, live: 0, by_category: {}, unassigned: 0, updated: 0, failed: 0, items: [], map_missing_on_store: [],
+  };
+  const sc = await loadStoreCategories(env, { fresh: true });
+  if (!sc.paths) { out.ok = false; out.error = `store categories unreadable: ${sc.error}`; return out; }
+  out.map_missing_on_store = [...new Set([...Object.values(sc.map.by_tag), ...Object.values(sc.map.by_genre)])]
+    .filter(n => !sc.paths!.includes(`/${n}`));
+
+  for (const sku of await listInventorySkus(env)) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') continue;
+    out.live++;
+    const product = await fetchSourceProduct(env, sku);
+    if (!product) { out.unassigned++; out.items.push({ sku, category: null, was: [], result: 'no_en_shopify' }); continue; }
+    const category = storeCategoryOf(product.tags, sc);
+    if (category) out.by_category[category] = (out.by_category[category] || 0) + 1;
+    else out.unassigned++;
+    const offer = await getOffer(env, summary.offerId);
+    const was: string[] = offer?.storeCategoryNames || [];
+    const want = category ? [`/${category}`] : [];
+    if (was.join('|') === want.join('|')) { out.items.push({ sku, category, was, result: 'unchanged' }); continue; }
+    if (!opts.apply) { out.items.push({ sku, category, was, result: 'would_update' }); continue; }
+    const body: any = {};
+    for (const k of UPDATE_OFFER_FIELDS) if (offer[k] !== undefined) body[k] = offer[k];
+    if (want.length) body.storeCategoryNames = want; else delete body.storeCategoryNames;
+    body.includeCatalogProductDetails ??= false;   // omitted, eBay would default it to true
+    try {
+      await updateOffer(env, summary.offerId, body);
+      out.updated++;
+      out.items.push({ sku, category, was, result: 'updated' });
+    } catch (e: any) {
+      out.failed++;
+      out.items.push({ sku, category, was, result: 'failed', error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
+// updateOffer's request fields (EbayOfferDetailsWithId, Inventory API spec).
+const UPDATE_OFFER_FIELDS = [
+  'availableQuantity', 'categoryId', 'charity', 'extendedProducerResponsibility', 'hideBuyerDetails',
+  'includeCatalogProductDetails', 'listingDescription', 'listingDuration', 'listingPolicies', 'listingStartDate',
+  'lotSize', 'merchantLocationKey', 'pricingSummary', 'quantityLimitPerBuyer', 'regulatory', 'secondaryCategoryId',
+  'storeCategoryNames', 'tax',
+];
+
 export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean } = {}): Promise<AutolistResult> {
   await requeueEanFailures(env);
   let mode = await getEbayAutolistMode(env);
@@ -422,6 +528,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   if (queue.length === 0) return finish();
 
   let cfg: { categoryId: string; policies: any; merchantLocationKey: string } | null = null;
+  let storeCats: StoreCategories | null = null;
   if (mode === 'live') {
     if (!ebayConfigured(env)) { result.ok = false; result.stopped = 'not_configured'; return finish(); }
     const limit = await env.SYNC_STATE.get(LIMIT_KEY);
@@ -447,6 +554,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
         policies: await getPolicyIds(env),
         merchantLocationKey: await getMerchantLocationKey(env),
       };
+      storeCats = await loadStoreCategories(env);
     } catch (e: any) {
       result.ok = false; result.stopped = 'setup_failed'; result.error = e?.message || String(e);
       return finish();
@@ -498,6 +606,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
       title: p.inventoryItem.product.title, price: p.offer.pricingSummary.price.value, price_source: p.price.detail,
       condition: p.inventoryItem.condition, grades: p.grades, ean: p.ean,
       images: p.inventoryItem.product.imageUrls.length,
+      store_category: p.offer.storeCategoryNames?.[0] || null,
     });
 
     if (mode === 'dry') {
@@ -505,6 +614,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
         categoryId: (await env.SYNC_STATE.get(CATEGORY_KEY)) || EBAY_DEFAULT_CATEGORY_ID,
         policies: { fulfillmentPolicyId: '(dry)', paymentPolicyId: '(dry)', returnPolicyId: '(dry)' },
         merchantLocationKey: '(dry)', withEan: true,
+        storeCategory: storeCategoryFor(product.tags, await loadStoreCategoryMap(env)),   // dry: not checked against the store
       });
       await saveItem(env, { ...item, hold_reason: undefined, preview: preview(p) }, 'would_list', `dry run at ${priced.price.value.toFixed(2)} (${priced.price.detail})`);
       result.would_list++;
@@ -513,14 +623,15 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
 
     // LIVE. First with the EAN (eBay may match its catalogue); if eBay refuses
     // for any reason other than the selling limit, once more as a standalone.
-    let payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: true });
+    const storeCategory = storeCategoryOf(product.tags, storeCats!);
+    let payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: true, storeCategory });
     try {
       let ids: { offerId: string; listingId: string };
       try {
         ids = await publishListing(env, payload);
       } catch (e) {
         if (isSellingLimitError(e) || !payload.ean) throw e;
-        payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: false });
+        payload = buildEbayListing(product, grades, priced.price, { ...cfg!, withEan: false, storeCategory });
         ids = await publishListing(env, payload);
       }
       await env.SYNC_STATE.put(LISTING_PREFIX + ids.listingId, item.sku);
@@ -1070,4 +1181,22 @@ export async function handleEbayRun(request: Request, env: EbayFullEnv): Promise
   if (what !== 'orders') out.autolist = await runEbayAutolist(env, { force: Boolean(b.force) });
   if (what !== 'autolist') out.orders = await pollEbayOrders(env);
   return res(out);
+}
+
+/**
+ * GET  ?action=ebay-store-categories (Bearer) — the map, the store's categories
+ *      (fresh from eBay) and which mapped names the store lacks.
+ * POST ?action=ebay-store-categories {apply?: true} (Bearer) — the one-off on
+ *      live listings; without apply it only reports what would change.
+ */
+export async function handleEbayStoreCategories(request: Request, env: EbayFullEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
+  if (request.method === 'GET') {
+    const sc = await loadStoreCategories(env, { fresh: true });
+    const names = [...new Set([...Object.values(sc.map.by_tag), ...Object.values(sc.map.by_genre)])];
+    return res({ ...sc, map_missing_on_store: sc.paths ? names.filter(n => !sc.paths!.includes(`/${n}`)) : null });
+  }
+  const b = await readBody(request);
+  const r = await applyStoreCategoriesToLive(env, { apply: b.apply === true });
+  return res(r, r.ok ? 200 : 502);
 }
