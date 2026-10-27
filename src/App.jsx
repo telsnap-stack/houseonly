@@ -8887,6 +8887,8 @@ const EBAY_HOLD_LABEL = {
   discogs_error:'Discogs no respondio (se reintenta)',
   sin_stock:'sin stock', forthcoming:'pre-order', no_activo:'no activo', sin_imagen:'sin foto',
   usado_sin_grado:'usado sin grado', no_en_shopify:'no esta en Shopify', sin_sku:'sin SKU', sku_largo:'SKU > 50',
+  discogs_snapshot_caducado:'snapshot de Discogs caducado (> 48 h)',
+  sin_politica_envio:'falta la politica de envio de su peso en eBay',
 };
 
 function EbayPanel() {
@@ -8982,6 +8984,7 @@ function EbayPanel() {
   const FILTERS = {
     pendientes: i => ['queued','held','would_list'].includes(i.s),
     sin_precio: i => i.s === 'held' && i.r === 'sin_fuente_de_precio',
+    sin_peso: i => Boolean(i.w) && i.s !== 'excluded',
     listed: i => i.s === 'listed',
     failed: i => i.s === 'failed',
     excluded: i => i.s === 'excluded',
@@ -9043,10 +9046,11 @@ function EbayPanel() {
           Backfill automatico (cron, tandas de 25 cuando no queda nada por publicar): {data.autobackfill === 'off' ? 'APAGADO (meta:ebay_autobackfill_mode=off)' : 'encendido'}
           {ab && ` · ${ab.at?.slice(0,16)}: ${ab.skipped ? `nada (${ab.skipped})` : ab.ok ? `${ab.queued?.length||0} en cola${ab.done?' · catalogo completo':''}` : `no (${ab.error})`}`}
         </div>); })()}
+      {data.no_weight > 0 && <div style={{fontSize:10,color:'#ff9a4a',marginBottom:8}}>⚠ {data.no_weight} disco(s) sin peso en Shopify: van con la politica de envio de un disco aunque sean dobles o triples. Ponles peso (filtro "sin peso").</div>}
       {noPrice > 0 && <div style={{fontSize:10,color:'#ff9a4a',marginBottom:8}}>⚠ {noPrice} disco(s) sin fuente de precio: tienen <code>discogs:no</code> y ningun coste en Shopify. No se publicaran hasta que tengan coste.</div>}
 
       <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
-        {[['pendientes',(counts.queued||0)+(counts.held||0)+(counts.would_list||0)],['sin_precio',noPrice],['listed',counts.listed||0],['failed',counts.failed||0],['excluded',counts.excluded||0],['todos',(data.items||[]).length]].map(([k,n]) => (
+        {[['pendientes',(counts.queued||0)+(counts.held||0)+(counts.would_list||0)],['sin_precio',noPrice],['sin_peso',data.no_weight||0],['listed',counts.listed||0],['failed',counts.failed||0],['excluded',counts.excluded||0],['todos',(data.items||[]).length]].map(([k,n]) => (
           <Btn key={k} ch={`${k.replace('_',' ')} ${n}`} variant={filter===k?'primary':'ghost'} onClick={()=>setFilter(k)} />
         ))}
       </div>

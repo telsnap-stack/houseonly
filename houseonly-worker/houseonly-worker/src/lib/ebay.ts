@@ -50,11 +50,11 @@ import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
   challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
-  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, getInventoryItem, type StoreCheck, type EbayEnv, type EbayOrder,
+  getStoreSubscription, getStoreCategoryPaths, EBAY_POLICY_NAMES, getOffer, listInventorySkus, getInventoryItem, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
   buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
-  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, OFF_EBAY_TEXT, stripOffEbayText, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
+  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, OFF_EBAY_TEXT, stripOffEbayText, shippingBandFor, fulfillmentPolicyFor, type ShippingBand, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
   shopifyAdminGraphQL, findVariantBySkuLoose, getVariantsStock, createDiscogsOrder,
@@ -162,7 +162,8 @@ export interface EbayItem {
   error?: string;
   title?: string;
   price?: EbayPrice;
-  preview?: { title: string; price: string; price_source: string; condition: string; grades: Grades; ean: string; images: number };
+  no_weight?: boolean;      // Shopify variant without weight: shipped on the one-record policy, flagged in the admin
+  preview?: { title: string; price: string; price_source: string; condition: string; grades: Grades; ean: string; images: number; shipping?: string; store_category?: string | null };
   history?: Array<{ at: string; status: EbayItemStatus; note?: string }>;
 }
 
@@ -174,6 +175,7 @@ export interface EbayItem {
 export interface EbayItemMeta {
   s: EbayItemStatus; r?: string; c?: string; a: string; t?: string;
   p?: string; ps?: string; l?: string; e?: string; o?: string;
+  w?: 1;                    // no weight in Shopify
 }
 
 function metaOf(it: EbayItem): EbayItemMeta {
@@ -185,6 +187,7 @@ function metaOf(it: EbayItem): EbayItemMeta {
   if (it.listing_id) m.l = it.listing_id;
   if (it.error && it.status === 'failed') m.e = it.error.slice(0, 160);
   if (it.origin) m.o = it.origin;
+  if (it.no_weight) m.w = 1;
   return m;
 }
 
@@ -575,6 +578,56 @@ export async function raiseLiveToFloor(env: EbayFullEnv, skus: string[]): Promis
   return out;
 }
 
+const shippingPolicyName = (band: ShippingBand) =>
+  band === 'two' ? EBAY_POLICY_NAMES.fulfillment2 : band === 'three' ? EBAY_POLICY_NAMES.fulfillment3 : EBAY_POLICY_NAMES.fulfillment;
+
+export interface ShippingPolicyApplyResult {
+  apply: boolean;
+  live: number;
+  by_policy: Record<string, number>;     // where each live listing belongs now
+  moved: number;
+  no_weight: string[];
+  items: Array<{ sku: string; kg: number | null; policy: string; result: 'moved' | 'would_move' | 'unchanged' | 'policy_missing' | 'no_en_shopify' | 'failed'; error?: string }>;
+}
+
+/**
+ * One-off: live listings onto the shipping policy their weight calls for
+ * (published before shipping went by weight). Only listingPolicies changes.
+ */
+export async function applyShippingPolicyToLive(env: EbayFullEnv, opts: { apply: boolean }): Promise<ShippingPolicyApplyResult> {
+  const out: ShippingPolicyApplyResult = { apply: opts.apply, live: 0, by_policy: {}, moved: 0, no_weight: [], items: [] };
+  await env.SYNC_STATE.delete('ebay:policies:v2');   // the band policies may have just been created
+  const policies = await getPolicyIds(env);
+  for (const sku of await listInventorySkus(env)) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') continue;
+    out.live++;
+    const product = await fetchSourceProduct(env, sku);
+    if (!product) { out.items.push({ sku, kg: null, policy: '-', result: 'no_en_shopify' }); continue; }
+    const kg = product.variant.weightKg ?? null;
+    const band = shippingBandFor(kg);
+    const name = shippingPolicyName(band);
+    if (!kg) out.no_weight.push(sku);
+    const want = fulfillmentPolicyFor(band, policies);
+    if (!want) { out.items.push({ sku, kg, policy: name, result: 'policy_missing' }); continue; }
+    out.by_policy[name] = (out.by_policy[name] || 0) + 1;
+    const item = await getItem(env, sku);
+    if (item && Boolean(item.no_weight) !== !kg) await saveItem(env, { ...item, no_weight: !kg || undefined }, item.status);
+    const offer = await withOneRetry(() => getOffer(env, summary.offerId));
+    if (offer?.listingPolicies?.fulfillmentPolicyId === want) { out.items.push({ sku, kg, policy: name, result: 'unchanged' }); continue; }
+    if (!opts.apply) { out.items.push({ sku, kg, policy: name, result: 'would_move' }); continue; }
+    try {
+      const body = offerForUpdate(offer);
+      await putLiveOffer(env, summary.offerId, { ...body, listingPolicies: { ...body.listingPolicies, fulfillmentPolicyId: want } });
+      out.moved++;
+      out.items.push({ sku, kg, policy: name, result: 'moved' });
+    } catch (e: any) {
+      out.items.push({ sku, kg, policy: name, result: 'failed', error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
 // createOrReplaceInventoryItem's request fields (InventoryItem, Inventory API spec).
 const PUT_INVENTORY_ITEM_FIELDS = ['availability', 'condition', 'conditionDescription', 'conditionDescriptors', 'packageWeightAndSize', 'product'];
 
@@ -735,12 +788,20 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     const grades = gradesFor(product.tags, priced.discogs || null);
     if (!grades) { await hold(item, 'usado_sin_grado'); continue; }
     item.price = priced.price;
+    const kg = product.variant.weightKg ?? null;
+    const band = shippingBandFor(kg);
+    item.no_weight = !kg || undefined;
+    if (mode === 'live' && !fulfillmentPolicyFor(band, cfg!.policies)) {
+      await hold(item, 'sin_politica_envio', `${shippingPolicyName(band)} (${kg} kg)`);
+      continue;
+    }
 
     const preview = (p: ReturnType<typeof buildEbayListing>) => ({
       title: p.inventoryItem.product.title, price: p.offer.pricingSummary.price.value, price_source: p.price.detail,
       condition: p.inventoryItem.condition, grades: p.grades, ean: p.ean,
       images: p.inventoryItem.product.imageUrls.length,
       store_category: p.offer.storeCategoryNames?.[0] || null,
+      shipping: `${shippingPolicyName(shippingBandFor(product.variant.weightKg))} · ${product.variant.weightKg ? `${product.variant.weightKg} kg` : 'SIN PESO'}`,
     });
 
     if (mode === 'dry') {
@@ -1260,9 +1321,11 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
   const items = (await listItemMetas(env)).sort((a, b) => (b.c || b.a).localeCompare(a.c || a.a));
   const counts: Record<string, number> = {};
   const holds: Record<string, number> = {};
+  let noWeight = 0;
   for (const i of items) {
     counts[i.s] = (counts[i.s] || 0) + 1;
     if (i.s === 'held' && i.r) holds[i.r] = (holds[i.r] || 0) + 1;
+    if (i.w && ['listed', 'would_list', 'queued', 'held'].includes(i.s)) noWeight++;
   }
   return res({
     configured: ebayConfigured(env),
@@ -1281,6 +1344,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     relink_last_run: await readJsonKey(env, 'meta:relink_cron_last_run'),
     counts,
     holds,
+    no_weight: noWeight,
     items,
   });
 }
