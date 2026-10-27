@@ -8934,6 +8934,17 @@ function EbayPanel() {
       : (d.done ? 'Backfill: catalogo completo.' : 'Backfill: nada nuevo.'));
     await reload();
   });
+  // Discogs inventory export (CSV) as the price snapshot, when the cron's API refresh can't get through.
+  const uploadSnapshot = (file) => run('snapshot', async () => {
+    const r = await fetch(`${WORKER_URL}?action=discogs-snapshot&name=${encodeURIComponent(file.name)}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'text/csv' }, body: await file.text(),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('Unauthorized — check the admin secret.');
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setMsg(`Snapshot de Discogs cargado: ${d.count} listings, del ${d.taken_at?.slice(0,16)} UTC.`);
+    await reload();
+  });
   const runNow = () => run('run', async () => {
     const d = await call('ebay-run', { what: 'autolist' });
     const a = d.autolist || {};
@@ -8992,6 +9003,25 @@ function EbayPanel() {
           {' '}Comprobado {data.store.checked_at?.slice(0,16)}.
         </div>
       )}
+      {(() => { const ds = data.discogs_snapshot; if (!ds) return null; const lr = ds.last_refresh; return (<>
+        {ds.stale && (
+          <div style={{fontSize:11,color:'#ff9a4a',border:'1px solid #ff9a4a',padding:'8px 10px',marginBottom:12}}>
+            ⚠ El snapshot de precios de Discogs {ds.taken_at ? `tiene ${ds.age_hours} h (del ${ds.taken_at.slice(0,16)} UTC)` : 'no existe'}: pasadas las {ds.max_age_hours} h los discos esperan y no se publica nada en eBay.
+            {' '}El cron lo renueva desde la API cuando Discogs deja; si no lo consigue, sube aqui el CSV del export de inventario de Discogs.
+          </div>
+        )}
+        <div style={{fontSize:9,color:S.muted,marginBottom:12,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+          <span>
+            Precios de Discogs: snapshot {ds.taken_at ? `del ${ds.taken_at.slice(0,16)} UTC (${ds.age_hours} h, ${ds.source}, ${ds.count} listings)` : 'sin cargar'}
+            {ds.building && ` · renovando: pagina ${ds.building.next_page}${ds.building.pages ? ` de ${ds.building.pages}` : ''}`}
+            {lr && ` · ultimo intento ${lr.at?.slice(0,16)}: ${lr.result}${lr.error ? ` (${lr.error})` : ''}`}
+          </span>
+          <label style={{cursor:busy?'default':'pointer',textDecoration:'underline'}}>
+            {busy==='snapshot' ? 'subiendo…' : 'subir CSV de Discogs'}
+            <input type="file" accept=".csv,text/csv" hidden disabled={Boolean(busy)} onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadSnapshot(f); }} />
+          </label>
+        </div>
+      </>); })()}
       <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
         {toggle('autolist','Auto-list eBay','live: cada producto nuevo entra en la cola y el cron publica en tandas lo que tiene precio. dry: prepara sin llamar a eBay. Independiente de Discogs.')}
         {toggle('sync','Ventas eBay → Shopify','dry: registra lo que haria. live: cada venta de eBay crea el pedido pagado en Shopify.')}

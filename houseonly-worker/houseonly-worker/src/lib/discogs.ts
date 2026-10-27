@@ -272,22 +272,28 @@ export interface InventoryPage {
  * @param username Discogs username (e.g. "houseonly")
  * @param page 1-indexed page number
  * @param status Optional filter: only listings with this status
+ * @param opts sort (e.g. 'listed' + 'asc': new listings land on the last page);
+ *             retry429 false = fail on the first 429 instead of waiting it out
  */
 export async function getInventory(
   token: string,
   username: string,
   page = 1,
   status?: DiscogsListingStatus,
+  opts: { sort?: string; sortOrder?: 'asc' | 'desc'; retry429?: boolean } = {},
 ): Promise<InventoryPage> {
   const params = new URLSearchParams({
     page: String(page),
     per_page: '100',
   });
   if (status) params.set('status', status);
+  if (opts.sort) params.set('sort', opts.sort);
+  if (opts.sortOrder) params.set('sort_order', opts.sortOrder);
 
   const r = await discogsFetch(
     token,
     `/users/${encodeURIComponent(username)}/inventory?${params}`,
+    opts.retry429 === false ? { _attempt: DISCOGS_429_MAX_ATTEMPTS - 1 } : undefined,
   );
 
   if (!r.ok) {
