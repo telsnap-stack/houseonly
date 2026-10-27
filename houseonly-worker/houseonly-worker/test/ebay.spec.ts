@@ -5,14 +5,14 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
 	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
-	roundUpTo99, stripShippingText,
+	roundUpTo99, stripShippingText, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
 	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -111,6 +111,17 @@ function route(method: string, match: RegExp, reply: Call["body"] | ((c: Call) =
 const ebayCalls = (method?: string, re?: RegExp) => calls.filter(c => c.path !== "/identity/v1/oauth2/token"
 	&& (!method || c.method === method) && (!re || re.test(c.path)));
 
+// Trading GetStore as the real account answered it (2026-10-27), trimmed.
+const GET_STORE_XML = '<?xml version="1.0" encoding="UTF-8"?><GetStoreResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack>'
+	+ '<Store><Name>House Only</Name><CustomCategories>'
+	+ '<CustomCategory><CategoryID>54550757012</CategoryID><Name>House</Name><Order>1</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>54550758012</CategoryID><Name>Minimal</Name><Order>2</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>54550759012</CategoryID><Name>UK Garage &amp; Breaks</Name><Order>3</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>54550760012</CategoryID><Name>Drum &amp; Bass</Name><Order>4</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>54550761012</CategoryID><Name>Bass Music</Name><Order>5</Order></CustomCategory>'
+	+ '<CustomCategory><CategoryID>1</CategoryID><Name>Other</Name><Order>6</Order></CustomCategory>'
+	+ '</CustomCategories></Store></GetStoreResponse>';
+
 function installFetch() {
 	calls = [];
 	routes = [];
@@ -126,6 +137,7 @@ function installFetch() {
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/withdraw$/, { listingId: "LIST-1" });
 	route("GET", /^\/sell\/account\/v1\/privilege$/, { sellerRegistrationCompleted: true });
 	route("GET", /^\/sell\/account\/v1\/subscription/, { total: 1, subscriptions: [{ subscriptionType: "STORE_PLAN", subscriptionLevel: "Featured", subscriptionId: "681522847", marketplaceId: "EBAY_ES", term: { value: 1, unit: "MONTH" } }] });
+	route("POST", /^\/ws\/api\.dll$/, () => new Response(GET_STORE_XML, { status: 200, headers: { "Content-Type": "text/xml" } }));
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any, init?: any) => {
 		const url = new URL(typeof input === "string" ? input : input.url);
 		if (url.origin !== "https://api.ebay.com") throw new Error(`unexpected fetch ${url}`);
@@ -1060,5 +1072,78 @@ describe("admin endpoints", () => {
 		const r = await (await viaWorker(post("ebay-run", { what: "autolist" }))).json() as any;
 		expect(r.autolist).toMatchObject({ mode: "dry", would_list: 1 });
 		expect(r.orders).toBeUndefined();
+	});
+});
+
+describe("eBay store categories", () => {
+	const cat = (tags: string[]) => storeCategoryFor(tags, EBAY_STORE_CATEGORY_DEFAULTS);
+
+	it("maps the canonical genre; a Minimal tag beats it; the rest stays unassigned", () => {
+		expect(cat(["genre:house"])).toBe("House");
+		expect(cat(["genre:deephouse"])).toBe("House");
+		expect(cat(["genre:techhouse"])).toBe("House");
+		expect(cat(["genre:garage"])).toBe("UK Garage & Breaks");
+		expect(cat(["genre:drumandbass", "Jungle"])).toBe("Drum & Bass");
+		expect(cat(["genre:bassmusic", "Dubstep"])).toBe("Bass Music");
+		expect(cat(["genre:techno", "Techno - Minimal"])).toBe("Minimal");
+		expect(cat(["genre:deephouse", "Deep Minimal"])).toBe("Minimal");
+		expect(cat(["genre:techno"])).toBeNull();
+		expect(cat(["genre:jazz"])).toBeNull();
+		expect(cat(["vinyl"])).toBeNull();
+	});
+
+	it("live publish sends storeCategoryNames as a full path", async () => {
+		await live();
+		await includeSkus(E, ["BOND12081C"]);   // genre:deephouse
+		expect((await runEbayAutolist(E)).listed).toBe(1);
+		expect(ebayCalls("POST", /offer$/)[0].body.storeCategoryNames).toEqual(["/House"]);
+		expect((await item("BOND12081C")).preview.store_category).toBe("/House");
+	});
+
+	it("the map is read from KV; a name the store lacks is never sent", async () => {
+		await live();
+		await E.SYNC_STATE.put("meta:ebay_store_category_map", JSON.stringify({ by_tag: {}, by_genre: { deephouse: "Deep" } }));
+		await includeSkus(E, ["BOND12081C"]);
+		expect((await runEbayAutolist(E)).listed).toBe(1);
+		expect(ebayCalls("POST", /offer$/)[0].body).not.toHaveProperty("storeCategoryNames");
+		await E.SYNC_STATE.put("meta:ebay_store_category_map", JSON.stringify({ by_tag: {}, by_genre: { deephouse: "Bass Music" } }));
+		addProduct("X2"); await linkDiscogs("X2", 702); await includeSkus(E, ["X2"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/)[1].body.storeCategoryNames).toEqual(["/Bass Music"]);
+	});
+
+	it("GetStore unreadable: the listing still publishes, without a store category", async () => {
+		await live();
+		route("POST", /^\/ws\/api\.dll$/, () => new Response("<GetStoreResponse><Ack>Failure</Ack><LongMessage>nope</LongMessage></GetStoreResponse>"));
+		await includeSkus(E, ["BOND12081C"]);
+		expect((await runEbayAutolist(E)).listed).toBe(1);
+		expect(ebayCalls("POST", /offer$/)[0].body).not.toHaveProperty("storeCategoryNames");
+	});
+
+	it("one-off on live listings: dry reports, apply puts the offer back whole with the category", async () => {
+		addProduct("T1", { tags: ["genre:techno"] });
+		route("GET", /^\/sell\/inventory\/v1\/inventory_item\?/, { inventoryItems: [{ sku: "BOND12081C" }, { sku: "T1" }, { sku: "U1" }] });
+		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=U1/, { offers: [{ offerId: "OFF-U", status: "UNPUBLISHED" }] });
+		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=T1/, { offers: [{ offerId: "OFF-T", status: "PUBLISHED", listing: { listingId: "LT" } }] });
+		route("GET", /^\/sell\/inventory\/v1\/offer\?sku=BOND/, { offers: [{ offerId: "OFF-B", status: "PUBLISHED", listing: { listingId: "LB" } }] });
+		const full = { offerId: "OFF-B", sku: "BOND12081C", marketplaceId: "EBAY_ES", format: "FIXED_PRICE", status: "PUBLISHED", listing: { listingId: "LB" },
+			availableQuantity: 1, categoryId: "176985", listingDescription: "<p>x</p>", listingDuration: "GTC", merchantLocationKey: "houseonly-main",
+			listingPolicies: { fulfillmentPolicyId: "F1", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "21.99", currency: "EUR" } } };
+		route("GET", /^\/sell\/inventory\/v1\/offer\/OFF-B$/, full);
+		route("GET", /^\/sell\/inventory\/v1\/offer\/OFF-T$/, { ...full, offerId: "OFF-T", sku: "T1" });
+		route("PUT", /^\/sell\/inventory\/v1\/offer\//, () => new Response(null, { status: 204 }));
+
+		const dry = await applyStoreCategoriesToLive(E, { apply: false });
+		expect(dry).toMatchObject({ ok: true, live: 2, by_category: { House: 1 }, unassigned: 1, updated: 0, map_missing_on_store: [] });
+		expect(ebayCalls("PUT", /offer/)).toHaveLength(0);
+
+		const r = await applyStoreCategoriesToLive(E, { apply: true });
+		expect(r).toMatchObject({ live: 2, updated: 1, failed: 0 });
+		expect(r.items.find(i => i.sku === "T1")!.result).toBe("unchanged");
+		const [put] = ebayCalls("PUT", /offer\/OFF-B$/);
+		expect(put.body).toEqual({
+			availableQuantity: 1, categoryId: "176985", listingDescription: "<p>x</p>", listingDuration: "GTC", merchantLocationKey: "houseonly-main",
+			listingPolicies: full.listingPolicies, pricingSummary: full.pricingSummary, storeCategoryNames: ["/House"], includeCatalogProductDetails: false,
+		});
 	});
 });

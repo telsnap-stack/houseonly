@@ -173,7 +173,8 @@ interface EbayRequestOpts {
 
 export async function ebayRequest(env: EbayEnv, method: string, path: string, opts: EbayRequestOpts = {}): Promise<any> {
   const send = async (token: string) => {
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+    // Accept-Language explicit: Inventory answers 25709 to '*' (what Node's fetch sends).
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': EBAY_CONTENT_LANGUAGE };
     if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
     if (opts.contentLanguage) headers['Content-Language'] = EBAY_CONTENT_LANGUAGE;
     return fetch(`${EBAY_API}${path}`, {
@@ -278,6 +279,51 @@ export async function getStoreSubscription(env: EbayEnv): Promise<StoreCheck> {
   }
 }
 
+// ── STORE CATEGORIES ────────────────────────────────────────────────
+
+// The seller's own store categories. The REST Stores API needs the sell.stores
+// scope, which our consent didn't ask for; Trading GetStore reads the same tree
+// with the token we have (api_scope). Site 186 = eBay Spain.
+const TRADING_URL = `${EBAY_API}/ws/api.dll`;
+const TRADING_COMPAT = '1371';
+
+/** Category paths of the store, e.g. ["/House", "/Minimal", "/Other"]. */
+export async function getStoreCategoryPaths(env: EbayEnv): Promise<string[]> {
+  const body = '<?xml version="1.0" encoding="utf-8"?><GetStoreRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<CategoryStructureOnly>true</CategoryStructureOnly></GetStoreRequest>';
+  const send = async (token: string) => fetch(TRADING_URL, {
+    method: 'POST',
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetStore', 'X-EBAY-API-SITEID': '186',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': TRADING_COMPAT, 'X-EBAY-API-IAF-TOKEN': token,
+      'Content-Type': 'text/xml',
+    },
+    body,
+  });
+  const xml = await (await send(await getUserToken(env))).text();
+  const ack = /<Ack>([^<]*)<\/Ack>/.exec(xml)?.[1];
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const msg = /<LongMessage>([^<]*)<\/LongMessage>/.exec(xml)?.[1] || xml.slice(0, 300);
+    throw new Error(`eBay GetStore: ${msg}`);
+  }
+  // CustomCategory (top level) and ChildCategory nest; Name is the path segment.
+  const paths: string[] = [];
+  const stack: string[] = [];
+  const re = /<(\/?)(CustomCategory|ChildCategory|Name)>([^<]*)/g;
+  for (let m; (m = re.exec(xml));) {
+    const [, close, tag, text] = m;
+    if (tag === 'Name' && !close && stack.length) {
+      stack[stack.length - 1] = decodeXml(text);
+      paths.push('/' + stack.join('/'));
+    } else if (tag !== 'Name') {
+      if (close) stack.pop(); else stack.push('');
+    }
+  }
+  return paths;
+}
+
+const decodeXml = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+
 // ── INVENTORY ───────────────────────────────────────────────────────
 
 /**
@@ -322,6 +368,22 @@ export async function findOffer(env: EbayEnv, sku: string): Promise<EbayOfferSum
   const o = (data?.offers || [])[0];
   if (!o?.offerId) return null;
   return { offerId: o.offerId, status: o.status, listingId: o.listing?.listingId, listingStatus: o.listing?.listingStatus };
+}
+
+/** The full offer (getOffer), as updateOffer needs it back. */
+export async function getOffer(env: EbayEnv, offerId: string): Promise<any> {
+  return ebayRequest(env, 'GET', `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);
+}
+
+/** Every inventory item SKU on the account (getInventoryItems, 100 a page). */
+export async function listInventorySkus(env: EbayEnv): Promise<string[]> {
+  const skus: string[] = [];
+  for (let offset = 0; ; offset += 100) {
+    const data = await ebayRequest(env, 'GET', `/sell/inventory/v1/inventory_item?limit=100&offset=${offset}`);
+    const page = (data?.inventoryItems || []).map((i: any) => String(i.sku));
+    skus.push(...page);
+    if (page.length < 100) return skus;
+  }
 }
 
 export async function createOffer(env: EbayEnv, offer: unknown): Promise<string> {
