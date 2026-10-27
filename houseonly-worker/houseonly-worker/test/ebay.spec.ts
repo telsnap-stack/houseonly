@@ -12,8 +12,8 @@ import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, withdrawOnEbayForShopifyOrder, runEbayBackfill,
-	EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
+	runEbayAutolist, pollEbayOrders, includeSkus, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
 
@@ -402,6 +402,45 @@ describe("backfill of the existing catalogue", () => {
 	});
 });
 
+describe("continuous backfill (cron)", () => {
+	const livePass = (over: any = {}) => ({ ok: true, mode: "live", checked: 0, listed: 0, would_list: 0, held: 0, failed: 0, held_by_reason: {}, pending: 0, finished_at: "", ...over }) as any;
+	beforeEach(async () => {
+		backfillList = Array.from({ length: 60 }, (_, i) => `CAT${String(i).padStart(3, "0")}`);
+		await E.SYNC_STATE.put("meta:ebay_backfill", JSON.stringify({ cursor: "5", batches: 1, done: false, queued: 5 }));
+		await E.SYNC_STATE.put("meta:ebay_autolist_mode", "live");
+	});
+
+	it(`queues the next ${EBAY_BACKFILL_NEXT} when nothing is queued or would_list (held records don't block)`, async () => {
+		addProduct("WAIT01"); await includeSkus(E, ["WAIT01"]);
+		await runEbayAutolist(E);                                   // no Discogs listing: held
+		expect((await item("WAIT01")).status).toBe("held");
+		const r: any = await runEbayAutoBackfill(E, livePass());
+		expect(r.queued).toHaveLength(EBAY_BACKFILL_NEXT);
+		expect(r.queued[0]).toBe("CAT005");
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:ebay_autobackfill_last_run")).queued).toHaveLength(EBAY_BACKFILL_NEXT);
+	});
+
+	it("waits while something is still queued or would_list", async () => {
+		await includeSkus(E, ["BOND12081C"]);
+		expect(await runEbayAutoBackfill(E, livePass())).toEqual({ skipped: "1 still waiting to publish" });
+		expect(await E.SYNC_STATE.get("ebay:item:CAT005")).toBeNull();
+	});
+
+	it("does nothing in dry, after a stopped pass, during the 25026 pause, at the end, or when off", async () => {
+		expect(await runEbayAutoBackfill(E, livePass({ mode: "dry" }))).toEqual({ skipped: "autolist not live" });
+		expect(await runEbayAutoBackfill(E, livePass({ stopped: "cooldown" }))).toEqual({ skipped: "pass stopped: cooldown" });
+		await E.SYNC_STATE.put("meta:ebay_limit_hit", JSON.stringify({ until: new Date(Date.now() + 3600e3).toISOString() }));
+		expect(await runEbayAutoBackfill(E, livePass())).toMatchObject({ ok: false, error: expect.stringMatching(/selling limit/) });
+		await E.SYNC_STATE.delete("meta:ebay_limit_hit");
+		await E.SYNC_STATE.put("meta:ebay_autobackfill_mode", "off");
+		expect(await runEbayAutoBackfill(E, livePass())).toEqual({ skipped: "off" });
+		await E.SYNC_STATE.delete("meta:ebay_autobackfill_mode");
+		await E.SYNC_STATE.put("meta:ebay_backfill", JSON.stringify({ cursor: "60", batches: 3, done: true, queued: 60 }));
+		expect(await runEbayAutoBackfill(E, livePass())).toMatchObject({ done: true, queued: [] });
+		expect(await E.SYNC_STATE.get("ebay:item:CAT005")).toBeNull();
+	});
+});
+
 // ── auto-list & price ───────────────────────────────────────────────
 
 describe("auto-list cron and price sources", () => {
@@ -515,6 +554,18 @@ describe("auto-list cron and price sources", () => {
 		expect(vi.mocked(discogs.getListing).mock.calls.length).toBeLessThanOrEqual(EBAY_DISCOGS_READS_PER_RUN);
 		expect(r.would_list).toBe(EBAY_BATCH_SIZE);
 		expect(r.checked).toBeLessThanOrEqual(EBAY_CHECKS_PER_RUN);
+	});
+
+	it("Discogs 429: held, no further Discogs reads this run, flagged for the cron", async () => {
+		addProduct("R1"); await linkDiscogs("R1", 901);
+		addProduct("R2"); await linkDiscogs("R2", 902);
+		vi.mocked(discogs.getListing).mockRejectedValue(new Error('Discogs getListing failed: 429 {"message":"You are making requests too quickly."}'));
+		await includeSkus(E, ["R1", "R2"]);
+		const r = await runEbayAutolist(E);
+		expect(r.discogs_429).toBe(true);
+		expect(discogs.getListing).toHaveBeenCalledTimes(1);
+		expect(r.held_by_reason).toEqual({ discogs_error: 2 });
+		expect(r.listed + r.would_list).toBe(0);
 	});
 
 	it("held records come round: the oldest check goes first", async () => {
@@ -640,6 +691,32 @@ describe("relink cron keeps sku: mappings current for hand-made listings", () =>
 		await E.SYNC_STATE.put("meta:relink_cron_mode", "off");
 		expect(await runRelinkCron(E)).toEqual({ skipped: "off" });
 		expect(discogs.getInventory).not.toHaveBeenCalled();
+	});
+
+	const cron = async () => {
+		const ctx = createExecutionContext();
+		await worker.scheduled({ cron: EBAY_CRON, scheduledTime: Date.now() } as any, E, ctx);
+		await waitOnExecutionContext(ctx);
+	};
+
+	it(":03 slot runs the eBay pass BEFORE the relink", async () => {
+		vi.mocked(discogs.getInventory).mockResolvedValue(inv(1, []) as any);
+		await includeSkus(E, ["BOND12081C"]);
+		await cron();
+		const read = vi.mocked(discogs.getListing).mock.invocationCallOrder[0];
+		const page = vi.mocked(discogs.getInventory).mock.invocationCallOrder[0];
+		expect(read).toBeLessThan(page);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_last_run"))).toMatchObject({ ok: true, page: 1 });
+	});
+
+	it(":03 slot skips the relink when the eBay pass just got a Discogs 429 (same page next run)", async () => {
+		await E.SYNC_STATE.put("meta:relink_cron_cursor", JSON.stringify({ status: "For Sale", page: 3 }));
+		vi.mocked(discogs.getListing).mockRejectedValue(new Error("Discogs getListing failed: 429 {}"));
+		await includeSkus(E, ["BOND12081C"]);
+		await cron();
+		expect(discogs.getInventory).not.toHaveBeenCalled();
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_last_run"))).toMatchObject({ skipped: "discogs_429" });
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:relink_cron_cursor"))).toEqual({ status: "For Sale", page: 3 });
 	});
 });
 
