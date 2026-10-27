@@ -2420,9 +2420,16 @@ const RELINK_LAST_RUN_KEY = 'meta:relink_cron_last_run';
 const RELINK_MODE_KEY = 'meta:relink_cron_mode';
 const RELINK_STATUSES: Array<'For Sale' | 'Draft'> = ['For Sale', 'Draft'];
 
-export async function runRelinkCron(env: SyncAdminEnv): Promise<any> {
+export async function runRelinkCron(env: SyncAdminEnv, opts: { discogs429?: boolean } = {}): Promise<any> {
   if ((await env.SYNC_STATE.get(RELINK_MODE_KEY)) === 'off') return { skipped: 'off' };
   if (!env.DISCOGS_TOKEN) return { skipped: 'no DISCOGS_TOKEN' };
+  if (opts.discogs429) {
+    // The eBay pass just before this, in the same :03 slot, got a 429 from
+    // Discogs: a page now would only burn the 6 × 20 s retries. Same page next run.
+    const summary = { at: new Date().toISOString(), ok: true, skipped: 'discogs_429' };
+    await env.SYNC_STATE.put(RELINK_LAST_RUN_KEY, JSON.stringify(summary));
+    return summary;
+  }
   let cur = { status: 'For Sale' as 'For Sale' | 'Draft', page: 1 };
   try {
     const raw = await env.SYNC_STATE.get(RELINK_CURSOR_KEY);
