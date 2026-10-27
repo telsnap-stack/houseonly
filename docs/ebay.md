@@ -179,15 +179,16 @@ La política de envío depende del peso de la variante en Shopify
 | Peso | Política |
 |---|---|
 | ≤ 0,675 kg (o sin peso) | Vinilos - envío estándar |
-| ≤ 1,125 kg | Vinilos - envío 2 discos (ES 8,50/+2 · UE 14/+1 · US-CA 36/+3 · resto 44/+4) |
-| > 1,125 kg | Vinilos - envío 3+ discos (ES 11/+2 · UE 16/+1 · US-CA 42/+3 · resto 50/+4) |
+| < 1,0 kg | Vinilos - envío 2 discos (ES 8,50/+2 · UE 14/+1 · US-CA 36/+3 · resto 44/+4) |
+| ≥ 1,0 kg | Vinilos - envío 3+ discos (ES 11/+2 · UE 16/+1 · US-CA 42/+3 · resto 50/+4) |
 
 - Las tres políticas se buscan por nombre, como antes (caché `ebay:policies:v2`).
 - Si falta una de las dos nuevas, los discos que la necesitan esperan
   (`sin_politica_envio`) en vez de salir con la tarifa de un disco.
 - Sin peso: política estándar, y el admin lo marca ("sin peso").
-- Ojo: con la regla de pesos de los importadores, un 3LP pesa 1,05 kg y cae en
-  "2 discos".
+- El corte de 3+ está en 1,0 kg y no en el 1,125 de la tienda: con la regla de
+  pesos de los importadores, un 3LP pesa 1,05 kg y tiene que ir como 3+
+  (decisión de Eduardo, 2026-10-27).
 - `applyShippingPolicyToLive` pasa los anuncios vivos a la política de su peso
   (solo cambia `listingPolicies`).
 
