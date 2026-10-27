@@ -53,7 +53,7 @@ import {
   type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
-  buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, toSourceProduct, PRODUCT_BY_SKU_QUERY,
+  buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
   EBAY_DEFAULT_CATEGORY_ID, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
@@ -309,11 +309,15 @@ async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { di
   if (l.price?.currency !== 'EUR') {
     return { ok: false, hold: 'discogs_no_eur', detail: `Discogs listing ${listingId} in ${l.price?.currency}` };
   }
-  const value = Math.round(Number(l.price.value) * 100) / 100;
-  if (!(value > 0)) return { ok: false, hold: 'discogs_no_disponible', detail: `Discogs listing ${listingId} has no price` };
+  const discogsValue = Math.round(Number(l.price.value) * 100) / 100;
+  if (!(discogsValue > 0)) return { ok: false, hold: 'discogs_no_disponible', detail: `Discogs listing ${listingId} has no price` };
+  const value = roundUpTo99(discogsValue);
   return {
     ok: true,
-    price: { value, source: 'discogs', detail: `Discogs listing ${listingId}` },
+    price: {
+      value, source: 'discogs',
+      detail: value === discogsValue ? `Discogs listing ${listingId}` : `Discogs listing ${listingId} (${discogsValue.toFixed(2)} → ${value.toFixed(2)})`,
+    },
     discogs: { condition: l.condition, sleeve_condition: l.sleeve_condition },
   };
 }
