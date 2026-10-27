@@ -125,7 +125,7 @@ function installFetch() {
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/publish$/, { listingId: "LIST-1" });
 	route("POST", /^\/sell\/inventory\/v1\/offer\/[^/]+\/withdraw$/, { listingId: "LIST-1" });
 	route("GET", /^\/sell\/account\/v1\/privilege$/, { sellerRegistrationCompleted: true });
-	route("GET", /^\/sell\/account\/v1\/subscription/, { total: 1, subscriptions: [{ subscriptionType: "EBAY_STORE", subscriptionLevel: "BASIC", marketplaceId: "EBAY_ES", subscriptionId: "S1" }] });
+	route("GET", /^\/sell\/account\/v1\/subscription/, { total: 1, subscriptions: [{ subscriptionType: "STORE_PLAN", subscriptionLevel: "Featured", subscriptionId: "681522847", marketplaceId: "EBAY_ES", term: { value: 1, unit: "MONTH" } }] });
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any, init?: any) => {
 		const url = new URL(typeof input === "string" ? input : input.url);
 		if (url.origin !== "https://api.ebay.com") throw new Error(`unexpected fetch ${url}`);
@@ -570,8 +570,11 @@ describe("auto-list cron and price sources", () => {
 		expect(JSON.parse(await E.SYNC_STATE.get("meta:ebay_store_check"))).toMatchObject({ has_store: false, subscriptions: [] });
 	});
 
-	it("store check: only a STORE-type subscription counts; a failed check means dry", async () => {
-		route("GET", /^\/sell\/account\/v1\/subscription/, { total: 1, subscriptions: [{ subscriptionType: "SELLING_MANAGER", marketplaceId: "EBAY_ES" }] });
+	it("store check: only STORE_PLAN on EBAY_ES counts; a failed check means dry", async () => {
+		route("GET", /^\/sell\/account\/v1\/subscription/, { total: 2, subscriptions: [
+			{ subscriptionType: "SELLING_MANAGER", marketplaceId: "EBAY_ES" },
+			{ subscriptionType: "STORE_PLAN", marketplaceId: "EBAY_DE" },
+		] });
 		await live();
 		await includeSkus(E, ["BOND12081C"]);
 		expect(await runEbayAutolist(E)).toMatchObject({ mode: "dry", store_guard: "no_store" });
@@ -588,7 +591,7 @@ describe("auto-list cron and price sources", () => {
 		expect(r.store_guard).toBeUndefined();
 		expect(r).toMatchObject({ mode: "live", listed: 1 });
 		const items = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
-		expect(items.store).toMatchObject({ has_store: true, subscriptions: [{ type: "EBAY_STORE", level: "BASIC", marketplace: "EBAY_ES" }] });
+		expect(items.store).toMatchObject({ has_store: true, subscriptions: [{ type: "STORE_PLAN", level: "Featured", marketplace: "EBAY_ES" }] });
 	});
 
 	it("Discogs 429: held, no further Discogs reads this run, flagged for the cron", async () => {

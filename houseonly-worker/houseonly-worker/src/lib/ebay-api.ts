@@ -250,13 +250,18 @@ export interface StoreCheck {
   error?: string;
 }
 
+// subscriptionType of an eBay Store, as getSubscription returned it for our
+// account on 2026-10-27 (Tienda Avanzada):
+//   {"subscriptionType":"STORE_PLAN","subscriptionLevel":"Featured",
+//    "marketplaceId":"EBAY_ES","term":{"value":1,"unit":"MONTH"}}
+export const EBAY_STORE_SUBSCRIPTION_TYPE = 'STORE_PLAN';
+
 /**
- * Does the seller have an eBay STORE subscription (Account API getSubscription)?
- * Without one, a business seller pays an insertion fee for every listing (no
- * free allowance), so auto-list must not publish. eBay documents the type only
- * as "such as an eBay store" (SubscriptionTypeEnum isn't readable to us), so
- * the test is a type containing STORE; anything else counts as no store and
- * the admin shows what eBay returned. A failed call is reported in `error`.
+ * Does the seller have an eBay Store subscription on EBAY_ES (Account API
+ * getSubscription)? Without one, a business seller pays an insertion fee for
+ * every listing (no free allowance), so auto-list must not publish. Exact
+ * match on STORE_PLAN; anything else counts as no store and the admin shows
+ * what eBay returned. A failed call is reported in `error`.
  */
 export async function getStoreSubscription(env: EbayEnv): Promise<StoreCheck> {
   const checked_at = new Date().toISOString();
@@ -266,7 +271,7 @@ export async function getStoreSubscription(env: EbayEnv): Promise<StoreCheck> {
       type: String(s?.subscriptionType || ''), level: String(s?.subscriptionLevel || ''), marketplace: String(s?.marketplaceId || ''),
     }));
     const has_store = subscriptions.some((s: { type: string; marketplace: string }) =>
-      /STORE/i.test(s.type) && (!s.marketplace || s.marketplace === EBAY_MARKETPLACE));
+      s.type === EBAY_STORE_SUBSCRIPTION_TYPE && s.marketplace === EBAY_MARKETPLACE);
     return { has_store, subscriptions, checked_at };
   } catch (e: any) {
     return { has_store: false, subscriptions: [], checked_at, error: e?.message || String(e) };

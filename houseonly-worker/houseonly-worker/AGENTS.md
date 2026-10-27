@@ -99,6 +99,30 @@ Si aun asi un secreto aparece en la conversacion, el agente debe:
    `--env staging`), y recordar que el valor nuevo hay que meterlo tambien en la
    pestaña Entities del admin, que es de donde el frontend saca el Bearer.
 
+## Costs first: nada que cobre por unidad sin coste previsto y aprobado
+
+Antes de activar algo que genere cargos por unidad o recurrentes en una
+plataforma de terceros (anuncios de eBay, apps de Shopify, transportistas, APIs
+de pago, ...), el agente debe:
+
+1. **Comprobar la tabla de tarifas para ESTE tipo de cuenta**, en la
+   documentación oficial o en la propia cuenta (página de pagos, plan,
+   suscripciones por API). No vale suponer la tarifa ni la cuota gratuita.
+2. **Poner en el informe el coste mensual previsto**: unidades × tarifa,
+   incluidas las renovaciones (un anuncio GTC de eBay se cobra cada mes).
+3. **Conseguir aprobación explícita** para ese coste antes de activarlo. Activar
+   un interruptor "live" es activarlo, y también lo es cualquier cosa que meta
+   unidades en una cola que ya está en live (botón de backfill, backfill
+   continuo).
+
+Por qué: el 27-10-2026 se pasó el auto-list de eBay a live para publicar 3
+discos aprobados. Mientras seguía en live, una tanda de backfill de 25 metió
+más discos y el cron publicó 7 anuncios en lugar de 3. La cuenta era
+profesional y sin Tienda, así que no tenía anuncios gratis: cada anuncio pagaba
+tarifa de inserción (0,35 € al mes). Nadie había comprobado la tarifa ni el
+coste antes. Desde entonces el auto-list no publica sin suscripción de Tienda
+(`getSubscription` = `STORE_PLAN`; ver `docs/ebay.md`).
+
 ## Node.js Compatibility
 
 https://developers.cloudflare.com/workers/runtime-apis/nodejs/
