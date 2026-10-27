@@ -433,14 +433,16 @@ export function weightToKg(w: { unit?: string; value?: number } | null | undefin
   return k && v > 0 ? Math.round(v * k * 1000) / 1000 : null;
 }
 
-// Shipping by parcel weight, the store's bands (Eduardo, 2026-10-27).
-export const SHIPPING_BAND_MAX_KG = { standard: 0.675, two: 1.125 };
+// Shipping by parcel weight (Eduardo, 2026-10-27). 3+ starts at 1.0 kg, not
+// the store's 1.125: our import weights make a 3LP 1.05 kg (0.15 + 3 × 0.30),
+// which must ship as 3+; a 2LP (0.75, or 0.90 on older imports) stays on 2.
+export const SHIPPING_BAND_KG = { standardMax: 0.675, threeFrom: 1.0 };
 export type ShippingBand = 'standard' | 'two' | 'three';
 
 /** Weight band → which eBay shipping policy. No weight: the one-record policy (and the admin flags it). */
 export function shippingBandFor(kg: number | null | undefined): ShippingBand {
-  if (!(kg && kg > 0) || kg <= SHIPPING_BAND_MAX_KG.standard) return 'standard';
-  return kg <= SHIPPING_BAND_MAX_KG.two ? 'two' : 'three';
+  if (!(kg && kg > 0) || kg <= SHIPPING_BAND_KG.standardMax) return 'standard';
+  return kg < SHIPPING_BAND_KG.threeFrom ? 'two' : 'three';
 }
 
 /** The policy ID for a band, or null when that policy doesn't exist on eBay. */

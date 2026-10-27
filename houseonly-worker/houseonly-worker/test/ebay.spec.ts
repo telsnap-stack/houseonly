@@ -1386,9 +1386,9 @@ describe("shipping policy by weight", () => {
 		expect(weightToKg(null)).toBeNull();
 	});
 
-	it("bands: ≤0.675 one record, ≤1.125 two, above three; no weight → one record", () => {
-		expect([0.45, 0.675, 0.676, 1.125, 1.126, 2.5, null].map(shippingBandFor))
-			.toEqual(["standard", "standard", "two", "two", "three", "three", "standard"]);
+	it("bands: ≤0.675 one record, under 1.0 two, from 1.0 three (3LP 1.05); no weight → one record", () => {
+		expect([0.45, 0.675, 0.676, 0.9, 0.999, 1.0, 1.05, 2.5, null].map(shippingBandFor))
+			.toEqual(["standard", "standard", "two", "two", "two", "three", "three", "three", "standard"]);
 	});
 
 	it("publishes each record with its weight's policy; no weight → one-record policy, flagged", async () => {
