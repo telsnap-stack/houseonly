@@ -243,6 +243,36 @@ export async function getSellingLimitQuantity(env: EbayEnv): Promise<number | nu
   return typeof q === 'number' ? q : null;
 }
 
+export interface StoreCheck {
+  has_store: boolean;
+  subscriptions: Array<{ type: string; level: string; marketplace: string }>;
+  checked_at: string;
+  error?: string;
+}
+
+/**
+ * Does the seller have an eBay STORE subscription (Account API getSubscription)?
+ * Without one, a business seller pays an insertion fee for every listing (no
+ * free allowance), so auto-list must not publish. eBay documents the type only
+ * as "such as an eBay store" (SubscriptionTypeEnum isn't readable to us), so
+ * the test is a type containing STORE; anything else counts as no store and
+ * the admin shows what eBay returned. A failed call is reported in `error`.
+ */
+export async function getStoreSubscription(env: EbayEnv): Promise<StoreCheck> {
+  const checked_at = new Date().toISOString();
+  try {
+    const data = await ebayRequest(env, 'GET', '/sell/account/v1/subscription?limit=100');
+    const subscriptions = (data?.subscriptions || []).map((s: any) => ({
+      type: String(s?.subscriptionType || ''), level: String(s?.subscriptionLevel || ''), marketplace: String(s?.marketplaceId || ''),
+    }));
+    const has_store = subscriptions.some((s: { type: string; marketplace: string }) =>
+      /STORE/i.test(s.type) && (!s.marketplace || s.marketplace === EBAY_MARKETPLACE));
+    return { has_store, subscriptions, checked_at };
+  } catch (e: any) {
+    return { has_store: false, subscriptions: [], checked_at, error: e?.message || String(e) };
+  }
+}
+
 // ── INVENTORY ───────────────────────────────────────────────────────
 
 /**
