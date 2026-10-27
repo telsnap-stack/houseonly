@@ -370,6 +370,11 @@ export async function findOffer(env: EbayEnv, sku: string): Promise<EbayOfferSum
   return { offerId: o.offerId, status: o.status, listingId: o.listing?.listingId, listingStatus: o.listing?.listingStatus };
 }
 
+/** The inventory item as eBay has it (getInventoryItem). */
+export async function getInventoryItem(env: EbayEnv, sku: string): Promise<any> {
+  return ebayRequest(env, 'GET', `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`);
+}
+
 /** The full offer (getOffer), as updateOffer needs it back. */
 export async function getOffer(env: EbayEnv, offerId: string): Promise<any> {
   return ebayRequest(env, 'GET', `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`);

@@ -267,6 +267,36 @@ export function stripShippingText(html: string): string {
     .replace(/[ \t]+(<\/p>)/gi, '$1');
 }
 
+// eBay hides listings that point buyers off eBay ("offering to buy or sell
+// outside eBay", 2026-10-27; the trigger was PFGXX50LP's distributor text
+// "LISTEN LINK: https://open.spotify.com/…"): links, emails, "Listen link" /
+// "Listen:" lines, our web shop, Discogs, Instagram, our handle. Links and contacts become a marker first (their dots would cut a
+// sentence short), then every sentence holding a marker or one of the words
+// goes, like the shipping ones. Plain text "House Only" (an artist/label name)
+// stays: only the domain and the handle are off-eBay pointers.
+const OFF_EBAY_TOKEN = '\u2063';   // invisible separator, never in our texts
+const OFF_EBAY_TOKENS: RegExp[] = [
+  /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi,                                   // URLs
+  /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g,                                         // emails
+  /@[A-Za-z0-9_.]*[A-Za-z0-9_]/g,                                             // handles (@onlyhouseonly)
+  /\b[\w-]+(?:\.[\w-]+)*\.(?:store|shop|com|net|org|es|io|fm|eu|de|fr|it|nl|uk|info|online|me)\b(?:\/[^\s<>"']*)?/gi,  // bare domains (houseonly.store)
+];
+// A sentence or a line (plain-text descriptions break lines with \n).
+const OFF_EBAY_SENTENCE = new RegExp(`[^.!?<>\\n]*(?:${OFF_EBAY_TOKEN}|\\b(?:discogs|instagram)\\b|\\blisten\\s*link\\b|\\blisten\\s*:)[^.!?<>\\n]*[.!?]?`, 'gi');
+/** Anything a reviewer would read as "buy elsewhere": true when the text has it. */
+export const OFF_EBAY_TEXT = /https?:\/\/|www\.|[\w.+-]+@[\w-]+\.[\w-]+|houseonly\.store|\bdiscogs\b|\binstagram\b|@onlyhouseonly|\blisten\s*link\b|\blisten\s*:/i;
+
+export function stripOffEbayText(html: string): string {
+  let s = String(html || '').replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1');
+  for (const re of OFF_EBAY_TOKENS) s = s.replace(re, OFF_EBAY_TOKEN);
+  return s
+    .replace(OFF_EBAY_SENTENCE, '')
+    .split(OFF_EBAY_TOKEN).join('')
+    .replace(/<(p|li|div|span|strong|b|em|i)>\s*<\/\1>/gi, '')
+    .replace(/(<(?:p|li|div)>)[ \t]+/gi, '$1')
+    .replace(/[ \t]+(<\/p>)/gi, '$1');
+}
+
 function listingDescription(f: { artist: string; title: string; label: string; catno: string; genre: string; grades: Grades | null; html: string }): string {
   const rows: Array<[string, string]> = [
     ['Artista', f.artist], ['Título', f.title], ['Sello', f.label],
@@ -322,7 +352,7 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
   const condition = conditionFromTags(p.tags);
   const used = condition !== 'NEW';
   const ean = cfg.withEan ? gtinValido(p.variant.barcode) : '';
-  const html = stripShippingText(p.descriptionHtml || '');
+  const html = stripOffEbayText(stripShippingText(p.descriptionHtml || ''));
 
   const aspects: Record<string, string[]> = {};
   if (artist) aspects[ASPECTS.artist] = [artist];

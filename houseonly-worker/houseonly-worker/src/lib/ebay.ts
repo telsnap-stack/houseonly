@@ -50,11 +50,11 @@ import {
   ebayConfigured, getPolicyIds, getMerchantLocationKey, putInventoryItem, findOffer,
   createOffer, updateOffer, publishOffer, withdrawOffer, getOrdersSince, getEbayOrder,
   challengeResponse, verifyNotificationSignature, isSellingLimitError, getSellingLimitQuantity,
-  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, type StoreCheck, type EbayEnv, type EbayOrder,
+  getStoreSubscription, getStoreCategoryPaths, getOffer, listInventorySkus, getInventoryItem, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
   buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
-  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
+  EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, OFF_EBAY_TEXT, stripOffEbayText, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
   shopifyAdminGraphQL, findVariantBySkuLoose, getVariantsStock, createDiscogsOrder,
@@ -515,17 +515,117 @@ export async function applyStoreCategoriesToLive(env: EbayFullEnv, opts: { apply
     const want = category ? [`/${category}`] : [];
     if (was.join('|') === want.join('|')) { out.items.push({ sku, category, was, result: 'unchanged' }); continue; }
     if (!opts.apply) { out.items.push({ sku, category, was, result: 'would_update' }); continue; }
-    const body: any = {};
-    for (const k of UPDATE_OFFER_FIELDS) if (offer[k] !== undefined) body[k] = offer[k];
+    const body = offerForUpdate(offer);
     if (want.length) body.storeCategoryNames = want; else delete body.storeCategoryNames;
-    body.includeCatalogProductDetails ??= false;   // omitted, eBay would default it to true
     try {
-      await updateOffer(env, summary.offerId, body);
+      await putLiveOffer(env, summary.offerId, body);
       out.updated++;
       out.items.push({ sku, category, was, result: 'updated' });
     } catch (e: any) {
       out.failed++;
       out.items.push({ sku, category, was, result: 'failed', error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
+/** getOffer's answer cut to what updateOffer takes (it replaces the whole offer). */
+function offerForUpdate(offer: any): any {
+  const body: any = {};
+  for (const k of UPDATE_OFFER_FIELDS) if (offer?.[k] !== undefined) body[k] = offer[k];
+  body.includeCatalogProductDetails ??= false;   // omitted, eBay would default it to true
+  return body;
+}
+
+/**
+ * The one way to revise a LIVE offer: the price floor applies here too, so no
+ * revision (price sync, categories, anything later) leaves a listing under it.
+ */
+async function putLiveOffer(env: EbayEnv, offerId: string, body: any): Promise<{ raised_from?: string }> {
+  const floor = await priceFloor(env);
+  const value = Number(body?.pricingSummary?.price?.value);
+  let raised_from: string | undefined;
+  if (floor > 0 && Number.isFinite(value) && value < floor) {
+    raised_from = body.pricingSummary.price.value;
+    body = { ...body, pricingSummary: { ...body.pricingSummary, price: { ...body.pricingSummary.price, value: floor.toFixed(2) } } };
+  }
+  await updateOffer(env, offerId, body);
+  return { raised_from };
+}
+
+/** Live listings priced under the floor (published before it existed) go up to it. */
+export async function raiseLiveToFloor(env: EbayFullEnv, skus: string[]): Promise<Array<{ sku: string; result: string; from?: string; to?: string; error?: string }>> {
+  const floor = await priceFloor(env);
+  const out: Array<{ sku: string; result: string; from?: string; to?: string; error?: string }> = [];
+  for (const sku of skus) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') { out.push({ sku, result: 'not_live' }); continue; }
+    const offer = await getOffer(env, summary.offerId);
+    const from = offer?.pricingSummary?.price?.value;
+    if (!(Number(from) < floor)) { out.push({ sku, result: 'at_or_above_floor', from }); continue; }
+    try {
+      await putLiveOffer(env, summary.offerId, offerForUpdate(offer));
+      const item = await getItem(env, sku);
+      if (item) await saveItem(env, { ...item, preview: item.preview ? { ...item.preview, price: floor.toFixed(2) } : item.preview }, item.status, `price ${from} → ${floor.toFixed(2)} (floor)`);
+      out.push({ sku, result: 'raised', from, to: floor.toFixed(2) });
+    } catch (e: any) {
+      out.push({ sku, result: 'failed', from, error: e?.message || String(e) });
+    }
+  }
+  return out;
+}
+
+// createOrReplaceInventoryItem's request fields (InventoryItem, Inventory API spec).
+const PUT_INVENTORY_ITEM_FIELDS = ['availability', 'condition', 'conditionDescription', 'conditionDescriptors', 'packageWeightAndSize', 'product'];
+
+export interface OffEbayScrubResult {
+  apply: boolean;
+  live: number;
+  affected: Array<{ sku: string; where: string[]; result: 'would_fix' | 'fixed' | 'failed'; error?: string }>;
+}
+
+/**
+ * Live listings whose eBay text still points off eBay (published before
+ * stripOffEbayText existed): the offer's listingDescription and the inventory
+ * item's product.description go back cleaned, everything else as eBay has it.
+ */
+// eBay's Inventory API answers the odd 500 (25001 "system error"): one more try.
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); } catch { await new Promise(r => setTimeout(r, 2000)); return fn(); }
+}
+
+export async function scrubOffEbayTextOnLive(env: EbayFullEnv, opts: { apply: boolean }): Promise<OffEbayScrubResult> {
+  const out: OffEbayScrubResult = { apply: opts.apply, live: 0, affected: [] };
+  for (const sku of await listInventorySkus(env)) {
+    const summary = await findOffer(env, sku);
+    if (summary?.status !== 'PUBLISHED') continue;
+    out.live++;
+    let offer: any, inv: any;
+    try {
+      [offer, inv] = await withOneRetry(() => Promise.all([getOffer(env, summary.offerId), getInventoryItem(env, sku)]));
+    } catch (e: any) {
+      out.affected.push({ sku, where: [], result: 'failed', error: `read: ${e?.message || e}` });
+      continue;
+    }
+    const where: string[] = [];
+    if (OFF_EBAY_TEXT.test(offer?.listingDescription || '')) where.push('listingDescription');
+    if (OFF_EBAY_TEXT.test(inv?.product?.description || '')) where.push('product.description');
+    if (OFF_EBAY_TEXT.test(inv?.product?.title || '')) where.push('title');   // reported only: titles aren't rewritten
+    if (!where.length) continue;
+    if (!opts.apply) { out.affected.push({ sku, where, result: 'would_fix' }); continue; }
+    try {
+      if (where.includes('product.description')) {
+        const body: any = {};
+        for (const k of PUT_INVENTORY_ITEM_FIELDS) if (inv[k] !== undefined) body[k] = inv[k];
+        body.product = { ...inv.product, description: stripOffEbayText(inv.product.description).trim() || inv.product.title };
+        await putInventoryItem(env, sku, body);
+      }
+      if (where.includes('listingDescription')) {
+        await putLiveOffer(env, summary.offerId, { ...offerForUpdate(offer), listingDescription: stripOffEbayText(offer.listingDescription) });
+      }
+      out.affected.push({ sku, where, result: 'fixed' });
+    } catch (e: any) {
+      out.affected.push({ sku, where, result: 'failed', error: e?.message || String(e) });
     }
   }
   return out;

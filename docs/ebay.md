@@ -84,8 +84,10 @@ grados salen de un **snapshot de nuestro inventario** en KV (`discogs:snapshot`)
 **Precio mínimo** (`meta:ebay_price_floor`, por defecto **12,99 €**, desde
 2026-10-27): se aplica a todo precio de eBay, venga de Discogs o del coste.
 Lo que quede por debajo sube a ese valor, y el origen del precio lo anota
-(`…; floor 12.99`). `"0"` lo desactiva. Los anuncios ya publicados no se
-recalculan.
+(`…; floor 12.99`). `"0"` lo desactiva. También vale para los anuncios ya
+publicados: toda modificación de una oferta viva pasa por `putLiveOffer`, que
+sube al mínimo un precio inferior. `raiseLiveToFloor(skus)` sube los que se
+publicaron antes de que existiera el mínimo (FP070, 11,99 → 12,99, el 27-10).
 
 El tag `discogs:no` es nuevo: hasta ahora no había forma de marcar un disco
 como "no va a Discogs" (el rechazo de pending-review caduca a los 7 días y
@@ -141,6 +143,19 @@ descripción, nuestras fotos y 1 unidad.
   fallaron así antes del arreglo (2026-10-27) vuelven solos a la cola en la
   siguiente pasada (`requeueEanFailures`).
 - No se añade texto de envío ni de Canarias.
+- **Nada que lleve fuera de eBay** (`stripOffEbayText`, desde 2026-10-27).
+  - Motivo: eBay ocultó anuncios por "ofrecer comprar o vender fuera de eBay".
+    El detonante fue PFGXX50LP, con "LISTEN LINK: https://open.spotify.com/…"
+    en el texto del distribuidor.
+  - Se quitan, con su frase o su línea: URLs, emails, líneas "Listen link" /
+    "Listen:", houseonly.store, Discogs, Instagram y @onlyhouseonly. Los
+    enlaces `<a>` se quedan en su texto.
+  - Se aplica a la descripción HTML y a la de texto plano. "House Only" como
+    nombre se queda.
+  - `scrubOffEbayTextOnLive` reenvía, limpios, los anuncios vivos que todavía lo llevan.
+  - Catálogo (2026-10-27): 1.380 de 1.524 descripciones tienen algún enlace en
+    el HTML, casi todos reproductores embebidos que ya se quitaban. **30**
+    habrían mandado texto de fuera de eBay (25 activos con stock).
 - **Categoría de la tienda** (`storeCategoryNames`, ruta completa: `["/House"]`).
   Mapa editable en KV `meta:ebay_store_category_map`:
   `{"by_tag": {"minimal": "Minimal", …}, "by_genre": {"house": "House", …}}`.
