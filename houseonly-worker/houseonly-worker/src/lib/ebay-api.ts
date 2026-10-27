@@ -55,13 +55,17 @@ const EBAY_APP_SCOPE = 'https://api.ebay.com/oauth/api_scope';
 // IDs at runtime through the Account API, never hardcoded.
 export const EBAY_POLICY_NAMES = {
   fulfillment: 'Vinilos - envío estándar',
+  // Heavier parcels (multi-disc), by Shopify variant weight: see shippingBandFor.
+  fulfillment2: 'Vinilos - envío 2 discos',
+  fulfillment3: 'Vinilos - envío 3+ discos',
   return: 'Vinilos - devolución 14 días, comprador paga',
   payment: 'Vinilos - pago inmediato',
 };
 
 const TOKEN_KEY_USER = 'ebay:token:user';
 const TOKEN_KEY_APP = 'ebay:token:app';
-const POLICIES_KEY = 'ebay:policies';
+// v2: carries fulfillmentByBand; the old cached value (without it) is ignored.
+const POLICIES_KEY = 'ebay:policies:v2';
 const POLICIES_TTL_S = 24 * 60 * 60;
 const LOCATION_OVERRIDE_KEY = 'meta:ebay_location_key';
 const PUBKEY_PREFIX = 'ebay:pubkey:';
@@ -203,9 +207,12 @@ export async function ebayRequest(env: EbayEnv, method: string, path: string, op
 // ── ACCOUNT: POLICIES ───────────────────────────────────────────────
 
 export interface EbayPolicyIds {
-  fulfillmentPolicyId: string;
+  fulfillmentPolicyId: string;              // standard (one record)
   paymentPolicyId: string;
   returnPolicyId: string;
+  // Shipping by weight band. null = that policy doesn't exist on eBay yet:
+  // records that need it wait instead of going out at the one-record rate.
+  fulfillmentByBand?: { standard: string; two: string | null; three: string | null };
 }
 
 /** The three business policies' IDs, looked up by name and cached for a day. */
@@ -218,10 +225,17 @@ export async function getPolicyIds(env: EbayEnv): Promise<EbayPolicyIds> {
     `/sell/account/v1/${kind}_policy/get_by_policy_name?marketplace_id=${EBAY_MARKETPLACE}&name=${encodeURIComponent(name)}`);
   // One token for the three parallel calls, not three refreshes racing.
   await getUserToken(env);
-  const [f, p, r] = await Promise.all([
+  // The band policies are optional: get_by_policy_name answers 404 for a name that isn't there.
+  const optional = (name: string) => byName('fulfillment', name).catch((e) => {
+    if (e instanceof EbayApiError && e.status === 404) return null;
+    throw e;
+  });
+  const [f, p, r, f2, f3] = await Promise.all([
     byName('fulfillment', EBAY_POLICY_NAMES.fulfillment),
     byName('payment', EBAY_POLICY_NAMES.payment),
     byName('return', EBAY_POLICY_NAMES.return),
+    optional(EBAY_POLICY_NAMES.fulfillment2),
+    optional(EBAY_POLICY_NAMES.fulfillment3),
   ]);
   const ids: EbayPolicyIds = {
     fulfillmentPolicyId: f?.fulfillmentPolicyId,
@@ -230,7 +244,10 @@ export async function getPolicyIds(env: EbayEnv): Promise<EbayPolicyIds> {
   };
   const missing = Object.entries(ids).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) throw new Error(`eBay policies not found on ${EBAY_MARKETPLACE}: ${missing.join(', ')}`);
-  await env.SYNC_STATE.put(POLICIES_KEY, JSON.stringify(ids), { expirationTtl: POLICIES_TTL_S });
+  ids.fulfillmentByBand = { standard: ids.fulfillmentPolicyId, two: f2?.fulfillmentPolicyId || null, three: f3?.fulfillmentPolicyId || null };
+  // A missing band policy is looked up again soon (it's probably being created), not tomorrow.
+  const complete = ids.fulfillmentByBand.two && ids.fulfillmentByBand.three;
+  await env.SYNC_STATE.put(POLICIES_KEY, JSON.stringify(ids), { expirationTtl: complete ? POLICIES_TTL_S : 600 });
   return ids;
 }
 
