@@ -716,8 +716,29 @@ export interface DiscogsBuyer {
   province?: string;
   zip: string;
   country: string;
+  // ISO 3166-1 alpha-2, when the marketplace already gives one (eBay does).
+  // Wins over `country`, which Discogs only gives as a free-text name.
+  countryCode?: string;
   phone?: string;
 }
+
+/**
+ * Which marketplace a paid Shopify order comes from. Discogs is the default
+ * and its values are the ones the order always carried; eBay (src/lib/ebay.ts)
+ * uses the same path so its sales are invoiced the same way.
+ */
+export interface MarketplaceOrderChannel {
+  tag: string;            // order tag, e.g. 'source:discogs'
+  sourceName: string;     // Shopify order sourceName
+  label: string;          // human name for the order note
+  attributeKey: string;   // custom attribute holding the marketplace order id
+}
+export const DISCOGS_ORDER_CHANNEL: MarketplaceOrderChannel = {
+  tag: 'source:discogs', sourceName: 'discogs', label: 'Discogs', attributeKey: 'discogs_order_id',
+};
+export const EBAY_ORDER_CHANNEL: MarketplaceOrderChannel = {
+  tag: 'source:ebay', sourceName: 'ebay', label: 'eBay', attributeKey: 'ebay_order_id',
+};
 
 export interface DiscogsOrderLine {
   variantId: string;   // gid://shopify/ProductVariant/...
@@ -740,6 +761,8 @@ export interface CreateDiscogsOrderResult {
  * @param discogsOrderId  e.g. "147628-8" (for tags/note/traceability)
  * @param lines       Line items (variantId + quantity)
  * @param buyer       Parsed buyer details from the Discogs order
+ * @param channel     Marketplace the sale comes from (default Discogs; eBay
+ *                    reuses this so both are invoiced identically)
  */
 // Minimal country name → ISO 3166-1 alpha-2 map covering the markets a
 // Madrid vinyl shop actually ships to. Extend as needed. Unknown → undefined
@@ -766,6 +789,7 @@ export async function createDiscogsOrder(
   discogsOrderId: string,
   lines: DiscogsOrderLine[],
   buyer: DiscogsBuyer,
+  channel: MarketplaceOrderChannel = DISCOGS_ORDER_CHANNEL,
 ): Promise<CreateDiscogsOrderResult> {
   if (lines.length === 0) {
     return { ok: false, error: 'no line items' };
@@ -790,7 +814,7 @@ export async function createDiscogsOrder(
   // Shopify wants a 2-letter ISO countryCode, but Discogs gives the country
   // NAME ("Spain"). Map it; if unknown, omit countryCode rather than send an
   // invalid value (Shopify would reject the whole order).
-  const cc = countryNameToCode(buyer.country);
+  const cc = buyer.countryCode || countryNameToCode(buyer.country);
   if (cc) shippingAddress.countryCode = cc;
   if (buyer.address2) shippingAddress.address2 = buyer.address2;
   // NOTE: provinceCode requires a valid subdivision code we can't reliably
@@ -820,10 +844,10 @@ export async function createDiscogsOrder(
     presentmentCurrencyCode: 'EUR',
     taxExempt: true,                       // NO VAT
     shippingAddress,
-    tags: ['source:discogs'],
-    sourceName: 'discogs',
-    note: `Discogs order ${discogsOrderId}`,
-    customAttributes: [{ key: 'discogs_order_id', value: discogsOrderId }],
+    tags: [channel.tag],
+    sourceName: channel.sourceName,
+    note: `${channel.label} order ${discogsOrderId}`,
+    customAttributes: [{ key: channel.attributeKey, value: discogsOrderId }],
   };
   if (buyer.email) draftInput.email = buyer.email;
 

@@ -53,6 +53,7 @@ import {
   type ShopifyDiscogsIndex,
   type ShopifyDiscogsOrder,
 } from './discogs-skip';
+import { withdrawOnEbayForShopifyOrder, enqueueNewProductForEbay, type EbayFullEnv } from './ebay';
 
 const DISCOGS_USERNAME = 'houseonly';
 const SHOPIFY_ORDERS_CREATE_TOPIC = 'ORDERS_CREATE';
@@ -789,6 +790,8 @@ interface ShopifyOrderWebhookBody {
   id?: number;
   order_number?: number;
   email?: string;
+  source_name?: string;
+  note_attributes?: Array<{ name?: string; value?: string }>;
   line_items?: Array<{
     id?: number;
     sku?: string;
@@ -876,6 +879,11 @@ export async function handleShopifyOrderWebhook(
   if (resolved.length > 0) {
     ctx.waitUntil(delistOnDiscogs(env, orderId, resolved));
   }
+  // Third channel: end the eBay listing of anything this order sold. Covers
+  // Discogs sales too — the poll turns them into Shopify orders, which land
+  // here. Independent of the Discogs delist above; see src/lib/ebay.ts.
+  ctx.waitUntil(withdrawOnEbayForShopifyOrder(env as unknown as EbayFullEnv, orderId, body)
+    .catch((e: any) => console.error(JSON.stringify({ event: 'ebay_withdraw_failed', order_id: orderId, error: e?.message || String(e) }))));
 
   return jsonResponse({
     ok: true,
@@ -1789,13 +1797,23 @@ export async function handleProductCreateWebhook(
     return jsonResponse({ ok: true, processed: 0, reason: 'no product id' });
   }
 
+  // eBay: every NEW product is queued while the eBay auto-list is live, before
+  // any of the Discogs filters below (a product Discogs skips is still an eBay
+  // candidate). Not on ?sync=1: those are our backfill scripts re-sending old
+  // products — the eBay catalogue backfill is ?action=ebay-backfill.
+  let ebay: string | undefined;
+  if (!syncMode) {
+    try { ebay = await enqueueNewProductForEbay(env as unknown as EbayFullEnv, body); }
+    catch (e: any) { ebay = `error: ${e?.message || e}`; }
+  }
+
   // 3. Idempotency lock (60s TTL — dedupes Shopify retries). Skipped in sync
   // backfill mode, where re-processing is intentional and idempotent at the
   // pending-review level.
   if (!syncMode) {
     const lockKey = `lock:product-create:${productId}`;
     if (await env.SYNC_STATE.get(lockKey)) {
-      return jsonResponse({ ok: true, processed: 0, reason: 'duplicate webhook' });
+      return jsonResponse({ ok: true, processed: 0, ebay, reason: 'duplicate webhook' });
     }
     await env.SYNC_STATE.put(lockKey, '1', { expirationTtl: 60 });
   }
@@ -1804,7 +1822,7 @@ export async function handleProductCreateWebhook(
   const tags = body.tags || '';
   const tagList = tags.split(',').map(t => t.trim());
   if (!tagList.some(t => ACCEPTED_SOURCE_TAGS.includes(t))) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'no recognized source tag' });
+    return jsonResponse({ ok: true, processed: 0, ebay, reason: 'no recognized source tag' });
   }
 
   // 4b. NEVER list pre-orders on Discogs. A `forthcoming` product has stock 0
@@ -1815,20 +1833,20 @@ export async function handleProductCreateWebhook(
   // arrival step removes the `forthcoming` tag, and a later products/update
   // (or manual re-trigger) makes it Discogs-eligible again.
   if (tagList.includes('forthcoming')) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'forthcoming pre-order — not listed on Discogs', sku: (((body.variants || [])[0] || {}).sku || '').trim() });
+    return jsonResponse({ ok: true, processed: 0, ebay, reason: 'forthcoming pre-order — not listed on Discogs', sku: (((body.variants || [])[0] || {}).sku || '').trim() });
   }
 
   // 5. Extract identifiers from the first variant
   const variant = (body.variants || [])[0] || {};
   const sku = (variant.sku || '').trim();
   if (!sku) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'no sku' });
+    return jsonResponse({ ok: true, processed: 0, ebay, reason: 'no sku' });
   }
 
   // 6. Duplicate check — already mapped means already on Discogs
   const existing = await getSkuMapping(env, sku);
   if (existing) {
-    return jsonResponse({ ok: true, processed: 0, reason: 'sku already mapped', sku });
+    return jsonResponse({ ok: true, processed: 0, ebay, reason: 'sku already mapped', sku });
   }
 
   const barcode = (variant.barcode || '').trim();
@@ -1855,6 +1873,7 @@ export async function handleProductCreateWebhook(
     queued: true,
     sync: syncMode,
     has_barcode: Boolean(barcode),
+    ebay,
   });
 }
 
@@ -2201,8 +2220,16 @@ function jsonResponse(data: any, status = 200): Response {
 // only if Eduardo approves that listing → SKU pair in the body. Existing keys
 // are never deleted, and a SKU already linked to ANOTHER listing is reported,
 // never overwritten.
+//
+// Two more rules (2026-10-22):
+//   - A SOLD listing never creates or changes a mapping ('sold', report only).
+//     The Sold dry run proposed sku:SJU12R24 → 4190851683 right after that
+//     mapping was cleared on purpose (the record is Shopify-only now).
+//   - Two or more live listings resolving to the same SKU in one run are all
+//     'conflict': which one owns the SKU is a human call (VP014, RMCE021 had
+//     two live copies; SOULR055 had two different releases sharing a catno).
 
-type RelinkOutcome = 'ok' | 'fix' | 'approved' | 'ambiguous' | 'unresolved' | 'conflict';
+type RelinkOutcome = 'ok' | 'fix' | 'approved' | 'ambiguous' | 'unresolved' | 'conflict' | 'sold';
 
 const normSku = (s: string) => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -2220,11 +2247,27 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
     if (body && typeof body.approve === 'object') approve = body.approve;
   } catch { /* no body = no approvals */ }
 
+  try {
+    return jsonResponse(await relinkPage(env, { page, status, commit, approve }));
+  } catch (e: any) {
+    return jsonResponse({ error: e?.message || String(e) }, 502);
+  }
+}
+
+/**
+ * One Discogs inventory page through the relink rules. Shared by the manual
+ * endpoint above and the cron (runRelinkCron). Throws on a Discogs or Shopify
+ * failure; writes only when commit is true.
+ */
+export async function relinkPage(
+  env: SyncAdminEnv,
+  { page, status, commit, approve = {} }: { page: number; status: 'For Sale' | 'Draft'; commit: boolean; approve?: Record<string, string> },
+) {
   let inv;
   try {
     inv = await getInventory(env.DISCOGS_TOKEN, DISCOGS_USERNAME, page, status);
   } catch (e: any) {
-    return jsonResponse({ error: `getInventory failed: ${e?.message || e}` }, 502);
+    throw new Error(`getInventory failed: ${e?.message || e}`);
   }
 
   // Candidates per listing, and one batched Shopify search for all of them.
@@ -2241,7 +2284,7 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
   try {
     variants = await searchVariantsBySkus(env, [...terms]);
   } catch (e: any) {
-    return jsonResponse({ error: `Shopify search failed: ${e?.message || e}` }, 502);
+    throw new Error(`Shopify search failed: ${e?.message || e}`);
   }
 
   // Unresolved listings get a prefix search for hints (BOND12081 → BOND12081C).
@@ -2256,8 +2299,24 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
   };
 
   const report: any[] = [];
-  const counts: Record<RelinkOutcome, number> = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0 };
+  const counts: Record<RelinkOutcome, number> = { ok: 0, fix: 0, approved: 0, ambiguous: 0, unresolved: 0, conflict: 0, sold: 0 };
   const noStock: any[] = [];
+
+  // Pass 1: every listing's candidate SKU, before anything is written, so two
+  // live listings claiming one SKU are seen together (the per-listing check
+  // below only sees mappings already in KV).
+  const proposed = rows.map(({ l, cands }) => {
+    const approvedSku = approve[String(l.id)];
+    if (approvedSku) return variants.find((v) => v.sku === approvedSku)?.sku;
+    const m = matchFor(cands);
+    return m.length === 1 ? m[0].sku : undefined;
+  });
+  const liveBySku = new Map<string, number[]>();
+  rows.forEach(({ l }, i) => {
+    const sku = proposed[i];
+    if (!sku || l.status === 'Sold') return;
+    liveBySku.set(sku, [...(liveBySku.get(sku) || []), l.id]);
+  });
 
   for (const { l, cached, cands } of rows) {
     const approvedSku = approve[String(l.id)];
@@ -2289,11 +2348,19 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
 
     if (target) {
       const current = await getSkuMapping(env, target.sku);
-      if (current?.listing_id && current.listing_id !== l.id) {
+      const siblings = (liveBySku.get(target.sku) || []).filter((id) => id !== l.id);
+      if (cached === target.sku && current?.listing_id === l.id) {
+        outcome = 'ok';
+      } else if (l.status === 'Sold') {
+        // Report only: a sold copy must never claim (or re-claim) the SKU.
+        outcome = 'sold';
+        hints = [{ sku: target.sku, would_link: false, sku_linked_to: current?.listing_id ?? null }];
+      } else if (siblings.length > 0) {
+        outcome = 'conflict';
+        hints = [{ sku: target.sku, other_live_listings: siblings, already_linked_to: current?.listing_id ?? null }];
+      } else if (current?.listing_id && current.listing_id !== l.id) {
         outcome = 'conflict';
         hints = [{ sku: target.sku, already_linked_to: current.listing_id }];
-      } else if (cached === target.sku && current?.listing_id === l.id) {
-        outcome = 'ok';
       } else if (commit) {
         const now = new Date().toISOString();
         await env.SYNC_STATE.put(`listing:${l.id}`, JSON.stringify({ sku: target.sku, status: l.status }));
@@ -2321,7 +2388,7 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
     }
   }
 
-  return jsonResponse({
+  return {
     page,
     pages: inv.pagination.pages,
     items: inv.pagination.items,
@@ -2331,7 +2398,54 @@ export async function handleSyncRelink(request: Request, env: SyncAdminEnv): Pro
     // Live on Discogs while Shopify has none: sell it there and it cannot ship.
     for_sale_without_stock: noStock,
     listings: report,
-  });
+  };
+}
+
+// ── RELINK ON THE CRON ──────────────────────────────────────────────
+//
+// Until 2026-10-26 the relink above only ran by hand (scripts/relink-discogs.mjs),
+// and bootstrap only maps listings that carry an external_id — so a listing
+// created by hand on Discogs got its sku: mapping only once it SOLD (the poll's
+// self-heal). The eBay channel prices from the linked Discogs listing, and the
+// Shopify→Discogs delist needs the same mapping, so it now walks the inventory
+// one page per cron run: For Sale pages, then Draft, then around again
+// (878 + 14 listings on 2026-10-26 ≈ 10 runs per full pass).
+//
+// Same rules as `commit=1` with no approvals: only an unambiguous exact match
+// is written; ambiguous / conflict / sold / unresolved are left for the manual
+// endpoint. One Discogs call per run. Kill switch: meta:relink_cron_mode = off.
+
+const RELINK_CURSOR_KEY = 'meta:relink_cron_cursor';
+const RELINK_LAST_RUN_KEY = 'meta:relink_cron_last_run';
+const RELINK_MODE_KEY = 'meta:relink_cron_mode';
+const RELINK_STATUSES: Array<'For Sale' | 'Draft'> = ['For Sale', 'Draft'];
+
+export async function runRelinkCron(env: SyncAdminEnv): Promise<any> {
+  if ((await env.SYNC_STATE.get(RELINK_MODE_KEY)) === 'off') return { skipped: 'off' };
+  if (!env.DISCOGS_TOKEN) return { skipped: 'no DISCOGS_TOKEN' };
+  let cur = { status: 'For Sale' as 'For Sale' | 'Draft', page: 1 };
+  try {
+    const raw = await env.SYNC_STATE.get(RELINK_CURSOR_KEY);
+    if (raw) cur = { ...cur, ...JSON.parse(raw) };
+  } catch { /* restart from the top */ }
+
+  const at = new Date().toISOString();
+  let summary: any;
+  let next = cur;
+  try {
+    const r = await relinkPage(env, { page: cur.page, status: cur.status, commit: true });
+    const i = RELINK_STATUSES.indexOf(cur.status);
+    next = cur.page < (r.pages || 1)
+      ? { status: cur.status, page: cur.page + 1 }
+      : { status: RELINK_STATUSES[(i + 1) % RELINK_STATUSES.length], page: 1 };
+    summary = { at, ok: true, status: cur.status, page: cur.page, pages: r.pages, counts: r.counts };
+  } catch (e: any) {
+    // Same page next run (a 429 is the usual cause).
+    summary = { at, ok: false, status: cur.status, page: cur.page, error: e?.message || String(e) };
+  }
+  await env.SYNC_STATE.put(RELINK_CURSOR_KEY, JSON.stringify(next));
+  await env.SYNC_STATE.put(RELINK_LAST_RUN_KEY, JSON.stringify(summary));
+  return summary;
 }
 
 async function shopifyPrefixSearch(env: SyncAdminEnv, q: string) {
