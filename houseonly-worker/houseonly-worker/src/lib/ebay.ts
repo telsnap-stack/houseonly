@@ -61,6 +61,7 @@ import {
   EBAY_ORDER_CHANNEL, type ShopifyAdminEnv, type DiscogsOrderLine, type DiscogsBuyer,
 } from './shopify-admin';
 import { getListing } from './discogs';
+import { loadSnapshot, snapshotFresh, snapshotStatus, saveSnapshot, snapshotFromCsv, type DiscogsSnapshot } from './discogs-snapshot';
 
 export interface EbayFullEnv extends EbayEnv, ShopifyAdminEnv {
   DISCOGS_TOKEN?: string;
@@ -294,7 +295,27 @@ async function costMultiplier(env: EbayEnv): Promise<number> {
 }
 
 /** The only two price sources. Anything else holds the record. */
-async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { discogs: number }): Promise<PriceDecision> {
+// The Discogs side of a price: from the inventory snapshot while it is fresh,
+// a single getListing only for a listing the snapshot doesn't have.
+async function discogsListingFor(
+  env: EbayFullEnv, listingId: number, budget: { discogs: number }, snap: DiscogsSnapshot | null,
+): Promise<{ ok: true; l: { status: string; price: { value: number; currency: string }; condition?: string; sleeve_condition?: string }; from: string } | { ok: false; hold: EbayHoldReason; detail: string }> {
+  if (!snapshotFresh(snap)) {
+    return { ok: false, hold: 'discogs_snapshot_caducado', detail: snap ? `snapshot from ${snap.taken_at}` : 'no snapshot' };
+  }
+  const s = snap!.listings[String(listingId)];
+  if (s) return { ok: true, l: { ...s, price: { value: s.price, currency: s.currency } }, from: `snapshot ${snap!.taken_at.slice(0, 16)}Z` };
+  if (!env.DISCOGS_TOKEN) return { ok: false, hold: 'discogs_error', detail: 'DISCOGS_TOKEN not configured' };
+  if (budget.discogs <= 0) return { ok: false, hold: 'discogs_error', detail: 'Discogs read budget for this run spent' };
+  budget.discogs--;
+  try {
+    return { ok: true, l: await getListing(env.DISCOGS_TOKEN, listingId), from: 'API' };
+  } catch (e: any) {
+    return { ok: false, hold: 'discogs_error', detail: `getListing ${listingId}: ${e?.message || e}` };
+  }
+}
+
+async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { discogs: number }, snap: DiscogsSnapshot | null): Promise<PriceDecision> {
   if (notForDiscogs(p.tags)) {
     const price = priceFromCost(p, await costMultiplier(env));
     return price ? { ok: true, price } : { ok: false, hold: 'sin_fuente_de_precio', detail: 'discogs:no and no Shopify unit cost' };
@@ -303,15 +324,9 @@ async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { di
   let listingId: number | null = null;
   try { listingId = raw ? Number(JSON.parse(raw).listing_id) || null : null; } catch { /* treat as unlinked */ }
   if (!listingId) return { ok: false, hold: 'esperando_discogs' };
-  if (!env.DISCOGS_TOKEN) return { ok: false, hold: 'discogs_error', detail: 'DISCOGS_TOKEN not configured' };
-  if (budget.discogs <= 0) return { ok: false, hold: 'discogs_error', detail: 'Discogs read budget for this run spent' };
-  budget.discogs--;
-  let l;
-  try {
-    l = await getListing(env.DISCOGS_TOKEN, listingId);
-  } catch (e: any) {
-    return { ok: false, hold: 'discogs_error', detail: `getListing ${listingId}: ${e?.message || e}` };
-  }
+  const got = await discogsListingFor(env, listingId, budget, snap);
+  if (!got.ok) return got;
+  const l = got.l;
   if (l.status !== 'For Sale' && l.status !== 'Draft') {
     return { ok: false, hold: 'discogs_no_disponible', detail: `Discogs listing ${listingId} is ${l.status}` };
   }
@@ -325,7 +340,7 @@ async function resolvePrice(env: EbayFullEnv, p: EbaySourceProduct, budget: { di
     ok: true,
     price: {
       value, source: 'discogs',
-      detail: value === discogsValue ? `Discogs listing ${listingId}` : `Discogs listing ${listingId} (${discogsValue.toFixed(2)} → ${value.toFixed(2)})`,
+      detail: `Discogs listing ${listingId}${value === discogsValue ? '' : ` (${discogsValue.toFixed(2)} → ${value.toFixed(2)})`}, ${got.from}`,
     },
     discogs: { condition: l.condition, sleeve_condition: l.sleeve_condition },
   };
@@ -562,6 +577,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   }
 
   const budget = { discogs: EBAY_DISCOGS_READS_PER_RUN };
+  const snap = await loadSnapshot(env);
   const hold = async (item: EbayItem, reason: EbayHoldReason, detail?: string) => {
     await saveItem(env, { ...item, hold_reason: reason }, 'held', detail ? `${reason}: ${detail}` : reason);
     result.held++;
@@ -589,7 +605,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     const why = holdReason(product);
     if (why) { await hold(item, why); continue; }
 
-    const priced = await resolvePrice(env, product, budget);
+    const priced = await resolvePrice(env, product, budget, snap);
     if (!priced.ok) {
       if (priced.hold === 'discogs_error' && /\b429\b/.test(priced.detail || '')) {
         result.discogs_429 = true;
@@ -1139,6 +1155,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),
     store: await storeForAdmin(env),
+    discogs_snapshot: await snapshotStatus(env),
     autobackfill: (await env.SYNC_STATE.get(AUTOBACKFILL_MODE_KEY)) === 'off' ? 'off' : 'on',
     autobackfill_last_run: await readJsonKey(env, AUTOBACKFILL_LAST_RUN),
     orders_last_run: await readJsonKey(env, ORDERS_LAST_RUN),
@@ -1199,4 +1216,29 @@ export async function handleEbayStoreCategories(request: Request, env: EbayFullE
   const b = await readBody(request);
   const r = await applyStoreCategoriesToLive(env, { apply: b.apply === true });
   return res(r, r.ok ? 200 : 502);
+}
+
+/**
+ * GET  ?action=discogs-snapshot (Bearer) — the snapshot's age, size, refresh progress.
+ * POST ?action=discogs-snapshot&name=<export file name> (Bearer), body = the
+ *      Discogs inventory export CSV — the manual fallback when the API refresh
+ *      can't get through. The file name carries the export's time.
+ */
+export async function handleDiscogsSnapshot(request: Request, env: EbayFullEnv): Promise<Response> {
+  if (!bearerOk(request, env)) return res({ error: 'unauthorized' }, 401);
+  if (request.method === 'POST') {
+    const name = new URL(request.url).searchParams.get('name') || '';
+    let parsed;
+    try {
+      parsed = snapshotFromCsv(await request.text(), name);
+    } catch (e: any) {
+      return res({ error: e?.message || String(e) }, 400);
+    }
+    const current = await loadSnapshot(env);
+    if (current && Date.parse(current.taken_at) > Date.parse(parsed.taken_at)) {
+      return res({ error: `this export (${parsed.taken_at}) is older than the snapshot in use (${current.taken_at})` }, 409);
+    }
+    await saveSnapshot(env, parsed.listings, parsed.taken_at, 'csv');
+  }
+  return res(await snapshotStatus(env));
 }

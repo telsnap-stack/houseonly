@@ -863,7 +863,9 @@ import {
   handlePendingReviewReject,
   pollDiscogsForSales,
   runRelinkCron,
+  DISCOGS_USERNAME,
 } from './lib/sync';
+import { refreshDiscogsSnapshot } from './lib/discogs-snapshot';
 
 import { searchRelease } from './lib/discogs';
 
@@ -935,7 +937,7 @@ import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './
 import { handleShopPolicies } from './lib/shop-policies';
 import {
   EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
-  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun, handleEbayStoreCategories,
+  handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun, handleEbayStoreCategories, handleDiscogsSnapshot,
 } from './lib/ebay';
 
 import {
@@ -2083,6 +2085,7 @@ export default {
     // ebay-exclude / ebay-include  POST Bearer {skus}
     // ebay-backfill POST Bearer {count?} — siguiente tanda del catalogo
     // ebay-run      POST Bearer {what: autolist|orders|both, force?}
+    // discogs-snapshot GET Bearer (edad del snapshot) · POST CSV del export de Discogs (&name=fichero)
     // ebay-store-categories GET Bearer (mapa + categorias de la tienda) · POST {apply?} a los anuncios vivos
     // Los productos nuevos entran solos (products/create, ver sync.ts).
     // Independiente de sync35-mode: el auto-add de Discogs no se toca.
@@ -2103,6 +2106,9 @@ export default {
     }
     if (action === 'ebay-run' && request.method === 'POST') {
       return await handleEbayRun(request, env);
+    }
+    if (action === 'discogs-snapshot') {
+      return await handleDiscogsSnapshot(request, env);
     }
     if (action === 'ebay-store-categories') {
       return await handleEbayStoreCategories(request, env);
@@ -3275,16 +3281,20 @@ export default {
       const fail = (key: string) => (err: any) => env.SYNC_STATE.put(key,
         JSON.stringify({ scheduled_at: at, ok: false, error: err?.message || String(err) }));
       // En serie, para no repartir el cupo de Discogs (por IP) entre dos tareas:
-      // 1) la pasada de eBay, que publica (lee el precio de cada listing);
+      // 0) el snapshot del inventario de Discogs, del que sale el precio de eBay
+      //    (paginas de 100; al primer 429 para y sigue en la siguiente pasada);
+      // 1) la pasada de eBay, que publica (precio del snapshot);
       // 2) el backfill continuo, si ya no queda nada por publicar;
       // 3) la conciliacion SKU↔Discogs, una pagina del inventario, salvo que la
       //    pasada acabe de llevarse un 429. Va en este hueco (:03) y no en el del
       //    poll (:07). Mantiene sku: al dia para los listings hechos a mano — de
       //    ahi sale el precio de eBay y el delist de Discogs en las ventas web.
       ctx.waitUntil((async () => {
+        const snap = await refreshDiscogsSnapshot(env, DISCOGS_USERNAME).catch(() => null);
         const pass = await runEbayAutolist(env).catch((err) => { fail('meta:ebay_autolist_last_run')(err); return null; });
         if (pass) await runEbayAutoBackfill(env, pass).catch(fail('meta:ebay_autobackfill_last_run'));
-        await runRelinkCron(env, { discogs429: Boolean(pass?.discogs_429) }).catch(fail('meta:relink_cron_last_run'));
+        const discogs429 = Boolean(pass?.discogs_429) || snap?.result === 'discogs_429';
+        await runRelinkCron(env, { discogs429 }).catch(fail('meta:relink_cron_last_run'));
       })());
       // Ventas de eBay: no tocan Discogs, van en paralelo.
       ctx.waitUntil(pollEbayOrders(env).catch(fail('meta:ebay_orders_last_run')));

@@ -175,6 +175,7 @@ export type EbayHoldReason =
   | 'discogs_no_disponible'   // linked listing is Sold / not For Sale or Draft
   | 'discogs_no_eur'          // linked listing priced in another currency
   | 'discogs_error'           // Discogs did not answer (usually 429): try next run
+  | 'discogs_snapshot_caducado' // the Discogs inventory snapshot is over 48 h old
   | 'sin_fuente_de_precio';   // discogs:no and no unit cost: flagged in the admin
 
 export interface EbayListingPayload {

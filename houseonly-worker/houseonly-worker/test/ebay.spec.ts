@@ -16,6 +16,7 @@ import {
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
+import { snapshotFromCsv, refreshDiscogsSnapshot, parseCsv } from "../src/lib/discogs-snapshot";
 
 vi.mock("../src/lib/shopify-admin", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/lib/shopify-admin")>();
@@ -155,7 +156,7 @@ function installFetch() {
 }
 
 async function wipe() {
-	for (const prefix of ["ebay", "meta:", "lock:", "sku:", "ebay-"]) {
+	for (const prefix of ["ebay", "meta:", "lock:", "sku:", "ebay-", "discogs:"]) {
 		const { keys } = await E.SYNC_STATE.list({ prefix });
 		for (const k of keys) await E.SYNC_STATE.delete(k.name);
 	}
@@ -184,6 +185,8 @@ beforeEach(async () => {
 	E.DISCOGS_TOKEN = "dtok";
 	installFetch();
 	installShopifyAndDiscogs();
+	// A fresh, empty snapshot: prices fall through to getListing, as before it existed.
+	await E.SYNC_STATE.put("discogs:snapshot", JSON.stringify({ taken_at: new Date().toISOString(), source: "api", count: 0, listings: {} }));
 	await linkDiscogs("BOND12081C", 555);
 	vi.mocked(shopifyAdmin.findVariantBySkuLoose).mockResolvedValue({ variantId: "gid://shopify/ProductVariant/9", sku: "BOND12081C" } as any);
 	vi.mocked(shopifyAdmin.getVariantsStock).mockImplementation(async (_e, ids) => new Map(ids.map(id => [id, 1])));
@@ -473,7 +476,7 @@ describe("auto-list cron and price sources", () => {
 		const it = await item("BOND12081C");
 		expect(it.status).toBe("would_list");
 		// Discogs 21.50, rounded up to .99.
-		expect(it.preview).toMatchObject({ price: "21.99", price_source: "Discogs listing 555 (21.50 → 21.99)", condition: "NEW" });
+		expect(it.preview).toMatchObject({ price: "21.99", price_source: "Discogs listing 555 (21.50 → 21.99), API", condition: "NEW" });
 	});
 
 	it("live: lists at the CURRENT Discogs listing price, never the Shopify price", async () => {
@@ -1147,5 +1150,104 @@ describe("eBay store categories", () => {
 			availableQuantity: 1, categoryId: "176985", listingDescription: "<p>x</p>", listingDuration: "GTC", merchantLocationKey: "houseonly-main",
 			listingPolicies: full.listingPolicies, pricingSummary: full.pricingSummary, storeCategoryNames: ["/House"], includeCatalogProductDetails: false,
 		});
+	});
+});
+
+describe("Discogs inventory snapshot (eBay prices)", () => {
+	const HOUR = 3600_000;
+	const putSnap = (listings: Record<string, any>, ageMs = 0, source = "api") => E.SYNC_STATE.put("discogs:snapshot", JSON.stringify({
+		taken_at: new Date(Date.now() - ageMs).toISOString(), source, count: Object.keys(listings).length, listings,
+	}));
+	const CSV = [
+		"listing_id,artist,title,label,catno,format,release_id,status,price,created,updated,comments,media_condition,sleeve_condition,accept_offer,external_id,weight,format_quantity,location,quantity",
+		'555,A,"Title, with comma",L,C1,"12"", EP",1,FOR_SALE,21.50,2026-05-12T06:56:46,2026-07-31T05:19:30,"New copy. ""Mint""\nsecond line",MINT,GENERIC,False,BOND12081C,230.0,1,X,1',
+		'556,B,T,L,C2,"12""",2,SOLD,30.00,2026-05-12T06:56:46,2026-10-26T07:50:50,,NEAR_MINT,NEAR_MINT,False,S2,230.0,1,X,1',
+	].join("\r\n");
+
+	it("CSV: quoted fields, export grades → Discogs strings, EUR, time from the file name (never ahead of now)", () => {
+		expect(parseCsv('a,"b,""c""\nd"\n1,2')).toEqual([["a", 'b,"c"\nd'], ["1", "2"]]);
+		const r = snapshotFromCsv(CSV, "147628-2026-10-27T16_23_00.255419-EXPORT.csv", new Date("2026-10-27T17:00:00Z"));
+		expect(r.taken_at).toBe("2026-10-27T16:23:00.000Z");
+		expect(r.listings["555"]).toEqual({ status: "For Sale", price: 21.5, currency: "EUR", condition: "Mint (M)", sleeve_condition: "Generic" });
+		expect(r.listings["556"]).toMatchObject({ status: "Sold", condition: "Near Mint (NM or M-)" });
+		// No time in the name: the newest `updated`. Never later than now.
+		expect(snapshotFromCsv(CSV, "x.csv").taken_at).toBe("2026-10-26T07:50:50.000Z");
+		expect(snapshotFromCsv(CSV, "1-2026-10-27T16_23_00-EXPORT.csv", new Date("2026-10-27T16:00:00Z")).taken_at).toBe("2026-10-27T16:00:00.000Z");
+		expect(() => snapshotFromCsv("a,b\n1,2")).toThrow(/listing_id/);
+	});
+
+	it("the pass prices from a fresh snapshot: no Discogs call", async () => {
+		await live();
+		await putSnap({ "555": { status: "For Sale", price: 18.2, currency: "EUR", condition: "Mint (M)", sleeve_condition: "Mint (M)" } }, 2 * HOUR);
+		await includeSkus(E, ["BOND12081C"]);
+		expect((await runEbayAutolist(E)).listed).toBe(1);
+		expect(discogs.getListing).not.toHaveBeenCalled();
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("18.99");
+		expect((await item("BOND12081C")).preview.price_source).toMatch(/^Discogs listing 555 \(18\.20 → 18\.99\), snapshot /);
+	});
+
+	it("sold in the snapshot: held as not available", async () => {
+		await live();
+		await putSnap({ "555": { status: "Sold", price: 18.2, currency: "EUR" } });
+		await includeSkus(E, ["BOND12081C"]);
+		expect((await runEbayAutolist(E)).held_by_reason).toEqual({ discogs_no_disponible: 1 });
+	});
+
+	it("snapshot over 48 h (or none): records wait, Discogs is not called, the admin flags it", async () => {
+		await live();
+		await putSnap({ "555": { status: "For Sale", price: 18.2, currency: "EUR" } }, 49 * HOUR);
+		await includeSkus(E, ["BOND12081C"]);
+		const r = await runEbayAutolist(E);
+		expect(r).toMatchObject({ listed: 0, held_by_reason: { discogs_snapshot_caducado: 1 } });
+		expect(discogs.getListing).not.toHaveBeenCalled();
+		const d = await (await viaWorker(new Request("https://w/?action=ebay-items", { headers: { Authorization: `Bearer ${SECRET}` } }))).json() as any;
+		expect(d.discogs_snapshot).toMatchObject({ stale: true, count: 1, max_age_hours: 48 });
+		await E.SYNC_STATE.delete("discogs:snapshot");
+		expect((await runEbayAutolist(E)).held_by_reason).toEqual({ discogs_snapshot_caducado: 1 });
+	});
+
+	it("refresh: pages of 100 without 429 retries, stops at the first 429 and resumes from that page", async () => {
+		await putSnap({}, 3 * HOUR);
+		const page = (n: number, pages: number, ids: number[]) => ({
+			pagination: { page: n, pages, per_page: 100, items: ids.length },
+			listings: ids.map(id => ({ id, status: "For Sale", price: { value: 10 + n, currency: "EUR" }, condition: "Mint (M)", sleeve_condition: "Generic" })),
+		});
+		vi.mocked(discogs.getInventory)
+			.mockResolvedValueOnce(page(1, 3, [1, 2]) as any)
+			.mockRejectedValueOnce(new Error("Discogs getInventory failed: 429 too quick"));
+		const first = await refreshDiscogsSnapshot(E, "houseonly");
+		expect(first).toMatchObject({ result: "discogs_429", pages_read: 1, next_page: 2, pages: 3 });
+		expect(vi.mocked(discogs.getInventory).mock.calls[0]).toEqual([E.DISCOGS_TOKEN, "houseonly", 1, undefined, { sort: "listed", sortOrder: "asc", retry429: false }]);
+		expect(JSON.parse(await E.SYNC_STATE.get("discogs:snapshot")).count).toBe(0);   // old one still in use
+
+		vi.mocked(discogs.getInventory)
+			.mockResolvedValueOnce(page(2, 3, [3]) as any)
+			.mockResolvedValueOnce(page(3, 3, [4]) as any);
+		const second = await refreshDiscogsSnapshot(E, "houseonly");
+		expect(second).toMatchObject({ result: "complete", pages_read: 2 });
+		expect(vi.mocked(discogs.getInventory).mock.calls[2][2]).toBe(2);
+		const snap = JSON.parse(await E.SYNC_STATE.get("discogs:snapshot"));
+		expect(snap).toMatchObject({ source: "api", count: 4 });
+		expect(snap.listings["4"]).toEqual({ status: "For Sale", price: 13, currency: "EUR", condition: "Mint (M)", sleeve_condition: "Generic" });
+		expect(await E.SYNC_STATE.get("discogs:snapshot:building")).toBeNull();
+		// Its time is when the read started, not when it finished.
+		expect(Date.parse(snap.taken_at)).toBeLessThanOrEqual(Date.parse(second.at));
+
+		// Under an hour old: left alone.
+		expect((await refreshDiscogsSnapshot(E, "houseonly")).result).toBe("skipped_fresh");
+		expect(discogs.getInventory).toHaveBeenCalledTimes(4);
+	});
+
+	it("admin upload: a CSV export becomes the snapshot; an older export than the one in use is refused", async () => {
+		await E.SYNC_STATE.delete("discogs:snapshot");
+		const up = (name: string, bearer: string | null = SECRET) => viaWorker(new Request(`https://w/?action=discogs-snapshot&name=${encodeURIComponent(name)}`, {
+			method: "POST", body: CSV, headers: { "Content-Type": "text/csv", ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+		}));
+		expect((await up("147628-2026-10-27T16_23_00-EXPORT.csv", null)).status).toBe(401);
+		const ok = await (await up("147628-2026-10-27T16_23_00-EXPORT.csv")).json() as any;
+		expect(ok).toMatchObject({ source: "csv", count: 2, taken_at: "2026-10-27T16:23:00.000Z" });
+		expect((await up("147628-2026-10-26T09_00_00-EXPORT.csv")).status).toBe(409);
+		const bad = await viaWorker(new Request("https://w/?action=discogs-snapshot", { method: "POST", body: "nope", headers: { Authorization: `Bearer ${SECRET}` } }));
+		expect(bad.status).toBe(400);
 	});
 });
