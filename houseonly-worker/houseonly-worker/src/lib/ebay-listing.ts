@@ -101,6 +101,7 @@ export const EBAY_STORE_CATEGORY_DEFAULTS: StoreCategoryMap = {
   },
   by_genre: {
     house: 'House', deephouse: 'House', techhouse: 'House',
+    techno: 'Techno',
     garage: 'UK Garage & Breaks',
     drumandbass: 'Drum & Bass',
     bassmusic: 'Bass Music',
