@@ -438,7 +438,7 @@ describe("continuous backfill (cron)", () => {
 	});
 
 	it(`queues the next ${EBAY_BACKFILL_NEXT} when nothing is queued or would_list (held records don't block)`, async () => {
-		addProduct("WAIT01", {}, { unitCost: null }); await includeSkus(E, ["WAIT01"]);
+		addProduct("WAIT01", {}, { unitCost: null, price: "0" }); await includeSkus(E, ["WAIT01"]);
 		await runEbayAutolist(E);                                   // no Discogs listing, no cost: held
 		expect((await item("WAIT01")).status).toBe("held");
 		const r: any = await runEbayAutoBackfill(E, livePass());
@@ -508,7 +508,7 @@ describe("auto-list cron and price sources", () => {
 		expect(await E.SYNC_STATE.get("ebay:listing:LIST-1")).toBe("BOND12081C");
 	});
 
-	it("no Discogs listing: listed at cost x multiplier; without a cost, held until the listing exists", async () => {
+	it("no Discogs listing: cost x multiplier, else Shopify price x 1.3; with neither, held until the listing exists", async () => {
 		await live();
 		addProduct("UNLINK1", {}, { unitCost: 8 });
 		await includeSkus(E, ["UNLINK1"]);
@@ -517,7 +517,13 @@ describe("auto-list cron and price sources", () => {
 		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("16.99");
 		expect((await item("UNLINK1")).preview.price_source).toBe("cost 8.00 × 2 = 16.00 → 16.99 (sin listing de Discogs)");
 		expect(discogs.getListing).not.toHaveBeenCalled();
-		addProduct("HAND01", {}, { unitCost: null });
+		// No cost either: Shopify price + 30 %. 14.99 × 1.3 = 19.49 → 19.99.
+		addProduct("UNLINK2", {}, { unitCost: null, price: "14.99" });
+		await includeSkus(E, ["UNLINK2"]);
+		await runEbayAutolist(E);
+		expect(ebayCalls("POST", /offer$/).at(-1)!.body.pricingSummary.price.value).toBe("19.99");
+		expect((await item("UNLINK2")).preview.price_source).toBe("Shopify 14.99 × 1.3 = 19.49 → 19.99 (sin listing de Discogs)");
+		addProduct("HAND01", {}, { unitCost: null, price: "0" });
 		await includeSkus(E, ["HAND01"]);
 		await runEbayAutolist(E);
 		expect(await item("HAND01")).toMatchObject({ status: "held", hold_reason: "esperando_discogs" });
@@ -664,7 +670,7 @@ describe("auto-list cron and price sources", () => {
 
 	it("held records come round: the oldest check goes first", async () => {
 		await live();
-		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 10; i++) addProduct(`W${String(i).padStart(2, "0")}`, {}, { unitCost: null });   // none on Discogs, no cost
+		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 10; i++) addProduct(`W${String(i).padStart(2, "0")}`, {}, { unitCost: null, price: "0" });   // none on Discogs, no cost or price
 		await includeSkus(E, [...catalog.keys()].filter(s => s.startsWith("W")));
 		await runEbayAutolist(E);
 		const first = await item("W00");

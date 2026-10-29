@@ -8880,7 +8880,7 @@ function DiscogsReviewPanel() {
 // WORKER_URL sigue a staging/prod segun VITE_WORKER_URL.
 const EBAY_STATUS_COLOR = { queued:'#ffd24a', held:'#ff9a4a', would_list:'#9ad0ff', listed:'#4ade80', sold:'#4ade80', failed:'#ff5a5a', excluded:'#888', withdrawn:'#888' };
 const EBAY_HOLD_LABEL = {
-  esperando_discogs:'sin listing de Discogs ni coste en Shopify',
+  esperando_discogs:'sin listing de Discogs, ni coste ni precio en Shopify',
   sin_fuente_de_precio:'SIN FUENTE DE PRECIO (discogs:no y sin coste)',
   discogs_no_disponible:'listing de Discogs no disponible',
   discogs_no_eur:'listing de Discogs no en EUR',
@@ -9065,7 +9065,7 @@ function EbayPanel() {
               <div style={{fontSize:12,color:S.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{it.t || it.sku}</div>
               <div style={{fontSize:9,color:S.muted,marginTop:3}}>
                 SKU {it.sku}{it.o && ` · entro por ${it.o}`}
-                {it.p && ` · €${it.p} (${it.ps==='cost'?'coste':'Discogs'})`}
+                {it.p && ` · €${it.p} (${it.ps==='cost'?'coste':it.ps==='shopify'?'Shopify +30 %':'Discogs'})`}
                 {it.r && <span style={{color:it.r==='sin_fuente_de_precio'?'#ff9a4a':S.muted}}> · {EBAY_HOLD_LABEL[it.r] || it.r}</span>}
                 {it.e && <span style={{color:S.danger}}> · {it.e}</span>}
                 {it.l && <> · <a href={`https://www.ebay.es/itm/${it.l}`} target="_blank" rel="noreferrer" style={{color:S.accent}}>eBay {it.l}</a></>}

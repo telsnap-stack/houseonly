@@ -15,12 +15,12 @@
 //    createOrReplaceInventoryItem → createOffer → publishOffer.
 //    Discogs' meta:sync_35_mode is never read here: either channel runs alone.
 //
-//    PRICE never comes from the Shopify price:
+//    PRICE comes from the Shopify price only for unlinked records without a cost:
 //    - the CURRENT price of the record's Discogs listing (sku:{SKU} mapping →
 //      GET /marketplace/listings/{id}) — the mapping itself is kept current by
 //      runRelinkCron (sync.ts), which now runs on this cron; without a listing,
-//      unitCost × multiplier like discogs:no, and with no cost either the record
-//      is HELD (esperando_discogs) and re-checked every run;
+//      unitCost × multiplier like discogs:no; with no cost, the Shopify price
+//      × EBAY_SHOPIFY_PRICE_MARKUP (1.3) — the one case the Shopify price is used;
 //    - records tagged `discogs:no`: Shopify unitCost × meta:ebay_cost_multiplier
 //      (default 2); no cost → HELD as sin_fuente_de_precio, flagged in the tab.
 //    Never a guessed price.
@@ -54,7 +54,7 @@ import {
   getStoreSubscription, getStoreCategoryPaths, EBAY_POLICY_NAMES, getOffer, listInventorySkus, getInventoryItem, type StoreCheck, type EbayEnv, type EbayOrder,
 } from './ebay-api';
 import {
-  buildEbayListing, gradesFor, holdReason, priceFromCost, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
+  buildEbayListing, gradesFor, holdReason, priceFromCost, priceFromShopify, notForDiscogs, roundUpTo99, toSourceProduct, PRODUCT_BY_SKU_QUERY,
   EBAY_DEFAULT_CATEGORY_ID, EBAY_STORE_CATEGORY_DEFAULTS, OFF_EBAY_TEXT, stripOffEbayText, shippingBandFor, fulfillmentPolicyFor, type ShippingBand, storeCategoryFor, type StoreCategoryMap, type EbaySourceProduct, type Grades, type EbayPrice, type EbayHoldReason,
 } from './ebay-listing';
 import {
@@ -124,6 +124,8 @@ export async function passSize(env: EbayEnv): Promise<{ batch: number; checks: n
 // egress IP and shared; the Discogs poll already finds it spent (memory).
 export const EBAY_DISCOGS_READS_PER_RUN = 10;
 export const EBAY_DEFAULT_COST_MULTIPLIER = 2;
+// No Discogs listing and no unit cost: Shopify price × this.
+export const EBAY_SHOPIFY_PRICE_MARKUP = 1.3;
 // No eBay price below this, whatever the source (Eduardo, 2026-10-27).
 export const EBAY_DEFAULT_PRICE_FLOOR = 12.99;
 // Backfill: first batch small enough to check every listing by eye.
@@ -382,10 +384,11 @@ async function priceFromSource(env: EbayFullEnv, p: EbaySourceProduct, budget: {
   if (!listingId) {
     // Not on Discogs: list anyway at cost × multiplier, like discogs:no (Eduardo, 2026-10-29).
     // The eBay price is not updated if a Discogs listing is linked later.
-    const price = priceFromCost(p, await costMultiplier(env));
+    // No cost either: the Shopify price + 30 % (Eduardo, 2026-10-29).
+    const price = priceFromCost(p, await costMultiplier(env)) || priceFromShopify(p, EBAY_SHOPIFY_PRICE_MARKUP);
     return price
       ? { ok: true, price: { ...price, detail: `${price.detail} (sin listing de Discogs)` } }
-      : { ok: false, hold: 'esperando_discogs', detail: 'no Discogs listing and no Shopify unit cost' };
+      : { ok: false, hold: 'esperando_discogs', detail: 'no Discogs listing, no Shopify unit cost or price' };
   }
   const got = await discogsListingFor(env, listingId, budget, snap);
   if (!got.ok) return got;
