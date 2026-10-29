@@ -12,7 +12,7 @@ import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, dailyPublishState, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, dailyPublishState, passSize, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -1481,5 +1481,29 @@ describe("daily publish cap", () => {
 		await E.SYNC_STATE.put("meta:ebay_daily_publish_cap", "60");
 		await E.SYNC_STATE.put("meta:ebay_published_today", JSON.stringify({ day: "2000-01-01", count: 60 }));
 		expect(await dailyPublishState(E)).toMatchObject({ cap: 60, count: 0, remaining: 60 });
+	});
+});
+
+describe("pass size override", () => {
+	it("meta:ebay_batch_size raises the batch and the checks with it; capped at 100; unset = default", async () => {
+		expect(await passSize(E)).toEqual({ batch: EBAY_BATCH_SIZE, checks: EBAY_CHECKS_PER_RUN });
+		await E.SYNC_STATE.put("meta:ebay_batch_size", "50");
+		expect(await passSize(E)).toEqual({ batch: 50, checks: 70 });
+		await E.SYNC_STATE.put("meta:ebay_batch_size", "500");
+		expect((await passSize(E)).batch).toBe(100);
+		await E.SYNC_STATE.put("meta:ebay_batch_size", "x");
+		expect((await passSize(E)).batch).toBe(EBAY_BATCH_SIZE);
+	});
+
+	it("a live pass publishes up to the override", async () => {
+		await live();
+		await E.SYNC_STATE.put("meta:ebay_batch_size", "12");
+		const skus = Array.from({ length: 14 }, (_, i) => `BIG${i}`);
+		for (const [i, s] of skus.entries()) { addProduct(s); await linkDiscogs(s, 1000 + i); }
+		// Prices from the snapshot, as in prod: the per-run Discogs read budget (10) doesn't apply.
+		const snapListings = Object.fromEntries(skus.map((_, i) => [String(1000 + i), { status: "For Sale", price: 21.5, currency: "EUR", condition: "Near Mint (NM or M-)", sleeve_condition: "Near Mint (NM or M-)" }]));
+		await E.SYNC_STATE.put("discogs:snapshot", JSON.stringify({ taken_at: new Date().toISOString(), source: "api", count: skus.length, listings: snapListings }));
+		await includeSkus(E, skus);
+		expect((await runEbayAutolist(E)).listed).toBe(12);
 	});
 });

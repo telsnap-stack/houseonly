@@ -107,6 +107,18 @@ export const EBAY_BATCH_SIZE = 10;
 // re-checked round-robin, oldest check first, so a long queue is covered
 // every few runs without one run doing hundreds of lookups.
 export const EBAY_CHECKS_PER_RUN = 40;
+// Override for both, editable: meta:ebay_batch_size (1–100; unset = 10). Set
+// to 50 for the relaunch after eBay's restriction (2026-10-29), then removed.
+// A pass of 50 is ~500 subrequests and ~6 min: Workers Paid allows 10,000
+// and 15 min per cron (developers.cloudflare.com/workers/platform/limits).
+const BATCH_SIZE_KEY = 'meta:ebay_batch_size';
+const EBAY_BATCH_SIZE_MAX = 100;
+export async function passSize(env: EbayEnv): Promise<{ batch: number; checks: number }> {
+  const n = Math.floor(Number(await env.SYNC_STATE.get(BATCH_SIZE_KEY)));
+  const batch = n > 0 ? Math.min(n, EBAY_BATCH_SIZE_MAX) : EBAY_BATCH_SIZE;
+  // Room for records that end up held (sold out, no price) on the way.
+  return { batch, checks: Math.max(EBAY_CHECKS_PER_RUN, batch + 20) };
+}
 // Discogs listing reads per run (price + grades). Discogs' budget is per
 // egress IP and shared; the Discogs poll already finds it spent (memory).
 export const EBAY_DISCOGS_READS_PER_RUN = 10;
@@ -771,6 +783,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   }
 
   const budget = { discogs: EBAY_DISCOGS_READS_PER_RUN };
+  const size = await passSize(env);
   const snap = await loadSnapshot(env);
   const hold = async (item: EbayItem, reason: EbayHoldReason, detail?: string) => {
     await saveItem(env, { ...item, hold_reason: reason }, 'held', detail ? `${reason}: ${detail}` : reason);
@@ -779,8 +792,8 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   };
 
   for (const entry of queue) {
-    if (result.checked >= EBAY_CHECKS_PER_RUN) break;
-    if (result.listed + result.would_list >= EBAY_BATCH_SIZE) break;
+    if (result.checked >= size.checks) break;
+    if (result.listed + result.would_list >= size.batch) break;
     if (daily && result.listed >= daily.remaining) { result.stopped = 'daily_cap'; break; }
     const stored = await getItem(env, entry.sku);
     if (!stored || !pendingStatuses(mode).has(stored.status)) continue;
@@ -1359,6 +1372,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     cost_multiplier: await costMultiplier(env),
     price_floor: await priceFloor(env),
     daily_publish: await dailyPublishState(env),
+    pass_size: await passSize(env),
     limit_hit: await readJsonKey(env, LIMIT_KEY),
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),
