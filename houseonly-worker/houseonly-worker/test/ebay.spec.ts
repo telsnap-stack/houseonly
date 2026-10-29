@@ -438,8 +438,8 @@ describe("continuous backfill (cron)", () => {
 	});
 
 	it(`queues the next ${EBAY_BACKFILL_NEXT} when nothing is queued or would_list (held records don't block)`, async () => {
-		addProduct("WAIT01"); await includeSkus(E, ["WAIT01"]);
-		await runEbayAutolist(E);                                   // no Discogs listing: held
+		addProduct("WAIT01", {}, { unitCost: null }); await includeSkus(E, ["WAIT01"]);
+		await runEbayAutolist(E);                                   // no Discogs listing, no cost: held
 		expect((await item("WAIT01")).status).toBe("held");
 		const r: any = await runEbayAutoBackfill(E, livePass());
 		expect(r.queued).toHaveLength(EBAY_BACKFILL_NEXT);
@@ -508,13 +508,19 @@ describe("auto-list cron and price sources", () => {
 		expect(await E.SYNC_STATE.get("ebay:listing:LIST-1")).toBe("BOND12081C");
 	});
 
-	it("no Discogs listing yet: held, re-checked every run, listed once the listing exists", async () => {
+	it("no Discogs listing: listed at cost x multiplier; without a cost, held until the listing exists", async () => {
 		await live();
-		addProduct("HAND01");
+		addProduct("UNLINK1", {}, { unitCost: 8 });
+		await includeSkus(E, ["UNLINK1"]);
+		await runEbayAutolist(E);
+		expect(await item("UNLINK1")).toMatchObject({ status: "listed" });
+		expect(ebayCalls("POST", /offer$/)[0].body.pricingSummary.price.value).toBe("16.99");
+		expect((await item("UNLINK1")).preview.price_source).toBe("cost 8.00 × 2 = 16.00 → 16.99 (sin listing de Discogs)");
+		expect(discogs.getListing).not.toHaveBeenCalled();
+		addProduct("HAND01", {}, { unitCost: null });
 		await includeSkus(E, ["HAND01"]);
 		await runEbayAutolist(E);
 		expect(await item("HAND01")).toMatchObject({ status: "held", hold_reason: "esperando_discogs" });
-		expect(ebayCalls("PUT")).toHaveLength(0);
 		await runEbayAutolist(E);
 		expect((await item("HAND01")).status).toBe("held");
 		// The relink cron maps the hand-made Discogs listing.
@@ -658,7 +664,7 @@ describe("auto-list cron and price sources", () => {
 
 	it("held records come round: the oldest check goes first", async () => {
 		await live();
-		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 10; i++) addProduct(`W${String(i).padStart(2, "0")}`);   // none on Discogs
+		for (let i = 0; i < EBAY_CHECKS_PER_RUN + 10; i++) addProduct(`W${String(i).padStart(2, "0")}`, {}, { unitCost: null });   // none on Discogs, no cost
 		await includeSkus(E, [...catalog.keys()].filter(s => s.startsWith("W")));
 		await runEbayAutolist(E);
 		const first = await item("W00");
