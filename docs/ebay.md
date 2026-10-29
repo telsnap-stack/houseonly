@@ -200,6 +200,26 @@ La política de envío depende del peso de la variante en Shopify
   que publicados + pendientes no superen `sellingLimit.quantity`
   (`GET /sell/account/v1/privilege`). Si la cuenta no tiene ese límite, no se
   aplica tope.
+- **Tope diario propio**: `meta:ebay_daily_publish_cap` (número; sin valor o
+  "0" = sin tope). Cuenta los anuncios publicados por día de Madrid en
+  `meta:ebay_published_today`. Al llegar al tope la pasada para
+  (`stopped: daily_cap`) y sigue al día siguiente. Se puso para el
+  relanzamiento tras la restricción de verificación de eBay (2026-10-29).
+  `ebay-items` lo devuelve en `daily_publish`.
+
+### Retirados por eBay
+
+`withdrawn_by_ebay`: anuncio que eBay terminó él mismo (restricción de la
+cuenta, 2026-10-28). La oferta queda UNPUBLISHED con el anuncio ENDED. Al
+volver a la cola, la pasada reutiliza la oferta y crea un anuncio nuevo,
+después de volver a comprobar el stock en Shopify.
+
+### Valores de item specifics
+
+Cada valor tiene como máximo **65 caracteres**: eBay lo dice al rechazar uno
+(25002), aunque `getItemAspectsForCategory` no da el límite. Las listas de
+artistas se cortan en la última coma y nunca se deja un paréntesis abierto
+(`fitAspectValue`).
 
 ### Una sola instancia
 
