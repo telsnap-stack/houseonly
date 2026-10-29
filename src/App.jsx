@@ -8880,7 +8880,7 @@ function DiscogsReviewPanel() {
 // WORKER_URL sigue a staging/prod segun VITE_WORKER_URL.
 const EBAY_STATUS_COLOR = { queued:'#ffd24a', held:'#ff9a4a', would_list:'#9ad0ff', listed:'#4ade80', sold:'#4ade80', failed:'#ff5a5a', excluded:'#888', withdrawn:'#888' };
 const EBAY_HOLD_LABEL = {
-  esperando_discogs:'esperando listing de Discogs',
+  esperando_discogs:'sin listing de Discogs ni coste en Shopify',
   sin_fuente_de_precio:'SIN FUENTE DE PRECIO (discogs:no y sin coste)',
   discogs_no_disponible:'listing de Discogs no disponible',
   discogs_no_eur:'listing de Discogs no en EUR',
