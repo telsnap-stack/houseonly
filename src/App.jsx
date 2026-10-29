@@ -8889,6 +8889,7 @@ const EBAY_HOLD_LABEL = {
   usado_sin_grado:'usado sin grado', no_en_shopify:'no esta en Shopify', sin_sku:'sin SKU', sku_largo:'SKU > 50',
   discogs_snapshot_caducado:'snapshot de Discogs caducado (> 48 h)',
   sin_politica_envio:'falta la politica de envio de su peso en eBay',
+  imagen_pequena:'imagen <500 px: cambia las fotos en Shopify',
 };
 
 function EbayPanel() {
