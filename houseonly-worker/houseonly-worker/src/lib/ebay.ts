@@ -17,9 +17,10 @@
 //
 //    PRICE never comes from the Shopify price:
 //    - the CURRENT price of the record's Discogs listing (sku:{SKU} mapping →
-//      GET /marketplace/listings/{id}); without a listing the record is HELD
-//      (esperando_discogs) and re-checked every run — the mapping itself is
-//      kept current by runRelinkCron (sync.ts), which now runs on this cron;
+//      GET /marketplace/listings/{id}) — the mapping itself is kept current by
+//      runRelinkCron (sync.ts), which now runs on this cron; without a listing,
+//      unitCost × multiplier like discogs:no, and with no cost either the record
+//      is HELD (esperando_discogs) and re-checked every run;
 //    - records tagged `discogs:no`: Shopify unitCost × meta:ebay_cost_multiplier
 //      (default 2); no cost → HELD as sin_fuente_de_precio, flagged in the tab.
 //    Never a guessed price.
@@ -378,7 +379,14 @@ async function priceFromSource(env: EbayFullEnv, p: EbaySourceProduct, budget: {
   const raw = await env.SYNC_STATE.get(`sku:${p.variant.sku.trim()}`);
   let listingId: number | null = null;
   try { listingId = raw ? Number(JSON.parse(raw).listing_id) || null : null; } catch { /* treat as unlinked */ }
-  if (!listingId) return { ok: false, hold: 'esperando_discogs' };
+  if (!listingId) {
+    // Not on Discogs: list anyway at cost × multiplier, like discogs:no (Eduardo, 2026-10-29).
+    // The eBay price is not updated if a Discogs listing is linked later.
+    const price = priceFromCost(p, await costMultiplier(env));
+    return price
+      ? { ok: true, price: { ...price, detail: `${price.detail} (sin listing de Discogs)` } }
+      : { ok: false, hold: 'esperando_discogs', detail: 'no Discogs listing and no Shopify unit cost' };
+  }
   const got = await discogsListingFor(env, listingId, budget, snap);
   if (!got.ok) return got;
   const l = got.l;
