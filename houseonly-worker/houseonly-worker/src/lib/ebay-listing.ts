@@ -161,7 +161,7 @@ export interface EbaySourceProduct {
 
 export interface EbayPrice {
   value: number;                  // EUR
-  source: 'discogs' | 'cost';
+  source: 'discogs' | 'cost' | 'shopify';
   detail: string;                 // e.g. "Discogs listing 4190680911" / "cost 9.50 × 2"
 }
 
@@ -363,6 +363,15 @@ export function priceFromCost(p: EbaySourceProduct, multiplier: number): EbayPri
   const raw = Math.round(cost * multiplier * 100) / 100;
   const value = roundUpTo99(raw);
   return { value, source: 'cost', detail: `cost ${cost.toFixed(2)} × ${multiplier}${value === raw ? '' : ` = ${raw.toFixed(2)} → ${value.toFixed(2)}`}` };
+}
+
+/** No Discogs listing and no unit cost: Shopify price × markup (Eduardo, 2026-10-29), or nothing. */
+export function priceFromShopify(p: EbaySourceProduct, markup: number): EbayPrice | null {
+  const shop = Number(p.variant.price);
+  if (!(shop > 0) || !(markup > 0)) return null;
+  const raw = Math.round(shop * markup * 100) / 100;
+  const value = roundUpTo99(raw);
+  return { value, source: 'shopify', detail: `Shopify ${shop.toFixed(2)} × ${markup}${value === raw ? '' : ` = ${raw.toFixed(2)} → ${value.toFixed(2)}`}` };
 }
 
 export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: EbayPrice, cfg: ListingConfig): EbayListingPayload {
