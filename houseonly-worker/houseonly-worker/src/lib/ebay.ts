@@ -142,6 +142,21 @@ export const EBAY_ORDER_SETTLE_MS = 5 * 60 * 1000;
 const LOCK_COMMITTED_TTL_S = 60 * 24 * 60 * 60;
 const AUDIT_TTL_S = 30 * 24 * 60 * 60;
 const HISTORY_MAX = 20;
+// eBay errors that are eBay's own load, not the record (2026-10-29, pass of
+// 50: 7× 25001 system error, 5× 25604 "Availability not found", 1× 25710).
+// Back to the queue, at most this many tries, then failed.
+const TRANSIENT_ERROR = /\beBay \d{3} (25001|25604|25710)\b/;
+export const EBAY_TRANSIENT_MAX_ATTEMPTS = 3;
+// 25002 on photo resolution: eBay wants 500 px on the longest side.
+const IMAGE_TOO_SMALL_ERROR = /\b25002\b.*(resoluci[oó]n de las im[aá]genes|image resolution|Pol[ií]tica de im[aá]genes)/i;
+// Pause between writing the inventory item (stock) and publishing: 25604
+// "Availability not found" is eBay not seeing the stock it was just sent.
+// Editable (ms) for tests and tuning.
+const PUBLISH_SETTLE_KEY = 'meta:ebay_publish_settle_ms';
+export const EBAY_PUBLISH_SETTLE_MS = 1500;
+// A pass stops starting new records after this (the cron runs every 15 min;
+// Eduardo: cut near 12). The record in flight finishes.
+export const EBAY_PASS_TIME_BUDGET_MS = 11 * 60 * 1000;
 
 // ── modes ──────────────────────────────────────────────────────────
 
@@ -179,6 +194,8 @@ export interface EbayItem {
   error?: string;
   title?: string;
   price?: EbayPrice;
+  transient_attempts?: number;   // eBay temporary errors in a row (25001/25604/25710); failed after 3
+  held_images?: string[];        // imagen_pequena: the photos eBay refused; new ones → try again
   no_weight?: boolean;      // Shopify variant without weight: shipped on the one-record policy, flagged in the admin
   preview?: { title: string; price: string; price_source: string; condition: string; grades: Grades; ean: string; images: number; shipping?: string; store_category?: string | null };
   history?: Array<{ at: string; status: EbayItemStatus; note?: string }>;
@@ -398,8 +415,9 @@ export interface AutolistResult {
   held: number;
   failed: number;
   held_by_reason: Record<string, number>;
+  requeued_transient?: number;   // eBay temporary error: back in the queue
   pending: number;          // queued + held + (live) would_list after the run
-  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error' | 'daily_cap';
+  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error' | 'daily_cap' | 'time_budget';
   // Discogs answered 429 (after its own retries): no more Discogs reads this
   // run, and the cron skips the relink that would hit the same quota.
   discogs_429?: boolean;
@@ -415,6 +433,10 @@ async function fetchSourceProduct(env: EbayFullEnv, sku: string): Promise<EbaySo
 
 async function publishListing(env: EbayFullEnv, payload: ReturnType<typeof buildEbayListing>): Promise<{ offerId: string; listingId: string }> {
   await putInventoryItem(env, payload.sku, payload.inventoryItem);
+  const raw = await env.SYNC_STATE.get(PUBLISH_SETTLE_KEY);
+  const n = raw === null ? NaN : Number(raw);
+  const settle = n >= 0 ? n : EBAY_PUBLISH_SETTLE_MS;
+  if (settle > 0) await new Promise(r => setTimeout(r, settle));
   const existing = await findOffer(env, payload.sku);
   if (existing?.status === 'PUBLISHED' && existing.listingId) {
     return { offerId: existing.offerId, listingId: existing.listingId };
@@ -726,6 +748,7 @@ const UPDATE_OFFER_FIELDS = [
 ];
 
 export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean } = {}): Promise<AutolistResult> {
+  const passStart = Date.now();
   await requeueEanFailures(env);
   let mode = await getEbayAutolistMode(env);
   const result: AutolistResult = {
@@ -792,6 +815,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   };
 
   for (const entry of queue) {
+    if (Date.now() - passStart > EBAY_PASS_TIME_BUDGET_MS) { result.stopped = 'time_budget'; break; }
     if (result.checked >= size.checks) break;
     if (result.listed + result.would_list >= size.batch) break;
     if (daily && result.listed >= daily.remaining) { result.stopped = 'daily_cap'; break; }
@@ -812,6 +836,12 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
     item.title = [product.vendor, product.title].filter(Boolean).join(' - ');
     const why = holdReason(product);
     if (why) { await hold(item, why); continue; }
+    if (item.hold_reason === 'imagen_pequena') {
+      // Same photos eBay refused → keep waiting; new ones (Shopify URLs change) → try.
+      const same = !item.held_images || item.held_images.join('\n') === product.images.join('\n');
+      if (same) { await hold({ ...item, held_images: item.held_images || product.images }, 'imagen_pequena', 'imagen <500 px'); continue; }
+      item.held_images = undefined;
+    }
 
     const priced = await resolvePrice(env, product, budget, snap);
     if (!priced.ok) {
@@ -869,6 +899,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
       await env.SYNC_STATE.put(LISTING_PREFIX + ids.listingId, item.sku);
       await saveItem(env, {
         ...item, hold_reason: undefined, offer_id: ids.offerId, listing_id: ids.listingId, preview: preview(payload), error: undefined,
+        transient_attempts: undefined, held_images: undefined,
       }, 'listed', `listing ${ids.listingId} at ${priced.price.value.toFixed(2)} (${priced.price.detail})`);
       result.listed++;
       await env.SYNC_STATE.put(DAILY_COUNT_KEY, JSON.stringify({ day: daily!.day, count: daily!.count + result.listed }));
@@ -883,6 +914,23 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
         result.stopped = 'selling_limit';
         result.error = msg;
         break;
+      }
+      if (TRANSIENT_ERROR.test(msg)) {
+        const attempts = (item.transient_attempts || 0) + 1;
+        if (attempts < EBAY_TRANSIENT_MAX_ATTEMPTS) {
+          // checked_at = now: to the back of the queue, not straight back at eBay.
+          await saveItem(env, { ...item, transient_attempts: attempts, error: undefined }, 'queued',
+            `eBay temporary error, try ${attempts}/${EBAY_TRANSIENT_MAX_ATTEMPTS}: ${msg}`);
+          result.requeued_transient = (result.requeued_transient || 0) + 1;
+          continue;
+        }
+        await saveItem(env, { ...item, transient_attempts: attempts, error: msg }, 'failed', msg);
+        result.failed++;
+        continue;
+      }
+      if (IMAGE_TOO_SMALL_ERROR.test(msg)) {
+        await hold({ ...item, held_images: product.images }, 'imagen_pequena', 'imagen <500 px');
+        continue;
       }
       await saveItem(env, { ...item, error: msg }, 'failed', msg);
       result.failed++;
