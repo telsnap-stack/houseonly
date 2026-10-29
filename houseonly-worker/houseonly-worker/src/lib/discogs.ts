@@ -15,6 +15,35 @@
 const DISCOGS_BASE = 'https://api.discogs.com';
 const USER_AGENT = 'HouseOnlyWorker/1.0 +https://houseonly.store';
 
+// ── FIXED-IP PROXY (2026-10-29) ─────────────────────────────────────
+// Discogs counts its limit per source IP, and Cloudflare's egress IP is
+// shared: our calls kept getting 429 with almost nothing of ours spent.
+// With DISCOGS_PROXY_URL + DISCOGS_PROXY_KEY set, calls go through our own
+// server (Hetzner discogs-proxy, Caddy → api.discogs.com) with its own IP.
+// If the proxy can't be reached or answers 403/502/503/504, the call goes
+// direct, as before. Set once per invocation from the entry points.
+let proxy: { url: string; key: string } | null = null;
+
+export function configureDiscogsProxy(env: { DISCOGS_PROXY_URL?: string; DISCOGS_PROXY_KEY?: string }): void {
+  const url = (env.DISCOGS_PROXY_URL || '').replace(/\/+$/, '');
+  proxy = url && env.DISCOGS_PROXY_KEY ? { url, key: env.DISCOGS_PROXY_KEY } : null;
+}
+
+const PROXY_DOWN = new Set([403, 502, 503, 504]);
+
+async function fetchViaProxy(url: string, init: RequestInit, headers: Record<string, string>): Promise<Response> {
+  if (proxy && url.startsWith(DISCOGS_BASE)) {
+    try {
+      const r = await fetch(proxy.url + url.slice(DISCOGS_BASE.length), { ...init, headers: { ...headers, 'X-Proxy-Key': proxy.key } });
+      if (!PROXY_DOWN.has(r.status)) return r;
+      console.warn(JSON.stringify({ tag: 'discogs_proxy_fallback', status: r.status }));
+    } catch (e: any) {
+      console.warn(JSON.stringify({ tag: 'discogs_proxy_fallback', error: String(e?.message || e).slice(0, 120) }));
+    }
+  }
+  return fetch(url, { ...init, headers });
+}
+
 // ── TYPES ───────────────────────────────────────────────────────────
 
 export type DiscogsCondition =
@@ -200,7 +229,7 @@ async function discogsFetch(
     ...((init?.headers as Record<string, string>) || {}),
   };
 
-  const r = await fetch(url, { ...init, headers });
+  const r = await fetchViaProxy(url, init || {}, headers);
 
   // Rate limited: wait and retry once
   const attempt = init?._attempt ?? 0;
