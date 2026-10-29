@@ -1,3 +1,4 @@
+import { configureDiscogsProxy } from './lib/discogs';
 interface Env {
   R2: R2Bucket;
   WISHLIST: KVNamespace;
@@ -25,6 +26,9 @@ interface Env {
   // Configured via `wrangler secret put DISCOGS_TOKEN` (separate command for staging).
   // Used by sync handlers in src/lib/sync.ts.
   DISCOGS_TOKEN: string;
+  // Fixed-IP proxy for Discogs (secrets; unset = direct). See lib/discogs.ts.
+  DISCOGS_PROXY_URL?: string;
+  DISCOGS_PROXY_KEY?: string;
   // BOOTSTRAP_AUTH_SECRET: Shared secret protecting the sync-bootstrap endpoint.
   // Configured via `wrangler secret put BOOTSTRAP_AUTH_SECRET`. Required header:
   //   Authorization: Bearer <secret>
@@ -1242,6 +1246,7 @@ async function handleMirrorGeneric(
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    configureDiscogsProxy(env);
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS });
@@ -3247,6 +3252,7 @@ export default {
   // returns before pollDiscogsForSales is done. Errors are caught so a
   // bad poll doesn't crash the Worker — we want next run to try again.
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    configureDiscogsProxy(env);
     // ── AVISOS DE NOVEDADES (fase 6) ────────────────────────
     // La tanda diaria va en SU PROPIA expresion de cron, y aqui se bifurca.
     // Sin esta bifurcacion, activar un cron en staging —que hoy no tiene
