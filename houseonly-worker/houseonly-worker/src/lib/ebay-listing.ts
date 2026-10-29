@@ -314,6 +314,9 @@ export const OFF_EBAY_TEXT = /https?:\/\/|www\.|[\w.+-]+@[\w-]+\.[\w-]+|houseonl
 export function stripOffEbayText(html: string): string {
   let s = String(html || '').replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1');
   for (const re of OFF_EBAY_TOKENS) s = s.replace(re, OFF_EBAY_TOKEN);
+  // A "://" left after the URLs (the Berlin club "://about blank") failed BB009
+  // with 25002 "no puede contener JavaScript" (2026-10-29).
+  s = s.replace(/:\/\//g, '');
   return s
     .replace(OFF_EBAY_SENTENCE, '')
     .split(OFF_EBAY_TOKEN).join('')

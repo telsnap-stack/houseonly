@@ -1349,6 +1349,8 @@ describe("no pointers off eBay in the listing text", () => {
 		expect(OFF_EBAY_TEXT.test(out)).toBe(false);
 		expect(OFF_EBAY_TEXT.test(DIRTY)).toBe(true);
 		expect(stripOffEbayText("<p>Released on www.label.com/ep in 2019.</p><p>Classic.</p>")).toBe("<p>Classic.</p>");
+		// BB009: the club "://about blank" read as active content (25002).
+		expect(stripOffEbayText("<p>Played Sonar, ://about blank, Golden Pudel.</p>")).toBe("<p>Played Sonar, about blank, Golden Pudel.</p>");
 		// PFGXX50LP: the distributor's listen line, in HTML and in plain text.
 		expect(stripOffEbayText("<p>Heavy disco.<br>LISTEN LINK: https://open.spotify.com/album/abc</p>")).toBe("<p>Heavy disco.<br></p>");
 		expect(stripOffEbayText("Heavy disco\nLISTEN LINK: https://open.spotify.com/album/abc\nA1 Track")).toBe("Heavy disco\n\nA1 Track");
