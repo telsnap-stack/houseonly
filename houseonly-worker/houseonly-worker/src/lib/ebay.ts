@@ -78,6 +78,10 @@ const CATEGORY_KEY = 'meta:ebay_category_id';
 const COST_MULTIPLIER_KEY = 'meta:ebay_cost_multiplier';
 const PRICE_FLOOR_KEY = 'meta:ebay_price_floor';   // editable; "0" turns it off
 const LIMIT_KEY = 'meta:ebay_limit_hit';
+// Listings published per day (Europe/Madrid), editable; unset or "0" = no cap.
+// Set to 60 for the relaunch after eBay's verification restriction (2026-10-29).
+const DAILY_CAP_KEY = 'meta:ebay_daily_publish_cap';
+const DAILY_COUNT_KEY = 'meta:ebay_published_today';   // {day, count}
 const GO_LIVE_KEY = 'meta:ebay_go_live_ts';
 const BACKFILL_KEY = 'meta:ebay_backfill';
 const AUTOLIST_LAST_RUN = 'meta:ebay_autolist_last_run';
@@ -145,6 +149,7 @@ export type EbayItemStatus =
   | 'failed'       // eBay refused (error); re-add to retry
   | 'excluded'     // taken out by hand; never re-queued automatically
   | 'withdrawn'    // ended because it sold elsewhere
+  | 'withdrawn_by_ebay'  // ended by eBay (account restriction, 2026-10-28); re-add to relist
   | 'sold';        // sold on eBay
 
 export type EbayItemOrigin = 'webhook' | 'backfill' | 'admin';
@@ -382,7 +387,7 @@ export interface AutolistResult {
   failed: number;
   held_by_reason: Record<string, number>;
   pending: number;          // queued + held + (live) would_list after the run
-  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error';
+  stopped?: 'selling_limit' | 'cooldown' | 'not_configured' | 'setup_failed' | 'shopify_error' | 'daily_cap';
   // Discogs answered 429 (after its own retries): no more Discogs reads this
   // run, and the cron skips the relink that would hit the same quota.
   discogs_429?: boolean;
@@ -411,6 +416,22 @@ async function publishListing(env: EbayFullEnv, payload: ReturnType<typeof build
   }
   const listingId = await publishOffer(env, offerId);
   return { offerId, listingId };
+}
+
+const madridDay = (t = new Date()) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+
+/** Today's cap and count. remaining = Infinity when no cap is set. */
+export async function dailyPublishState(env: EbayEnv): Promise<{ day: string; cap: number | null; count: number; remaining: number }> {
+  const day = madridDay();
+  const n = Number(await env.SYNC_STATE.get(DAILY_CAP_KEY));
+  const cap = Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  let count = 0;
+  try {
+    const c = JSON.parse((await env.SYNC_STATE.get(DAILY_COUNT_KEY)) || 'null');
+    if (c?.day === day) count = Number(c.count) || 0;
+  } catch { /* malformed → 0 */ }
+  return { day, cap, count, remaining: cap === null ? Infinity : Math.max(0, cap - count) };
 }
 
 const pendingStatuses = (mode: EbayMode): Set<EbayItemStatus> =>
@@ -733,6 +754,8 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
       if (queue.length === 0) return finish();
     }
   }
+  const daily = mode === 'live' ? await dailyPublishState(env) : null;
+  if (daily && daily.remaining <= 0) { result.stopped = 'daily_cap'; return finish(); }
   if (mode === 'live') {
     try {
       cfg = {
@@ -758,6 +781,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
   for (const entry of queue) {
     if (result.checked >= EBAY_CHECKS_PER_RUN) break;
     if (result.listed + result.would_list >= EBAY_BATCH_SIZE) break;
+    if (daily && result.listed >= daily.remaining) { result.stopped = 'daily_cap'; break; }
     const stored = await getItem(env, entry.sku);
     if (!stored || !pendingStatuses(mode).has(stored.status)) continue;
     result.checked++;
@@ -834,6 +858,7 @@ export async function runEbayAutolist(env: EbayFullEnv, opts: { force?: boolean 
         ...item, hold_reason: undefined, offer_id: ids.offerId, listing_id: ids.listingId, preview: preview(payload), error: undefined,
       }, 'listed', `listing ${ids.listingId} at ${priced.price.value.toFixed(2)} (${priced.price.detail})`);
       result.listed++;
+      await env.SYNC_STATE.put(DAILY_COUNT_KEY, JSON.stringify({ day: daily!.day, count: daily!.count + result.listed }));
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (isSellingLimitError(e)) {
@@ -1333,6 +1358,7 @@ export async function handleEbayItems(request: Request, env: EbayFullEnv): Promi
     sync: await getEbaySyncMode(env),
     cost_multiplier: await costMultiplier(env),
     price_floor: await priceFloor(env),
+    daily_publish: await dailyPublishState(env),
     limit_hit: await readJsonKey(env, LIMIT_KEY),
     backfill: await readJsonKey(env, BACKFILL_KEY),
     autolist_last_run: await readJsonKey(env, AUTOLIST_LAST_RUN),

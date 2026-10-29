@@ -47,6 +47,11 @@ const TITLE_MAX = 80;
 const PRODUCT_DESCRIPTION_MAX = 4000;
 // Up to 24 images per item; all ours are on cdn.shopify.com (https).
 const IMAGES_MAX = 24;
+// Item specific values: max 65 characters. Not in getItemAspectsForCategory
+// (aspectMaxLength comes back empty for 176985); eBay states it when it refuses
+// one: 25002 "…de Artista es demasiado largo. Introduce un valor de 65
+// caracteres como máximo" (NERO050R, HW020, 2026-10-28).
+export const ASPECT_VALUE_MAX = 65;
 // SKU path parameter: max length 50.
 const SKU_MAX = 50;
 
@@ -226,6 +231,23 @@ function tagValue(tags: string[], prefix: string): string {
   return t ? t.slice(prefix.length).trim() : '';
 }
 
+/**
+ * An item specific value cut to eBay's 65: at the last ", " (artist lists),
+ * else at a word; never ending in an unclosed "(" or on punctuation.
+ */
+export function fitAspectValue(v: string, max = ASPECT_VALUE_MAX): string {
+  v = v.trim();
+  if (v.length <= max) return v;
+  let cut = v.slice(0, max);
+  const comma = cut.lastIndexOf(', ');
+  const space = cut.lastIndexOf(' ');
+  if (comma > max / 3) cut = cut.slice(0, comma);
+  else if (v[max] !== ' ' && space > max / 3) cut = cut.slice(0, space);
+  const open = cut.lastIndexOf('(');
+  if (open > 0 && cut.indexOf(')', open) < 0) cut = cut.slice(0, open);
+  return cut.replace(/[\s,;:&(\-–]+$/, '');
+}
+
 function artistOf(vendor: string): string {
   // As google-feed: Shopify's default vendor is the shop, not an artist.
   const v = decodeHtmlEntities((vendor || '').trim());
@@ -366,6 +388,7 @@ export function buildEbayListing(p: EbaySourceProduct, grades: Grades, price: Eb
     aspects[ASPECTS.mediaGrade] = [grades.media];
     aspects[ASPECTS.sleeveGrade] = [grades.sleeve];
   }
+  for (const k of Object.keys(aspects)) aspects[k] = aspects[k].map(v => fitAspectValue(v));
 
   const product: any = {
     title: ebayTitle(artist, title, sku),
