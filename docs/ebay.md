@@ -36,15 +36,16 @@ Antes de activarla, eBay devolvía `{"total":0}`.
 **Nada de esto lee ni escribe `meta:sync_35_mode`.** El auto-add de Discogs
 sigue en `dry` (verificado 2026-10-26) y eBay funciona sin él.
 
-### Precio: nunca el de Shopify, nunca adivinado
+### Precio: nunca adivinado
 
 1. **Listing de Discogs del disco** (`sku:{SKU}` → `GET /marketplace/listings/{id}`):
    su precio **actual**, en EUR, **redondeado hacia arriba a ,99** (12,97 → 12,99;
    21,23 → 21,99; 12,99 se queda). La pestaña muestra los dos precios. Se lee al publicar, máximo 10 lecturas de
    Discogs por pasada. Sin listing enlazado, se publica igualmente a **coste × multiplicador**,
    con las mismas reglas que `discogs:no` (punto 2) y el suelo; el precio de eBay no
-   cambia si luego aparece el listing de Discogs. Sin listing y sin coste, se queda
-   **retenido** (`esperando_discogs`) y el cron lo vuelve a mirar en cada pasada. Si el listing está vendido o no está en EUR, también queda retenido.
+   cambia si luego aparece el listing de Discogs. Sin listing y sin coste, **precio de
+   Shopify + 30 %** (× 1,3), redondeado a ,99 y con el suelo: el único caso en que se
+   usa el precio de Shopify. Sin nada de eso, **retenido** (`esperando_discogs`). Si el listing está vendido o no está en EUR, también queda retenido.
 2. **Discos marcados como "no van a Discogs"** con el tag de Shopify
    **`discogs:no`**: coste unitario de Shopify (`inventoryItem.unitCost`) × el
    multiplicador de `meta:ebay_cost_multiplier` (2 por defecto), **redondeado
