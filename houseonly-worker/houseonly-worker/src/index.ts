@@ -847,6 +847,7 @@ function mergeItems(a: WishlistItem[], b: WishlistItem[]): WishlistItem[] {
 //
 // See src/lib/shopify-admin.ts for full docs.
 
+import { runDiscogsRelist } from './lib/discogs-relist';
 import { shopifyAdminGraphQL, getShopifyAdminToken } from './lib/shopify-admin';
 import {
   handleSyncBootstrap,
@@ -3295,6 +3296,13 @@ export default {
         if (pass) await runEbayAutoBackfill(env, pass).catch(fail('meta:ebay_autobackfill_last_run'));
         const discogs429 = Boolean(pass?.discogs_429) || snap?.result === 'discogs_429';
         await runRelinkCron(env, { discogs429 }).catch(fail('meta:relink_cron_last_run'));
+        // 4) relistado de vendidos en Discogs con stock en Shopify (lista en KV;
+        //    sin lista no hace nada). Tambien se salta tras un 429.
+        if (!discogs429) {
+          await runDiscogsRelist(env).then(
+            (r) => r && env.SYNC_STATE.put('meta:discogs_relist_last_run', JSON.stringify({ at, ...r })),
+            fail('meta:discogs_relist_last_run'));
+        }
       })());
       // Ventas de eBay: no tocan Discogs, van en paralelo.
       ctx.waitUntil(pollEbayOrders(env).catch(fail('meta:ebay_orders_last_run')));
