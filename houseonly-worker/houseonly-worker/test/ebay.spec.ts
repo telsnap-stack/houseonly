@@ -12,7 +12,7 @@ import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, dailyPublishState, passSize, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, dailyPublishState, passSize, EBAY_TRANSIENT_MAX_ATTEMPTS, EBAY_PASS_TIME_BUDGET_MS, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -184,6 +184,7 @@ beforeEach(async () => {
 	vi.clearAllMocks();
 	vi.restoreAllMocks();
 	await wipe();
+	await E.SYNC_STATE.put("meta:ebay_publish_settle_ms", "0");   // no 1.5 s pause per publish in tests
 	E.BOOTSTRAP_AUTH_SECRET = SECRET;
 	E.EBAY_CLIENT_ID = "cid";
 	E.EBAY_CLIENT_SECRET = "csecret";
@@ -1505,5 +1506,67 @@ describe("pass size override", () => {
 		await E.SYNC_STATE.put("discogs:snapshot", JSON.stringify({ taken_at: new Date().toISOString(), source: "api", count: skus.length, listings: snapListings }));
 		await includeSkus(E, skus);
 		expect((await runEbayAutolist(E)).listed).toBe(12);
+	});
+});
+
+describe("eBay temporary errors, small photos, time budget", () => {
+	it("25001/25604/25710 go back to the queue; failed after 3 tries", async () => {
+		await live();
+		route("POST", /\/publish$/, () => ebayError(500, 25001, "A system error has occurred."));
+		await includeSkus(E, ["BOND12081C"]);
+		for (let i = 1; i < EBAY_TRANSIENT_MAX_ATTEMPTS; i++) {
+			const r = await runEbayAutolist(E);
+			expect(r).toMatchObject({ failed: 0, requeued_transient: 1 });
+			expect(await item("BOND12081C")).toMatchObject({ status: "queued", transient_attempts: i });
+		}
+		expect((await runEbayAutolist(E)).failed).toBe(1);
+		expect(await item("BOND12081C")).toMatchObject({ status: "failed", transient_attempts: 3 });
+	});
+
+	it("25604 and 25710 count as temporary too; 25019 fails at once", async () => {
+		await live();
+		const cases: Array<[string, number, number, string, string]> = [
+			["T604", 1101, 400, "25604", "queued"], ["T710", 1102, 404, "25710", "queued"], ["P019", 1103, 400, "25019", "failed"],
+		];
+		for (const [sku, id, status, code, expected] of cases) {
+			addProduct(sku); await linkDiscogs(sku, id);
+			route("POST", /\/publish$/, () => ebayError(status, Number(code), "eBay says no."));
+			await includeSkus(E, [sku]);
+			await runEbayAutolist(E);
+			expect((await item(sku)).status).toBe(expected);
+			await E.SYNC_STATE.put("meta:ebay_autolist_mode", "dry");   // keep it out of the next case's pass
+			await E.SYNC_STATE.delete(`ebay:item:${sku}`);
+			await live();
+		}
+	});
+
+	it("photos under 500 px: held until the photos change in Shopify", async () => {
+		await live();
+		let small = true;
+		route("POST", /\/publish$/, () => small
+			? ebayError(400, 25002, "A user error has occurred. La resolución de las imágenes proporcionadas no cumple los requisitos de la Política de imágenes de eBay.")
+			: jsonResponse({ listingId: "LIST-IMG" }));
+		await includeSkus(E, ["BOND12081C"]);
+		const r = await runEbayAutolist(E);
+		expect(r).toMatchObject({ failed: 0, held_by_reason: { imagen_pequena: 1 } });
+		expect(await item("BOND12081C")).toMatchObject({ status: "held", hold_reason: "imagen_pequena" });
+		const publishes = () => ebayCalls("POST", /\/publish$/).length;
+		const before = publishes();
+		await runEbayAutolist(E);                                  // same photos: no new try
+		expect(publishes()).toBe(before);
+		small = false;
+		addProduct("BOND12081C", { images: ["https://cdn.shopify.com/s/files/big.jpg"] });
+		expect((await runEbayAutolist(E)).listed).toBe(1);
+	});
+
+	it("stops starting records once the pass nears 12 minutes", async () => {
+		await live();
+		addProduct("TB1"); await linkDiscogs("TB1", 1201);
+		await includeSkus(E, ["BOND12081C", "TB1"]);
+		const t0 = Date.now();
+		let n = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => (n++ === 0 ? t0 : t0 + EBAY_PASS_TIME_BUDGET_MS + 1));
+		const r = await runEbayAutolist(E);
+		expect(r).toMatchObject({ stopped: "time_budget", listed: 0 });
 	});
 });

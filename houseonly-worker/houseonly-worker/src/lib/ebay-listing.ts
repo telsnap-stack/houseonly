@@ -183,6 +183,7 @@ export type EbayHoldReason =
   | 'discogs_error'           // Discogs did not answer (usually 429): try next run
   | 'discogs_snapshot_caducado' // the Discogs inventory snapshot is over 48 h old
   | 'sin_politica_envio'      // heavy parcel and its shipping policy isn't on eBay yet
+  | 'imagen_pequena'          // eBay refused the photos (under 500 px): waits until they change in Shopify
   | 'sin_fuente_de_precio';   // discogs:no and no unit cost: flagged in the admin
 
 export interface EbayListingPayload {

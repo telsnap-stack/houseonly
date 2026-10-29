@@ -207,6 +207,20 @@ La política de envío depende del peso de la variante en Shopify
   relanzamiento tras la restricción de verificación de eBay (2026-10-29).
   `ebay-items` lo devuelve en `daily_publish`.
 
+### Errores temporales de eBay, fotos y tiempo de pasada
+
+- **25001, 25604, 25710** son carga de eBay, no del disco: el disco vuelve a la
+  cola (al final) y se reintenta; al **3.er** intento seguido queda `failed`.
+  `requeued_transient` en el resultado de la pasada.
+- Entre escribir el inventario (stock) y publicar hay una pausa de **1,5 s**
+  (`meta:ebay_publish_settle_ms`) para reducir 25604 "Availability not found".
+- **25002 por resolución de fotos** (menos de 500 px): `held` con motivo
+  `imagen_pequena` ("imagen <500 px"). No se reintenta hasta que cambian las
+  fotos en Shopify (las URLs cambian al subir otras).
+- Una pasada deja de empezar discos a los **11 min** (`stopped: time_budget`);
+  el resto sigue en la siguiente (el cron va cada 15 min).
+- Tamaño de pasada: `meta:ebay_batch_size` (1–100; sin valor = 10).
+
 ### Retirados por eBay
 
 `withdrawn_by_ebay`: anuncio que eBay terminó él mismo (restricción de la
