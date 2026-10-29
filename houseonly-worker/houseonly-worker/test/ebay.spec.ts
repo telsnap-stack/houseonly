@@ -5,14 +5,14 @@ import * as shopifyAdmin from "../src/lib/shopify-admin";
 import * as discogs from "../src/lib/discogs";
 import {
 	buildEbayListing, ebayTitle, gradesFor, conditionFromTags, holdReason, priceFromCost, toSourceProduct, GRADE_MINT, ASPECTS,
-	roundUpTo99, stripShippingText, stripOffEbayText, weightToKg, shippingBandFor, OFF_EBAY_TEXT, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS,
+	roundUpTo99, stripShippingText, stripOffEbayText, weightToKg, shippingBandFor, OFF_EBAY_TEXT, storeCategoryFor, EBAY_STORE_CATEGORY_DEFAULTS, fitAspectValue,
 	type EbaySourceProduct, type EbayPrice,
 } from "../src/lib/ebay-listing";
 import {
 	challengeResponse, derToRawSignature, verifyNotificationSignature, getPolicyIds, EBAY_POLICY_NAMES,
 } from "../src/lib/ebay-api";
 import {
-	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, runEbayBackfill, runEbayAutoBackfill,
+	runEbayAutolist, pollEbayOrders, includeSkus, applyStoreCategoriesToLive, raiseLiveToFloor, scrubOffEbayTextOnLive, applyShippingPolicyToLive, requeueEanFailures, withdrawOnEbayForShopifyOrder, dailyPublishState, runEbayBackfill, runEbayAutoBackfill,
 	EBAY_CRON, EBAY_BATCH_SIZE, EBAY_CHECKS_PER_RUN, EBAY_DISCOGS_READS_PER_RUN, EBAY_BACKFILL_FIRST, EBAY_BACKFILL_NEXT,
 } from "../src/lib/ebay";
 import { runRelinkCron } from "../src/lib/sync";
@@ -1438,5 +1438,48 @@ describe("shipping policy by weight", () => {
 		const [put] = ebayCalls("PUT", /offer\//);
 		expect(put.path).toMatch(/OFF-2$/);
 		expect(put.body).toMatchObject({ listingPolicies: { fulfillmentPolicyId: "F2", paymentPolicyId: "P1", returnPolicyId: "R1" }, pricingSummary: { price: { value: "24.99" } } });
+	});
+});
+
+describe("item specific values fit eBay's 65 characters", () => {
+	it("cuts artist lists at a comma and drops an unclosed parenthesis (NERO050R, HW020)", () => {
+		const nero = "Aybee, Dego, Fred P, Gerald Mitchell, Ian O’Brien, K15, Kirk Degiorgio, Linkwood, Patrice Scott, Pirahnahead, Volcov";
+		expect(fitAspectValue(nero)).toBe("Aybee, Dego, Fred P, Gerald Mitchell, Ian O’Brien, K15");
+		expect(fitAspectValue("various artists (yam yam, franco strato, scattin man, allen & filix)")).toBe("various artists");
+		expect(fitAspectValue("Short Artist")).toBe("Short Artist");
+		const words = "Word ".repeat(20).trim();
+		expect(fitAspectValue(words).length).toBeLessThanOrEqual(65);
+		expect(fitAspectValue(words).endsWith("Word")).toBe(true);
+	});
+
+	it("every aspect sent is at most 65 characters", () => {
+		const long = "A".repeat(30) + ", " + "B".repeat(30) + ", " + "C".repeat(30);
+		const p = buildEbayListing(product({ vendor: long, tags: ["vinyl", "label:" + "L".repeat(80), "genre:house"] }), { media: GRADE_MINT, sleeve: GRADE_MINT }, DISCOGS_PRICE, { ...CFG, withEan: true });
+		for (const vals of Object.values(p.inventoryItem.product.aspects) as string[][]) for (const v of vals) expect(v.length).toBeLessThanOrEqual(65);
+		expect(p.inventoryItem.product.aspects[ASPECTS.artist]).toEqual(["A".repeat(30) + ", " + "B".repeat(30)]);
+	});
+});
+
+describe("daily publish cap", () => {
+	it("stops publishing at meta:ebay_daily_publish_cap for the day; unset = no cap", async () => {
+		await live();
+		expect((await dailyPublishState(E)).cap).toBeNull();
+		await E.SYNC_STATE.put("meta:ebay_daily_publish_cap", "3");
+		const skus = ["CAP1", "CAP2", "CAP3", "CAP4", "CAP5"];
+		for (const [i, s] of skus.entries()) { addProduct(s); await linkDiscogs(s, 970 + i); }
+		await includeSkus(E, skus);
+		const r1 = await runEbayAutolist(E);
+		expect(r1).toMatchObject({ listed: 3, stopped: "daily_cap" });
+		expect(await dailyPublishState(E)).toMatchObject({ cap: 3, count: 3, remaining: 0 });
+		const r2 = await runEbayAutolist(E);
+		expect(r2).toMatchObject({ listed: 0, checked: 0, stopped: "daily_cap" });
+		await E.SYNC_STATE.put("meta:ebay_daily_publish_cap", "5");
+		expect((await runEbayAutolist(E)).listed).toBe(2);
+	});
+
+	it("a count from another day doesn't carry over", async () => {
+		await E.SYNC_STATE.put("meta:ebay_daily_publish_cap", "60");
+		await E.SYNC_STATE.put("meta:ebay_published_today", JSON.stringify({ day: "2000-01-01", count: 60 }));
+		expect(await dailyPublishState(E)).toMatchObject({ cap: 60, count: 0, remaining: 60 });
 	});
 });
