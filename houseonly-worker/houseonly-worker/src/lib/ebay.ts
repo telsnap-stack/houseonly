@@ -436,7 +436,7 @@ export interface AutolistResult {
   finished_at: string;
 }
 
-async function fetchSourceProduct(env: EbayFullEnv, sku: string): Promise<EbaySourceProduct | null> {
+export async function fetchSourceProduct(env: EbayFullEnv, sku: string): Promise<EbaySourceProduct | null> {
   const r = await shopifyAdminGraphQL(env, PRODUCT_BY_SKU_QUERY, { q: `sku:"${sku.replace(/"/g, '\\"')}"` });
   if (r?.errors?.length) throw new Error(`Shopify: ${r.errors[0]?.message || 'query failed'}`);
   return toSourceProduct(r?.data?.products?.nodes || [], sku);
