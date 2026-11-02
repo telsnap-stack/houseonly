@@ -1,0 +1,460 @@
+/**
+ * Bandeja de escucha del tab Pre-order, fase 1: ingesta de audio (2026-11-02).
+ *
+ * De cada email de anuncio de Rubadub o Triple Vision archivado en EMAILS, el
+ * cron saca los discos (parseDistributorEmail, el mismo parser que el tab), baja
+ * el promopack y deja en R2 solo los MP3 y la portada (la del ZIP; si no trae,
+ * la del email). La bandeja los reproduce desde aqui: nada de enlaces externos.
+ *
+ * Audio PRIVADO: el prefijo listen/ no se sirve por el bucket publico. Lo sirve
+ * ?action=listen-file con URL firmada (HMAC de la clave + caducidad), que solo
+ * reparte ?action=listen-list con el Bearer de admin.
+ *
+ * KV (SYNC_STATE, distinto en prod y staging):
+ *   meta:listen_mode        'live' = el cron ingiere; cualquier otra cosa, nada
+ *   meta:listen_last_run    resumen de la ultima pasada
+ *   listen:rel:<CLAVE>      el disco (CLAVE = claveCatno: dedupe por catno);
+ *                           metadata = resumen para listar sin un get por clave
+ *   listen:mail:<fichero>   email ya tratado entero (no se vuelve a abrir)
+ *
+ * R2 (houseonly-audio, compartido con staging): LISTEN_R2_PREFIX, por defecto
+ * listen/ (prod); staging usa listen-staging/ para no pisar a prod.
+ *
+ * Fuera de la fase 1: decisiones, carga al Pre-order y limpieza (rechazados a
+ * los 7 dias, pendientes a los 30). Por eso cada disco guarda ingested_at.
+ */
+import { unzipSync } from 'fflate';
+import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER } from './distributor-email.mjs';
+import { claveCatno, claveKV } from './preorder-rechazos.mjs';
+
+export interface ListenEnv {
+  SYNC_STATE: KVNamespace;
+  EMAILS: KVNamespace;
+  R2: R2Bucket;
+  BOOTSTRAP_AUTH_SECRET: string;
+  LISTEN_R2_PREFIX?: string;
+}
+
+// Su propia expresion de cron, lejos de :03 (eBay) y :07 (Discogs).
+export const LISTEN_CRON = '41 * * * *';
+
+const MODE_KEY = 'meta:listen_mode';
+const LAST_RUN_KEY = 'meta:listen_last_run';
+const REL_PREFIX = 'listen:rel:';
+const MAIL_PREFIX = 'listen:mail:';
+
+// Fase 1: solo Rubadub y Triple Vision. DBH, MT y Kudos vendran cada uno con su
+// propio mecanismo de audio.
+export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision' };
+
+// Los st= de Dropbox caducan: solo emails recientes. 3 dias cubre el fin de
+// semana, en el que el Apps Script no empuja (medido: los del 30-10 aun bajaban
+// el 02-11, pero no hay que contar con ello).
+const MAX_EMAIL_AGE_DAYS = 3;
+// Discos intentados por pasada. A ~10 MB por promopack y una pasada por hora,
+// sobra para los ~6 anuncios diarios de octubre.
+const PER_RUN = 6;
+// Tope del ZIP. Se lee en memoria (128 MB por isolate) y se descomprime fichero
+// a fichero, asi que el pico es el ZIP mas un MP3. Por encima: descarga manual.
+export const ZIP_MAX_BYTES = 50 * 1024 * 1024;
+const COVER_MAX_BYTES = 10 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 60_000;
+// Caducidad de las URLs firmadas que da listen-list.
+export const SIGNED_TTL_S = 3600;
+
+const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
+// Mismos hosts que ?action=zip-proxy.
+const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$/i;
+// Portadas del email: los mismos hosts que espeja ?action=mirror.
+const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com)$/i;
+
+export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'error';
+
+export interface ListenTrack { name: string; key: string; bytes: number }
+
+export interface ListenRelease {
+  clave: string;
+  catno: string;
+  distribuidor: string;          // RD | TV
+  artist: string;
+  title: string;
+  label: string;
+  format: string;
+  release: string;               // yyyy-mm-dd o ''
+  dealerPrice: number | null;    // EUR, como en el tab
+  email: string;                 // fichero archivado del que sale
+  email_date: string;
+  estado: ListenEstado;
+  detalle?: string;
+  zip_link?: string;             // solo si hay que bajarlo a mano
+  tracks: ListenTrack[];
+  cover?: { key: string; from: 'zip' | 'email' };
+  bytes: number;
+  ingested_at: string;
+}
+
+export interface ListenRunResult {
+  mode: string;
+  emails_vistos: number;
+  emails_cerrados: number;
+  nuevos: number;
+  por_estado: Partial<Record<ListenEstado, number>>;
+  saltados: { duplicado: number; rechazado: number; no_preorder: number };
+  quedan: boolean;
+  finished_at: string;
+}
+
+function prefijo(env: ListenEnv): string {
+  return env.LISTEN_R2_PREFIX || 'listen/';
+}
+
+function metaDe(r: ListenRelease) {
+  return {
+    c: r.catno, d: r.distribuidor, e: r.estado,
+    a: r.artist.slice(0, 60), t: r.title.slice(0, 60), r: r.release,
+    n: r.tracks.length, at: r.ingested_at,
+  };
+}
+
+async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
+  await env.SYNC_STATE.put(REL_PREFIX + r.clave, JSON.stringify(r), { metadata: metaDe(r) });
+}
+
+// ── selección de emails ────────────────────────────────────────
+
+interface IdxEntry { name: string; prefix: string; subject: string; date: string }
+
+/** Anuncios de RD/TV recientes, del mas antiguo al mas nuevo (caducan antes). */
+export function emailsCandidatos(idx: IdxEntry[], hoy: Date): IdxEntry[] {
+  const desde = new Date(hoy.getTime() - MAX_EMAIL_AGE_DAYS * 86400000).toISOString().slice(0, 10);
+  return idx
+    .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde)
+    .filter(e => !MAIL_ORDER.test(e.subject) && !MAIL_DIGEST.some(re => re.test(e.subject)))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
+}
+
+// ── enlaces y descargas ────────────────────────────────────────
+
+async function fetchConTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0', ...(init.headers || {}) } });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** dl=1: dl=0 devuelve la pagina de vista previa (HTML con 200), no el ZIP. */
+export function dropboxDescarga(url: string): string {
+  let u = url.replace(/([?&])dl=0(&|$)/i, '$1dl=1$2');
+  if (!/[?&]dl=1(&|$)/i.test(u)) u += (u.includes('?') ? '&' : '?') + 'dl=1';
+  return u;
+}
+
+function esZipDescargable(u: string): boolean {
+  try {
+    const p = new URL(u);
+    if (p.protocol !== 'https:' || !ZIP_HOSTS.test(p.hostname)) return false;
+    if (/dropbox\.com$/i.test(p.hostname)) return /\/(scl\/fo|sh)\//i.test(p.pathname);
+    if (/digitaloceanspaces\.com$/i.test(p.hostname)) return /promopack/i.test(p.pathname);
+    return true;
+  } catch { return false; }
+}
+
+/** El promopack del disco: directo, o tras UN salto del tracker de Mailchimp. */
+async function enlaceDelZip(row: { zipUrl?: string; _zipLinks?: string[] }): Promise<string> {
+  const candidatos = [...new Set([row.zipUrl, ...(row._zipLinks || [])].filter(Boolean) as string[])];
+  for (const raw of candidatos) {
+    const u = raw.replace(/&amp;/g, '&');
+    if (esZipDescargable(u)) return /dropbox\.com/i.test(u) ? dropboxDescarga(u) : u;
+    if (!TRACKER.test(u)) continue;
+    // redirect:'manual' para leer el Location sin bajar nada (como resolve-links).
+    const r = await fetchConTimeout(u, { redirect: 'manual' });
+    const dest = r.headers.get('location') || '';
+    if (esZipDescargable(dest)) return /dropbox\.com/i.test(dest) ? dropboxDescarga(dest) : dest;
+  }
+  return '';
+}
+
+class Demasiado extends Error {}
+
+/** El cuerpo entero, cortando en cuanto pase del tope (sin fiarse de Content-Length). */
+async function leeConTope(res: Response, tope: number): Promise<Uint8Array> {
+  const declarado = Number(res.headers.get('content-length') || 0);
+  if (declarado > tope) throw new Demasiado(`${declarado} bytes`);
+  const reader = res.body!.getReader();
+  const trozos: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > tope) { await reader.cancel(); throw new Demasiado(`más de ${tope} bytes`); }
+    trozos.push(value);
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const t of trozos) { out.set(t, o); o += t.byteLength; }
+  return out;
+}
+
+// ── el ZIP ─────────────────────────────────────────────────────
+
+const base = (n: string) => n.split('/').pop() || n;
+const esBasura = (n: string) => /(^|\/)__MACOSX\//.test(n) || base(n).startsWith('._');
+const esMp3 = (n: string) => /\.mp3$/i.test(n) && !esBasura(n);
+// Solo JPG: los PNG de los promopacks son las galletas (LN-017), no la funda.
+const esJpg = (n: string) => /\.jpe?g$/i.test(n) && !esBasura(n);
+
+const orden = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+
+/** Nombres y tamaños del ZIP, sin descomprimir nada. */
+export function contenidoZip(zip: Uint8Array): Array<{ name: string; size: number }> {
+  const out: Array<{ name: string; size: number }> = [];
+  unzipSync(zip, { filter: f => { out.push({ name: f.name, size: f.originalSize }); return false; } });
+  return out;
+}
+
+/** Un fichero del ZIP. De uno en uno, para no tener todo descomprimido a la vez. */
+function unFichero(zip: Uint8Array, name: string): Uint8Array {
+  return unzipSync(zip, { filter: f => f.name === name })[name];
+}
+
+/** Lo que se guarda de un promopack: MP3 en orden natural y la portada mejor candidata. */
+export function eligeFicheros(lista: Array<{ name: string; size: number }>): { mp3: string[]; portada: string | null } {
+  const mp3 = lista.filter(f => esMp3(f.name)).map(f => f.name).sort(orden.compare);
+  const jpgs = lista.filter(f => esJpg(f.name));
+  const preferida = jpgs.find(f => /front|cover|sleeve/i.test(base(f.name)));
+  const portada = preferida?.name || jpgs.sort((a, b) => b.size - a.size)[0]?.name || null;
+  return { mp3, portada };
+}
+
+const slug = (s: string) => s.replace(/\.[^.]+$/, '').normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'pista';
+
+// ── un disco ───────────────────────────────────────────────────
+
+async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: string): Promise<ListenRelease> {
+  const clave = claveCatno(row.catno);
+  const rel: ListenRelease = {
+    clave, catno: row.catno, distribuidor: email.prefix,
+    artist: row.artist || '', title: row.title || '', label: row.label || '', format: row.format || '',
+    release: row.release || '', dealerPrice: row.dealerPrice ?? null,
+    email: email.name, email_date: email.date,
+    estado: 'listo', tracks: [], bytes: 0, ingested_at: ahora,
+  };
+  const dir = `${prefijo(env)}${clave}/`;
+  const subidas: string[] = [];
+  try {
+    const url = await enlaceDelZip(row);
+    if (!url) return { ...rel, estado: 'sin_zip', detalle: 'el email no trae un enlace de promopack descargable' };
+
+    const res = await fetchConTimeout(url, { redirect: 'follow' });
+    if (!res.ok) return { ...rel, estado: 'error', detalle: `promopack: HTTP ${res.status}`, zip_link: url };
+    if (/text\/html/i.test(res.headers.get('content-type') || '')) {
+      await res.body?.cancel();
+      return { ...rel, estado: 'error', detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
+    }
+    let zip: Uint8Array;
+    try { zip = await leeConTope(res, ZIP_MAX_BYTES); }
+    catch (e) {
+      if (e instanceof Demasiado) return { ...rel, estado: 'descarga_manual', detalle: `ZIP demasiado grande (${e.message})`, zip_link: url };
+      throw e;
+    }
+
+    const { mp3, portada } = eligeFicheros(contenidoZip(zip));
+    if (!mp3.length) return { ...rel, estado: 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
+
+    for (let i = 0; i < mp3.length; i++) {
+      const data = unFichero(zip, mp3[i]);
+      const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(base(mp3[i]))}.mp3`;
+      await env.R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
+      subidas.push(key);
+      rel.tracks.push({ name: base(mp3[i]).replace(/\.mp3$/i, ''), key, bytes: data.byteLength });
+      rel.bytes += data.byteLength;
+    }
+
+    if (portada) {
+      const data = unFichero(zip, portada);
+      const key = `${dir}cover.jpg`;
+      await env.R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
+      subidas.push(key);
+      rel.cover = { key, from: 'zip' };
+      rel.bytes += data.byteLength;
+    } else if (row.coverUrl) {
+      const cover = await portadaDelEmail(row.coverUrl);
+      if (cover) {
+        const key = `${dir}cover${cover.ext}`;
+        await env.R2.put(key, cover.data, { httpMetadata: { contentType: cover.type } });
+        subidas.push(key);
+        rel.cover = { key, from: 'email' };
+        rel.bytes += cover.data.byteLength;
+      }
+    }
+    return rel;
+  } catch (e: any) {
+    // A medias no sirve: lo subido se borra para que el reintento empiece limpio.
+    if (subidas.length) await env.R2.delete(subidas).catch(() => {});
+    return { ...rel, estado: 'error', tracks: [], bytes: 0, cover: undefined, detalle: e?.message || String(e) };
+  }
+}
+
+async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: string; ext: string } | null> {
+  try {
+    const p = new URL(url);
+    if (p.protocol !== 'https:' || !COVER_HOSTS.test(p.hostname)) return null;
+    const res = await fetchConTimeout(url, { headers: { Accept: 'image/*' } });
+    const type = (res.headers.get('content-type') || '').toLowerCase();
+    if (!res.ok || !type.startsWith('image/')) return null;
+    const data = await leeConTope(res, COVER_MAX_BYTES);
+    const ext = type.includes('png') ? '.png' : type.includes('webp') ? '.webp' : '.jpg';
+    return { data, type, ext };
+  } catch { return null; }
+}
+
+// ── la pasada ──────────────────────────────────────────────────
+
+// Un disco ya ingerido no se repite; uno que no se pudo bajar se reintenta si
+// otro email (una revision, por ejemplo) lo vuelve a anunciar.
+const REINTENTABLE: ListenEstado[] = ['sin_zip', 'error'];
+
+export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date } = {}): Promise<ListenRunResult> {
+  const now = opts.now || new Date();
+  const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
+  const out: ListenRunResult = {
+    mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, quedan: false, finished_at: '',
+  };
+  if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
+
+  const idx: IdxEntry[] = JSON.parse((await env.EMAILS.get('idx')) || '[]');
+  let intentos = 0;
+  for (const email of emailsCandidatos(idx, now)) {
+    if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
+    if (intentos >= PER_RUN) { out.quedan = true; break; }
+    out.emails_vistos++;
+    const html = await env.EMAILS.get(`msg:${email.name}`);
+    if (!html) continue;
+    const [y, m, d] = email.date.split('-').map(Number);
+    const rows = parseDistributorEmail(html, { emailDate: new Date(y, m - 1, d) });
+
+    let completo = true;
+    const vistos = new Set<string>();
+    for (const row of rows) {
+      const clave = claveCatno(row.catno);
+      if (!clave || vistos.has(clave)) continue;
+      vistos.add(clave);
+      // La bandeja es de pre-orders: lo que ya se envia no entra.
+      if (!row.forthcoming) { out.saltados.no_preorder++; continue; }
+      if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
+      const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
+      if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
+      if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
+      intentos++;
+      const rel = await ingiereDisco(env, row, email, now.toISOString());
+      await guardaRelease(env, rel);
+      out.nuevos++;
+      out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
+    }
+    if (completo) {
+      // Caduca sola cuando el email ya no puede volver a ser candidato.
+      await env.SYNC_STATE.put(MAIL_PREFIX + email.name, JSON.stringify({ at: now.toISOString(), discos: vistos.size }),
+        { expirationTtl: (MAX_EMAIL_AGE_DAYS + 2) * 86400 });
+      out.emails_cerrados++;
+    }
+  }
+  out.finished_at = new Date().toISOString();
+  await env.SYNC_STATE.put(LAST_RUN_KEY, JSON.stringify(out));
+  return out;
+}
+
+// ── URLs firmadas ──────────────────────────────────────────────
+
+const enc = new TextEncoder();
+
+async function firma(secret: string, key: string, exp: number): Promise<string> {
+  const k = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', k, enc.encode(`listen:v1\n${key}\n${exp}`));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function urlFirmada(env: ListenEnv, origin: string, key: string, now = Date.now()): Promise<string> {
+  const exp = Math.floor(now / 1000) + SIGNED_TTL_S;
+  const sig = await firma(env.BOOTSTRAP_AUTH_SECRET, key, exp);
+  return `${origin}/?action=listen-file&k=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}`;
+}
+
+const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Range', 'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges' };
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
+}
+
+/** GET ?action=listen-file&k&exp&sig — sin Bearer: la firma es la autorizacion. Soporta Range. */
+export async function handleListenFile(request: Request, env: ListenEnv): Promise<Response> {
+  const u = new URL(request.url);
+  const key = u.searchParams.get('k') || '';
+  const exp = Number(u.searchParams.get('exp') || 0);
+  const sig = u.searchParams.get('sig') || '';
+  if (!env.BOOTSTRAP_AUTH_SECRET || !key.startsWith(prefijo(env)) || key.includes('..')) return json({ error: 'forbidden' }, 403);
+  if (!exp || exp < Math.floor(Date.now() / 1000)) return json({ error: 'expired' }, 403);
+  const real = enc.encode(await firma(env.BOOTSTRAP_AUTH_SECRET, key, exp));
+  const dada = enc.encode(sig);
+  const ok = real.byteLength === dada.byteLength && crypto.subtle.timingSafeEqual(real, dada);
+  if (!ok) return json({ error: 'forbidden' }, 403);
+
+  const obj = await env.R2.get(key, { range: request.headers });
+  if (!obj) return json({ error: 'not found' }, 404);
+  const headers = new Headers(CORS);
+  obj.writeHttpMetadata(headers);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Cache-Control', 'private, max-age=3600');
+  headers.set('ETag', obj.httpEtag);
+  const r = (obj as R2ObjectBody & { range?: R2Range }).range as any;
+  if (r && request.headers.has('range')) {
+    const offset = r.offset ?? (r.suffix !== undefined ? obj.size - r.suffix : 0);
+    const length = r.length ?? (obj.size - offset);
+    headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${obj.size}`);
+    headers.set('Content-Length', String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(obj.size));
+  return new Response(obj.body, { headers });
+}
+
+// ── lista para el admin ────────────────────────────────────────
+
+/** GET ?action=listen-list (Bearer) — los discos con sus URLs firmadas. */
+export async function handleListenList(request: Request, env: ListenEnv, autorizado: boolean): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  const origin = new URL(request.url).origin;
+  const claves: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) claves.push(k.name);
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+
+  const items: any[] = [];
+  for (let i = 0; i < claves.length; i += 20) {
+    const lote = await Promise.all(claves.slice(i, i + 20).map(k => env.SYNC_STATE.get<ListenRelease>(k, 'json')));
+    for (const r of lote) {
+      if (!r) continue;
+      items.push({
+        ...r,
+        tracks: await Promise.all(r.tracks.map(async t => ({ name: t.name, bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
+        cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
+      });
+    }
+  }
+  items.sort((a, b) => b.ingested_at.localeCompare(a.ingested_at) || a.catno.localeCompare(b.catno));
+  const lastRun = JSON.parse((await env.SYNC_STATE.get(LAST_RUN_KEY)) || 'null');
+  return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, items });
+}
+
+/** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */
+export async function handleListenRun(env: ListenEnv, autorizado: boolean): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  return json({ ok: true, ...(await runListenIngest(env, { force: true })) });
+}

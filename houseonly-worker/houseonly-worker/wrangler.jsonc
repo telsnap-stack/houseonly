@@ -65,7 +65,9 @@
     //        Discogs. Solo en produccion: prod y staging tienen SYNC_STATE
     //        distinto y sus candados de pedido no se ven, asi que eBay no puede
     //        correr en los dos. Staging se prueba a mano con ?action=ebay-run.
-    "crons": ["7,22,37,52 * * * *", "0 6 * * *", "3,18,33,48 * * * *"]
+    // 41   — bandeja de escucha (LISTEN_CRON en src/lib/listen.ts): ingesta de
+    //        audio de RD/TV. No hace nada hasta meta:listen_mode = live.
+    "crons": ["7,22,37,52 * * * *", "0 6 * * *", "3,18,33,48 * * * *", "41 * * * *"]
   },
   "env": {
     "staging": {
@@ -117,8 +119,13 @@
       // Staging corre SOLO la tanda de avisos. El poll de Discogs sigue fuera
       // por lo que explica el comentario de arriba: competia por el mismo cupo
       // de 60/min que necesita produccion, y en dry no creaba nada.
+      // + la bandeja de escucha (:41), que no toca Discogs. Su audio va a
+      // listen-staging/ del mismo bucket para no pisar el de produccion.
       "triggers": {
-        "crons": ["0 6 * * *"]
+        "crons": ["0 6 * * *", "41 * * * *"]
+      },
+      "vars": {
+        "LISTEN_R2_PREFIX": "listen-staging/"
       }
     }
   }
