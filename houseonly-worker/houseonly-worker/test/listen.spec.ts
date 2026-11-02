@@ -4,6 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
+	handleListenPromote,
 } from "../src/lib/listen";
 
 const E = env as any;
@@ -46,6 +47,7 @@ const rel = async (clave: string) => JSON.parse((await E.SYNC_STATE.get(`listen:
 beforeEach(async () => {
 	for (const ns of [E.SYNC_STATE, E.EMAILS]) for (const k of (await ns.list()).keys) await ns.delete(k.name);
 	for (const o of (await E.LISTEN_R2.list({ prefix: "listen/" })).objects) await E.LISTEN_R2.delete(o.key);
+	for (const o of (await E.R2.list()).objects) await E.R2.delete(o.key);
 	E.BOOTSTRAP_AUTH_SECRET = SECRET;
 	await E.SYNC_STATE.put("meta:listen_mode", "live");
 });
@@ -101,6 +103,17 @@ describe("listen: ingesta", () => {
 		// Otro email (una revision) del mismo disco: no se baja otra vez.
 		await archiva("RD__UPDATE-Test---TST-001__2026-11-02.html", rdEmail("TST-001"), "2026-11-02");
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 0, saltados: { duplicado: 1 } });
+	});
+
+	it("guarda el _promotext.txt y el SALESPAPER.pdf si el ZIP los trae, y listen-list los firma", async () => {
+		redes(zipDe({ "A1.mp3": 10, "TXT001_promotext.txt": 40, "SALESPAPER.pdf": 60, "otro.pdf": 5 }));
+		await archiva("RD__X---Y-TXT001__2026-11-01.html", rdEmail("TXT001"));
+		await runListenIngest(E, { now: NOW });
+		const d = await rel("TXT001");
+		expect(d.textos).toEqual({ promotext: "listen/TXT001/promotext.txt", salespaper: "listen/TXT001/salespaper.pdf" });
+		expect((await E.LISTEN_R2.head("listen/TXT001/salespaper.pdf")).httpMetadata.contentType).toBe("application/pdf");
+		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=TXT001"), E, true)).json();
+		expect(body.items[0].textos.promotext).toMatch(/k=listen%2FTXT001%2Fpromotext\.txt&exp=\d+&sig=/);
 	});
 
 	it("sin JPG en el ZIP, la portada del email; rechazados y no pre-order no se bajan", async () => {
@@ -258,7 +271,7 @@ describe("listen: decisiones y limpieza", () => {
 		await pon(base("NON031", { ingested_at: hace(31) }));
 		await pon(base("NON029", { ingested_at: hace(29) }));
 		await pon(base("PRE040", { decision: "preorder", decided_at: hace(35), ingested_at: hace(40) }));
-		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2, fuera: 0 });
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2, fuera: 0, cargados: 0 });
 		expect(await rel("REJ007")).toBeNull();
 		expect((await E.LISTEN_R2.list({ prefix: "listen/REJ007/" })).objects).toHaveLength(0);
 		expect((await rel("REJ006")).tracks).toHaveLength(1);
@@ -269,7 +282,7 @@ describe("listen: decisiones y limpieza", () => {
 		expect((await rel("NON029")).tracks).toHaveLength(1);
 		expect((await rel("PRE040")).tracks).toHaveLength(1);
 		// Ya sin audio: la siguiente pasada no lo vuelve a tocar...
-		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0, fuera: 0 });
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 });
 		// ...hasta 30 dias despues de borrarle el audio: entonces sale de la bandeja.
 		const luego = new Date(NOW.getTime() + 30 * 86400000);
 		expect((await limpiaBandeja(E, luego)).fuera).toBe(2);
@@ -285,7 +298,7 @@ describe("listen: decisiones y limpieza", () => {
 		await pon(base("PRD001", { decision: "rechazado", decided_at: hace(8) }));   // claves en listen/ (prod)
 		E.LISTEN_R2_PREFIX = "listen-staging/";
 		try {
-			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0, fuera: 0 });
+			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0, fuera: 0, cargados: 0 });
 			expect((await E.LISTEN_R2.list({ prefix: "listen/PRD001/" })).objects).toHaveLength(2);
 		} finally { delete E.LISTEN_R2_PREFIX; }
 	});
@@ -298,7 +311,7 @@ describe("listen: decisiones y limpieza", () => {
 		const pide = async (qs: string) => (await handleListenList(new Request(`https://w/?action=listen-list&${qs}`), E, true)).json() as any;
 
 		const p1 = await pide("vista=por_decidir&limit=2");
-		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0 });
+		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0 });
 		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
 		expect(p1).toMatchObject({ count: 5, cursor: "2" });
 		const p3 = await pide("vista=por_decidir&limit=2&cursor=4");
@@ -312,5 +325,62 @@ describe("listen: decisiones y limpieza", () => {
 		const sueltas = await pide("claves=PAG003,ele-001,NOPE99");
 		expect(sueltas.items.map((x: any) => x.clave).sort()).toEqual(["ELE001", "PAG003"]);
 		expect(sueltas.items[0].tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
+	});
+
+	it("listen-promote: apagado no hace nada; encendido COPIA a los prefijos del entorno, marca cargado y no repite", async () => {
+		await pon(base("PRO001", { decision: "preorder", decided_at: NOW.toISOString() }));
+		await pon(base("PEN009", { decision: "pendiente", decided_at: NOW.toISOString() }));
+		const promo = (body: any, ok = true) => handleListenPromote(new Request("https://w/?action=listen-promote", { method: "POST", body: JSON.stringify(body) }), E, ok, "https://pub.example", NOW.getTime());
+		const cuerpo = { clave: "PRO001", safeKey: "PRO001", handle: "pro001" };
+
+		expect((await promo(cuerpo, false)).status).toBe(401);
+		expect((await promo(cuerpo)).status).toBe(403);                       // meta:listen_promote sin poner
+		await E.SYNC_STATE.put("meta:listen_promote", "on");
+		E.LISTEN_PROMOTE_AUDIO_PREFIX = "staging-audio/";
+		E.LISTEN_PROMOTE_COVERS_PREFIX = "staging-covers/";
+		try {
+			expect((await promo({ ...cuerpo, safeKey: "../x" })).status).toBe(400);
+			expect((await promo({ clave: "PEN009", safeKey: "PEN009" })).status).toBe(409);   // no elegido
+			const r: any = await (await promo(cuerpo)).json();
+			expect(r).toMatchObject({ ok: true, coverUrl: "https://pub.example/staging-covers/PRO001.jpg", cover_from: "zip" });
+			expect(r.tracks).toEqual([{ name: "a", url: "https://pub.example/staging-audio/PRO001/a.mp3" }]);
+			// Copiado al bucket publico con los mismos bytes y tipo; el original sigue en la bandeja.
+			const copiado = await E.R2.get("staging-audio/PRO001/a.mp3");
+			expect(copiado.size).toBe(10);
+			await copiado.arrayBuffer();
+			expect((await E.R2.list({ prefix: "audio/" })).objects).toHaveLength(0);
+			expect((await E.R2.list({ prefix: "covers/" })).objects).toHaveLength(0);
+			expect((await E.LISTEN_R2.list({ prefix: "listen/PRO001/" })).objects).toHaveLength(2);
+			expect(await rel("PRO001")).toMatchObject({ decision: "cargado", cargado_at: NOW.toISOString(), handle: "pro001",
+				promovidos: ["staging-audio/PRO001/a.mp3", "staging-covers/PRO001.jpg"] });
+			// Un Process repetido: mismas URLs, sin copiar otra vez ni cambiar la fecha.
+			await E.R2.delete("staging-audio/PRO001/a.mp3");
+			const otra: any = await (await promo(cuerpo, true)).json();
+			expect(otra).toMatchObject({ ya_cargado: true, tracks: r.tracks, coverUrl: r.coverUrl, cargado_at: NOW.toISOString() });
+			expect(await E.R2.head("staging-audio/PRO001/a.mp3")).toBeNull();
+			await E.R2.put("staging-audio/PRO001/a.mp3", new Uint8Array(10));
+
+			// Vista Cargados y deshacer: vuelve a Elegidos sin tocar lo copiado.
+			const lista = async (v: string) => ((await (await handleListenList(new Request(`https://w/?action=listen-list&vista=${v}`), E, true)).json()) as any).items.map((x: any) => x.clave);
+			expect(await lista("cargados")).toEqual(["PRO001"]);
+			await handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "PRO001", decision: "preorder" }) }), E, true, NOW.getTime());
+			expect(await lista("elegidos")).toEqual(["PRO001"]);
+			const vuelto = await rel("PRO001");
+			expect(vuelto.cargado_at).toBeUndefined();
+			expect(vuelto.promovidos).toBeUndefined();
+			expect((await E.R2.list({ prefix: "staging-audio/PRO001/" })).objects).toHaveLength(1);
+		} finally { delete E.LISTEN_PROMOTE_AUDIO_PREFIX; delete E.LISTEN_PROMOTE_COVERS_PREFIX; }
+	});
+
+	it("cargado hace 7 dias: se borra la copia de la bandeja y el registro, nunca lo copiado al producto", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		await pon(base("CAR007", { decision: "cargado", decided_at: hace(7), cargado_at: hace(7) }));
+		await pon(base("CAR006", { decision: "cargado", decided_at: hace(6), cargado_at: hace(6) }));
+		await E.R2.put("audio/CAR007/a.mp3", new Uint8Array(3));
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0, fuera: 0, cargados: 1 });
+		expect(await rel("CAR007")).toBeNull();
+		expect((await E.LISTEN_R2.list({ prefix: "listen/CAR007/" })).objects).toHaveLength(0);
+		expect((await E.R2.list({ prefix: "audio/CAR007/" })).objects).toHaveLength(1);
+		expect(await rel("CAR006")).not.toBeNull();
 	});
 });

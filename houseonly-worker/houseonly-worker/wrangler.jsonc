@@ -135,7 +135,10 @@
         "crons": ["0 6 * * *", "41 * * * *"]
       },
       "vars": {
-        "LISTEN_R2_PREFIX": "listen-staging/"
+        "LISTEN_R2_PREFIX": "listen-staging/",
+        // listen-promote en staging nunca escribe en el audio/ y covers/ reales.
+        "LISTEN_PROMOTE_AUDIO_PREFIX": "staging-audio/",
+        "LISTEN_PROMOTE_COVERS_PREFIX": "staging-covers/"
       }
     }
   }

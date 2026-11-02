@@ -31,7 +31,17 @@
  *   de entrar, y sale de la bandeja 30 dias despues de eso. Lo elegido para
  *   pre-order no se toca.
  *   listen-list pagina por vista (por_decidir | pendientes | elegidos |
- *   rechazados) con limit y cursor; la fase 3 leera vista=elegidos.
+ *   rechazados | cargados) con limit y cursor.
+ *
+ * Fase 3 (2026-11-02): carga al Pre-order.
+ *   El tab mete los elegidos en el manifest (filas _listen). Al hacer Process,
+ *   ?action=listen-promote COPIA (no mueve) el audio y la portada de aqui a
+ *   audio/<safeKey>/ y covers/ de houseonly-audio (staging: staging-audio/ y
+ *   staging-covers/) y marca el disco "cargado". El original se queda para que
+ *   "deshacer" funcione; la limpieza lo borra 7 dias despues de cargarlo.
+ *   Interruptor: meta:listen_promote = 'on' (sin el, listen-promote no hace nada).
+ *   Si el ZIP trae texto (_promotext.txt de TV, SALESPAPER.pdf de Rubadub) se
+ *   guarda tambien, para la descripcion del producto.
  */
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
@@ -43,6 +53,9 @@ export interface ListenEnv {
   LISTEN_R2: R2Bucket;            // houseonly-listen, privado
   BOOTSTRAP_AUTH_SECRET: string;
   LISTEN_R2_PREFIX?: string;
+  R2: R2Bucket;                   // houseonly-audio (publico): destino de listen-promote
+  LISTEN_PROMOTE_AUDIO_PREFIX?: string;
+  LISTEN_PROMOTE_COVERS_PREFIX?: string;
 }
 
 // Su propia expresion de cron, lejos de :03 (eBay) y :07 (Discogs).
@@ -83,8 +96,13 @@ const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-
 const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com)$/i;
 
 export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'error';
-export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado';
+export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado';
+// Las que se pueden poner a mano; 'cargado' solo lo pone listen-promote.
 export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado'];
+const PROMOTE_KEY = 'meta:listen_promote';
+export const DIAS_CARGADO = 7;
+const TEXTO_MAX_BYTES = 256 * 1024;
+const PDF_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface ListenTrack { name: string; key: string; bytes: number }
 
@@ -107,12 +125,16 @@ export interface ListenRelease {
   zip_link?: string;             // solo si hay que bajarlo a mano
   tracks: ListenTrack[];
   cover?: { key: string; from: 'zip' | 'email' };
+  textos?: { promotext?: string; salespaper?: string };   // claves en LISTEN_R2
   bytes: number;
   ingested_at: string;
   decision?: ListenDecision;
   decided_at?: string;
   rechazo?: 'temporal' | 'definitivo';
   audio_limpiado_at?: string;    // pendiente/sin decidir de mas de 30 dias
+  cargado_at?: string;           // listen-promote: copiado a audio/ y covers/
+  handle?: string;               // el handle con que va al CSV
+  promovidos?: string[];         // claves copiadas en houseonly-audio
 }
 
 export interface ListenRunResult {
@@ -122,7 +144,7 @@ export interface ListenRunResult {
   nuevos: number;
   por_estado: Partial<Record<ListenEstado, number>>;
   saltados: { duplicado: number; rechazado: number; no_preorder: number };
-  limpiados: { rechazados: number; sin_audio: number; fuera: number };
+  limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
   quedan: boolean;
   finished_at: string;
 }
@@ -297,12 +319,18 @@ function unFichero(zip: Uint8Array, name: string): Uint8Array {
 }
 
 /** Lo que se guarda de un promopack: MP3 en orden natural y la portada mejor candidata. */
-export function eligeFicheros(lista: Array<{ name: string; size: number }>): { mp3: string[]; portada: string | null } {
+export function eligeFicheros(lista: Array<{ name: string; size: number }>): { mp3: string[]; portada: string | null; promotext: string | null; salespaper: string | null } {
   const mp3 = lista.filter(f => esMp3(f.name)).map(f => f.name).sort(orden.compare);
   const jpgs = lista.filter(f => esJpg(f.name));
   const preferida = jpgs.find(f => /front|cover|sleeve/i.test(base(f.name)));
   const portada = preferida?.name || jpgs.sort((a, b) => b.size - a.size)[0]?.name || null;
-  return { mp3, portada };
+  // Los mismos que lee el Process del tab: TV {CATNO}_promotext.txt (o un .txt),
+  // W&S/Rubadub SALESPAPER.pdf (o un .pdf). Si pesan demasiado, no.
+  const txts = lista.filter(f => /\.txt$/i.test(f.name) && !esBasura(f.name) && f.size <= TEXTO_MAX_BYTES);
+  const pdfs = lista.filter(f => /\.pdf$/i.test(f.name) && !esBasura(f.name) && f.size <= PDF_MAX_BYTES);
+  const promotext = (txts.find(f => /_promotext\.txt$/i.test(f.name)) || txts[0])?.name || null;
+  const salespaper = (pdfs.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || pdfs[0])?.name || null;
+  return { mp3, portada, promotext, salespaper };
 }
 
 const slug = (s: string) => s.replace(/\.[^.]+$/, '').normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'pista';
@@ -352,7 +380,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     }
 
     const lista = contenidoZip(zip);
-    const { mp3, portada } = eligeFicheros(lista);
+    const { mp3, portada, promotext, salespaper } = eligeFicheros(lista);
     if (viaPista && !esElPromopack(clave, nombreDeDescarga(res), lista, mp3.length, cuentaPistas(html!)))
       return { ...rel, estado: 'descarga_manual', detalle: 'el enlace de la pista no baja el promopack del disco', zip_link: url };
     if (!mp3.length) return { ...rel, estado: viaPista ? 'descarga_manual' : 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
@@ -364,6 +392,19 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
       subidas.push(key);
       rel.tracks.push({ name: base(mp3[i]).replace(/\.mp3$/i, ''), key, bytes: data.byteLength });
+      rel.bytes += data.byteLength;
+    }
+
+    for (const [campo, nombre, destino, tipo] of [
+      ['promotext', promotext, 'promotext.txt', 'text/plain; charset=utf-8'],
+      ['salespaper', salespaper, 'salespaper.pdf', 'application/pdf'],
+    ] as const) {
+      if (!nombre) continue;
+      const data = unFichero(zip, nombre);
+      const key = `${dir}${destino}`;
+      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: tipo } });
+      subidas.push(key);
+      rel.textos = { ...rel.textos, [campo]: key };
       rel.bytes += data.byteLength;
     }
 
@@ -416,7 +457,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
     mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
-    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0 }, quedan: false, finished_at: '',
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 }, quedan: false, finished_at: '',
   };
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
@@ -465,14 +506,20 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
 
 // ── limpieza ───────────────────────────────────────────────────
 
+/** Todo lo que un disco tiene en la bandeja (LISTEN_R2). */
+const clavesDe = (r: ListenRelease) => [
+  ...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : []),
+  ...Object.values(r.textos || {}).filter(Boolean) as string[],
+];
+
 /**
  * Rechazado hace 7 dias o mas: fuera de la bandeja (KV y R2); el rechazo sigue
  * en preorder:rejected. Pendiente o sin decidir con 30 dias o mas desde que
  * entro: se borra el audio y el disco se queda, marcado. 30 dias despues de
  * borrarle el audio, fuera tambien (KV y la portada). Pre-order: intacto.
  */
-export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number; fuera: number }> {
-  const out = { rechazados: 0, sin_audio: 0, fuera: 0 };
+export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number; fuera: number; cargados: number }> {
+  const out = { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 };
   const t = now.getTime();
   // El bucket es el de prod tambien: solo se borra bajo el prefijo de este
   // entorno (staging: listen-staging/), diga lo que diga el registro.
@@ -487,16 +534,19 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
     for (const k of l.keys) {
       const m = k.metadata || {};
       const rechazadoViejo = m.x === 'rechazado' && t - Date.parse(m.dt) >= DIAS_RECHAZADO * DIA_MS;
+      const cargadoViejo = m.x === 'cargado' && t - Date.parse(m.dt) >= DIAS_CARGADO * DIA_MS;
       const noElegido = !m.x || m.x === 'pendiente';
       const sinDecidirViejo = noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
       const sinAudioViejo = noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS;
-      if (!rechazadoViejo && !sinDecidirViejo && !sinAudioViejo) continue;
+      if (!rechazadoViejo && !sinDecidirViejo && !sinAudioViejo && !cargadoViejo) continue;
       const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
       if (!r) continue;
-      if (rechazadoViejo || sinAudioViejo) {
-        await borra([...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : [])]);
+      if (rechazadoViejo || sinAudioViejo || cargadoViejo) {
+        // Solo la copia de la bandeja (LISTEN_R2): lo copiado a audio/ y covers/
+        // es del producto y no se toca.
+        await borra(clavesDe(r));
         await env.SYNC_STATE.delete(k.name);
-        if (rechazadoViejo) out.rechazados++; else out.fuera++;
+        if (rechazadoViejo) out.rechazados++; else if (cargadoViejo) out.cargados++; else out.fuera++;
       } else {
         await borra(r.tracks.map(x => x.key));
         r.bytes -= r.tracks.reduce((s, x) => s + x.bytes, 0);
@@ -529,6 +579,9 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
   if (!r) return json({ error: 'not found' }, 404);
 
+  // Deshacer una carga: vuelve a Elegidos. Lo copiado a audio/ y covers/ se
+  // queda (puede estar ya en un producto); un Process nuevo lo sobrescribe.
+  if (r.decision === 'cargado') { delete r.cargado_at; delete r.handle; delete r.promovidos; }
   if (decision === 'rechazado') {
     const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
     if ('error' in rec) return json({ error: rec.error }, 400);
@@ -606,6 +659,7 @@ export const VISTAS: Record<string, (x?: string) => boolean> = {
   pendientes: x => x === 'pendiente',
   elegidos: x => x === 'preorder',
   rechazados: x => x === 'rechazado',
+  cargados: x => x === 'cargado',
 };
 const LIMIT_DEF = 30;
 const LIMIT_MAX = 100;
@@ -615,6 +669,10 @@ async function conUrls(env: ListenEnv, origin: string, r: ListenRelease) {
     ...r,
     tracks: await Promise.all(r.tracks.map(async t => ({ name: t.name, bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
     cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
+    textos: {
+      promotext: r.textos?.promotext ? await urlFirmada(env, origin, r.textos.promotext) : null,
+      salespaper: r.textos?.salespaper ? await urlFirmada(env, origin, r.textos.salespaper) : null,
+    },
   };
 }
 
@@ -662,6 +720,76 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
   const sig = desde + limit < deVista.length ? String(desde + limit) : null;
   return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, items, cursor: sig });
+}
+
+// ── carga al Pre-order ─────────────────────────────────────────
+
+// El mismo nombre que da el Process del tab a un MP3 de un ZIP.
+const nombreProcess = (name: string) => `${name}.mp3`.replace(/[^A-Za-z0-9._-]+/g, '-');
+
+/** Copia R2→R2 en streaming. El binding no tiene copy; put() quiere longitud conocida. */
+async function copia(src: R2Bucket, key: string, dst: R2Bucket, destino: string): Promise<void> {
+  const obj = await src.get(key);
+  if (!obj) throw new Error(`no esta en la bandeja: ${key}`);
+  const { readable, writable } = new FixedLengthStream(obj.size);
+  const [, puesto] = await Promise.all([obj.body.pipeTo(writable), dst.put(destino, readable, { httpMetadata: obj.httpMetadata })]);
+  if (!puesto) throw new Error(`no se pudo escribir ${destino}`);
+}
+
+/**
+ * POST ?action=listen-promote (Bearer) {clave, safeKey, handle}
+ * Lo llama el Process del tab para una fila _listen. COPIA las pistas y la
+ * portada de la bandeja a audio/<safeKey>/ y covers/<safeKey>.<ext> de
+ * houseonly-audio (prefijos LISTEN_PROMOTE_AUDIO_PREFIX / _COVERS_PREFIX; staging:
+ * staging-audio/ y staging-covers/) con los nombres que daria el Process, y marca
+ * el disco "cargado". Devuelve las URLs publicas para el CSV.
+ */
+export async function handleListenPromote(request: Request, env: ListenEnv, autorizado: boolean, publicBase: string, ahora = Date.now()): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  if ((await env.SYNC_STATE.get(PROMOTE_KEY)) !== 'on') return json({ error: `listen-promote apagado (${PROMOTE_KEY})` }, 403);
+  const body: any = await request.json().catch(() => null);
+  const clave = claveCatno(body?.clave);
+  const safeKey = String(body?.safeKey || '');
+  const handle = String(body?.handle || '').slice(0, 120);
+  if (!clave) return json({ error: 'clave required' }, 400);
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(safeKey)) return json({ error: 'safeKey invalido' }, 400);
+  const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
+  if (!r) return json({ error: 'not found' }, 404);
+  // Ya cargado: no se copia otra vez, pero un Process repetido recibe las mismas
+  // URLs (si no, ese CSV saldria sin pistas). Orden de promovidos: pistas, portada.
+  if (r.decision === 'cargado' && r.promovidos?.length) {
+    const n = r.tracks.length;
+    return json({
+      ok: true, clave, ya_cargado: true, cargado_at: r.cargado_at, cover_from: r.cover?.from || null,
+      tracks: r.tracks.map((t, i) => ({ name: t.name, url: `${publicBase}/${r.promovidos![i]}` })),
+      coverUrl: r.promovidos[n] ? `${publicBase}/${r.promovidos[n]}` : '',
+    });
+  }
+  if (r.decision !== 'preorder') return json({ error: 'solo se cargan los elegidos para pre-order' }, 409);
+  if (!r.tracks.length) return json({ error: 'sin audio en la bandeja' }, 409);
+
+  const audioPre = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/';
+  const coversPre = env.LISTEN_PROMOTE_COVERS_PREFIX || 'covers/';
+  const promovidos: string[] = [];
+  const tracks: Array<{ name: string; url: string }> = [];
+  for (const t of r.tracks) {
+    const destino = `${audioPre}${safeKey}/${nombreProcess(t.name)}`;
+    await copia(env.LISTEN_R2, t.key, env.R2, destino);
+    promovidos.push(destino);
+    tracks.push({ name: t.name, url: `${publicBase}/${destino}` });
+  }
+  let coverUrl = '';
+  if (r.cover) {
+    const ext = (r.cover.key.match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg').toLowerCase().replace('jpeg', 'jpg');
+    const destino = `${coversPre}${safeKey}.${ext}`;
+    await copia(env.LISTEN_R2, r.cover.key, env.R2, destino);
+    promovidos.push(destino);
+    coverUrl = `${publicBase}/${destino}`;
+  }
+  const at = new Date(ahora).toISOString();
+  Object.assign(r, { decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
+  await guardaRelease(env, r);
+  return json({ ok: true, clave, tracks, coverUrl, cover_from: r.cover?.from || null, cargado_at: at });
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */
