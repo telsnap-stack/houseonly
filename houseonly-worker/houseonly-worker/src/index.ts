@@ -11,9 +11,12 @@ interface Env {
   //                        date, bytes}. Una sola lectura sirve la tabla del
   //                        Pre-order tab sin traerse los cuerpos.
   //   msg:<filename>     → el htmlBody crudo del email, tal cual llego.
-  // El worker NO parsea nada de esto: el parseo vive en App.jsx y punto. Aqui
-  // solo se guarda y se sirve.
+  // El worker no parsea al guardar. Solo la bandeja de escucha (lib/listen.ts)
+  // los lee, con el parser compartido con App.jsx (lib/distributor-email.mjs).
   EMAILS: KVNamespace;
+  // Prefijo de R2 del audio de la bandeja de escucha. Sin definir = listen/
+  // (prod); staging usa listen-staging/ porque el bucket es el mismo.
+  LISTEN_R2_PREFIX?: string;
   // STOCK_LEDGER: registro de ?action=stock-add, compartido con staging.
   STOCK_LEDGER: KVNamespace;
   // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
@@ -910,6 +913,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1905,6 +1909,20 @@ export default {
       const html = await env.EMAILS.get(`msg:${name}`);
       if (html == null) return jsonRes({ error: 'not found' }, 404);
       return jsonRes({ ok: true, name, html });
+    }
+
+    // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
+    //   GET  ?action=listen-list   Bearer  discos + URLs firmadas (1 h)
+    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano
+    //   GET  ?action=listen-file   firma   el MP3/portada, con Range
+    if (action === 'listen-list' && request.method === 'GET') {
+      return await handleListenList(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'listen-run' && request.method === 'POST') {
+      return await handleListenRun(env, bearerAdminValido(request, env));
+    }
+    if (action === 'listen-file' && (request.method === 'GET' || request.method === 'HEAD')) {
+      return await handleListenFile(request, env);
     }
 
     // ── FASE 3B: PROXY DE ZIP ──────────────────────────────
@@ -3275,6 +3293,15 @@ export default {
             JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
         ),
       );
+      return;
+    }
+
+    // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ──────────────
+    // Ingesta de audio de los anuncios de RD/TV. Solo hace algo con
+    // meta:listen_mode = live; el resultado queda en meta:listen_last_run.
+    if (event.cron === LISTEN_CRON) {
+      ctx.waitUntil(runListenIngest(env).catch((err) => env.SYNC_STATE.put('meta:listen_last_run',
+        JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) }))));
       return;
     }
 

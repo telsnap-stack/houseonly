@@ -66,6 +66,7 @@ solo timeout. Se resolvió sola en unas horas.
 | `pending-review-approve` | POST | `{sku, release_id}` → crea listing. |
 | `pending-review-reject` | POST | `{sku}` → descarta. |
 | `sync35-mode` | GET/POST | dry/live del auto-list. |
+| `listen-list` · `listen-run` · `listen-file` | GET/POST/GET | Bandeja de escucha (Pre-order): ingesta de audio RD/TV a R2 (`listen/`, privado), cron :41 con `meta:listen_mode`=live; `listen-file` solo con URL firmada. Ver `src/lib/listen.ts`. |
 | `ebay-mode` · `ebay-items` · `ebay-exclude` · `ebay-include` · `ebay-backfill` · `ebay-run` · `ebay-notify` | — | eBay, tercer canal: entrada automatica por `products/create`, interruptores propios, independientes de Discogs. Ver `docs/ebay.md`. |
 
 ## Scripts de operación (`houseonly-worker/houseonly-worker/scripts/`)
