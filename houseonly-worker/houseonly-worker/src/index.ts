@@ -18,6 +18,10 @@ interface Env {
   // Prefijo de R2 del audio de la bandeja de escucha. Sin definir = listen/
   // (prod); staging usa listen-staging/ porque el bucket (houseonly-listen) es el mismo.
   LISTEN_R2_PREFIX?: string;
+  // Destino de listen-promote en houseonly-audio. Sin definir = audio/ y covers/
+  // (prod); staging usa staging-audio/ y staging-covers/.
+  LISTEN_PROMOTE_AUDIO_PREFIX?: string;
+  LISTEN_PROMOTE_COVERS_PREFIX?: string;
   // STOCK_LEDGER: registro de ?action=stock-add, compartido con staging.
   STOCK_LEDGER: KVNamespace;
   // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
@@ -914,7 +918,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1922,6 +1926,10 @@ export default {
     }
     if (action === 'listen-run' && request.method === 'POST') {
       return await handleListenRun(env, bearerAdminValido(request, env));
+    }
+    //   POST ?action=listen-promote Bearer {clave, safeKey, handle}: copia a audio/ y covers/
+    if (action === 'listen-promote' && request.method === 'POST') {
+      return await handleListenPromote(request, env, bearerAdminValido(request, env), R2_PUBLIC);
     }
     if (action === 'listen-decide' && request.method === 'POST') {
       return await handleListenDecide(request, env, bearerAdminValido(request, env));

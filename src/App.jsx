@@ -9827,13 +9827,16 @@ const LISTEN_VISTAS = [
   ['pendientes', 'Pendientes'],
   ['elegidos', 'Elegidos pre-order'],
   ['rechazados', 'Rechazados'],
+  ['cargados', 'Cargados'],
 ];
-const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : 'rechazados';
+const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : d === 'cargado' ? 'cargados' : 'rechazados';
 const LISTEN_PAGINA = 30;
 const coma = n => Number(n).toFixed(2).replace('.', ',');
 const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
 
-function ListenInbox() {
+// `onCargar(discos)`: lo pone el tab Pre-order; mete los elegidos en su manifest
+// y devuelve {anadidos, enTienda: [{clave, como}], sinAudio, errores}.
+function ListenInbox({ onCargar }) {
   const [secret, setSecret] = useMailSecret();
   const [cache, setCache] = useState(() => new Map());  // clave -> disco (con _exp), de todas las cargas
   const [lista, setLista] = useState(null);       // {vista, claves, count, cursor}; null = sin cargar
@@ -9852,6 +9855,8 @@ function ListenInbox() {
   const [verCola, setVerCola] = useState(false);
   const [toast, setToast] = useState('');
   const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
+  const [enTiendaComo, setEnTiendaComo] = useState({});  // clave -> SKU con que esta ya en la tienda
+  const [cargandoPre, setCargandoPre] = useState(false);
   const toastRef = useRef(0);
   const audioRef = useRef(null);
   const cacheRef = useRef(new Map());
@@ -10036,7 +10041,9 @@ function ListenInbox() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      const nuevo = { ...cacheRef.current.get(it.clave), decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined };
+      const previo = cacheRef.current.get(it.clave);
+      const nuevo = { ...previo, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined,
+        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined } : {}) };
       const m = new Map(cacheRef.current).set(it.clave, nuevo);
       cacheRef.current = m;
       setCache(m);
@@ -10050,6 +10057,33 @@ function ListenInbox() {
     } catch (e) {
       setErr(`No se pudo guardar la decisión de ${it.catno}: ${e.message}`);
     } finally { setBusy(''); }
+  };
+
+  // "Cargar elegidos": TODOS los elegidos (no solo la pagina abierta) al
+  // manifest del Pre-order. Solo mete filas; "cargado" lo marca el Process.
+  const cargarElegidos = async () => {
+    if (!onCargar) return;
+    setCargandoPre(true); setErr('');
+    try {
+      const todos = [];
+      let cur = null;
+      do {
+        const d = await pide(`vista=elegidos&limit=100${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
+        mantener();
+        guarda(d.items || [], d.expires_in);
+        todos.push(...(d.items || []));
+        cur = d.cursor || null;
+      } while (cur);
+      const res = await onCargar(todos);
+      setEnTiendaComo(m => ({ ...m, ...Object.fromEntries((res.enTienda || []).map(x => [x.clave, x.como])) }));
+      const partes = [`${res.anadidos.length} al manifest`];
+      if (res.enTienda?.length) partes.push(`${res.enTienda.length} ya en tienda (no entran)`);
+      if (res.sinAudio?.length) partes.push(`${res.sinAudio.length} sin audio en la bandeja (necesitan ZIP)`);
+      if (res.errores?.length) partes.push(`${res.errores.length} con error: ${res.errores.map(e => `${e.clave} (${e.error})`).join(', ')}`);
+      setAviso(`Cargar elegidos: ${partes.join(' · ')}. "Cargado" se marca al hacer Process.`);
+    } catch (e) {
+      setErr(`Cargar elegidos: ${e.message}`);
+    } finally { setCargandoPre(false); }
   };
 
   const visibles = (lista?.claves || []).map(c => cache.get(c)).filter(Boolean);
@@ -10088,6 +10122,12 @@ function ListenInbox() {
               <button key={k} onClick={() => cambiaVista(k)} style={vista === k ? btnOn : btn}>{label} ({counts?.[k] ?? 0})</button>
             ))}
             <span style={{ flex: 1 }} />
+            {vista === 'elegidos' && onCargar && (counts?.elegidos || 0) > 0 && (
+              <button onClick={cargarElegidos} disabled={cargandoPre} title="Mete los elegidos en el manifest de abajo. Lo que ya está en la tienda no entra."
+                style={{ ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 }}>
+                {cargandoPre ? 'Cargando…' : `Cargar elegidos al Pre-order (${counts.elegidos})`}
+              </button>
+            )}
             {conAudio.length > 0 && (todoVisibleEnCola
               ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ {todoAnadido?.vista === vista ? todoAnadido.n : pistasVisibles} en cola</span>
               : <button onClick={() => setTodoAnadido({ vista, n: aCola(conAudio) })} style={btn}>+ todo a la cola ({pistasVisibles} pistas)</button>)}
@@ -10112,6 +10152,7 @@ function ListenInbox() {
                     <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
                     <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
+                    {enTiendaComo[it.clave] && it.decision === 'preorder' && <span title="No entra al manifest: decide tú (Add stock no se toca desde aquí)" style={{ fontSize: 8, color: '#ff8800', border: '1px solid #ff880066', borderRadius: 2, padding: '0 5px' }}>en tienda como {enTiendaComo[it.clave]}</span>}
                   </div>
                   <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
                     {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '',
@@ -10137,9 +10178,12 @@ function ListenInbox() {
                   </div>}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
+                    {it.decision === 'cargado' && <span title="Audio y portada copiados al producto; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>}
                     {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
-                    {rechazando === it.clave ? (<>
+                    {it.decision === 'cargado' ? (
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} title="Vuelve a Elegidos; lo ya copiado al producto se queda" style={btn}>deshacer carga</button>
+                    ) : rechazando === it.clave ? (<>
                       <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'temporal')} title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={btn}>No, por ahora</button>
                       <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'definitivo')} title="No vuelve a salir (se puede recuperar)" style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Nunca</button>
                       <button onClick={() => setRechazando('')} style={btn}>cancelar</button>
@@ -10906,6 +10950,51 @@ function PreorderImporter() {
     } finally { setMailRechazando(''); }
   };
 
+  // Bandeja de escucha → manifest (fase 3). Por cada elegido: si ya esta en la
+  // tienda (las mismas reglas que el archivo: buscaEnTienda + UNLISTED) no entra
+  // y se devuelve "en tienda como X"; si no, se reconstruye la fila analizando
+  // su email con el mismo parser que el archivo y entra marcada `_listen`, para
+  // que el Process tome el audio de la bandeja en vez de un ZIP. Repetible: el
+  // manifest se indexa por catno. "Cargado" lo marca el Process, no esto.
+  const cargarDesdeBandeja = async (discos) => {
+    const out = { anadidos: [], enTienda: [], sinAudio: [], errores: [] };
+    const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
+    let unlisted = [];
+    try { unlisted = await preorderUnlistedFetch(mailSecret); }
+    catch (e) { out.errores.push({ clave: '—', error: `sin productos unlisted (${e.message}); pueden contar como sin alta` }); }
+    const clavesUnlisted = new Set(unlisted.map(u => rdKey(u.sku)).filter(Boolean));
+    const skuUnlisted = new Map(unlisted.map(u => [rdKey(u.sku), u.sku]));
+    const indice = indiceTienda([...live, ...clavesUnlisted]);
+    const filas = [];
+    for (const d of discos) {
+      const como = buscaEnTienda(indice, d.catno);
+      if (como) { out.enTienda.push({ clave: d.clave, como: live.skuReal?.get(como) || skuUnlisted.get(como) || como }); continue; }
+      const html = await mailFetchBody(mailSecret, d.email);
+      if (!html) { out.errores.push({ clave: d.clave, error: 'no se pudo leer su email' }); continue; }
+      let rows = [];
+      try { rows = parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() }); }
+      catch (e) { out.errores.push({ clave: d.clave, error: e.message }); continue; }
+      const row = rows.find(r => rdKey(r.catno) === d.clave);
+      if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
+      // Como mailAddPicked: fuera los campos de trabajo del parseo; `_desc` se queda.
+      const limpia = { ...row };
+      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_trackers']) delete limpia[k];
+      // Sin audio en la bandeja (descarga manual): entra como cualquier fila, a la espera de ZIP.
+      if (d.tracks?.length) limpia._listen = d.clave; else out.sinAudio.push(d.clave);
+      filas.push(limpia);
+      out.anadidos.push(d.clave);
+    }
+    if (filas.length) {
+      setManifest(prev => {
+        const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
+        for (const row of filas) byCatno.set(row.catno.toUpperCase(), row);
+        return [...byCatno.values()];
+      });
+      setManifestName(name => name || 'Bandeja de escucha');
+    }
+    return out;
+  };
+
   const mailAddPicked = async () => {
     const vivos = new Set((mailRows || []).filter(r => r._live).map(r => rdKey(r.catno)));
     const cl = clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos });
@@ -11069,6 +11158,8 @@ function PreorderImporter() {
     const isLive = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     for (const m of manifest) {
       const alreadyLive = isLive(m.catno);
+      // Fila de la bandeja de escucha: el audio ya esta en R2, no espera ZIP.
+      if (m._listen) { ready.push({ ...m, _zip: '🎧 bandeja de escucha', _alreadyLive: alreadyLive }); continue; }
       const zf = zipForCatno(m.catno);
       if (zf) { ready.push({ ...m, _zip: zf.name, _alreadyLive: alreadyLive }); matchedZipNames.add(zf.name); }
       else needZip.push({ ...m, _alreadyLive: alreadyLive });
@@ -11151,8 +11242,10 @@ function PreorderImporter() {
         // Primero lo arrastrado; si no, la carpeta de Drive. Asi quien prefiera
         // seguir arrastrando no nota el cambio, y quien conecte la carpeta se
         // ahorra el paso entero.
-        let zipFile = zipForCatno(catno);
-        if (!zipFile && zipDir) {
+        // Filas _listen (bandeja de escucha): ni ZIP soltado ni carpeta; el audio
+        // lo copia el worker (listen-promote) mas abajo. El resto, como siempre.
+        let zipFile = m._listen ? null : zipForCatno(catno);
+        if (!zipFile && zipDir && !m._listen) {
           const h = zipDir.idx.get(rdKey(catno));
           if (h) {
             try {
@@ -11216,6 +11309,37 @@ function PreorderImporter() {
               } catch (e) { /* PDF parse is best-effort; never block the import */ }
             }
           } catch(e) { itemError = e.message; }
+        }
+
+        if (m._listen) {
+          try {
+            // El texto, si la bandeja lo guardo: el mismo tratamiento que dentro del ZIP.
+            const lr = await fetch(`${WORKER_URL}?action=listen-list&claves=${encodeURIComponent(m._listen)}`, { headers: { 'Authorization': `Bearer ${mailSecret}` } });
+            const textos = lr.ok ? ((await lr.json()).items?.[0]?.textos || {}) : {};
+            if (textos.promotext) {
+              try { const t = (await (await fetch(textos.promotext)).text()).trim(); if (t) zipDesc = t; } catch { /* mejor sin descripcion que sin producto */ }
+            }
+            if (textos.salespaper) {
+              try {
+                const extracted = await extractSalesPaperText(await (await fetch(textos.salespaper)).blob());
+                if (extracted) {
+                  if (!genre && extracted.genre) genre = mapGenrePreorder(extracted.genre);
+                  if (extracted.desc) zipDesc = extracted.desc;
+                }
+              } catch { /* PDF parse is best-effort; never block the import */ }
+            }
+            setProgress({ done:i, total, current:`${catno} — copiando audio de la bandeja…` });
+            const r = await fetchAdmin(`${WORKER_URL}?action=listen-promote`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clave: m._listen, safeKey, handle }),
+            }, mailSecret);
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            tracks = d.tracks || [];
+            coverUrl = d.coverUrl || '';
+            // La de la bandeja ya es la buena (la del ZIP o la del email espejada).
+            coverNamedInZip = coverUrl ? true : null;
+          } catch (e) { itemError = 'bandeja de escucha: ' + e.message; }
         }
 
         // Fallback cover: if no ZIP cover, use the manifest's distributor cover
@@ -11416,7 +11540,7 @@ function PreorderImporter() {
         </div>
       </div>
 
-      {status==='idle'&&<ListenInbox />}
+      {status==='idle'&&<ListenInbox onCargar={cargarDesdeBandeja} />}
 
       {/* Archivo de emails → una sola vista de todos los releases */}
       {status==='idle'&&(
