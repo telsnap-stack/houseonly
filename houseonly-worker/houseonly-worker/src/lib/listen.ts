@@ -20,12 +20,17 @@
  * R2 (houseonly-audio, compartido con staging): LISTEN_R2_PREFIX, por defecto
  * listen/ (prod); staging usa listen-staging/ para no pisar a prod.
  *
- * Fuera de la fase 1: decisiones, carga al Pre-order y limpieza (rechazados a
- * los 7 dias, pendientes a los 30). Por eso cada disco guarda ingested_at.
+ * Fase 2 (2026-11-02): decisiones y limpieza.
+ *   listen-decide  preorder (solo lo marca: la carga al tab es la fase 3) |
+ *                  pendiente | rechazado (temporal 90 dias o definitivo, en el
+ *                  mismo preorder:rejected del filtro del 20-10) | null (deshacer)
+ *   Limpieza, en cada pasada: un rechazado sale de la bandeja (KV y R2) a los 7
+ *   dias de rechazarlo; un pendiente o sin decidir pierde el audio a los 30 dias
+ *   de entrar, pero sigue en la bandeja. Lo elegido para pre-order no se toca.
  */
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER } from './distributor-email.mjs';
-import { claveCatno, claveKV } from './preorder-rechazos.mjs';
+import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
 
 export interface ListenEnv {
   SYNC_STATE: KVNamespace;
@@ -61,6 +66,10 @@ const COVER_MAX_BYTES = 10 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 60_000;
 // Caducidad de las URLs firmadas que da listen-list.
 export const SIGNED_TTL_S = 3600;
+// Limpieza (fase 2).
+export const DIAS_RECHAZADO = 7;
+export const DIAS_SIN_DECIDIR = 30;
+const DIA_MS = 86400000;
 
 const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 // Mismos hosts que ?action=zip-proxy.
@@ -69,6 +78,8 @@ const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-
 const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com)$/i;
 
 export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'error';
+export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado';
+export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado'];
 
 export interface ListenTrack { name: string; key: string; bytes: number }
 
@@ -91,6 +102,10 @@ export interface ListenRelease {
   cover?: { key: string; from: 'zip' | 'email' };
   bytes: number;
   ingested_at: string;
+  decision?: ListenDecision;
+  decided_at?: string;
+  rechazo?: 'temporal' | 'definitivo';
+  audio_limpiado_at?: string;    // pendiente/sin decidir de mas de 30 dias
 }
 
 export interface ListenRunResult {
@@ -100,6 +115,7 @@ export interface ListenRunResult {
   nuevos: number;
   por_estado: Partial<Record<ListenEstado, number>>;
   saltados: { duplicado: number; rechazado: number; no_preorder: number };
+  limpiados: { rechazados: number; sin_audio: number };
   quedan: boolean;
   finished_at: string;
 }
@@ -113,6 +129,7 @@ function metaDe(r: ListenRelease) {
     c: r.catno, d: r.distribuidor, e: r.estado,
     a: r.artist.slice(0, 60), t: r.title.slice(0, 60), r: r.release,
     n: r.tracks.length, at: r.ingested_at,
+    x: r.decision, dt: r.decided_at,
   };
 }
 
@@ -177,6 +194,57 @@ async function enlaceDelZip(row: { zipUrl?: string; _zipLinks?: string[] }): Pro
   return '';
 }
 
+// MYD015 (2026-10-30): sin boton "Download Zip"; el Dropbox va colgado del
+// nombre de la pista "A1. ...". Solo en emails de un disco y solo Dropbox.
+const ETIQUETA_PISTA = /^(?:[A-H]\d{1,2}|\d{1,2})\s*[.)]/;
+const textoPlano = (h: string) => h.replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim();
+
+/** Los href de los enlaces cuyo texto empieza por una etiqueta de pista, en orden. */
+export function enlacesDePista(html: string): string[] {
+  const out: string[] = [];
+  const re = /<a\b[^>]*?href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) if (ETIQUETA_PISTA.test(textoPlano(m[2]))) out.push(m[1].replace(/&amp;/g, '&'));
+  return [...new Set(out)];
+}
+
+/** Cuantas pistas distintas ("A1.", "B2." ...) lista el email. */
+export function cuentaPistas(html: string): number {
+  const t = textoPlano(html);
+  return new Set([...t.matchAll(/(?:^|\s)([A-H]\d{1,2})\s*[.)]/g)].map(m => m[1])).size;
+}
+
+const esDropbox = (u: string) => { try { return /(^|\.)dropbox\.com$/i.test(new URL(u).hostname); } catch { return false; } };
+
+/** El primer enlace de pista que lleve a Dropbox (directo o tras un salto del tracker). */
+async function dropboxDePista(enlaces: string[]): Promise<string> {
+  for (const u of enlaces) {
+    if (esDropbox(u)) return u;
+    if (!TRACKER.test(u)) continue;
+    const r = await fetchConTimeout(u, { redirect: 'manual' });
+    const dest = r.headers.get('location') || '';
+    if (esDropbox(dest)) return dest;
+  }
+  return '';
+}
+
+/**
+ * ¿Lo que bajo el enlace de la pista es el promopack del disco y no una pista
+ * suelta u otra cosa? Si el ZIP o algun fichero lleva el catno, o si trae un MP3
+ * por cada pista que lista el email.
+ */
+export function esElPromopack(clave: string, nombreZip: string, lista: Array<{ name: string }>, mp3: number, pistas: number): boolean {
+  if (claveCatno(nombreZip).includes(clave)) return true;
+  if (lista.some(f => claveCatno(f.name).includes(clave))) return true;
+  return pistas >= 2 && mp3 >= pistas;
+}
+
+const nombreDeDescarga = (res: Response) => {
+  const cd = res.headers.get('content-disposition') || '';
+  const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+  try { return m ? decodeURIComponent(m[1]) : ''; } catch { return m ? m[1] : ''; }
+};
+
 class Demasiado extends Error {}
 
 /** El cuerpo entero, cortando en cuanto pase del tope (sin fiarse de Content-Length). */
@@ -234,7 +302,8 @@ const slug = (s: string) => s.replace(/\.[^.]+$/, '').normalize('NFKD').replace(
 
 // ── un disco ───────────────────────────────────────────────────
 
-async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: string): Promise<ListenRelease> {
+/** `html` solo en emails de un disco: habilita el enlace de pista (MYD015). */
+async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: string, html?: string): Promise<ListenRelease> {
   const clave = claveCatno(row.catno);
   const rel: ListenRelease = {
     clave, catno: row.catno, distribuidor: email.prefix,
@@ -246,14 +315,26 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
   const dir = `${prefijo(env)}${clave}/`;
   const subidas: string[] = [];
   try {
-    const url = await enlaceDelZip(row);
+    let url = await enlaceDelZip(row);
+    let viaPista = false;
+    if (!url && html) {
+      const dbx = await dropboxDePista(enlacesDePista(html));
+      if (dbx) {
+        // Un /scl/fi/ es una pista suelta, no la carpeta del promopack.
+        if (!esZipDescargable(dbx)) return { ...rel, estado: 'descarga_manual', detalle: 'el enlace de la pista es un fichero suelto, no el promopack', zip_link: dbx };
+        url = dropboxDescarga(dbx);
+        viaPista = true;
+      }
+    }
     if (!url) return { ...rel, estado: 'sin_zip', detalle: 'el email no trae un enlace de promopack descargable' };
+    // Por el enlace de pista, cualquier cosa que no sea el promopack: a mano.
+    const fallo = viaPista ? 'descarga_manual' as const : 'error' as const;
 
     const res = await fetchConTimeout(url, { redirect: 'follow' });
-    if (!res.ok) return { ...rel, estado: 'error', detalle: `promopack: HTTP ${res.status}`, zip_link: url };
+    if (!res.ok) { await res.body?.cancel(); return { ...rel, estado: fallo, detalle: `promopack: HTTP ${res.status}`, zip_link: url }; }
     if (/text\/html/i.test(res.headers.get('content-type') || '')) {
       await res.body?.cancel();
-      return { ...rel, estado: 'error', detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
+      return { ...rel, estado: fallo, detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
     }
     let zip: Uint8Array;
     try { zip = await leeConTope(res, ZIP_MAX_BYTES); }
@@ -262,8 +343,12 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       throw e;
     }
 
-    const { mp3, portada } = eligeFicheros(contenidoZip(zip));
-    if (!mp3.length) return { ...rel, estado: 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
+    const lista = contenidoZip(zip);
+    const { mp3, portada } = eligeFicheros(lista);
+    if (viaPista && !esElPromopack(clave, nombreDeDescarga(res), lista, mp3.length, cuentaPistas(html!)))
+      return { ...rel, estado: 'descarga_manual', detalle: 'el enlace de la pista no baja el promopack del disco', zip_link: url };
+    if (!mp3.length) return { ...rel, estado: viaPista ? 'descarga_manual' : 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
+    if (viaPista) rel.detalle = 'promopack del enlace de la pista (sin botón Download Zip)';
 
     for (let i = 0; i < mp3.length; i++) {
       const data = unFichero(zip, mp3[i]);
@@ -323,7 +408,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
     mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
-    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, quedan: false, finished_at: '',
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0 }, quedan: false, finished_at: '',
   };
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
@@ -340,6 +425,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
 
     let completo = true;
     const vistos = new Set<string>();
+    const unDisco = new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
     for (const row of rows) {
       const clave = claveCatno(row.catno);
       if (!clave || vistos.has(clave)) continue;
@@ -351,7 +437,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
       if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
       intentos++;
-      const rel = await ingiereDisco(env, row, email, now.toISOString());
+      const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
       await guardaRelease(env, rel);
       out.nuevos++;
       out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
@@ -363,9 +449,82 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       out.emails_cerrados++;
     }
   }
+  out.limpiados = await limpiaBandeja(env, now);
   out.finished_at = new Date().toISOString();
   await env.SYNC_STATE.put(LAST_RUN_KEY, JSON.stringify(out));
   return out;
+}
+
+// ── limpieza ───────────────────────────────────────────────────
+
+/**
+ * Rechazado hace 7 dias o mas: fuera de la bandeja (KV y R2); el rechazo sigue
+ * en preorder:rejected. Pendiente o sin decidir con 30 dias o mas desde que
+ * entro: se borra el audio y el disco se queda, marcado. Pre-order: intacto.
+ */
+export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number }> {
+  const out = { rechazados: 0, sin_audio: 0 };
+  const t = now.getTime();
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.metadata || {};
+      const rechazadoViejo = m.x === 'rechazado' && t - Date.parse(m.dt) >= DIAS_RECHAZADO * DIA_MS;
+      const sinDecidirViejo = (!m.x || m.x === 'pendiente') && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
+      if (!rechazadoViejo && !sinDecidirViejo) continue;
+      const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
+      if (!r) continue;
+      if (rechazadoViejo) {
+        const keys = [...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : [])];
+        if (keys.length) await env.R2.delete(keys);
+        await env.SYNC_STATE.delete(k.name);
+        out.rechazados++;
+      } else {
+        if (r.tracks.length) await env.R2.delete(r.tracks.map(x => x.key));
+        r.bytes -= r.tracks.reduce((s, x) => s + x.bytes, 0);
+        r.tracks = [];
+        r.audio_limpiado_at = now.toISOString();
+        await guardaRelease(env, r);
+        out.sin_audio++;
+      }
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  return out;
+}
+
+// ── decisiones ─────────────────────────────────────────────────
+
+/**
+ * POST ?action=listen-decide (Bearer) {clave, decision, tipo?}
+ *   decision: preorder | pendiente | rechazado (con tipo temporal|definitivo) | null
+ * Rechazar escribe el mismo preorder:rejected que el tab (filtro del 20-10);
+ * salir de rechazado lo borra.
+ */
+export async function handleListenDecide(request: Request, env: ListenEnv, autorizado: boolean, ahora = Date.now()): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  const body: any = await request.json().catch(() => null);
+  const clave = claveCatno(body?.clave);
+  const decision = body?.decision ?? null;
+  if (!clave) return json({ error: 'clave required' }, 400);
+  if (decision !== null && !DECISIONES.includes(decision)) return json({ error: `decision must be ${DECISIONES.join(', ')} or null` }, 400);
+  const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
+  if (!r) return json({ error: 'not found' }, 404);
+
+  if (decision === 'rechazado') {
+    const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
+    if ('error' in rec) return json({ error: rec.error }, 400);
+    await env.SYNC_STATE.put(claveKV(rec.catno), JSON.stringify(rec), { metadata: rec });
+    r.rechazo = rec.tipo as 'temporal' | 'definitivo';
+  } else {
+    if (r.decision === 'rechazado') await env.SYNC_STATE.delete(claveKV(r.catno));
+    delete r.rechazo;
+  }
+  if (decision) { r.decision = decision; r.decided_at = new Date(ahora).toISOString(); }
+  else { delete r.decision; delete r.decided_at; }
+  await guardaRelease(env, r);
+  return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null } });
 }
 
 // ── URLs firmadas ──────────────────────────────────────────────

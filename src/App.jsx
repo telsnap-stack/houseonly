@@ -9806,6 +9806,285 @@ const saveMailState = (s) => {
 //   • Variant Inventory Policy: continue   (oversell → negative stock = demand)
 //   • Tags                    : + forthcoming + release:YYYY-MM-DD
 // After bulk-upload to Shopify, the Forthcoming section shows them automatically.
+// ── BANDEJA DE ESCUCHA (Pre-order, fase 2) ─────────────────────
+// Los promopacks de RD/TV que el worker ya bajo a R2 (lib/listen.ts), con una
+// cola propia: el admin no va dentro de PlayerProvider. Las URLs firmadas
+// caducan en 1 h; si una pista falla por eso (401/403) se pide la lista otra
+// vez y se sigue en la misma pista y el mismo segundo, sin cortar la cola.
+// Decisiones: Pre-order solo marca (la carga al tab es la fase 3), Pendiente
+// deja el disco aqui, Rechazar usa el mismo filtro del 20-10 (temporal/definitivo).
+const LISTEN_ESTADO = {
+  listo:           { txt: 'listo',           col: S.accent },
+  descarga_manual: { txt: 'descarga manual', col: '#ff8800' },
+  sin_zip:         { txt: 'error',           col: S.danger },
+  sin_audio:       { txt: 'error',           col: S.danger },
+  error:           { txt: 'error',           col: S.danger },
+};
+const LISTEN_VISTAS = [
+  ['bandeja', 'Bandeja', it => !it.decision || it.decision === 'pendiente'],
+  ['preorder', 'Elegidos pre-order', it => it.decision === 'preorder'],
+  ['rechazado', 'Rechazados', it => it.decision === 'rechazado'],
+];
+const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
+
+function ListenInbox() {
+  const [secret, setSecret] = useMailSecret();
+  const [items, setItems] = useState(null);       // null = sin cargar
+  const [lastRun, setLastRun] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [err, setErr] = useState('');
+  const [aviso, setAviso] = useState('');
+  const [vista, setVista] = useState('bandeja');
+  const [busy, setBusy] = useState('');           // clave con una decision en vuelo
+  const [rechazando, setRechazando] = useState(''); // clave eligiendo temporal/definitivo
+  const [cola, setCola] = useState([]);           // [{clave, idx}]
+  const [pos, setPos] = useState(-1);
+  const [playing, setPlaying] = useState(false);
+  const [tiempo, setTiempo] = useState({ t: 0, d: 0 });
+  const audioRef = useRef(null);
+  const itemsRef = useRef([]);
+  const colaRef = useRef([]);
+  const posRef = useRef(-1);
+  const expRef = useRef(0);                       // ms en que caducan las URLs actuales
+  const reanudarRef = useRef({ t: 0, play: true });
+  const ultimoTRef = useRef(0);
+  const reintentoRef = useRef('');                // "clave:idx" ya renovada una vez
+  useEffect(() => { itemsRef.current = items || []; }, [items]);
+  useEffect(() => { colaRef.current = cola; }, [cola]);
+  useEffect(() => { posRef.current = pos; }, [pos]);
+
+  const porClave = useMemo(() => new Map((items || []).map(i => [i.clave, i])), [items]);
+  const actual = pos >= 0 ? cola[pos] : null;
+  const actualItem = actual ? porClave.get(actual.clave) : null;
+  const actualTrack = actualItem?.tracks?.[actual.idx] || null;
+  const srcActual = actualTrack?.url || '';
+
+  // `reanudar`: en que segundo y si suena al cambiar las URLs. Por defecto, donde
+  // va el audio y como esta (una recarga a mano no corta ni arranca nada).
+  const cargar = async (reanudar) => {
+    if (!secret) { setErr('Pega el BOOTSTRAP_AUTH_SECRET.'); return false; }
+    setCargando(true); setErr('');
+    const a = audioRef.current;
+    try {
+      const r = await fetch(`${WORKER_URL}?action=listen-list`, { headers: { 'Authorization': `Bearer ${secret}` } });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 401) throw new Error('Secreto incorrecto.');
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      reanudarRef.current = reanudar || { t: a?.currentTime || 0, play: a ? !a.paused : false };
+      expRef.current = Date.now() + (d.expires_in || 3600) * 1000;
+      itemsRef.current = d.items || [];
+      setItems(d.items || []);
+      setLastRun(d.last_run || null);
+      return true;
+    } catch (e) {
+      setErr(`listen-list: ${e.message}`);
+      return false;
+    } finally { setCargando(false); }
+  };
+
+  // Cambia la pista (o sus URLs tras renovar): carga y, si toca, suena.
+  useEffect(() => {
+    const a = audioRef.current; if (!a) return;
+    if (!srcActual) { a.pause(); a.removeAttribute('src'); setPlaying(false); return; }
+    const { t, play } = reanudarRef.current;
+    reanudarRef.current = { t: 0, play: true };
+    a.src = srcActual;
+    const go = () => {
+      if (t) { try { a.currentTime = t; } catch { /* sin metadata aun: empieza en 0 */ } }
+      if (play) a.play().catch(() => setPlaying(false));
+    };
+    a.addEventListener('loadedmetadata', go, { once: true });
+    return () => a.removeEventListener('loadedmetadata', go);
+  }, [srcActual]);
+
+  // A una pista concreta de la cola. Si las URLs estan a punto de caducar, se
+  // renuevan antes de empezar.
+  const irA = async (i) => {
+    if (i < 0 || i >= colaRef.current.length) { setPos(-1); return; }
+    if (Date.now() > expRef.current - 60_000) await cargar({ t: 0, play: true });
+    reanudarRef.current = { t: 0, play: true };
+    setPos(i);
+  };
+  const siguiente = () => irA(posRef.current + 1);
+
+  const pistasDe = it => (it.tracks || []).map((_, idx) => ({ clave: it.clave, idx }));
+  const escuchar = (it, idx = 0) => {
+    const nuevas = pistasDe(it);
+    colaRef.current = nuevas;
+    setCola(nuevas);
+    setPos(-1);
+    setTimeout(() => irA(idx), 0);
+  };
+  const aCola = (lista) => {
+    const nuevas = lista.flatMap(pistasDe);
+    if (!nuevas.length) return;
+    const vacia = colaRef.current.length === 0 || posRef.current < 0;
+    const c = [...colaRef.current, ...nuevas];
+    colaRef.current = c;
+    setCola(c);
+    if (vacia) setTimeout(() => irA(c.length - nuevas.length), 0);
+  };
+
+  const onError = async () => {
+    const cur = colaRef.current[posRef.current]; if (!cur) return;
+    const it = itemsRef.current.find(i => i.clave === cur.clave);
+    const tr = it?.tracks?.[cur.idx];
+    if (!tr) { siguiente(); return; }
+    const id = `${cur.clave}:${cur.idx}`;
+    let status = 0;
+    try { status = (await fetch(tr.url, { method: 'HEAD' })).status; } catch { /* sin red: status 0 */ }
+    if ((status === 401 || status === 403 || Date.now() > expRef.current) && reintentoRef.current !== id) {
+      reintentoRef.current = id;
+      if (await cargar({ t: ultimoTRef.current, play: true })) return;   // el efecto sigue en el mismo punto
+    }
+    setAviso(`No se pudo reproducir ${it.catno} · ${tr.name}${status ? ` (HTTP ${status})` : ''}: se salta.`);
+    siguiente();
+  };
+
+  const toggle = () => {
+    const a = audioRef.current; if (!a || !srcActual) return;
+    if (a.paused) a.play().catch(() => {}); else a.pause();
+  };
+  const buscar = (e) => {
+    const a = audioRef.current; if (!a || !tiempo.d) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * tiempo.d;
+  };
+
+  const decidir = async (it, decision, tipo) => {
+    setBusy(it.clave); setErr('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=listen-decide`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clave: it.clave, decision, tipo }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setItems(xs => xs.map(x => x.clave === it.clave
+        ? { ...x, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined } : x));
+      setRechazando('');
+    } catch (e) {
+      setErr(`No se pudo guardar la decisión de ${it.catno}: ${e.message}`);
+    } finally { setBusy(''); }
+  };
+
+  const filtro = LISTEN_VISTAS.find(v => v[0] === vista)[2];
+  const visibles = (items || []).filter(filtro);
+  const conAudio = visibles.filter(it => it.tracks?.length);
+  const btn = { background: 'none', border: `1px solid ${S.border}`, color: S.muted, cursor: 'pointer', fontSize: 8, padding: '2px 7px', borderRadius: 2, fontFamily: 'inherit', flexShrink: 0, whiteSpace: 'nowrap' };
+  const btnOn = { ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 };
+
+  return (
+    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!items}>
+      <summary style={{ cursor: 'pointer', padding: '8px 14px', fontSize: 9, color: S.muted, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }}>
+        🎧 Bandeja de escucha {items ? `· ${(items || []).filter(LISTEN_VISTAS[0][2]).length} por decidir` : ''}
+      </summary>
+      <div style={{ padding: '0 14px 14px' }}>
+        <audio ref={audioRef} preload="metadata"
+          onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+          onPlaying={() => { reintentoRef.current = ''; }}
+          onTimeUpdate={e => { ultimoTRef.current = e.currentTarget.currentTime; setTiempo({ t: e.currentTarget.currentTime, d: e.currentTarget.duration || 0 }); }}
+          onEnded={siguiente} onError={onError} />
+        {err && <div style={{ marginBottom: 10, padding: 8, background: '#1a0000', border: `1px solid ${S.danger}44`, borderRadius: 2, fontSize: 10, color: S.danger }}>{err}</div>}
+        {aviso && <div onClick={() => setAviso('')} style={{ marginBottom: 10, padding: 8, border: '1px solid #ff880055', borderRadius: 2, fontSize: 10, color: '#ff8800', cursor: 'pointer' }}>{aviso} <span style={{ color: S.muted }}>(cerrar)</span></div>}
+
+        {items === null ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargar(); }}
+              placeholder="BOOTSTRAP_AUTH_SECRET"
+              style={{ flex: '1 1 260px', background: S.surf, border: `1px solid ${S.border}`, color: S.text, borderRadius: 2, padding: '6px 10px', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
+            <button onClick={() => cargar()} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
+              {cargando ? 'Cargando…' : 'Cargar'}
+            </button>
+          </div>
+        ) : (<>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            {LISTEN_VISTAS.map(([k, label, f]) => (
+              <button key={k} onClick={() => setVista(k)} style={vista === k ? btnOn : btn}>{label} ({items.filter(f).length})</button>
+            ))}
+            <span style={{ flex: 1 }} />
+            {conAudio.length > 0 && <button onClick={() => aCola(conAudio)} style={btn}>+ todo a la cola ({conAudio.length})</button>}
+            <button onClick={() => cargar()} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
+          </div>
+          {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
+            Última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC · {lastRun.nuevos ?? 0} nuevos · modo {lastRun.mode}
+          </div>}
+          {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>Nada en esta vista.</div>}
+
+          {visibles.map(it => {
+            const est = LISTEN_ESTADO[it.estado] || LISTEN_ESTADO.error;
+            const sonando = actual?.clave === it.clave;
+            return (
+              <div key={it.clave} style={{ display: 'flex', gap: 10, padding: '10px 0', borderTop: `1px solid ${S.border}` }}>
+                <div style={{ width: 56, height: 56, flexShrink: 0, background: S.surf, borderRadius: 2, overflow: 'hidden' }}>
+                  {it.cover?.url && <img src={it.cover.url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 9, color: S.accent, fontFamily: 'monospace' }}>{it.catno}</span>
+                    <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
+                    <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
+                    {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
+                  </div>
+                  <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
+                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '', it.dealerPrice != null ? `${it.dealerPrice.toFixed(2)} €` : '', it.distribuidor].filter(Boolean).join(' · ')}
+                  </div>
+                  {it.estado !== 'listo' && <div style={{ fontSize: 9, color: est.col, marginTop: 3 }}>
+                    {it.detalle || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
+                  </div>}
+                  {it.estado === 'listo' && it.detalle && <div style={{ fontSize: 8, color: S.muted, marginTop: 2 }}>{it.detalle}</div>}
+                  {it.tracks?.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                    {it.tracks.map((t, idx) => {
+                      const esta = sonando && actual.idx === idx;
+                      return <button key={idx} onClick={() => escuchar(it, idx)} title={t.name}
+                        style={{ ...btn, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', color: esta ? '#080808' : S.text, background: esta ? S.accent : 'none' }}>
+                        {esta && playing ? '♪ ' : '▶ '}{t.name}</button>;
+                    })}
+                    <button onClick={() => aCola([it])} style={btn}>+ cola</button>
+                  </div>}
+                  <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
+                    {it.decision === 'pendiente' && <span style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
+                    {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
+                    {rechazando === it.clave ? (<>
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'temporal')} title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={btn}>No, por ahora</button>
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'definitivo')} title="No vuelve a salir (se puede recuperar)" style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Nunca</button>
+                      <button onClick={() => setRechazando('')} style={btn}>cancelar</button>
+                    </>) : (<>
+                      {it.decision !== 'preorder' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} style={{ ...btn, color: S.accent, borderColor: `${S.accent}55` }}>Pre-order</button>}
+                      {it.decision !== 'pendiente' && it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'pendiente')} title="Se queda en la bandeja; el audio se borra a los 30 días de entrar" style={btn}>Pendiente</button>}
+                      {it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => setRechazando(it.clave)} style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Rechazar</button>}
+                      {it.decision && <button disabled={busy === it.clave} onClick={() => decidir(it, null)} style={btn}>deshacer</button>}
+                    </>)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {actualTrack && (
+            <div style={{ position: 'sticky', bottom: 0, marginTop: 10, padding: '8px 10px', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+              {actualItem.cover?.url && <img src={actualItem.cover.url} alt="" style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 2 }} />}
+              <button onClick={() => irA(pos - 1)} disabled={pos <= 0} style={btn}>⏮</button>
+              <button onClick={toggle} style={{ width: 30, height: 30, borderRadius: '50%', background: S.accent, border: 'none', cursor: 'pointer', fontSize: 11, color: '#080808' }}>{playing ? '⏸' : '▶'}</button>
+              <button onClick={siguiente} disabled={pos >= cola.length - 1} style={btn}>⏭</button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 10, color: S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{ color: S.accent, fontFamily: 'monospace' }}>{actualItem.catno}</span> · {actualTrack.name}
+                </div>
+                <div onClick={buscar} style={{ height: 6, background: S.border, borderRadius: 3, marginTop: 4, cursor: 'pointer', overflow: 'hidden' }}>
+                  <div style={{ width: `${tiempo.d ? (tiempo.t / tiempo.d) * 100 : 0}%`, height: '100%', background: S.accent }} />
+                </div>
+              </div>
+              <span style={{ fontSize: 9, color: S.muted, whiteSpace: 'nowrap' }}>{mmss(tiempo.t)} / {mmss(tiempo.d)} · {pos + 1}/{cola.length}</span>
+            </div>
+          )}
+        </>)}
+      </div>
+    </details>
+  );
+}
+
 function PreorderImporter() {
   const [manifest, setManifest]     = useState([]);   // [{catno, artist, title, label, genre, release, dealerPrice, tracks, format, coverUrl, zipUrl, source}]
   const [manifestName, setManifestName] = useState(null);
@@ -11010,6 +11289,8 @@ function PreorderImporter() {
           })()}
         </div>
       </div>
+
+      {status==='idle'&&<ListenInbox />}
 
       {/* Archivo de emails → una sola vista de todos los releases */}
       {status==='idle'&&(
