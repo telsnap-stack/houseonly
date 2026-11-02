@@ -66,7 +66,7 @@ solo timeout. Se resolvió sola en unas horas.
 | `pending-review-approve` | POST | `{sku, release_id}` → crea listing. |
 | `pending-review-reject` | POST | `{sku}` → descarta. |
 | `sync35-mode` | GET/POST | dry/live del auto-list. |
-| `listen-list` · `listen-run` · `listen-file` · `listen-decide` | GET/POST/GET/POST | Bandeja de escucha (Pre-order): ingesta de audio RD/TV a R2 (`listen/`, privado), cron :41 con `meta:listen_mode`=live; `listen-file` solo con URL firmada; `listen-decide` = preorder/pendiente/rechazado (filtro del 20-10); `listen-list` pagina con `vista=` (por_decidir/pendientes/elegidos/rechazados), `limit` y `cursor`. Limpieza: rechazados a 7 días; sin decidir, audio a los 30 y fuera 30 después. Ver `src/lib/listen.ts`. |
+| `listen-list` · `listen-run` · `listen-file` · `listen-decide` | GET/POST/GET/POST | Bandeja de escucha (Pre-order): ingesta de audio RD/TV al bucket privado `houseonly-listen` (binding `LISTEN_R2`, sin r2.dev; `houseonly-audio` es público entero), cron :41 con `meta:listen_mode`=live; `listen-file` solo con URL firmada; `listen-decide` = preorder/pendiente/rechazado (filtro del 20-10); `listen-list` pagina con `vista=` (por_decidir/pendientes/elegidos/rechazados), `limit` y `cursor`. Limpieza: rechazados a 7 días; sin decidir, audio a los 30 y fuera 30 después. Ver `src/lib/listen.ts`. |
 | `ebay-mode` · `ebay-items` · `ebay-exclude` · `ebay-include` · `ebay-backfill` · `ebay-run` · `ebay-notify` | — | eBay, tercer canal: entrada automatica por `products/create`, interruptores propios, independientes de Discogs. Ver `docs/ebay.md`. |
 
 ## Scripts de operación (`houseonly-worker/houseonly-worker/scripts/`)

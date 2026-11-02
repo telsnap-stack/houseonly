@@ -6,7 +6,9 @@
  * el promopack y deja en R2 solo los MP3 y la portada (la del ZIP; si no trae,
  * la del email). La bandeja los reproduce desde aqui: nada de enlaces externos.
  *
- * Audio PRIVADO: el prefijo listen/ no se sirve por el bucket publico. Lo sirve
+ * Audio PRIVADO: vive en su propio bucket, houseonly-listen (binding LISTEN_R2),
+ * sin r2.dev ni dominio. (Hasta el 2026-11-02 iba en houseonly-audio, que se
+ * sirve ENTERO por r2.dev: la firma no protegia nada.) Solo lo sirve
  * ?action=listen-file con URL firmada (HMAC de la clave + caducidad), que solo
  * reparte ?action=listen-list con el Bearer de admin.
  *
@@ -17,7 +19,7 @@
  *                           metadata = resumen para listar sin un get por clave
  *   listen:mail:<fichero>   email ya tratado entero (no se vuelve a abrir)
  *
- * R2 (houseonly-audio, compartido con staging): LISTEN_R2_PREFIX, por defecto
+ * R2 (houseonly-listen, compartido con staging): LISTEN_R2_PREFIX, por defecto
  * listen/ (prod); staging usa listen-staging/ para no pisar a prod.
  *
  * Fase 2 (2026-11-02): decisiones y limpieza.
@@ -38,7 +40,7 @@ import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
 export interface ListenEnv {
   SYNC_STATE: KVNamespace;
   EMAILS: KVNamespace;
-  R2: R2Bucket;
+  LISTEN_R2: R2Bucket;            // houseonly-listen, privado
   BOOTSTRAP_AUTH_SECRET: string;
   LISTEN_R2_PREFIX?: string;
 }
@@ -359,7 +361,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     for (let i = 0; i < mp3.length; i++) {
       const data = unFichero(zip, mp3[i]);
       const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(base(mp3[i]))}.mp3`;
-      await env.R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
+      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
       subidas.push(key);
       rel.tracks.push({ name: base(mp3[i]).replace(/\.mp3$/i, ''), key, bytes: data.byteLength });
       rel.bytes += data.byteLength;
@@ -368,7 +370,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     if (portada) {
       const data = unFichero(zip, portada);
       const key = `${dir}cover.jpg`;
-      await env.R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
+      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
       subidas.push(key);
       rel.cover = { key, from: 'zip' };
       rel.bytes += data.byteLength;
@@ -376,7 +378,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       const cover = await portadaDelEmail(row.coverUrl);
       if (cover) {
         const key = `${dir}cover${cover.ext}`;
-        await env.R2.put(key, cover.data, { httpMetadata: { contentType: cover.type } });
+        await env.LISTEN_R2.put(key, cover.data, { httpMetadata: { contentType: cover.type } });
         subidas.push(key);
         rel.cover = { key, from: 'email' };
         rel.bytes += cover.data.byteLength;
@@ -385,7 +387,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     return rel;
   } catch (e: any) {
     // A medias no sirve: lo subido se borra para que el reintento empiece limpio.
-    if (subidas.length) await env.R2.delete(subidas).catch(() => {});
+    if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
     return { ...rel, estado: 'error', tracks: [], bytes: 0, cover: undefined, detalle: e?.message || String(e) };
   }
 }
@@ -477,7 +479,7 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
   const pre = prefijo(env);
   const borra = async (keys: string[]) => {
     const mias = keys.filter(k => k.startsWith(pre) && !k.includes('..'));
-    if (mias.length) await env.R2.delete(mias);
+    if (mias.length) await env.LISTEN_R2.delete(mias);
   };
   let cursor: string | undefined;
   do {
@@ -577,7 +579,7 @@ export async function handleListenFile(request: Request, env: ListenEnv): Promis
   const ok = real.byteLength === dada.byteLength && crypto.subtle.timingSafeEqual(real, dada);
   if (!ok) return json({ error: 'forbidden' }, 403);
 
-  const obj = await env.R2.get(key, { range: request.headers });
+  const obj = await env.LISTEN_R2.get(key, { range: request.headers });
   if (!obj) return json({ error: 'not found' }, 404);
   const headers = new Headers(CORS);
   obj.writeHttpMetadata(headers);

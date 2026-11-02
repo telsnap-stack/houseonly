@@ -45,7 +45,7 @@ const rel = async (clave: string) => JSON.parse((await E.SYNC_STATE.get(`listen:
 
 beforeEach(async () => {
 	for (const ns of [E.SYNC_STATE, E.EMAILS]) for (const k of (await ns.list()).keys) await ns.delete(k.name);
-	for (const o of (await E.R2.list({ prefix: "listen/" })).objects) await E.R2.delete(o.key);
+	for (const o of (await E.LISTEN_R2.list({ prefix: "listen/" })).objects) await E.LISTEN_R2.delete(o.key);
 	E.BOOTSTRAP_AUTH_SECRET = SECRET;
 	await E.SYNC_STATE.put("meta:listen_mode", "live");
 });
@@ -93,8 +93,10 @@ describe("listen: ingesta", () => {
 		expect(d.tracks.map((t: any) => [t.name, t.key])).toEqual([
 			["A1 - Uno", "listen/TST001/01-A1-Uno.mp3"], ["B1 - Dos", "listen/TST001/02-B1-Dos.mp3"],
 		]);
-		const keys = (await E.R2.list({ prefix: "listen/TST001/" })).objects.map((o: any) => o.key).sort();
+		const keys = (await E.LISTEN_R2.list({ prefix: "listen/TST001/" })).objects.map((o: any) => o.key).sort();
 		expect(keys).toEqual(["listen/TST001/01-A1-Uno.mp3", "listen/TST001/02-B1-Dos.mp3", "listen/TST001/cover.jpg"]);
+		// Nada en el bucket publico (houseonly-audio, servido por r2.dev).
+		expect((await E.R2.list()).objects.filter((o: any) => o.key.startsWith("listen"))).toHaveLength(0);
 
 		// Otro email (una revision) del mismo disco: no se baja otra vez.
 		await archiva("RD__UPDATE-Test---TST-001__2026-11-02.html", rdEmail("TST-001"), "2026-11-02");
@@ -122,7 +124,7 @@ describe("listen: ingesta", () => {
 		await archiva("RD__X---Y-OKK001__2026-11-01.html", rdEmail("OKK001"));
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 2, por_estado: { descarga_manual: 1, listo: 1 } });
 		expect(await rel("BIG001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fo/big/X?rlkey=k&dl=1", tracks: [] });
-		expect((await E.R2.list({ prefix: "listen/BIG001/" })).objects).toHaveLength(0);
+		expect((await E.LISTEN_R2.list({ prefix: "listen/BIG001/" })).objects).toHaveLength(0);
 	});
 
 	// MYD015: sin "Download Zip", el Dropbox colgado del nombre de la primera pista.
@@ -163,7 +165,7 @@ describe("listen: ingesta", () => {
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 2, por_estado: { descarga_manual: 2 } });
 		expect(await rel("OTR001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fo/otra/X?rlkey=k&dl=1", tracks: [] });
 		expect(await rel("SUE001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fi/uno/A1.mp3?rlkey=k&dl=0" });
-		expect((await E.R2.list({ prefix: "listen/OTR001/" })).objects).toHaveLength(0);
+		expect((await E.LISTEN_R2.list({ prefix: "listen/OTR001/" })).objects).toHaveLength(0);
 	});
 
 	it("sin modo live no hace nada", async () => {
@@ -177,7 +179,7 @@ describe("listen: ingesta", () => {
 
 describe("listen: URLs firmadas", () => {
 	const ORIGIN = "https://w.example";
-	beforeEach(async () => { await E.R2.put("listen/TST001/01-a.mp3", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), { httpMetadata: { contentType: "audio/mpeg" } }); });
+	beforeEach(async () => { await E.LISTEN_R2.put("listen/TST001/01-a.mp3", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), { httpMetadata: { contentType: "audio/mpeg" } }); });
 	const pide = (url: string, headers: Record<string, string> = {}) => handleListenFile(new Request(url, { headers }), E);
 
 	it("firmada vale, con Range da 206; firma mala, caducada o fuera de listen/ es 403", async () => {
@@ -195,7 +197,7 @@ describe("listen: URLs firmadas", () => {
 		expect((await pide(url.replace(/sig=[0-9a-f]/, "sig=z"))).status).toBe(403);
 		const vieja = await urlFirmada(E, ORIGIN, "listen/TST001/01-a.mp3", Date.now() - 2 * 3600_000);
 		expect((await pide(vieja)).status).toBe(403);
-		await E.R2.put("covers/x.jpg", new Uint8Array([1]));
+		await E.LISTEN_R2.put("covers/x.jpg", new Uint8Array([1]));
 		expect((await pide(await urlFirmada(E, ORIGIN, "covers/x.jpg"))).status).toBe(403);
 	});
 
@@ -222,8 +224,8 @@ describe("listen: decisiones y limpieza", () => {
 		bytes: 15, ingested_at: "2026-11-01T10:00:00Z", ...over,
 	});
 	const pon = async (r: any) => {
-		await E.R2.put(r.tracks[0].key, new Uint8Array(10));
-		await E.R2.put(r.cover.key, new Uint8Array(5));
+		await E.LISTEN_R2.put(r.tracks[0].key, new Uint8Array(10));
+		await E.LISTEN_R2.put(r.cover.key, new Uint8Array(5));
 		await E.SYNC_STATE.put(`listen:rel:${r.clave}`, JSON.stringify(r),
 			{ metadata: { c: r.catno, e: r.estado, n: r.tracks.length, at: r.ingested_at, x: r.decision, dt: r.decided_at } });
 	};
@@ -258,11 +260,11 @@ describe("listen: decisiones y limpieza", () => {
 		await pon(base("PRE040", { decision: "preorder", decided_at: hace(35), ingested_at: hace(40) }));
 		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2, fuera: 0 });
 		expect(await rel("REJ007")).toBeNull();
-		expect((await E.R2.list({ prefix: "listen/REJ007/" })).objects).toHaveLength(0);
+		expect((await E.LISTEN_R2.list({ prefix: "listen/REJ007/" })).objects).toHaveLength(0);
 		expect((await rel("REJ006")).tracks).toHaveLength(1);
 		for (const c of ["PEN030", "NON031"]) {
 			expect(await rel(c)).toMatchObject({ tracks: [], bytes: 5, audio_limpiado_at: NOW.toISOString() });
-			expect((await E.R2.list({ prefix: `listen/${c}/` })).objects.map((o: any) => o.key)).toEqual([`listen/${c}/cover.jpg`]);
+			expect((await E.LISTEN_R2.list({ prefix: `listen/${c}/` })).objects.map((o: any) => o.key)).toEqual([`listen/${c}/cover.jpg`]);
 		}
 		expect((await rel("NON029")).tracks).toHaveLength(1);
 		expect((await rel("PRE040")).tracks).toHaveLength(1);
@@ -273,7 +275,7 @@ describe("listen: decisiones y limpieza", () => {
 		expect((await limpiaBandeja(E, luego)).fuera).toBe(2);
 		for (const c of ["PEN030", "NON031"]) {
 			expect(await rel(c)).toBeNull();
-			expect((await E.R2.list({ prefix: `listen/${c}/` })).objects).toHaveLength(0);
+			expect((await E.LISTEN_R2.list({ prefix: `listen/${c}/` })).objects).toHaveLength(0);
 		}
 		expect(await rel("PRE040")).not.toBeNull();
 	});
@@ -284,7 +286,7 @@ describe("listen: decisiones y limpieza", () => {
 		E.LISTEN_R2_PREFIX = "listen-staging/";
 		try {
 			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0, fuera: 0 });
-			expect((await E.R2.list({ prefix: "listen/PRD001/" })).objects).toHaveLength(2);
+			expect((await E.LISTEN_R2.list({ prefix: "listen/PRD001/" })).objects).toHaveLength(2);
 		} finally { delete E.LISTEN_R2_PREFIX; }
 	});
 
