@@ -267,4 +267,14 @@ describe("listen: decisiones y limpieza", () => {
 		// Ya sin audio: la siguiente pasada no lo vuelve a tocar.
 		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0 });
 	});
+
+	it("con prefijo de staging no borra nada fuera de listen-staging/ aunque el registro lo apunte", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		await pon(base("PRD001", { decision: "rechazado", decided_at: hace(8) }));   // claves en listen/ (prod)
+		E.LISTEN_R2_PREFIX = "listen-staging/";
+		try {
+			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0 });
+			expect((await E.R2.list({ prefix: "listen/PRD001/" })).objects).toHaveLength(2);
+		} finally { delete E.LISTEN_R2_PREFIX; }
+	});
 });
