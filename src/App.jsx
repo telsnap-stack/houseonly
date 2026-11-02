@@ -9812,7 +9812,8 @@ const saveMailState = (s) => {
 // caducan en 1 h; si una pista falla por eso (401/403) se pide la lista otra
 // vez y se sigue en la misma pista y el mismo segundo, sin cortar la cola.
 // Decisiones: Pre-order solo marca (la carga al tab es la fase 3), Pendiente
-// deja el disco aqui, Rechazar usa el mismo filtro del 20-10 (temporal/definitivo).
+// lo pasa a su pestana (sale de "por decidir"), Rechazar usa el mismo filtro
+// del 20-10 (temporal/definitivo). Los precios son coste dealer, no de venta.
 const LISTEN_ESTADO = {
   listo:           { txt: 'listo',           col: S.accent },
   descarga_manual: { txt: 'descarga manual', col: '#ff8800' },
@@ -9821,7 +9822,8 @@ const LISTEN_ESTADO = {
   error:           { txt: 'error',           col: S.danger },
 };
 const LISTEN_VISTAS = [
-  ['bandeja', 'Bandeja', it => !it.decision || it.decision === 'pendiente'],
+  ['bandeja', 'Por decidir', it => !it.decision],
+  ['pendiente', 'Pendientes', it => it.decision === 'pendiente'],
   ['preorder', 'Elegidos pre-order', it => it.decision === 'preorder'],
   ['rechazado', 'Rechazados', it => it.decision === 'rechazado'],
 ];
@@ -9841,6 +9843,10 @@ function ListenInbox() {
   const [pos, setPos] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [tiempo, setTiempo] = useState({ t: 0, d: 0 });
+  const [verCola, setVerCola] = useState(false);
+  const [toast, setToast] = useState('');
+  const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
+  const toastRef = useRef(0);
   const audioRef = useRef(null);
   const itemsRef = useRef([]);
   const colaRef = useRef([]);
@@ -9858,6 +9864,9 @@ function ListenInbox() {
   const actualItem = actual ? porClave.get(actual.clave) : null;
   const actualTrack = actualItem?.tracks?.[actual.idx] || null;
   const srcActual = actualTrack?.url || '';
+  // Que pista toca, aparte de su URL: dos pistas con la misma URL, o volver a
+  // pulsar la que suena, tambien tienen que recargar.
+  const idActual = actual ? `${pos}:${actual.clave}:${actual.idx}` : '';
 
   // `reanudar`: en que segundo y si suena al cambiar las URLs. Por defecto, donde
   // va el audio y como esta (una recarga a mano no corta ni arranca nada).
@@ -9895,7 +9904,7 @@ function ListenInbox() {
     };
     a.addEventListener('loadedmetadata', go, { once: true });
     return () => a.removeEventListener('loadedmetadata', go);
-  }, [srcActual]);
+  }, [srcActual, idActual]);
 
   // A una pista concreta de la cola. Si las URLs estan a punto de caducar, se
   // renuevan antes de empezar.
@@ -9908,22 +9917,57 @@ function ListenInbox() {
   const siguiente = () => irA(posRef.current + 1);
 
   const pistasDe = it => (it.tracks || []).map((_, idx) => ({ clave: it.clave, idx }));
+  // Pulsar una pista no borra la cola: si ya esta, salta a ella; si no, el disco
+  // entra detras de lo que suena (sin las pistas que ya estuvieran) y empieza ahi.
   const escuchar = (it, idx = 0) => {
-    const nuevas = pistasDe(it);
-    colaRef.current = nuevas;
-    setCola(nuevas);
-    setPos(-1);
-    setTimeout(() => irA(idx), 0);
+    const id = `${it.clave}:${idx}`;
+    let c = colaRef.current;
+    let i = c.findIndex(x => `${x.clave}:${x.idx}` === id);
+    if (i < 0) {
+      const ya = new Set(c.map(x => `${x.clave}:${x.idx}`));
+      const nuevas = pistasDe(it).filter(x => !ya.has(`${x.clave}:${x.idx}`));
+      const at = posRef.current + 1;
+      c = [...c.slice(0, at), ...nuevas, ...c.slice(at)];
+      colaRef.current = c;
+      setCola(c);
+      i = at + nuevas.findIndex(x => x.idx === idx);
+    }
+    if (i === posRef.current) { setPos(-1); }
+    setTimeout(() => irA(i), 0);
   };
+  const avisa = (txt) => {
+    setToast(txt);
+    clearTimeout(toastRef.current);
+    toastRef.current = setTimeout(() => setToast(''), 2000);
+  };
+  const enCola = useMemo(() => new Set(cola.map(c => `${c.clave}:${c.idx}`)), [cola]);
+  const todoEnCola = it => (it.tracks || []).length > 0 && it.tracks.every((_, idx) => enCola.has(`${it.clave}:${idx}`));
+  // Anade sin repetir; no arranca sola: la barra aparece y se le da a ▶.
   const aCola = (lista) => {
-    const nuevas = lista.flatMap(pistasDe);
-    if (!nuevas.length) return;
-    const vacia = colaRef.current.length === 0 || posRef.current < 0;
-    const c = [...colaRef.current, ...nuevas];
+    const ya = new Set(colaRef.current.map(c => `${c.clave}:${c.idx}`));
+    const nuevas = lista.flatMap(pistasDe).filter(c => !ya.has(`${c.clave}:${c.idx}`));
+    if (nuevas.length) {
+      const c = [...colaRef.current, ...nuevas];
+      colaRef.current = c;
+      setCola(c);
+    }
+    avisa(nuevas.length ? `Añadida${nuevas.length > 1 ? 's' : ''} ${nuevas.length} pista${nuevas.length > 1 ? 's' : ''} a la cola` : 'Ya estaban en la cola');
+    return nuevas.length;
+  };
+  const quitarDeCola = (i) => {
+    const c = colaRef.current.filter((_, j) => j !== i);
     colaRef.current = c;
     setCola(c);
-    if (vacia) setTimeout(() => irA(c.length - nuevas.length), 0);
+    const p = posRef.current;
+    if (i < p) setPos(p - 1);
+    else if (i === p) {
+      // La que sonaba: pasa a la siguiente, que ahora ocupa el mismo indice.
+      if (i < c.length) { reanudarRef.current = { t: 0, play: !audioRef.current?.paused }; setPos(-1); setTimeout(() => setPos(i), 0); }
+      else setPos(-1);
+    }
+    if (!c.length) setVerCola(false);
   };
+  const vaciarCola = () => { colaRef.current = []; setCola([]); setPos(-1); setVerCola(false); setTodoAnadido(null); };
 
   const onError = async () => {
     const cur = colaRef.current[posRef.current]; if (!cur) return;
@@ -9942,7 +9986,8 @@ function ListenInbox() {
   };
 
   const toggle = () => {
-    const a = audioRef.current; if (!a || !srcActual) return;
+    const a = audioRef.current; if (!a) return;
+    if (!srcActual) { if (colaRef.current.length) irA(0); return; }
     if (a.paused) a.play().catch(() => {}); else a.pause();
   };
   const buscar = (e) => {
@@ -9971,15 +10016,17 @@ function ListenInbox() {
   const filtro = LISTEN_VISTAS.find(v => v[0] === vista)[2];
   const visibles = (items || []).filter(filtro);
   const conAudio = visibles.filter(it => it.tracks?.length);
+  const pistasVisibles = conAudio.reduce((n, it) => n + it.tracks.length, 0);
+  const todoVisibleEnCola = conAudio.length > 0 && conAudio.every(todoEnCola);
   const btn = { background: 'none', border: `1px solid ${S.border}`, color: S.muted, cursor: 'pointer', fontSize: 8, padding: '2px 7px', borderRadius: 2, fontFamily: 'inherit', flexShrink: 0, whiteSpace: 'nowrap' };
   const btnOn = { ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 };
 
   return (
     <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!items}>
       <summary style={{ cursor: 'pointer', padding: '8px 14px', fontSize: 9, color: S.muted, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }}>
-        🎧 Bandeja de escucha {items ? `· ${(items || []).filter(LISTEN_VISTAS[0][2]).length} por decidir` : ''}
+        🎧 Bandeja de escucha {items ? `· ${items.filter(LISTEN_VISTAS[0][2]).length} por decidir` : ''}
       </summary>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div style={{ padding: cola.length ? '0 14px 76px' : '0 14px 14px' }}>
         <audio ref={audioRef} preload="metadata"
           onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
           onPlaying={() => { reintentoRef.current = ''; }}
@@ -10003,7 +10050,9 @@ function ListenInbox() {
               <button key={k} onClick={() => setVista(k)} style={vista === k ? btnOn : btn}>{label} ({items.filter(f).length})</button>
             ))}
             <span style={{ flex: 1 }} />
-            {conAudio.length > 0 && <button onClick={() => aCola(conAudio)} style={btn}>+ todo a la cola ({conAudio.length})</button>}
+            {conAudio.length > 0 && (todoVisibleEnCola
+              ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ {todoAnadido?.vista === vista ? todoAnadido.n : pistasVisibles} en cola</span>
+              : <button onClick={() => setTodoAnadido({ vista, n: aCola(conAudio) })} style={btn}>+ todo a la cola ({pistasVisibles} pistas)</button>)}
             <button onClick={() => cargar()} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
           </div>
           {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
@@ -10027,7 +10076,7 @@ function ListenInbox() {
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
                   </div>
                   <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
-                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '', it.dealerPrice != null ? `${it.dealerPrice.toFixed(2)} €` : '', it.distribuidor].filter(Boolean).join(' · ')}
+                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '', it.dealerPrice != null ? `coste dealer ${it.dealerPrice.toFixed(2)} €` : '', it.distribuidor].filter(Boolean).join(' · ')}
                   </div>
                   {it.estado !== 'listo' && <div style={{ fontSize: 9, color: est.col, marginTop: 3 }}>
                     {it.detalle || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
@@ -10040,11 +10089,13 @@ function ListenInbox() {
                         style={{ ...btn, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', color: esta ? '#080808' : S.text, background: esta ? S.accent : 'none' }}>
                         {esta && playing ? '♪ ' : '▶ '}{t.name}</button>;
                     })}
-                    <button onClick={() => aCola([it])} style={btn}>+ cola</button>
+                    {todoEnCola(it)
+                      ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ en cola</span>
+                      : <button onClick={() => aCola([it])} style={btn}>+ cola</button>}
                   </div>}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
-                    {it.decision === 'pendiente' && <span style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
+                    {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
                     {rechazando === it.clave ? (<>
                       <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'temporal')} title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={btn}>No, por ahora</button>
@@ -10062,21 +10113,48 @@ function ListenInbox() {
             );
           })}
 
-          {actualTrack && (
-            <div style={{ position: 'sticky', bottom: 0, marginTop: 10, padding: '8px 10px', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
-              {actualItem.cover?.url && <img src={actualItem.cover.url} alt="" style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 2 }} />}
-              <button onClick={() => irA(pos - 1)} disabled={pos <= 0} style={btn}>⏮</button>
-              <button onClick={toggle} style={{ width: 30, height: 30, borderRadius: '50%', background: S.accent, border: 'none', cursor: 'pointer', fontSize: 11, color: '#080808' }}>{playing ? '⏸' : '▶'}</button>
-              <button onClick={siguiente} disabled={pos >= cola.length - 1} style={btn}>⏭</button>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 10, color: S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  <span style={{ color: S.accent, fontFamily: 'monospace' }}>{actualItem.catno}</span> · {actualTrack.name}
+          {cola.length > 0 && (
+            <div style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 12, width: 'min(900px, calc(100vw - 32px))', zIndex: 50 }}>
+              {toast && <div style={{ marginBottom: 6, padding: '5px 10px', background: S.accent, color: '#080808', fontSize: 10, fontWeight: 700, borderRadius: 3, width: 'fit-content' }}>{toast}</div>}
+              {verCola && (
+                <div style={{ marginBottom: 6, maxHeight: 260, overflowY: 'auto', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, padding: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 9, color: S.muted, letterSpacing: 1, textTransform: 'uppercase', flex: 1 }}>Cola · {cola.length} pistas</span>
+                    <button onClick={vaciarCola} style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>vaciar cola</button>
+                  </div>
+                  {cola.map((c, i) => {
+                    const it = porClave.get(c.clave);
+                    const t = it?.tracks?.[c.idx];
+                    return (
+                      <div key={`${c.clave}:${c.idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderTop: i ? `1px solid ${S.border}` : 'none' }}>
+                        <span style={{ fontSize: 9, color: i === pos ? S.accent : S.muted, width: 18, textAlign: 'right' }}>{i === pos ? '♪' : i + 1}</span>
+                        <button onClick={() => irA(i)} style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', fontSize: 10, color: i === pos ? S.accent : S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', padding: 0 }}>
+                          <span style={{ fontFamily: 'monospace' }}>{it?.catno || c.clave}</span> · {t?.name || `pista ${c.idx + 1}`}
+                        </button>
+                        <button onClick={() => quitarDeCola(i)} title="Quitar de la cola" style={btn}>✕</button>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div onClick={buscar} style={{ height: 6, background: S.border, borderRadius: 3, marginTop: 4, cursor: 'pointer', overflow: 'hidden' }}>
-                  <div style={{ width: `${tiempo.d ? (tiempo.t / tiempo.d) * 100 : 0}%`, height: '100%', background: S.accent }} />
+              )}
+              <div style={{ padding: '8px 10px', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+                {actualItem?.cover?.url && <img src={actualItem.cover.url} alt="" style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 2 }} />}
+                <button onClick={() => irA(pos - 1)} disabled={pos <= 0} style={btn}>⏮</button>
+                <button onClick={toggle} style={{ width: 30, height: 30, borderRadius: '50%', background: S.accent, border: 'none', cursor: 'pointer', fontSize: 11, color: '#080808' }}>{playing ? '⏸' : '▶'}</button>
+                <button onClick={siguiente} disabled={pos >= cola.length - 1} style={btn}>⏭</button>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, color: S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {actualTrack
+                      ? <><span style={{ color: S.accent, fontFamily: 'monospace' }}>{actualItem.catno}</span> · {actualTrack.name}</>
+                      : <span style={{ color: S.muted }}>Cola lista — dale a ▶</span>}
+                  </div>
+                  <div onClick={buscar} style={{ height: 6, background: S.border, borderRadius: 3, marginTop: 4, cursor: 'pointer', overflow: 'hidden' }}>
+                    <div style={{ width: `${actualTrack && tiempo.d ? (tiempo.t / tiempo.d) * 100 : 0}%`, height: '100%', background: S.accent }} />
+                  </div>
                 </div>
+                <span style={{ fontSize: 9, color: S.muted, whiteSpace: 'nowrap' }}>{actualTrack ? `${mmss(tiempo.t)} / ${mmss(tiempo.d)}` : ''}</span>
+                <button onClick={() => setVerCola(v => !v)} title="Ver la cola" style={{ ...btn, fontSize: 10, color: verCola ? '#080808' : S.text, background: verCola ? S.accent : 'none' }}>☰ {cola.length}</button>
               </div>
-              <span style={{ fontSize: 9, color: S.muted, whiteSpace: 'nowrap' }}>{mmss(tiempo.t)} / {mmss(tiempo.d)} · {pos + 1}/{cola.length}</span>
             </div>
           )}
         </>)}

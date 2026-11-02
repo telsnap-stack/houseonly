@@ -465,6 +465,13 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
 export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number }> {
   const out = { rechazados: 0, sin_audio: 0 };
   const t = now.getTime();
+  // El bucket es el de prod tambien: solo se borra bajo el prefijo de este
+  // entorno (staging: listen-staging/), diga lo que diga el registro.
+  const pre = prefijo(env);
+  const borra = async (keys: string[]) => {
+    const mias = keys.filter(k => k.startsWith(pre) && !k.includes('..'));
+    if (mias.length) await env.R2.delete(mias);
+  };
   let cursor: string | undefined;
   do {
     const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
@@ -476,12 +483,11 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
       const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
       if (!r) continue;
       if (rechazadoViejo) {
-        const keys = [...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : [])];
-        if (keys.length) await env.R2.delete(keys);
+        await borra([...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : [])]);
         await env.SYNC_STATE.delete(k.name);
         out.rechazados++;
       } else {
-        if (r.tracks.length) await env.R2.delete(r.tracks.map(x => x.key));
+        await borra(r.tracks.map(x => x.key));
         r.bytes -= r.tracks.reduce((s, x) => s + x.bytes, 0);
         r.tracks = [];
         r.audio_limpiado_at = now.toISOString();
