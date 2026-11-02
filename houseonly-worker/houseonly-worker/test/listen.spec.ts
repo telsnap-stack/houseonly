@@ -88,6 +88,8 @@ describe("listen: ingesta", () => {
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 1, quedan: false });
 		const d = await rel("TST001");
 		expect(d).toMatchObject({ catno: "TST001", distribuidor: "RD", estado: "listo", release: "2026-12-24", cover: { key: "listen/TST001/cover.jpg", from: "zip" } });
+		// Libras del email y el cambio unico (RD_GBP_EUR) con que se paso a coste dealer.
+		expect(d).toMatchObject({ gbp: 8.99, fx: 1.17, dealerPrice: 10.52 });
 		expect(d.tracks.map((t: any) => [t.name, t.key])).toEqual([
 			["A1 - Uno", "listen/TST001/01-A1-Uno.mp3"], ["B1 - Dos", "listen/TST001/02-B1-Dos.mp3"],
 		]);
@@ -205,7 +207,7 @@ describe("listen: URLs firmadas", () => {
 		const req = new Request(`${ORIGIN}/?action=listen-list`);
 		expect((await handleListenList(req, E, false)).status).toBe(401);
 		const body: any = await (await handleListenList(req, E, true)).json();
-		expect(body.count).toBe(1);
+		expect(body).toMatchObject({ vista: "por_decidir", count: 1, cursor: null });
 		expect(body.items[0].tracks[0].url).toMatch(/^https:\/\/w\.example\/\?action=listen-file&k=listen%2FTST001%2F01-a\.mp3&exp=\d+&sig=[0-9a-f]{64}$/);
 		const audio = await pide(body.items[0].tracks[0].url);
 		expect(audio.status).toBe(200);
@@ -254,7 +256,7 @@ describe("listen: decisiones y limpieza", () => {
 		await pon(base("NON031", { ingested_at: hace(31) }));
 		await pon(base("NON029", { ingested_at: hace(29) }));
 		await pon(base("PRE040", { decision: "preorder", decided_at: hace(35), ingested_at: hace(40) }));
-		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2 });
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2, fuera: 0 });
 		expect(await rel("REJ007")).toBeNull();
 		expect((await E.R2.list({ prefix: "listen/REJ007/" })).objects).toHaveLength(0);
 		expect((await rel("REJ006")).tracks).toHaveLength(1);
@@ -264,8 +266,16 @@ describe("listen: decisiones y limpieza", () => {
 		}
 		expect((await rel("NON029")).tracks).toHaveLength(1);
 		expect((await rel("PRE040")).tracks).toHaveLength(1);
-		// Ya sin audio: la siguiente pasada no lo vuelve a tocar.
-		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0 });
+		// Ya sin audio: la siguiente pasada no lo vuelve a tocar...
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0, fuera: 0 });
+		// ...hasta 30 dias despues de borrarle el audio: entonces sale de la bandeja.
+		const luego = new Date(NOW.getTime() + 30 * 86400000);
+		expect((await limpiaBandeja(E, luego)).fuera).toBe(2);
+		for (const c of ["PEN030", "NON031"]) {
+			expect(await rel(c)).toBeNull();
+			expect((await E.R2.list({ prefix: `listen/${c}/` })).objects).toHaveLength(0);
+		}
+		expect(await rel("PRE040")).not.toBeNull();
 	});
 
 	it("con prefijo de staging no borra nada fuera de listen-staging/ aunque el registro lo apunte", async () => {
@@ -273,8 +283,32 @@ describe("listen: decisiones y limpieza", () => {
 		await pon(base("PRD001", { decision: "rechazado", decided_at: hace(8) }));   // claves en listen/ (prod)
 		E.LISTEN_R2_PREFIX = "listen-staging/";
 		try {
-			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0 });
+			expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 0, fuera: 0 });
 			expect((await E.R2.list({ prefix: "listen/PRD001/" })).objects).toHaveLength(2);
 		} finally { delete E.LISTEN_R2_PREFIX; }
+	});
+
+	it("listen-list pagina por vista con cursor, da los recuentos y sirve claves sueltas", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		for (let i = 1; i <= 5; i++) await pon(base(`PAG00${i}`, { ingested_at: hace(i) }));
+		await pon(base("ELE001", { decision: "preorder", decided_at: hace(1) }));
+		await pon(base("PEN001", { decision: "pendiente", decided_at: hace(1) }));
+		const pide = async (qs: string) => (await handleListenList(new Request(`https://w/?action=listen-list&${qs}`), E, true)).json() as any;
+
+		const p1 = await pide("vista=por_decidir&limit=2");
+		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0 });
+		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
+		expect(p1).toMatchObject({ count: 5, cursor: "2" });
+		const p3 = await pide("vista=por_decidir&limit=2&cursor=4");
+		expect(p3.items.map((x: any) => x.clave)).toEqual(["PAG005"]);
+		expect(p3.cursor).toBeNull();
+
+		expect((await pide("vista=elegidos")).items.map((x: any) => x.clave)).toEqual(["ELE001"]);
+		expect((await pide("vista=pendientes")).items.map((x: any) => x.clave)).toEqual(["PEN001"]);
+		expect((await handleListenList(new Request("https://w/?action=listen-list&vista=otra"), E, true)).status).toBe(400);
+
+		const sueltas = await pide("claves=PAG003,ele-001,NOPE99");
+		expect(sueltas.items.map((x: any) => x.clave).sort()).toEqual(["ELE001", "PAG003"]);
+		expect(sueltas.items[0].tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
 	});
 });
