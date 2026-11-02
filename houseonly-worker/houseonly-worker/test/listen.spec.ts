@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
-	ZIP_MAX_BYTES, dropboxDescarga,
+	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
 } from "../src/lib/listen";
 
 const E = env as any;
@@ -123,6 +123,47 @@ describe("listen: ingesta", () => {
 		expect((await E.R2.list({ prefix: "listen/BIG001/" })).objects).toHaveLength(0);
 	});
 
+	// MYD015: sin "Download Zip", el Dropbox colgado del nombre de la primera pista.
+	const sinBoton = (cat: string, link = "https://us.list-manage.com/track/click?u=pista") =>
+		rdEmail(cat).replace(/<p>A1\. Uno <a[^>]*>Download Zip<\/a><\/p>/, `<p><a href="${link}">A1.&nbsp;Uno</a></p><p>A2. Dos</p><p>B1. Tres</p>`);
+
+	it("enlaces y pistas del email; que cuenta como el promopack", () => {
+		const h = sinBoton("PIS001");
+		expect(enlacesDePista(h)).toEqual(["https://us.list-manage.com/track/click?u=pista"]);
+		expect(cuentaPistas(h)).toBe(3);
+		expect(esElPromopack("PIS001", "PIS001.zip", [], 0, 3)).toBe(true);
+		expect(esElPromopack("PIS001", "", [{ name: "PIS001_front.jpg" }], 1, 3)).toBe(true);
+		expect(esElPromopack("PIS001", "pack.zip", [], 3, 3)).toBe(true);
+		expect(esElPromopack("PIS001", "pack.zip", [], 1, 3)).toBe(false);
+	});
+
+	it("sin Download Zip: el Dropbox de la pista si baja el promopack del disco", async () => {
+		const pista = "https://www.dropbox.com/scl/fo/pista/X?rlkey=k&dl=0";
+		redes(zipDe({}), {
+			"https://us.list-manage.com/track/click?u=pista": () => new Response(null, { status: 302, headers: { location: pista } }),
+			"https://www.dropbox.com/scl/fo/pista/": () => new Response(zipDe({ "A1 - Uno.mp3": 10, "A2 - Dos.mp3": 10, "B1 - Tres.mp3": 10 }),
+				{ headers: { "content-type": "application/zip", "content-disposition": "attachment; filename=\"PIS001.zip\"" } }),
+		});
+		await archiva("RD__X---Y-PIS001__2026-11-01.html", sinBoton("PIS001"));
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, por_estado: { listo: 1 } });
+		expect(await rel("PIS001")).toMatchObject({ estado: "listo", detalle: expect.stringContaining("enlace de la pista") });
+		expect((await rel("PIS001")).tracks).toHaveLength(3);
+	});
+
+	it("sin Download Zip: si la pista baja otra cosa, o es un fichero suelto, descarga manual", async () => {
+		redes(zipDe({}), {
+			"https://us.list-manage.com/track/click?u=otra": () => new Response(null, { status: 302, headers: { location: "https://www.dropbox.com/scl/fo/otra/X?rlkey=k&dl=0" } }),
+			"https://www.dropbox.com/scl/fo/otra/": () => new Response(zipDe({ "A1 - Uno.mp3": 10 }), { headers: { "content-type": "application/zip" } }),
+			"https://us.list-manage.com/track/click?u=suelto": () => new Response(null, { status: 302, headers: { location: "https://www.dropbox.com/scl/fi/uno/A1.mp3?rlkey=k&dl=0" } }),
+		});
+		await archiva("RD__X---Y-OTR001__2026-11-01.html", sinBoton("OTR001", "https://us.list-manage.com/track/click?u=otra"));
+		await archiva("RD__X---Y-SUE001__2026-11-01.html", sinBoton("SUE001", "https://us.list-manage.com/track/click?u=suelto"));
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 2, por_estado: { descarga_manual: 2 } });
+		expect(await rel("OTR001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fo/otra/X?rlkey=k&dl=1", tracks: [] });
+		expect(await rel("SUE001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fi/uno/A1.mp3?rlkey=k&dl=0" });
+		expect((await E.R2.list({ prefix: "listen/OTR001/" })).objects).toHaveLength(0);
+	});
+
 	it("sin modo live no hace nada", async () => {
 		await E.SYNC_STATE.delete("meta:listen_mode");
 		const f = redes(zipDe({ "a.mp3": 10 }));
@@ -169,5 +210,61 @@ describe("listen: URLs firmadas", () => {
 		const audio = await pide(body.items[0].tracks[0].url);
 		expect(audio.status).toBe(200);
 		await audio.arrayBuffer();
+	});
+});
+
+describe("listen: decisiones y limpieza", () => {
+	const base = (clave: string, over: any = {}) => ({
+		clave, catno: clave, distribuidor: "RD", artist: "A", title: "T", estado: "listo",
+		tracks: [{ name: "a", key: `listen/${clave}/01-a.mp3`, bytes: 10 }], cover: { key: `listen/${clave}/cover.jpg`, from: "zip" },
+		bytes: 15, ingested_at: "2026-11-01T10:00:00Z", ...over,
+	});
+	const pon = async (r: any) => {
+		await E.R2.put(r.tracks[0].key, new Uint8Array(10));
+		await E.R2.put(r.cover.key, new Uint8Array(5));
+		await E.SYNC_STATE.put(`listen:rel:${r.clave}`, JSON.stringify(r),
+			{ metadata: { c: r.catno, e: r.estado, n: r.tracks.length, at: r.ingested_at, x: r.decision, dt: r.decided_at } });
+	};
+	const decide = (body: any, ok = true) => handleListenDecide(new Request("https://w/?action=listen-decide", { method: "POST", body: JSON.stringify(body) }), E, ok, NOW.getTime());
+
+	it("rechazar escribe el filtro del 20-10; deshacer lo borra; pre-order y pendiente solo marcan", async () => {
+		await pon(base("DEC001"));
+		expect((await decide({ clave: "DEC001", decision: "rechazado" }, false)).status).toBe(401);
+		expect((await decide({ clave: "DEC001", decision: "rechazado", tipo: "quizas" })).status).toBe(400);
+		expect((await decide({ clave: "NOPE01", decision: "pendiente" })).status).toBe(404);
+
+		expect((await decide({ clave: "DEC001", decision: "rechazado", tipo: "temporal" })).status).toBe(200);
+		expect(JSON.parse(await E.SYNC_STATE.get("preorder:rejected:DEC001"))).toMatchObject({ catno: "DEC001", tipo: "temporal", distribuidor: "rd" });
+		expect(await rel("DEC001")).toMatchObject({ decision: "rechazado", rechazo: "temporal", decided_at: NOW.toISOString() });
+
+		await decide({ clave: "DEC001", decision: null });
+		expect(await E.SYNC_STATE.get("preorder:rejected:DEC001")).toBeNull();
+		expect((await rel("DEC001")).decision).toBeUndefined();
+
+		await decide({ clave: "DEC001", decision: "preorder" });
+		expect((await rel("DEC001")).decision).toBe("preorder");
+		expect(await E.SYNC_STATE.get("preorder:rejected:DEC001")).toBeNull();
+	});
+
+	it("rechazado de 7 dias fuera (KV y R2); pendiente o sin decidir de 30 dias pierde el audio; pre-order intacto", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		await pon(base("REJ007", { decision: "rechazado", decided_at: hace(7) }));
+		await pon(base("REJ006", { decision: "rechazado", decided_at: hace(6) }));
+		await pon(base("PEN030", { decision: "pendiente", decided_at: hace(1), ingested_at: hace(30) }));
+		await pon(base("NON031", { ingested_at: hace(31) }));
+		await pon(base("NON029", { ingested_at: hace(29) }));
+		await pon(base("PRE040", { decision: "preorder", decided_at: hace(35), ingested_at: hace(40) }));
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 1, sin_audio: 2 });
+		expect(await rel("REJ007")).toBeNull();
+		expect((await E.R2.list({ prefix: "listen/REJ007/" })).objects).toHaveLength(0);
+		expect((await rel("REJ006")).tracks).toHaveLength(1);
+		for (const c of ["PEN030", "NON031"]) {
+			expect(await rel(c)).toMatchObject({ tracks: [], bytes: 5, audio_limpiado_at: NOW.toISOString() });
+			expect((await E.R2.list({ prefix: `listen/${c}/` })).objects.map((o: any) => o.key)).toEqual([`listen/${c}/cover.jpg`]);
+		}
+		expect((await rel("NON029")).tracks).toHaveLength(1);
+		expect((await rel("PRE040")).tracks).toHaveLength(1);
+		// Ya sin audio: la siguiente pasada no lo vuelve a tocar.
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 0 });
 	});
 });

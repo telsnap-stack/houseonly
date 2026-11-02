@@ -913,7 +913,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1915,11 +1915,15 @@ export default {
     //   GET  ?action=listen-list   Bearer  discos + URLs firmadas (1 h)
     //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano
     //   GET  ?action=listen-file   firma   el MP3/portada, con Range
+    //   POST ?action=listen-decide Bearer  preorder | pendiente | rechazado | null
     if (action === 'listen-list' && request.method === 'GET') {
       return await handleListenList(request, env, bearerAdminValido(request, env));
     }
     if (action === 'listen-run' && request.method === 'POST') {
       return await handleListenRun(env, bearerAdminValido(request, env));
+    }
+    if (action === 'listen-decide' && request.method === 'POST') {
+      return await handleListenDecide(request, env, bearerAdminValido(request, env));
     }
     if (action === 'listen-file' && (request.method === 'GET' || request.method === 'HEAD')) {
       return await handleListenFile(request, env);
