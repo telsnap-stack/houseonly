@@ -15,6 +15,12 @@
     {
       "binding": "R2",
       "bucket_name": "houseonly-audio"
+    },
+    // Audio de la bandeja de escucha: bucket SIN acceso publico (ni r2.dev ni
+    // dominio). houseonly-audio se sirve entero por r2.dev (2026-11-02).
+    {
+      "binding": "LISTEN_R2",
+      "bucket_name": "houseonly-listen"
     }
   ],
   "kv_namespaces": [
@@ -79,6 +85,10 @@
         {
           "binding": "R2",
           "bucket_name": "houseonly-audio"
+        },
+        {
+          "binding": "LISTEN_R2",
+          "bucket_name": "houseonly-listen"
         }
       ],
       "kv_namespaces": [
@@ -120,7 +130,7 @@
       // por lo que explica el comentario de arriba: competia por el mismo cupo
       // de 60/min que necesita produccion, y en dry no creaba nada.
       // + la bandeja de escucha (:41), que no toca Discogs. Su audio va a
-      // listen-staging/ del mismo bucket para no pisar el de produccion.
+      // listen-staging/ de houseonly-listen (compartido con prod) para no pisar listen/.
       "triggers": {
         "crons": ["0 6 * * *", "41 * * * *"]
       },

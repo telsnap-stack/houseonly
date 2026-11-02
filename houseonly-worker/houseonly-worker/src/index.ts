@@ -1,6 +1,7 @@
 import { configureDiscogsProxy } from './lib/discogs';
 interface Env {
   R2: R2Bucket;
+  LISTEN_R2: R2Bucket;   // houseonly-listen: audio privado de la bandeja de escucha
   WISHLIST: KVNamespace;
   // SYNC_STATE: KV namespace for Discogs↔Shopify sync metadata.
   // Used by Fase 3 sync handlers (bootstrap, status, webhook, polling).
@@ -15,7 +16,7 @@ interface Env {
   // los lee, con el parser compartido con App.jsx (lib/distributor-email.mjs).
   EMAILS: KVNamespace;
   // Prefijo de R2 del audio de la bandeja de escucha. Sin definir = listen/
-  // (prod); staging usa listen-staging/ porque el bucket es el mismo.
+  // (prod); staging usa listen-staging/ porque el bucket (houseonly-listen) es el mismo.
   LISTEN_R2_PREFIX?: string;
   // STOCK_LEDGER: registro de ?action=stock-add, compartido con staging.
   STOCK_LEDGER: KVNamespace;
