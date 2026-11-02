@@ -26,10 +26,13 @@
  *                  mismo preorder:rejected del filtro del 20-10) | null (deshacer)
  *   Limpieza, en cada pasada: un rechazado sale de la bandeja (KV y R2) a los 7
  *   dias de rechazarlo; un pendiente o sin decidir pierde el audio a los 30 dias
- *   de entrar, pero sigue en la bandeja. Lo elegido para pre-order no se toca.
+ *   de entrar, y sale de la bandeja 30 dias despues de eso. Lo elegido para
+ *   pre-order no se toca.
+ *   listen-list pagina por vista (por_decidir | pendientes | elegidos |
+ *   rechazados) con limit y cursor; la fase 3 leera vista=elegidos.
  */
 import { unzipSync } from 'fflate';
-import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER } from './distributor-email.mjs';
+import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
 
 export interface ListenEnv {
@@ -92,7 +95,9 @@ export interface ListenRelease {
   label: string;
   format: string;
   release: string;               // yyyy-mm-dd o ''
-  dealerPrice: number | null;    // EUR, como en el tab
+  dealerPrice: number | null;    // EUR, como en el tab (coste dealer)
+  gbp?: number | null;           // RD: precio del email en libras
+  fx?: number;                   // RD: cambio con el que se paso a EUR
   email: string;                 // fichero archivado del que sale
   email_date: string;
   estado: ListenEstado;
@@ -115,7 +120,7 @@ export interface ListenRunResult {
   nuevos: number;
   por_estado: Partial<Record<ListenEstado, number>>;
   saltados: { duplicado: number; rechazado: number; no_preorder: number };
-  limpiados: { rechazados: number; sin_audio: number };
+  limpiados: { rechazados: number; sin_audio: number; fuera: number };
   quedan: boolean;
   finished_at: string;
 }
@@ -129,7 +134,7 @@ function metaDe(r: ListenRelease) {
     c: r.catno, d: r.distribuidor, e: r.estado,
     a: r.artist.slice(0, 60), t: r.title.slice(0, 60), r: r.release,
     n: r.tracks.length, at: r.ingested_at,
-    x: r.decision, dt: r.decided_at,
+    x: r.decision, dt: r.decided_at, al: r.audio_limpiado_at,
   };
 }
 
@@ -309,6 +314,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     clave, catno: row.catno, distribuidor: email.prefix,
     artist: row.artist || '', title: row.title || '', label: row.label || '', format: row.format || '',
     release: row.release || '', dealerPrice: row.dealerPrice ?? null,
+    ...(row._gbp != null ? { gbp: row._gbp, fx: RD_GBP_EUR } : {}),
     email: email.name, email_date: email.date,
     estado: 'listo', tracks: [], bytes: 0, ingested_at: ahora,
   };
@@ -408,7 +414,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
     mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
-    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0 }, quedan: false, finished_at: '',
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0 }, quedan: false, finished_at: '',
   };
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
@@ -421,7 +427,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
     const html = await env.EMAILS.get(`msg:${email.name}`);
     if (!html) continue;
     const [y, m, d] = email.date.split('-').map(Number);
-    const rows = parseDistributorEmail(html, { emailDate: new Date(y, m - 1, d) });
+    const rows = parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, m - 1, d) });
 
     let completo = true;
     const vistos = new Set<string>();
@@ -460,10 +466,11 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
 /**
  * Rechazado hace 7 dias o mas: fuera de la bandeja (KV y R2); el rechazo sigue
  * en preorder:rejected. Pendiente o sin decidir con 30 dias o mas desde que
- * entro: se borra el audio y el disco se queda, marcado. Pre-order: intacto.
+ * entro: se borra el audio y el disco se queda, marcado. 30 dias despues de
+ * borrarle el audio, fuera tambien (KV y la portada). Pre-order: intacto.
  */
-export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number }> {
-  const out = { rechazados: 0, sin_audio: 0 };
+export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechazados: number; sin_audio: number; fuera: number }> {
+  const out = { rechazados: 0, sin_audio: 0, fuera: 0 };
   const t = now.getTime();
   // El bucket es el de prod tambien: solo se borra bajo el prefijo de este
   // entorno (staging: listen-staging/), diga lo que diga el registro.
@@ -478,14 +485,16 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
     for (const k of l.keys) {
       const m = k.metadata || {};
       const rechazadoViejo = m.x === 'rechazado' && t - Date.parse(m.dt) >= DIAS_RECHAZADO * DIA_MS;
-      const sinDecidirViejo = (!m.x || m.x === 'pendiente') && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
-      if (!rechazadoViejo && !sinDecidirViejo) continue;
+      const noElegido = !m.x || m.x === 'pendiente';
+      const sinDecidirViejo = noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
+      const sinAudioViejo = noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS;
+      if (!rechazadoViejo && !sinDecidirViejo && !sinAudioViejo) continue;
       const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
       if (!r) continue;
-      if (rechazadoViejo) {
+      if (rechazadoViejo || sinAudioViejo) {
         await borra([...r.tracks.map(x => x.key), ...(r.cover ? [r.cover.key] : [])]);
         await env.SYNC_STATE.delete(k.name);
-        out.rechazados++;
+        if (rechazadoViejo) out.rechazados++; else out.fuera++;
       } else {
         await borra(r.tracks.map(x => x.key));
         r.bytes -= r.tracks.reduce((s, x) => s + x.bytes, 0);
@@ -589,33 +598,68 @@ export async function handleListenFile(request: Request, env: ListenEnv): Promis
 
 // ── lista para el admin ────────────────────────────────────────
 
-/** GET ?action=listen-list (Bearer) — los discos con sus URLs firmadas. */
+// Vistas de la bandeja, sobre la metadata (x = decision), sin leer cada disco.
+export const VISTAS: Record<string, (x?: string) => boolean> = {
+  por_decidir: x => !x,
+  pendientes: x => x === 'pendiente',
+  elegidos: x => x === 'preorder',
+  rechazados: x => x === 'rechazado',
+};
+const LIMIT_DEF = 30;
+const LIMIT_MAX = 100;
+
+async function conUrls(env: ListenEnv, origin: string, r: ListenRelease) {
+  return {
+    ...r,
+    tracks: await Promise.all(r.tracks.map(async t => ({ name: t.name, bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
+    cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
+  };
+}
+
+/**
+ * GET ?action=listen-list (Bearer) — una pagina de una vista, con URLs firmadas.
+ *   vista   por_decidir (defecto) | pendientes | elegidos | rechazados
+ *   limit   1..100 (defecto 30)    cursor  el `cursor` de la respuesta anterior
+ *   claves  CLAVE,CLAVE... (max 100): esos discos, de cualquier vista; la
+ *           bandeja lo usa para renovar las URLs de lo que tiene en la cola
+ * Responde {items, count (de la vista), counts (de todas), cursor|null}.
+ * La lista y los recuentos salen de la metadata (un list por 1000 discos);
+ * solo se leen enteros los de la pagina.
+ */
 export async function handleListenList(request: Request, env: ListenEnv, autorizado: boolean): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
-  const origin = new URL(request.url).origin;
-  const claves: string[] = [];
+  const u = new URL(request.url);
+  const origin = u.origin;
+  const lastRun = JSON.parse((await env.SYNC_STATE.get(LAST_RUN_KEY)) || 'null');
+
+  const pedidas = (u.searchParams.get('claves') || '').split(',').map(c => claveCatno(c)).filter(Boolean).slice(0, LIMIT_MAX);
+  if (pedidas.length) {
+    const recs = await Promise.all(pedidas.map(c => env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + c, 'json')));
+    const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
+    return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, items, cursor: null });
+  }
+
+  const vista = u.searchParams.get('vista') || 'por_decidir';
+  if (!VISTAS[vista]) return json({ error: `vista must be ${Object.keys(VISTAS).join(', ')}` }, 400);
+  const limit = Math.min(LIMIT_MAX, Math.max(1, Number(u.searchParams.get('limit')) || LIMIT_DEF));
+  const desde = Math.max(0, Number(u.searchParams.get('cursor')) || 0);
+
+  const todos: Array<{ name: string; m: any }> = [];
   let cursor: string | undefined;
   do {
     const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
-    for (const k of l.keys) claves.push(k.name);
+    for (const k of l.keys) todos.push({ name: k.name, m: k.metadata || {} });
     cursor = l.list_complete ? undefined : l.cursor;
   } while (cursor);
-
-  const items: any[] = [];
-  for (let i = 0; i < claves.length; i += 20) {
-    const lote = await Promise.all(claves.slice(i, i + 20).map(k => env.SYNC_STATE.get<ListenRelease>(k, 'json')));
-    for (const r of lote) {
-      if (!r) continue;
-      items.push({
-        ...r,
-        tracks: await Promise.all(r.tracks.map(async t => ({ name: t.name, bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
-        cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
-      });
-    }
-  }
-  items.sort((a, b) => b.ingested_at.localeCompare(a.ingested_at) || a.catno.localeCompare(b.catno));
-  const lastRun = JSON.parse((await env.SYNC_STATE.get(LAST_RUN_KEY)) || 'null');
-  return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, items });
+  const counts = Object.fromEntries(Object.entries(VISTAS).map(([v, f]) => [v, todos.filter(k => f(k.m.x)).length]));
+  // Lo mas nuevo primero; el cursor es la posicion en este orden.
+  const deVista = todos.filter(k => VISTAS[vista](k.m.x))
+    .sort((a, b) => String(b.m.at || '').localeCompare(String(a.m.at || '')) || a.name.localeCompare(b.name));
+  const pagina = deVista.slice(desde, desde + limit);
+  const recs = await Promise.all(pagina.map(k => env.SYNC_STATE.get<ListenRelease>(k.name, 'json')));
+  const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
+  const sig = desde + limit < deVista.length ? String(desde + limit) : null;
+  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, items, cursor: sig });
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */

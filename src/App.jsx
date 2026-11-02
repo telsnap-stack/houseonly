@@ -9,7 +9,7 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
+import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
@@ -9809,8 +9809,9 @@ const saveMailState = (s) => {
 // ── BANDEJA DE ESCUCHA (Pre-order, fase 2) ─────────────────────
 // Los promopacks de RD/TV que el worker ya bajo a R2 (lib/listen.ts), con una
 // cola propia: el admin no va dentro de PlayerProvider. Las URLs firmadas
-// caducan en 1 h; si una pista falla por eso (401/403) se pide la lista otra
-// vez y se sigue en la misma pista y el mismo segundo, sin cortar la cola.
+// caducan en 1 h; si una pista falla por eso (401/403) se piden otra vez las
+// de lo que hay en la cola y se sigue en la misma pista y segundo. Cada pestana
+// carga solo su vista, de 30 en 30 (listen-list vista= / cursor).
 // Decisiones: Pre-order solo marca (la carga al tab es la fase 3), Pendiente
 // lo pasa a su pestana (sale de "por decidir"), Rechazar usa el mismo filtro
 // del 20-10 (temporal/definitivo). Los precios son coste dealer, no de venta.
@@ -9822,21 +9823,26 @@ const LISTEN_ESTADO = {
   error:           { txt: 'error',           col: S.danger },
 };
 const LISTEN_VISTAS = [
-  ['bandeja', 'Por decidir', it => !it.decision],
-  ['pendiente', 'Pendientes', it => it.decision === 'pendiente'],
-  ['preorder', 'Elegidos pre-order', it => it.decision === 'preorder'],
-  ['rechazado', 'Rechazados', it => it.decision === 'rechazado'],
+  ['por_decidir', 'Por decidir'],
+  ['pendientes', 'Pendientes'],
+  ['elegidos', 'Elegidos pre-order'],
+  ['rechazados', 'Rechazados'],
 ];
+const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : 'rechazados';
+const LISTEN_PAGINA = 30;
+const coma = n => Number(n).toFixed(2).replace('.', ',');
 const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
 
 function ListenInbox() {
   const [secret, setSecret] = useMailSecret();
-  const [items, setItems] = useState(null);       // null = sin cargar
+  const [cache, setCache] = useState(() => new Map());  // clave -> disco (con _exp), de todas las cargas
+  const [lista, setLista] = useState(null);       // {vista, claves, count, cursor}; null = sin cargar
+  const [counts, setCounts] = useState(null);
   const [lastRun, setLastRun] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [err, setErr] = useState('');
   const [aviso, setAviso] = useState('');
-  const [vista, setVista] = useState('bandeja');
+  const [vista, setVista] = useState('por_decidir');
   const [busy, setBusy] = useState('');           // clave con una decision en vuelo
   const [rechazando, setRechazando] = useState(''); // clave eligiendo temporal/definitivo
   const [cola, setCola] = useState([]);           // [{clave, idx}]
@@ -9848,18 +9854,16 @@ function ListenInbox() {
   const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
   const toastRef = useRef(0);
   const audioRef = useRef(null);
-  const itemsRef = useRef([]);
+  const cacheRef = useRef(new Map());
   const colaRef = useRef([]);
   const posRef = useRef(-1);
-  const expRef = useRef(0);                       // ms en que caducan las URLs actuales
   const reanudarRef = useRef({ t: 0, play: true });
   const ultimoTRef = useRef(0);
   const reintentoRef = useRef('');                // "clave:idx" ya renovada una vez
-  useEffect(() => { itemsRef.current = items || []; }, [items]);
   useEffect(() => { colaRef.current = cola; }, [cola]);
   useEffect(() => { posRef.current = pos; }, [pos]);
 
-  const porClave = useMemo(() => new Map((items || []).map(i => [i.clave, i])), [items]);
+  const porClave = cache;
   const actual = pos >= 0 ? cola[pos] : null;
   const actualItem = actual ? porClave.get(actual.clave) : null;
   const actualTrack = actualItem?.tracks?.[actual.idx] || null;
@@ -9868,27 +9872,57 @@ function ListenInbox() {
   // pulsar la que suena, tambien tienen que recargar.
   const idActual = actual ? `${pos}:${actual.clave}:${actual.idx}` : '';
 
-  // `reanudar`: en que segundo y si suena al cambiar las URLs. Por defecto, donde
-  // va el audio y como esta (una recarga a mano no corta ni arranca nada).
-  const cargar = async (reanudar) => {
+  const pide = async (qs) => {
+    const r = await fetch(`${WORKER_URL}?action=listen-list&${qs}`, { headers: { 'Authorization': `Bearer ${secret}` } });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('Secreto incorrecto.');
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+  const guarda = (its, expiresIn) => {
+    const exp = Date.now() + (expiresIn || 3600) * 1000;
+    const m = new Map(cacheRef.current);
+    for (const it of its) m.set(it.clave, { ...it, _exp: exp });
+    cacheRef.current = m;
+    setCache(m);
+  };
+  // Si al guardar cambia la URL de lo que suena, sigue donde iba y como iba.
+  const mantener = () => { const a = audioRef.current; reanudarRef.current = { t: a?.currentTime || 0, play: a ? !a.paused : false }; };
+
+  // Una pestana: la primera pagina, o la siguiente con `mas`.
+  const cargarVista = async (v, mas = false) => {
     if (!secret) { setErr('Pega el BOOTSTRAP_AUTH_SECRET.'); return false; }
     setCargando(true); setErr('');
-    const a = audioRef.current;
     try {
-      const r = await fetch(`${WORKER_URL}?action=listen-list`, { headers: { 'Authorization': `Bearer ${secret}` } });
-      const d = await r.json().catch(() => ({}));
-      if (r.status === 401) throw new Error('Secreto incorrecto.');
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      reanudarRef.current = reanudar || { t: a?.currentTime || 0, play: a ? !a.paused : false };
-      expRef.current = Date.now() + (d.expires_in || 3600) * 1000;
-      itemsRef.current = d.items || [];
-      setItems(d.items || []);
+      const cur = mas && lista?.vista === v ? lista.cursor : null;
+      const d = await pide(`vista=${v}&limit=${LISTEN_PAGINA}${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
+      mantener();
+      guarda(d.items || [], d.expires_in);
+      setCounts(d.counts || null);
       setLastRun(d.last_run || null);
+      setLista(l => ({ vista: v, claves: [...(cur && l?.vista === v ? l.claves : []), ...(d.items || []).map(x => x.clave)], count: d.count ?? 0, cursor: d.cursor || null }));
       return true;
     } catch (e) {
       setErr(`listen-list: ${e.message}`);
       return false;
     } finally { setCargando(false); }
+  };
+  const cambiaVista = (v) => { setVista(v); setRechazando(''); cargarVista(v); };
+
+  // URLs nuevas para todo lo que hay en la cola (de la pestana que sea).
+  const renovar = async (reanudar) => {
+    const claves = [...new Set(colaRef.current.map(c => c.clave))];
+    try {
+      reanudarRef.current = reanudar;
+      for (let i = 0; i < claves.length; i += 100) {
+        const d = await pide(`claves=${encodeURIComponent(claves.slice(i, i + 100).join(','))}`);
+        guarda(d.items || [], d.expires_in);
+      }
+      return true;
+    } catch (e) {
+      setErr(`listen-list: ${e.message}`);
+      return false;
+    }
   };
 
   // Cambia la pista (o sus URLs tras renovar): carga y, si toca, suena.
@@ -9906,34 +9940,31 @@ function ListenInbox() {
     return () => a.removeEventListener('loadedmetadata', go);
   }, [srcActual, idActual]);
 
-  // A una pista concreta de la cola. Si las URLs estan a punto de caducar, se
-  // renuevan antes de empezar.
+  // A una pista concreta de la cola. Si a sus URLs les queda menos de un
+  // minuto, se renuevan antes de empezar.
   const irA = async (i) => {
     if (i < 0 || i >= colaRef.current.length) { setPos(-1); return; }
-    if (Date.now() > expRef.current - 60_000) await cargar({ t: 0, play: true });
+    const it = cacheRef.current.get(colaRef.current[i].clave);
+    if (!it || Date.now() > it._exp - 60_000) await renovar({ t: 0, play: true });
     reanudarRef.current = { t: 0, play: true };
     setPos(i);
   };
   const siguiente = () => irA(posRef.current + 1);
 
   const pistasDe = it => (it.tracks || []).map((_, idx) => ({ clave: it.clave, idx }));
-  // Pulsar una pista no borra la cola: si ya esta, salta a ella; si no, el disco
-  // entra detras de lo que suena (sin las pistas que ya estuvieran) y empieza ahi.
+  // Pulsar una pista: suena YA. Esa pista y las siguientes del disco pasan justo
+  // detras de lo ya oido (si estaban en la cola, se mueven, no se duplican) y la
+  // cola que hubiera sigue detras, en su orden.
   const escuchar = (it, idx = 0) => {
-    const id = `${it.clave}:${idx}`;
-    let c = colaRef.current;
-    let i = c.findIndex(x => `${x.clave}:${x.idx}` === id);
-    if (i < 0) {
-      const ya = new Set(c.map(x => `${x.clave}:${x.idx}`));
-      const nuevas = pistasDe(it).filter(x => !ya.has(`${x.clave}:${x.idx}`));
-      const at = posRef.current + 1;
-      c = [...c.slice(0, at), ...nuevas, ...c.slice(at)];
-      colaRef.current = c;
-      setCola(c);
-      i = at + nuevas.findIndex(x => x.idx === idx);
-    }
-    if (i === posRef.current) { setPos(-1); }
-    setTimeout(() => irA(i), 0);
+    const mueve = x => x.clave === it.clave && x.idx >= idx;
+    const c = colaRef.current, p = posRef.current;
+    const antes = c.slice(0, p + 1).filter(x => !mueve(x));
+    const despues = c.slice(p + 1).filter(x => !mueve(x));
+    const n = [...antes, ...pistasDe(it).slice(idx), ...despues];
+    colaRef.current = n;
+    setCola(n);
+    setPos(-1);
+    setTimeout(() => irA(antes.length), 0);
   };
   const avisa = (txt) => {
     setToast(txt);
@@ -9943,9 +9974,9 @@ function ListenInbox() {
   const enCola = useMemo(() => new Set(cola.map(c => `${c.clave}:${c.idx}`)), [cola]);
   const todoEnCola = it => (it.tracks || []).length > 0 && it.tracks.every((_, idx) => enCola.has(`${it.clave}:${idx}`));
   // Anade sin repetir; no arranca sola: la barra aparece y se le da a ▶.
-  const aCola = (lista) => {
+  const aCola = (discos) => {
     const ya = new Set(colaRef.current.map(c => `${c.clave}:${c.idx}`));
-    const nuevas = lista.flatMap(pistasDe).filter(c => !ya.has(`${c.clave}:${c.idx}`));
+    const nuevas = discos.flatMap(pistasDe).filter(c => !ya.has(`${c.clave}:${c.idx}`));
     if (nuevas.length) {
       const c = [...colaRef.current, ...nuevas];
       colaRef.current = c;
@@ -9971,15 +10002,15 @@ function ListenInbox() {
 
   const onError = async () => {
     const cur = colaRef.current[posRef.current]; if (!cur) return;
-    const it = itemsRef.current.find(i => i.clave === cur.clave);
+    const it = cacheRef.current.get(cur.clave);
     const tr = it?.tracks?.[cur.idx];
     if (!tr) { siguiente(); return; }
     const id = `${cur.clave}:${cur.idx}`;
     let status = 0;
     try { status = (await fetch(tr.url, { method: 'HEAD' })).status; } catch { /* sin red: status 0 */ }
-    if ((status === 401 || status === 403 || Date.now() > expRef.current) && reintentoRef.current !== id) {
+    if ((status === 401 || status === 403 || Date.now() > it._exp) && reintentoRef.current !== id) {
       reintentoRef.current = id;
-      if (await cargar({ t: ultimoTRef.current, play: true })) return;   // el efecto sigue en el mismo punto
+      if (await renovar({ t: ultimoTRef.current, play: true })) return;   // el efecto sigue en el mismo punto
     }
     setAviso(`No se pudo reproducir ${it.catno} · ${tr.name}${status ? ` (HTTP ${status})` : ''}: se salta.`);
     siguiente();
@@ -10005,16 +10036,23 @@ function ListenInbox() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      setItems(xs => xs.map(x => x.clave === it.clave
-        ? { ...x, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined } : x));
+      const nuevo = { ...cacheRef.current.get(it.clave), decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined };
+      const m = new Map(cacheRef.current).set(it.clave, nuevo);
+      cacheRef.current = m;
+      setCache(m);
+      // Cambia de pestana: sale de la lista abierta y se mueven los contadores.
+      const de = vistaDeDecision(it.decision), a = vistaDeDecision(nuevo.decision);
+      if (de !== a) {
+        setCounts(c => c && { ...c, [de]: Math.max(0, (c[de] || 0) - 1), [a]: (c[a] || 0) + 1 });
+        setLista(l => l && l.vista === de ? { ...l, claves: l.claves.filter(c => c !== it.clave), count: Math.max(0, l.count - 1) } : l);
+      }
       setRechazando('');
     } catch (e) {
       setErr(`No se pudo guardar la decisión de ${it.catno}: ${e.message}`);
     } finally { setBusy(''); }
   };
 
-  const filtro = LISTEN_VISTAS.find(v => v[0] === vista)[2];
-  const visibles = (items || []).filter(filtro);
+  const visibles = (lista?.claves || []).map(c => cache.get(c)).filter(Boolean);
   const conAudio = visibles.filter(it => it.tracks?.length);
   const pistasVisibles = conAudio.reduce((n, it) => n + it.tracks.length, 0);
   const todoVisibleEnCola = conAudio.length > 0 && conAudio.every(todoEnCola);
@@ -10022,9 +10060,9 @@ function ListenInbox() {
   const btnOn = { ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 };
 
   return (
-    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!items}>
+    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!lista}>
       <summary style={{ cursor: 'pointer', padding: '8px 14px', fontSize: 9, color: S.muted, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }}>
-        🎧 Bandeja de escucha {items ? `· ${items.filter(LISTEN_VISTAS[0][2]).length} por decidir` : ''}
+        🎧 Bandeja de escucha {counts ? `· ${counts.por_decidir} por decidir` : ''}
       </summary>
       <div style={{ padding: cola.length ? '0 14px 76px' : '0 14px 14px' }}>
         <audio ref={audioRef} preload="metadata"
@@ -10035,30 +10073,30 @@ function ListenInbox() {
         {err && <div style={{ marginBottom: 10, padding: 8, background: '#1a0000', border: `1px solid ${S.danger}44`, borderRadius: 2, fontSize: 10, color: S.danger }}>{err}</div>}
         {aviso && <div onClick={() => setAviso('')} style={{ marginBottom: 10, padding: 8, border: '1px solid #ff880055', borderRadius: 2, fontSize: 10, color: '#ff8800', cursor: 'pointer' }}>{aviso} <span style={{ color: S.muted }}>(cerrar)</span></div>}
 
-        {items === null ? (
+        {lista === null ? (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargar(); }}
+            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargarVista(vista); }}
               placeholder="BOOTSTRAP_AUTH_SECRET"
               style={{ flex: '1 1 260px', background: S.surf, border: `1px solid ${S.border}`, color: S.text, borderRadius: 2, padding: '6px 10px', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
-            <button onClick={() => cargar()} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
+            <button onClick={() => cargarVista(vista)} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
               {cargando ? 'Cargando…' : 'Cargar'}
             </button>
           </div>
         ) : (<>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
-            {LISTEN_VISTAS.map(([k, label, f]) => (
-              <button key={k} onClick={() => setVista(k)} style={vista === k ? btnOn : btn}>{label} ({items.filter(f).length})</button>
+            {LISTEN_VISTAS.map(([k, label]) => (
+              <button key={k} onClick={() => cambiaVista(k)} style={vista === k ? btnOn : btn}>{label} ({counts?.[k] ?? 0})</button>
             ))}
             <span style={{ flex: 1 }} />
             {conAudio.length > 0 && (todoVisibleEnCola
               ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ {todoAnadido?.vista === vista ? todoAnadido.n : pistasVisibles} en cola</span>
               : <button onClick={() => setTodoAnadido({ vista, n: aCola(conAudio) })} style={btn}>+ todo a la cola ({pistasVisibles} pistas)</button>)}
-            <button onClick={() => cargar()} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
+            <button onClick={() => cargarVista(vista)} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
           </div>
           {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
             Última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC · {lastRun.nuevos ?? 0} nuevos · modo {lastRun.mode}
           </div>}
-          {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>Nada en esta vista.</div>}
+          {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
 
           {visibles.map(it => {
             const est = LISTEN_ESTADO[it.estado] || LISTEN_ESTADO.error;
@@ -10076,7 +10114,11 @@ function ListenInbox() {
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
                   </div>
                   <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
-                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '', it.dealerPrice != null ? `coste dealer ${it.dealerPrice.toFixed(2)} €` : '', it.distribuidor].filter(Boolean).join(' · ')}
+                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '',
+                      it.dealerPrice == null ? '' : it.gbp != null
+                        ? `£${coma(it.gbp)} × ${String(it.fx ?? RD_GBP_EUR).replace('.', ',')} = ${coma(it.dealerPrice)} € coste dealer`
+                        : `${coma(it.dealerPrice)} € coste dealer`,
+                      it.distribuidor].filter(Boolean).join(' · ')}
                   </div>
                   {it.estado !== 'listo' && <div style={{ fontSize: 9, color: est.col, marginTop: 3 }}>
                     {it.detalle || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
@@ -10112,6 +10154,12 @@ function ListenInbox() {
               </div>
             );
           })}
+
+          {lista.cursor && (
+            <button onClick={() => cargarVista(vista, true)} disabled={cargando} style={{ ...btn, display: 'block', margin: '10px auto 0', fontSize: 9, padding: '5px 14px' }}>
+              {cargando ? 'Cargando…' : `Cargar ${Math.min(LISTEN_PAGINA, lista.count - visibles.length)} más (quedan ${lista.count - visibles.length})`}
+            </button>
+          )}
 
           {cola.length > 0 && (
             <div style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 12, width: 'min(900px, calc(100vw - 32px))', zIndex: 50 }}>
@@ -10177,7 +10225,7 @@ function PreorderImporter() {
   const [margin, setMargin]         = useState(60);
   const [ignoredKeys, setIgnoredKeys] = useState([]);  // manifest fields normalizeRow dropped
   const [rdText, setRdText]         = useState('');    // pasted Rubadub email(s)
-  const [rdFx, setRdFx]             = useState(1.17);  // GBP→EUR, applied in the parser
+  const [rdFx, setRdFx]             = useState(RD_GBP_EUR);  // GBP→EUR, applied in the parser (misma constante que la bandeja)
   const [rdDate, setRdDate]         = useState(() => new Date().toISOString().slice(0,10));
   const [rdPreview, setRdPreview]   = useState(null);  // parsed rows awaiting confirmation
   const [rdError, setRdError]       = useState('');

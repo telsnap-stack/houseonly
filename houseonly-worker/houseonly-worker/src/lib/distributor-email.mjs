@@ -167,7 +167,11 @@ export function descFromProse(before, after, fields) {
 // fx converts the email's GBP to EUR HERE, so the row handed to the Pre-order
 // tab carries dealerPrice in EUR like every other distributor's — the tab's
 // pricing (margin → ceil − 0.01) is untouched and W&S/DBH are unaffected.
-export function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) {
+// Cambio fijo GBP→EUR de Rubadub: UNA constante para el tab (valor por defecto
+// del campo) y para la ingesta de la bandeja de escucha, para que no se
+// desalineen (2026-11-02).
+export const RD_GBP_EUR = 1.17;
+export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Date() } = {}) {
   const text = rdHtmlToText(String(raw || ''));
   const rows = [];
   // Document-level, not per-release. A shipping digest says so ONCE, in the
