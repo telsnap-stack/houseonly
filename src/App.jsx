@@ -10,7 +10,7 @@ import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib
 import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
+import { parseDistributorEmail, parseDbhEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from "./preorder-listen.mjs";
@@ -11103,7 +11103,7 @@ function PreorderImporter() {
       const html = await mailFetchBody(mailSecret, d.email);
       if (!html) { out.errores.push({ clave: d.clave, error: 'no se pudo leer su email' }); continue; }
       let rows = [];
-      try { rows = parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() }); }
+      try { rows = d.distribuidor === 'DBH' ? parseDbhEmail(html) : parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() }); }
       catch (e) { out.errores.push({ clave: d.clave, error: e.message }); continue; }
       const row = rows.find(r => rdKey(r.catno) === d.clave);
       if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
@@ -11337,7 +11337,10 @@ function PreorderImporter() {
         const artist = (ov.artist != null ? ov.artist : deriveArtist(m)).trim();
         const title  = (ov.title  != null ? ov.title  : deriveTitle(m)).trim();
         const label  = m.label;
-        let   genre  = mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
+        // DBH desde la bandeja: su genero tal cual ("Techno - Minimal"), que lo
+        // resuelva genres.mjs; mapGenrePreorder lo convertiria ("Techno - Detroit"
+        // → "Detroit House"). Si no resuelve, la fila queda FALTA GÉNERO.
+        let   genre  = m._listen && m.source === 'dbh' ? (m.genre || '') : mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
         const release = m.release;                          // YYYY-MM-DD (raw street date)
         // Nunca sin año. El escaparate trata la ausencia de etiqueta de año como
         // "agotado de verdad" (isBackorderEligible corta con `if (!y) return
@@ -12256,7 +12259,7 @@ function PreorderImporter() {
           )}
           {filasSinGenero(results, excluded, generoResuelve).length>0&&(
             <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:10,color:'#ff8800',lineHeight:1.5}}>
-              Falta el género de {filasSinGenero(results, excluded, generoResuelve).map(r=>r._catno).join(', ')} (Rubadub no lo trae en el correo). Elígelo en su tarjeta antes de generar el CSV.
+              Falta el género de {filasSinGenero(results, excluded, generoResuelve).map(r=>r._catno).join(', ')} (el correo no lo trae, o el del distribuidor no es de la tienda). Elígelo en su tarjeta antes de generar el CSV.
             </div>
           )}
           {filasBloqueadas(results, excluded).length>0&&(
