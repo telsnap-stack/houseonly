@@ -9819,11 +9819,13 @@ const saveMailState = (s) => {
 // Decisiones: Pre-order solo marca (la carga al tab es la fase 3), Pendiente
 // lo pasa a su pestana (sale de "por decidir"), Rechazar usa el mismo filtro
 // del 20-10 (temporal/definitivo). Los precios son coste dealer, no de venta.
+// Sin audio no es un error mudo: se ve con portada y prosa del correo, se puede
+// decidir, y "subir audio" mete el que se consiga por otra via (listen-upload).
 const LISTEN_ESTADO = {
   listo:           { txt: 'listo',           col: S.accent },
   descarga_manual: { txt: 'descarga manual', col: '#ff8800' },
-  sin_zip:         { txt: 'error',           col: S.danger },
-  sin_audio:       { txt: 'error',           col: S.danger },
+  sin_zip:         { txt: 'sin ZIP',         col: '#ff8800', ayuda: 'el correo no trae promopack' },
+  sin_audio:       { txt: 'sin audio',       col: '#ff8800', ayuda: 'el ZIP no trae MP3' },
   error:           { txt: 'error',           col: S.danger },
 };
 const LISTEN_VISTAS = [
@@ -9864,6 +9866,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   const [motivoCarga, setMotivoCarga] = useState({});  // clave -> {txt, col}: por que no entro (o entro sin audio)
   const [promote, setPromote] = useState(null);       // {activo, pruebas, audio, covers} del worker
   const [cargandoPre, setCargandoPre] = useState(false);
+  const [subiendo, setSubiendo] = useState('');      // clave con una subida de audio en vuelo
   const toastRef = useRef(0);
   const audioRef = useRef(null);
   const cacheRef = useRef(new Map());
@@ -10181,6 +10184,35 @@ function ListenInbox({ onCargar, ultimaCarga }) {
     }
   }, [ultimaCarga]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // "Descarga manual": un ZIP, o MP3 sueltos (se empaquetan aqui), al worker.
+  const subirAudio = async (it, files) => {
+    const fs = [...(files || [])];
+    if (!fs.length) return;
+    setSubiendo(it.clave); setErr('');
+    try {
+      let cuerpo;
+      if (fs.length === 1 && /\.zip$/i.test(fs[0].name)) cuerpo = fs[0];
+      else {
+        const mp3 = fs.filter(f => /\.mp3$/i.test(f.name));
+        if (!mp3.length) throw new Error('elige un ZIP o MP3');
+        const JSZip = await loadJSZip();
+        const z = new JSZip();
+        for (const f of mp3) z.file(f.name, f);
+        cuerpo = await z.generateAsync({ type: 'blob', compression: 'STORE' });
+      }
+      const r = await fetch(`${WORKER_URL}?action=listen-upload&clave=${encodeURIComponent(it.clave)}`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/zip' }, body: cuerpo,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      mantener();
+      guarda([d.item], 3600);
+      avisa(`${it.catno}: ${d.item.tracks.length} pista${d.item.tracks.length === 1 ? '' : 's'} subida${d.item.tracks.length === 1 ? '' : 's'}`);
+    } catch (e) {
+      setErr(`No se pudo subir el audio de ${it.catno}: ${e.message}`);
+    } finally { setSubiendo(''); }
+  };
+
   const visibles = (lista?.claves || []).map(c => cache.get(c)).filter(Boolean);
   const conAudio = visibles.filter(it => it.tracks?.length);
   const pistasVisibles = conAudio.reduce((n, it) => n + it.tracks.length, 0);
@@ -10260,8 +10292,16 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                       it.distribuidor].filter(Boolean).join(' · ')}
                   </div>
                   {it.estado !== 'listo' && <div style={{ fontSize: 9, color: est.col, marginTop: 3 }}>
-                    {it.detalle || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
+                    {it.detalle || est.ayuda || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
                   </div>}
+                  {!it.tracks?.length && it.resumen && <div title={it.resumen} style={{ fontSize: 9, color: S.muted, marginTop: 3, lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{it.resumen}</div>}
+                  {!it.tracks?.length && it.decision !== 'cargado' && (
+                    <label title="Si consigues el audio por otra vía: un ZIP o los MP3. Se guarda en la bandeja como un promopack." style={{ ...btn, display: 'inline-block', marginTop: 6, color: '#ff8800', borderColor: '#ff880066', cursor: subiendo === it.clave ? 'default' : 'pointer' }}>
+                      {subiendo === it.clave ? 'Subiendo…' : '⬆ Descarga manual: subir audio (ZIP o MP3)'}
+                      <input type="file" accept=".zip,.mp3,audio/mpeg,application/zip" multiple disabled={subiendo === it.clave} style={{ display: 'none' }}
+                        onChange={e => { subirAudio(it, e.target.files); e.target.value = ''; }} />
+                    </label>
+                  )}
                   {it.estado === 'listo' && it.detalle && <div style={{ fontSize: 8, color: S.muted, marginTop: 2 }}>{it.detalle}</div>}
                   {it.tracks?.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
                     {it.tracks.map((t, idx) => {
