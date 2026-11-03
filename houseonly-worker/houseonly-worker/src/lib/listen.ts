@@ -77,10 +77,11 @@ const MAIL_PREFIX = 'listen:mail:';
 // propio mecanismo de audio.
 export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision', DBH: 'DBH' };
 
-// Los st= de Dropbox caducan: solo emails recientes. 3 dias cubre el fin de
-// semana, en el que el Apps Script no empuja (medido: los del 30-10 aun bajaban
-// el 02-11, pero no hay que contar con ello).
-const MAX_EMAIL_AGE_DAYS = 3;
+// Solo emails recientes. 7 dias desde el 03-11 (con 3 se quedaban fuera los
+// anuncios que llegan tarde al indice). Ojo: los st= de Dropbox de Rubadub
+// caducan (los del 30-10 aun bajaban el 02-11); si ya no bajan, el disco entra
+// sin audio, con portada y prosa, y se sube a mano.
+const MAX_EMAIL_AGE_DAYS = 7;
 // Discos intentados por pasada. A ~10 MB por promopack y una pasada por hora,
 // sobra para los ~6 anuncios diarios de octubre.
 const PER_RUN = 6;
