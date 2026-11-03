@@ -632,13 +632,18 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
  * Rechazar escribe el mismo preorder:rejected que el tab (filtro del 20-10);
  * salir de rechazado lo borra.
  */
-/** ¿Hay en la tienda un producto con ese handle? null si no se pudo saber. */
-async function productoEnTienda(env: ListenEnv, handle: string): Promise<boolean | null> {
+/**
+ * ¿Hay en la tienda un producto con ese handle? null si no se pudo saber.
+ * productByIdentifier lee el producto directamente: el indice de busqueda
+ * (products(query:)) tarda en ver lo recien importado por CSV, y aqui un falso
+ * "no existe" borraria el audio de un producto vivo.
+ */
+export async function productoEnTienda(env: ListenEnv, handle: string): Promise<boolean | null> {
   try {
     const d = await shopifyAdminGraphQL(env as unknown as ShopifyAdminEnv,
-      `query($q: String!) { products(first: 1, query: $q) { nodes { handle } } }`, { q: `handle:'${handle.replace(/'/g, '')}'` });
-    const nodes = d?.data?.products?.nodes;
-    return Array.isArray(nodes) ? nodes.some((n: any) => n.handle === handle) : null;
+      `query($h: String!) { productByIdentifier(identifier: { handle: $h }) { id } }`, { h: handle });
+    if (!d?.data || d.errors?.length) return null;
+    return d.data.productByIdentifier != null;
   } catch { return null; }
 }
 
