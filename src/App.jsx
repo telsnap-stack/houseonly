@@ -12,7 +12,7 @@ import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
-import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga } from "./preorder-listen.mjs";
+import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from "./preorder-listen.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
@@ -10065,7 +10065,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       const previo = cacheRef.current.get(it.clave);
       const nuevo = { ...previo, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined,
-        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined } : {}) };
+        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined, en_tienda_como: undefined } : {}) };
       const m = new Map(cacheRef.current).set(it.clave, nuevo);
       cacheRef.current = m;
       setCache(m);
@@ -10109,6 +10109,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
         todos.push(...(d.items || []).filter(it => it.decision === 'preorder'));
       }
       if (!todos.length) { setAviso('No hay elegidos que cargar.'); return; }
+      const deTodos = new Map(todos.map(x => [x.clave, x]));
       // La pestana y su contador, con los elegidos confirmados (no los de la lista atrasada).
       setCounts(c => c && { ...c, elegidos: todos.length });
       setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: [...new Set([...l.claves, ...todos.map(x => x.clave)])], count: Math.max(l.count, todos.length) } : l);
@@ -10119,7 +10120,36 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       for (const e of res.errores || []) if (e.clave !== '—') motivos[e.clave] = { txt: `no entra: ${e.error}`, col: S.danger };
       for (const c of res.anadidos || []) if (!motivos[c]) motivos[c] = { txt: 'en el manifest: falta "List pre-orders"', col: S.accent };
       setMotivoCarga(m => ({ ...m, ...motivos }));
-      setAviso(`Cargar elegidos — ${resumenCarga(todos.length, res)} "Cargado" se marca al pulsar "List pre-orders".`);
+      // Lo que ya esta en la tienda no se queda en Elegidos: pasa a Cargados con
+      // su motivo (sin copiar nada), y "deshacer carga" lo devuelve.
+      const aCargados = [];
+      for (const x of res.enTienda || []) {
+        const como = x.handle || x.como;
+        try {
+          const r = await fetch(`${WORKER_URL}?action=listen-decide`, {
+            method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clave: x.clave, decision: 'cargado', en_tienda: como }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+          aCargados.push({ clave: x.clave, cargado_at: d.item.cargado_at, en_tienda_como: d.item.en_tienda_como });
+        } catch (e) { motivos[x.clave] = { txt: `ya en tienda como ${como}, pero no se pudo pasar a Cargados: ${e.message}`, col: S.danger }; }
+      }
+      if (aCargados.length) {
+        const m = new Map(cacheRef.current);
+        for (const x of aCargados) {
+          m.set(x.clave, { ...(m.get(x.clave) || deTodos.get(x.clave)), decision: 'cargado', decided_at: x.cargado_at, cargado_at: x.cargado_at, en_tienda_como: x.en_tienda_como });
+          decididoRef.current.set(x.clave, 'cargado');
+        }
+        cacheRef.current = m;
+        setCache(m);
+        const fuera = new Set(aCargados.map(x => x.clave));
+        setCounts(c => c && { ...c, elegidos: Math.max(0, (c.elegidos || 0) - fuera.size), cargados: (c.cargados || 0) + fuera.size });
+        setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: l.claves.filter(c => !fuera.has(c)), count: Math.max(0, l.count - fuera.size) } : l);
+        setMotivoCarga(mc => { const n = { ...mc }; for (const c of fuera) delete n[c]; return n; });
+      }
+      setMotivoCarga(m => ({ ...m, ...Object.fromEntries(Object.entries(motivos).filter(([c]) => !aCargados.some(x => x.clave === c))) }));
+      setAviso(`Cargar elegidos — ${resumenCarga(todos.length, res)}${aCargados.length ? ` Los ya en tienda pasan a Cargados (${aCargados.length}).` : ''} "Cargado" se marca al pulsar "List pre-orders".`);
     } catch (e) {
       setErr(`Cargar elegidos: ${e.message}`);
     } finally { setCargandoPre(false); }
@@ -10246,7 +10276,9 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                   </div>}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
-                    {it.decision === 'cargado' && <span title="Audio y portada copiados al producto por List pre-orders; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>}
+                    {it.decision === 'cargado' && (it.en_tienda_como
+                      ? <span title="No se copió nada: ya estaba en la tienda. Deshacer lo devuelve a Elegidos." style={{ fontSize: 8, color: '#ff8800', fontWeight: 700 }}>CARGADO EL {fechaCorta(it.cargado_at)} · ya en tienda como {it.en_tienda_como}</span>
+                      : <span title="Audio y portada copiados al producto por List pre-orders; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>)}
                     {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'cargado' ? (
@@ -11482,7 +11514,7 @@ function PreorderImporter() {
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
-          _coverUrl: coverUrl, _tracks: tracks, _error: itemError, _bloqueo: bloqueo,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError, _bloqueo: bloqueo, _listen: m._listen || '',
           _zipFound: !!zipFile, _release: release,
           _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
           _genre: genre,                              // editable in review; rebuilds Tags
@@ -11552,6 +11584,13 @@ function PreorderImporter() {
     const bloqueadas = filasBloqueadas(results, excluded);
     if (bloqueadas.length) {
       setError(`CSV bloqueado: ${bloqueadas.map(r => `${r._catno} (${r._bloqueo})`).join('; ')}. Exclúyela(s) con ✕ o vuelve a pulsar "List pre-orders".`);
+      return;
+    }
+    // Rubadub no trae genero en el correo: una fila de la bandeja sin genero que
+    // resuelva se completa a mano en su tarjeta (como en el importer de Rubadub).
+    const sinGenero = filasSinGenero(results, excluded, generoResuelve);
+    if (sinGenero.length) {
+      setError(`Falta el género de ${sinGenero.map(r => r._catno).join(', ')}: escríbelo en su tarjeta (o exclúyela con ✕) antes de generar el CSV.`);
       return;
     }
     setError('');
@@ -12189,6 +12228,11 @@ function PreorderImporter() {
               CSV de pruebas: apunta a staging-audio/, no lo importes en Shopify.
             </div>
           )}
+          {filasSinGenero(results, excluded, generoResuelve).length>0&&(
+            <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:10,color:'#ff8800',lineHeight:1.5}}>
+              Falta el género de {filasSinGenero(results, excluded, generoResuelve).map(r=>r._catno).join(', ')} (Rubadub no lo trae en el correo). Elígelo en su tarjeta antes de generar el CSV.
+            </div>
+          )}
           {filasBloqueadas(results, excluded).length>0&&(
             <div style={{padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}66`,borderRadius:4,marginBottom:12,fontSize:10,color:S.danger,lineHeight:1.5}}>
               {filasBloqueadas(results, excluded).length} disco(s) de la bandeja sin su audio copiado: el CSV no se genera hasta excluirlos (✕) o volver a pulsar "List pre-orders".
@@ -12199,6 +12243,7 @@ function PreorderImporter() {
             After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
           </div>
 
+          <datalist id="preorder-generos">{GENEROS_CANONICOS.map(g=><option key={g.id} value={g.label} />)}</datalist>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>{
               const isOut = !!excluded[r._catno] || r._alreadyLive;
@@ -12222,7 +12267,8 @@ function PreorderImporter() {
                   <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
                   <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
                   <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
-                  <input value={r._genre||''} placeholder="(no genre)" onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  <input value={r._genre||''} list="preorder-generos" placeholder={r._listen&&!isOut?'FALTA GÉNERO':'(no genre)'} onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._listen&&!isOut&&!generoResuelve(r._genre)?'#ff8800':r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  {r._listen&&!isOut&&!generoResuelve(r._genre)&&<div style={{fontSize:8,color:'#ff8800',marginTop:2}}>{r._genre?'no es un género de la tienda':'falta el género'}: bloquea el CSV</div>}
                   <div style={{fontSize:8,color:S.muted,marginTop:3}}>{formatExpected(addDays(r._release,14))}</div>
                   <div style={{fontSize:10,color:S.accent,marginTop:2,fontWeight:700}}>€{r['Variant Price']}</div>
                   {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
@@ -12309,6 +12355,11 @@ function tagsDeGenero(valorCrudo, ctx = {}) {
 // elegido pasa por tagsDeGenero() como cualquier otro valor.
 const GENERO_SIN = 'sin';
 const GENEROS_CANONICOS = [...new Set(GENRES.map(g => g.seccion))].flatMap(generosDeSeccion);
+
+// ¿Da un genero canonico de la tienda? (lo que tagsDeGenero convierte en tag).
+function generoResuelve(valor) {
+  return !!resolveGenre(String(valor || '').split(/[/,;|]/).map(x => x.trim()).filter(Boolean));
+}
 
 function generoSugerido(crudo) {
   const partes = String(crudo || '').split(/[\/,;|]/).map(x => x.trim()).filter(Boolean);

@@ -135,6 +135,7 @@ export interface ListenRelease {
   cargado_at?: string;           // listen-promote: copiado a audio/ y covers/
   handle?: string;               // el handle con que va al CSV
   promovidos?: string[];         // claves copiadas en houseonly-audio
+  en_tienda_como?: string;       // "cargado" sin copiar nada: ya estaba en la tienda
 }
 
 export interface ListenRunResult {
@@ -575,13 +576,18 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   const clave = claveCatno(body?.clave);
   const decision = body?.decision ?? null;
   if (!clave) return json({ error: 'clave required' }, 400);
-  if (decision !== null && !DECISIONES.includes(decision)) return json({ error: `decision must be ${DECISIONES.join(', ')} or null` }, 400);
+  // 'cargado' a mano solo con en_tienda: un elegido que ya esta en la tienda no
+  // pasa por listen-promote (no hay nada que copiar) pero sale de Elegidos.
+  const enTienda = String(body?.en_tienda || '').slice(0, 120);
+  const cargadoEnTienda = decision === 'cargado' && !!enTienda;
+  if (decision !== null && !DECISIONES.includes(decision) && !cargadoEnTienda) return json({ error: `decision must be ${DECISIONES.join(', ')} or null` }, 400);
   const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
   if (!r) return json({ error: 'not found' }, 404);
+  if (cargadoEnTienda && r.decision !== 'preorder') return json({ error: 'solo un elegido para pre-order pasa a cargado por estar en tienda' }, 409);
 
   // Deshacer una carga: vuelve a Elegidos. Lo copiado a audio/ y covers/ se
   // queda (puede estar ya en un producto); un Process nuevo lo sobrescribe.
-  if (r.decision === 'cargado') { delete r.cargado_at; delete r.handle; delete r.promovidos; }
+  if (r.decision === 'cargado') { delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como; }
   if (decision === 'rechazado') {
     const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
     if ('error' in rec) return json({ error: rec.error }, 400);
@@ -593,8 +599,10 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   }
   if (decision) { r.decision = decision; r.decided_at = new Date(ahora).toISOString(); }
   else { delete r.decision; delete r.decided_at; }
+  if (cargadoEnTienda) { r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
   await guardaRelease(env, r);
-  return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null } });
+  return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null,
+    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null } });
 }
 
 // ── URLs firmadas ──────────────────────────────────────────────

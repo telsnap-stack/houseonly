@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga } from './preorder-listen.mjs';
+import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from './preorder-listen.mjs';
 
 test('listen-promote fallido: la fila queda bloqueada y frena el CSV hasta excluirla', () => {
   const malo = bloqueoListen({ listen: 'AAA001', error: 'HTTP 500', tracks: [] });
@@ -31,4 +31,18 @@ test('el aviso de Cargar elegidos desglosa siempre', () => {
   }), '4 elegidos: 1 al manifest · 1 ya en tienda (MSLP022LTD como mslp022ltd) · 0 sin audio · 1 sin entrar por error (LN017: no se pudo leer su email).');
   assert.equal(resumenCarga(1, { anadidos: ['A'], enTienda: [], sinAudio: ['A'], errores: [] }),
     '1 elegido: 1 al manifest · 0 ya en tienda · 1 sin audio (A: entran esperando ZIP).');
+});
+
+test('fila de la bandeja sin genero que resuelva: incompleta hasta ponerlo o excluirla', () => {
+  const resuelve = g => ['House', 'Techno', 'Jungle / Drum & Bass'].includes(g);
+  const results = [
+    { _catno: 'MYD015', _listen: 'MYD015', _genre: '' },
+    { _catno: 'LN-017', _listen: 'LN017', _genre: 'cosas raras' },
+    { _catno: 'CITS007', _listen: 'CITS007', _genre: 'Jungle / Drum & Bass' },
+    { _catno: 'ZIP001', _genre: '' },                                   // fila de ZIP: no se toca
+  ];
+  assert.deepEqual(filasSinGenero(results, {}, resuelve).map(r => r._catno), ['MYD015', 'LN-017']);
+  assert.deepEqual(filasSinGenero(results, { MYD015: true }, resuelve).map(r => r._catno), ['LN-017']);
+  results[0]._genre = 'House';
+  assert.deepEqual(filasSinGenero(results, {}, resuelve).map(r => r._catno), ['LN-017']);
 });
