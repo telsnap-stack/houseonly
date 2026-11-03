@@ -7,6 +7,7 @@ import { csvHeader, labelFromTags, entityCsvColumns } from "../houseonly-worker/
 import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/houseonly-worker/src/lib/ligatures.ts";
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
+import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
 import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
@@ -6209,35 +6210,8 @@ function MotherTongueImporter() {
     });
   }
 
-  // ── TRACK NAME EXTRACTION ─────────────────────────────────────
-  // Strip prefixes (A1, B2, Side A.1, 01., catalog number) and suffixes
-  // (Snippet, Clip, Preview, "60 sec taster", "[1.30MIN SNIPPET]", " - 2000BLACK").
-  // Catno is passed in so we can recognize SKU-prefixed track names like
-  // "DTW082 A1 Don't Forget Your Hiss" or "MT19022- 1-A1 Terra de Luz".
-  function trackNameFromFilename(fname, catno) {
-    let n = fname.replace(/\.[^.]+$/, '');
-    n = n.replace(/_/g, ' ');
-    n = n.replace(/\s*\[\s*\d+\.?\d*\s*MIN\s*SNIPPET\s*\]\s*/i, '');
-
-    const skuRx = catno ? catno.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
-    for (let i = 0; i < 5; i++) {
-      const before = n;
-      n = n.replace(/^[\s\-–]+/, '');
-      if (skuRx) n = n.replace(new RegExp('^' + skuRx + '\\s*', 'i'), '');
-      n = n.replace(/^[AB]\s*[-–]\s+/i, '');
-      n = n.replace(/^\d+\s*[-–]\s*/, '');
-      n = n.replace(/^[AB]\d+\.?\s*[-–]?\s*/i, '');
-      n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-–]?\s*/i, '');
-      n = n.replace(/^TRACK\s+\d+[\s_\-]*/i, '');
-      n = n.replace(/^\d{1,2}[\s_.\-]+/, '');
-      if (n === before) break;
-    }
-    n = n.replace(/[\s_.\-]*\(?\s*(snippet|snip|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
-    n = n.replace(/[\s_-]*\(\s*\d+\s*sec\s+taster\s*\)\s*$/i, '');
-    n = n.replace(/\s*-\s*2000BLACK\s*$/i, '');
-    n = n.replace(/\s{2,}/g, ' ').trim();
-    return n || fname.replace(/\.[^.]+$/, '');
-  }
+  // Nombre de pista desde el fichero: trackNameFromFilename, en
+  // houseonly-worker/.../lib/track-names.mjs (compartido con la bandeja de escucha).
 
   // ── GENRE TAG NORMALIZATION ───────────────────────────────────
   // Decision D4: WooCommerce categories include some operational ones
@@ -9865,6 +9839,11 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
   const [motivoCarga, setMotivoCarga] = useState({});  // clave -> {txt, col}: por que no entro (o entro sin audio)
   const [promote, setPromote] = useState(null);       // {activo, pruebas, audio, covers} del worker
+  const [modo, setModo] = useState('');               // meta:listen_mode ahora mismo
+  // Con el secreto del login del admin no se pide nada (como las demas pestanas):
+  // carga sola, sin desplegarse. El campo solo sale si no hay secreto.
+  const [pideSecreto] = useState(() => !mailSecretStore.v);
+  const [abierta, setAbierta] = useState(false);
   const [cargandoPre, setCargandoPre] = useState(false);
   const [subiendo, setSubiendo] = useState('');      // clave con una subida de audio en vuelo
   const toastRef = useRef(0);
@@ -9917,6 +9896,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       setCounts(d.counts || null);
       setLastRun(d.last_run || null);
       setPromote(d.promote || null);
+      setModo(d.modo || '');
       // La lista de KV va hasta 60 s por detras de lo recien decidido: en la
       // primera pagina se suma lo que esta pestana ya sabe que es de esta vista
       // y se quita lo que sabe que ya no lo es.
@@ -9938,6 +9918,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
     } finally { setCargando(false); }
   };
   const cambiaVista = (v) => { setVista(v); setRechazando(''); cargarVista(v); };
+  useEffect(() => { if (!pideSecreto && secret) cargarVista('por_decidir'); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // URLs nuevas para todo lo que hay en la cola (de la pestana que sea).
   const renovar = async (reanudar) => {
@@ -10221,7 +10202,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   const btnOn = { ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 };
 
   return (
-    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!lista}>
+    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={abierta} onToggle={e => setAbierta(e.currentTarget.open)}>
       <summary style={{ cursor: 'pointer', padding: '8px 14px', fontSize: 9, color: S.muted, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }}>
         🎧 Bandeja de escucha {counts ? `· ${counts.por_decidir} por decidir` : ''}
       </summary>
@@ -10234,12 +10215,16 @@ function ListenInbox({ onCargar, ultimaCarga }) {
         {err && <div style={{ marginBottom: 10, padding: 8, background: '#1a0000', border: `1px solid ${S.danger}44`, borderRadius: 2, fontSize: 10, color: S.danger }}>{err}</div>}
         {aviso && <div onClick={() => setAviso('')} style={{ marginBottom: 10, padding: 8, border: '1px solid #ff880055', borderRadius: 2, fontSize: 10, color: '#ff8800', cursor: 'pointer' }}>{aviso} <span style={{ color: S.muted }}>(cerrar)</span></div>}
 
-        {lista === null ? (
+        {lista === null && !pideSecreto && secret ? (
+          <div style={{ fontSize: 10, color: S.muted }}>
+            {cargando ? 'Cargando la bandeja…' : <button onClick={() => cargarVista(vista)} style={{ background: 'none', border: `1px solid ${S.border}`, color: S.muted, cursor: 'pointer', fontSize: 9, padding: '3px 10px', borderRadius: 2, fontFamily: 'inherit' }}>↻ reintentar</button>}
+          </div>
+        ) : lista === null ? (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargarVista(vista); }}
+            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargarVista(vista).then(ok => ok && setAbierta(true)); }}
               placeholder="BOOTSTRAP_AUTH_SECRET"
               style={{ flex: '1 1 260px', background: S.surf, border: `1px solid ${S.border}`, color: S.text, borderRadius: 2, padding: '6px 10px', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
-            <button onClick={() => cargarVista(vista)} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
+            <button onClick={() => cargarVista(vista).then(ok => ok && setAbierta(true))} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
               {cargando ? 'Cargando…' : 'Cargar'}
             </button>
           </div>
@@ -10263,9 +10248,10 @@ function ListenInbox({ onCargar, ultimaCarga }) {
           {promote?.pruebas && <div style={{ marginBottom: 10, padding: '6px 10px', border: '1px solid #ff880077', background: '#1a1000', borderRadius: 2, fontSize: 10, color: '#ff8800', fontWeight: 700 }}>
             CSV de pruebas: "List pre-orders" copia el audio a {promote.audio} y {promote.covers}. No importes ese CSV en Shopify.
           </div>}
-          {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
-            Última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC · {lastRun.nuevos ?? 0} nuevos · modo {lastRun.mode}
-          </div>}
+          <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
+            Ingesta <b style={{ color: modo === 'live' ? S.accent : '#ff8800' }}>{modo === 'live' ? 'encendida' : `apagada${modo ? ` (${modo})` : ''}`}</b>
+            {lastRun && <> · última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC, {lastRun.nuevos ?? 0} nuevos</>}
+          </div>
           {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
 
           {visibles.map(it => {
