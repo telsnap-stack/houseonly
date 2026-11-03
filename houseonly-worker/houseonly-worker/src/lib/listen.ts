@@ -45,7 +45,7 @@
  */
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
-import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
+import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
@@ -153,7 +153,9 @@ export interface ListenRunResult {
   emails_cerrados: number;
   nuevos: number;
   por_estado: Partial<Record<ListenEstado, number>>;
-  saltados: { duplicado: number; rechazado: number; no_preorder: number };
+  saltados: { duplicado: number; rechazado: number; no_preorder: number; en_tienda: number };
+  en_tienda?: string[];          // "<catno> como <handle>"
+  tienda_error?: string;
   limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
   portadas?: number;
   quedan: boolean;
@@ -471,18 +473,64 @@ async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: s
 // otro email (una revision, por ejemplo) lo vuelve a anunciar.
 const REINTENTABLE: ListenEstado[] = ['sin_zip', 'error'];
 
+// ── ya en tienda ───────────────────────────────────────────
+
+export interface Tienda { indice: ReturnType<typeof indiceTienda>; handleDe: Map<string, string> }
+
+/**
+ * Lo que ya existe en Shopify no entra a la bandeja (2026-11-03: MSLP022LTD
+ * salio en "Por decidir" estando activo). Las mismas reglas que "Cargar
+ * elegidos" en el tab (indiceTienda + buscaEnTienda sobre handle y SKU), pero
+ * con TODOS los productos menos los archivados: un borrador o un unlisted
+ * tambien estan ya dados de alta. Admin API leyendo productos (no el indice de
+ * busqueda): ~1600 productos = 7 paginas de 250 (coste pedido ~500 cada una).
+ */
+export async function leeTienda(env: ListenEnv): Promise<Tienda> {
+  const claves: string[] = [];
+  const handleDe = new Map<string, string>();
+  let after: string | null = null;
+  for (let pagina = 0, esperas = 0; pagina < 40;) {
+    const r: any = await shopifyAdminGraphQL(env as unknown as ShopifyAdminEnv, `
+      query($after: String) {
+        products(first: 250, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { handle status variants(first: 1) { nodes { sku } } }
+        }
+      }`, { after });
+    if (r?.errors?.some((e: any) => e?.extensions?.code === 'THROTTLED') && esperas++ < 5) {
+      await new Promise(ok => setTimeout(ok, 2000));
+      continue;
+    }
+    const conn = r?.data?.products;
+    if (r?.errors?.length || !conn) throw new Error(`Shopify products: ${JSON.stringify(r?.errors || r).slice(0, 200)}`);
+    for (const n of conn.nodes) {
+      if (n.status === 'ARCHIVED') continue;
+      for (const k of [claveCatno(n.handle), claveCatno(n.variants?.nodes?.[0]?.sku)].filter(Boolean)) {
+        claves.push(k);
+        if (!handleDe.has(k)) handleDe.set(k, n.handle);
+      }
+    }
+    if (!conn.pageInfo?.hasNextPage) return { indice: indiceTienda(claves), handleDe };
+    after = conn.pageInfo.endCursor;
+    pagina++;
+  }
+  throw new Error('Shopify products: demasiadas paginas');
+}
+
 export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date } = {}): Promise<ListenRunResult> {
   const now = opts.now || new Date();
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
     mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
-    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 }, quedan: false, finished_at: '',
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0, en_tienda: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 }, quedan: false, finished_at: '',
   };
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
   const idx: IdxEntry[] = JSON.parse((await env.EMAILS.get('idx')) || '[]');
   let intentos = 0;
-  for (const email of emailsCandidatos(idx, now)) {
+  // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
+  let tienda: Tienda | null = null;
+  ingesta: for (const email of emailsCandidatos(idx, now)) {
     if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
     if (intentos >= PER_RUN) { out.quedan = true; break; }
     out.emails_vistos++;
@@ -503,6 +551,18 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
       const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
       if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
+      if (!tienda) {
+        // Sin saber que hay en la tienda no entra nada: el email queda abierto
+        // y la pasada de la hora siguiente lo reintenta.
+        try { tienda = await leeTienda(env); }
+        catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+      }
+      const como = buscaEnTienda(tienda.indice, row.catno);
+      if (como) {
+        out.saltados.en_tienda++;
+        (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
+        continue;
+      }
       if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
       intentos++;
       const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);

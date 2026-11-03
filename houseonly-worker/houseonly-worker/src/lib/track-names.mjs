@@ -43,7 +43,9 @@ function limpiaNombre(fname, catno) {
 
 /**
  * Para mostrar y para el producto: lo de arriba y, si lo que queda no es un
- * titulo (un numero suelto "1", el catno, un codigo como "DMSR8411"), "Pista N".
+ * titulo (un numero suelto "1", el catno, un codigo como "DMSR8411"), la cara
+ * del fichero ("CITS007_A1-snippet" → "A1", "Side B 2" → "B2") y, si tampoco
+ * la trae, "Pista N".
  */
 export function nombreDePista(crudo, catno, i) {
   // El catno, escrito con o sin separadores ("LN017-Sugar…" con catno LN-017).
@@ -51,5 +53,7 @@ export function nombreDePista(crudo, catno, i) {
   const sinCatno = k ? String(crudo || '').replace(new RegExp('^' + k.split('').join('[\\s._-]*') + '[\\s._-]*', 'i'), '') : String(crudo || '');
   const n = limpiaNombre(sinCatno, catno);
   const sinTitulo = !n || /^\d+$/.test(n) || claveCatno(n) === claveCatno(catno) || /^[A-Z]{2,}[\s-]?\d+[A-Z0-9-]*$/.test(n);
-  return sinTitulo ? `Pista ${i + 1}` : n;
+  if (!sinTitulo) return n;
+  const cara = sinCatno.match(/(?:^|[\s._-])(?:side[\s._-]*)?([A-D])[\s._-]?(\d{1,2})(?=$|[\s._-])/i);
+  return cara ? `${cara[1].toUpperCase()}${Number(cara[2])}` : `Pista ${i + 1}`;
 }

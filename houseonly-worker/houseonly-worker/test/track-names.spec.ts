@@ -16,7 +16,15 @@ describe("nombres de pista", () => {
 		expect(nombreDePista("DMSR8412", "DMSR8602-1", 1)).toBe("Pista 2");
 		expect(nombreDePista("1", "DMSR8707-1", 0)).toBe("Pista 1");
 		expect(nombreDePista("3", "DMSR8707-1", 1)).toBe("Pista 2");
-		expect(nombreDePista("CITS007_A1-snippet", "CITS007", 0)).toBe("Pista 1");
+		expect(nombreDePista("CITS007_A1-snippet", "CITS007", 0)).toBe("A1");
+		expect(nombreDePista("CITS007_B2-snippet", "CITS007", 3)).toBe("B2");
 		expect(nombreDePista("LN017-Sugar - A1 Heaven is a Place In Flint", "LN-017", 0)).toBe("Sugar - A1 Heaven is a Place In Flint");
+	});
+
+	it("sin titulo: la cara del fichero, o Pista N si no la trae", () => {
+		expect(nombreDePista("XYZ001 Side B 2 snippet", "XYZ001", 3)).toBe("B2");
+		expect(nombreDePista("XYZ001-A01", "XYZ001", 0)).toBe("A1");
+		expect(nombreDePista("02", "XYZ001", 1)).toBe("Pista 2");
+		expect(nombreDePista("A1 Truth Like Memory", "XYZ001", 0)).toBe("Truth Like Memory");
 	});
 });
