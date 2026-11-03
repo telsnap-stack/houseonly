@@ -1,3 +1,5 @@
+// Copia de referencia: la version que manda es la desplegada en Apps Script.
+
 /**
  * Save Word & Sound + DBH + Triple Vision + Rubadub PRE-ORDER emails as .html
  * files into a Drive folder.
@@ -74,7 +76,7 @@ var SOURCES = [
     prefix: 'DBH',
     // DBH pre-order announcements + newsletter. Excludes receipts & account mail.
     query: 'from:noreply@dbh-music.com ' +
-           '(subject:Upcoming OR subject:"Out soon" OR subject:Newsletter) ' +
+           '(subject:Upcoming OR subject:"Out soon" OR subject:"Shipping this week" OR subject:Newsletter) ' +
            '-subject:"has been received" -subject:"has been shipped" ' +
            '-subject:"account data"'
   },
@@ -112,6 +114,21 @@ var SOURCES = [
     // source saves attachments too (see saveAttachments below).
     query: 'from:distribution@rubadub.co.uk subject:Quote',
     saveAttachments: true
+  },
+  {
+    prefix: 'MT',
+    // Mother Tongue monthly pre-order announcement, forwarded by Eduardo from
+    // emontagut@houseonly.store. "Wholesale Price" only appears in the
+    // announcement itself; reply chains and invoice threads are excluded.
+    query: 'from:emontagut@houseonly.store "Mother Tongue" "Wholesale Price" ' +
+           '-subject:"Re:" -has:attachment'
+  },
+  {
+    prefix: 'KUDOS',
+    // Kudos Distribution mailouts (Forthcoming Schedule, Shipping Next Week...)
+    // forwarded by Eduardo from emontagut@houseonly.store. Invoices excluded.
+    query: 'from:emontagut@houseonly.store "Kudos Distribution" ' +
+           '-subject:invoice -has:attachment'
   }
 ];
 

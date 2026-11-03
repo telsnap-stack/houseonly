@@ -9,8 +9,10 @@ import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
+import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
+import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from "./preorder-listen.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
@@ -269,6 +271,7 @@ async function fetchLiveHandles() {
   // ("WPA-4/ UR-079" frente a "WPA-4/UR-079"). Va colgado del Set para no
   // cambiar lo que devuelve a los demas.
   set.skuReal = new Map();
+  set.handleDe = new Map();
   let cursor = null;
   let safety = 25; // up to 25 × 250 = 6250 products
   while (safety-- > 0) {
@@ -296,6 +299,8 @@ async function fetchLiveHandles() {
       const skuTal = e.node.variants?.edges?.[0]?.node?.sku || '';
       const sku = rdKey(skuTal);
       if (sku) set.add(sku);
+      // Handle tal cual, por clave: la bandeja dice "en tienda como <handle>".
+      for (const k of [h, sku].filter(Boolean)) if (!set.handleDe.has(k)) set.handleDe.set(k, e.node.handle);
       if (skuTal) for (const k of [h, sku].filter(Boolean)) {
         const v = set.skuReal.get(k);
         set.skuReal.set(k, v && v !== skuTal ? null : skuTal);   // null = ambiguo
@@ -2951,21 +2956,6 @@ const GLIST='Deep House, Tech House, Afro House, Chicago House, Soulful House, A
 // Customer-first: every product gets a consistent, well-formatted, SEO-friendly
 // description. Source notes (from W&S salespapers, Kudos API, DBH CSV) are
 // included only when they pass quality checks. No "Pfei ff er" disasters.
-
-function decodeHtmlEntities(s) {
-  if (!s) return '';
-  let out = String(s);
-  // Multi-pass for double-encoding (e.g. &amp;amp; → &amp; → &)
-  for (let i = 0; i < 3; i++) {
-    out = out
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-      .replace(/&euro;/g, '€').replace(/&ndash;/g, '–').replace(/&mdash;/g, '—')
-      .replace(/&hellip;/g, '…').replace(/&rsquo;/g, "'").replace(/&lsquo;/g, "'")
-      .replace(/&ldquo;/g, '"').replace(/&rdquo;/g, '"').replace(/&bdquo;/g, '„');
-  }
-  return out;
-}
 
 // Cleans source notes from PDFs/APIs. Aggressive: prioritises customer-facing
 // prose. Strips B2B junk, metadata blocks, distributor footers, embedded
@@ -9315,372 +9305,6 @@ function NewsletterPanel() {
   );
 }
 
-// ── RUBADUB EMAIL PARSER (source:rd) ───────────────────────────
-// Rubadub sends no manifest and no invoice for pre-sales — the release data
-// only exists in the per-release announcement email. This turns a pasted email
-// (HTML or plain text) into manifest rows the Pre-order tab already consumes.
-// Validated against the real HT001 / AD010 / YORE-011LTD / AD009 emails.
-//
-// Real structure (verified, NOT the order the fields suggest):
-//     <prose>
-//     Rubadub World Exclusive
-//     Please Pre-Order            ← BEFORE the field block
-//     Shipping 24th August        ← BEFORE the field block
-//
-//     Artist: Hot Towel
-//     Title: Warm in Your Office EP
-//     Label: Hot Towel Records
-//     Cat: HT001
-//     Format: 12" w / Full sleeve
-//     Price: £8.99
-//
-//     A1. … Download Zip (https://www.dropbox.com/scl/fo/…)   ← AFTER the block
-// So each release owns two windows: the prose BEFORE its field block (ship date
-// + pre-order marker) and the text AFTER it up to the next release (Dropbox).
-
-const RD_MONTHS = ['january','february','march','april','may','june',
-                   'july','august','september','october','november','december'];
-
-// Is this paste a DIGEST (a catalogue Rubadub sends out) rather than one or
-// more per-release announcements? It decides the default selection, and the
-// two must not be told apart by row count: three per-release emails pasted in
-// one go are three deliberate picks, while a four-line digest is still a
-// catalogue — and that short digest is the dangerous one, because nobody
-// double-checks four rows.
-//
-// There are TWO kinds of digest and they behave differently here:
-//   • shipping digest — "these are all shipping to you today / next Monday".
-//     Carries full field blocks (a real one runs to 132 of them) and the
-//     records are already on their way, so they are NOT pre-orders.
-//   • weekly pre-sales round-up — "All Rubadub Pre-sales (Week …)". Carries NO
-//     field blocks at all, just one link per release, so it parses to zero
-//     rows. It is detected only to explain that in the error message.
-const RD_DIGEST_SHIPPING = /these\s+are\s+all\s+shipping\s+to\s+you|shipping\s+to\s+you\s+(today|next\s+\w+)|New\s+Releases\s+Shipping\s+(This|Next)\s+Week|Imports\s+Shipping\s+Today|Today'?s?\s+New\s+Arrivals/i;
-const RD_DIGEST_PRESALES = /All\s+Rubadub\s+Pre-?sales|WEEKLY\s+ROUND\s*UP/i;
-
-// Normalize pasted HTML into the same shape as Rubadub's plaintext part, so a
-// single parser handles both. Anchors become "label (url)" — exactly how the
-// plaintext renders them — and images become inline [[IMG:url]] markers, which
-// keeps every link and image positioned in the text for window attribution.
-function rdHtmlToText(input) {
-  // Ya es texto plano. El Apps Script archiva asi los digests grandes, con
-  // saltos CRLF, y el \r colgando al final de "Cat: M052\r" hacia fallar la
-  // linea de campo: los digests parseaban a CERO releases.
-  if (!/<[a-z!/][^>]*>/i.test(input)) return input.replace(/\r/g, '');
-  let s = input.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, '');
-  s = s.replace(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi, ' [[IMG:$1]] ');
-  s = s.replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
-                (_m, href, label) => `${label.replace(/<[^>]+>/g, '')} (${href}) `);
-  s = s.replace(/<br\b[^>]*>/gi, '\n');
-  s = s.replace(/<\/(p|div|tr|td|th|li|h[1-6]|table|blockquote)\s*>/gi, '\n');
-  s = s.replace(/<[^>]+>/g, ' ');
-  s = decodeHtmlEntities(s);
-  s = s.replace(/\r/g, '').replace(/[ \t ]+/g, ' ');
-  s = s.replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n');
-  return s;
-}
-
-// Dropbox FOLDER link (not a direct .zip). Mailchimp appends tracking junk that
-// in the plaintext part arrives mangled (`&mc_cid` loses its `=`), so cut at the
-// marker rather than trying to parse it. dl=1 makes Dropbox zip the folder.
-function rdCleanDropbox(url) {
-  if (!url) return '';
-  let u = url.split(/&(?:amp;)?mc_cid|&(?:amp;)?mc_eid/)[0];
-  u = u.replace(/&(?:amp;)?dl=0/g, '').replace(/&amp;/g, '&').replace(/[).,\s]+$/, '');
-  if (!/[?&]dl=1/.test(u)) u += (u.includes('?') ? '&' : '?') + 'dl=1';
-  return u;
-}
-
-// "Shipping 24th August" → 2026-08-24, rolled to next year when the date would
-// otherwise sit far in the past relative to the email. Also tolerates the vague
-// forms Rubadub really uses ("late August", "mid September", "NEXT WEEK"),
-// which resolve to a nominal day and are flagged approximate — an approximate
-// release: tag still beats no date, but the operator must see it.
-function rdShipDate(text, emailDate) {
-  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  const roll = (month, day) => {
-    let d = new Date(emailDate.getFullYear(), month, day);
-    if ((d - emailDate) / 86400000 < -30) d = new Date(emailDate.getFullYear()+1, month, day);
-    return d;
-  };
-  const exact = text.match(/Shipping\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)/i);
-  if (exact) {
-    const month = RD_MONTHS.indexOf(exact[2].toLowerCase());
-    if (month >= 0) return { date: iso(roll(month, parseInt(exact[1], 10))), approx: false };
-  }
-  const vague = text.match(/Shipping\s+(early|mid|late)\s+([A-Za-z]+)/i);
-  if (vague) {
-    const month = RD_MONTHS.indexOf(vague[2].toLowerCase());
-    if (month >= 0) {
-      const day = { early: 5, mid: 15, late: 25 }[vague[1].toLowerCase()];
-      return { date: iso(roll(month, day)), approx: true, raw: vague[0] };
-    }
-  }
-  const nextWeek = text.match(/Shipping\s+(NEXT\s+WEEK|TODAY|THIS\s+WEEK)/i);
-  if (nextWeek) {
-    const d = new Date(emailDate);
-    d.setDate(d.getDate() + (/NEXT/i.test(nextWeek[1]) ? 7 : 0));
-    return { date: iso(d), approx: true, raw: nextWeek[0] };
-  }
-  return { date: '', approx: false };
-}
-
-// La prosa descriptiva del email, para el Body (HTML) de Shopify. Rubadub la
-// pone antes del bloque de campos y la repite ampliada despues; se coge el
-// trozo mas largo de los dos y se limpian los restos de plantilla de Mailchimp
-// (tracklist, enlaces de descarga, pie de pagina), que no son descripcion.
-function descFromProse(before, after, fields) {
-  const limpia = (t) => String(t || '')
-    .replace(/\[\[IMG:[^\]]*\]\]/g, ' ')
-    .replace(/View this email in your browser[^\n]*/gi, ' ')
-    .replace(/Download Zip[^\n]*/gi, ' ')
-    .replace(/Click here to see our current stocklist[\s\S]*/i, ' ')
-    .replace(/Tracklisting[\s\S]*/i, ' ')
-    .replace(/Sales Note[\s\S]*/i, ' ')
-    .replace(/Order\s+\S+\s+now[\s\S]*/i, ' ')
-    .replace(/unsubscribe from this list[\s\S]*/i, ' ')
-    .replace(/You received this email[\s\S]*/i, ' ')
-    .replace(/(Rubadub (World Exclusive|Import)|Please\s+Pre-?Order|Shipping[^\n]*)/gi, ' ')
-    // Las lineas de campo ya viajan como campos; repetirlas en la descripcion
-    // es ruido en la ficha del producto.
-    .replace(/^[ \t]*(Artist|Title|Label|Catalog|Cat|Format|Price|Barcode|Genre|Release date)[ \t]*:.*$/gim, ' ')
-    .replace(/https?:\/\/\S+/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .split(/\n\s*\n/).map(x => x.trim()).filter(x => x.length > 60);
-  const trozos = [...limpia(before), ...limpia(after)];
-  if (!trozos.length) return '';
-  // Un parrafo suelto puede ser un titular; la descripcion util suele ser el
-  // bloque mas largo. Se conserva hasta un limite razonable para Shopify.
-  return trozos.sort((a, b) => b.length - a.length).slice(0, 4).join('\n\n').slice(0, 2400);
-}
-
-// Parse one or more pasted distributor emails into Pre-order manifest rows.
-// Entiende Rubadub y Triple Vision: se distinguen por el nombre del campo del
-// catalogo ("Cat:" vs "Catalog:"), asi que un pegado mixto tambien sale bien.
-// fx converts the email's GBP to EUR HERE, so the row handed to the Pre-order
-// tab carries dealerPrice in EUR like every other distributor's — the tab's
-// pricing (margin → ceil − 0.01) is untouched and W&S/DBH are unaffected.
-function parseDistributorEmail(raw, { fx = 1.17, emailDate = new Date() } = {}) {
-  const text = rdHtmlToText(String(raw || ''));
-  const rows = [];
-  // Document-level, not per-release. A shipping digest says so ONCE, in the
-  // opening line, and that fact belongs to every release it carries: in the
-  // real 132-release digest "Hi, these are all shipping to you today" appears
-  // exactly once, so a per-release test only ever sees it in row 1 and leaves
-  // the other 131 looking like an ambiguous partial paste.
-  const digest = RD_DIGEST_SHIPPING.test(text) ? 'shipping' : '';
-
-  // Locate every field block. "Cat:" is the anchor — a block without a cat-no
-  // is not a release. Each block spans from its Artist:/first field line to the
-  // last consecutive "Key: value" line.
-  // Rubadub usa 'Cat:'; Triple Vision 'Catalog:' y ademas trae 'Release date:'
-  // y 'Genre:' como campos de verdad, que en Rubadub hay que sacar de la prosa
-  // o del ZIP. Un solo escaner de bloques, los dos juegos de nombres.
-  const FIELD_LINE = /^[ \t]*(Artist|Title|Label|Catalog|Cat|Format|Price|Barcode|Genre|Release date)[ \t]*:[ \t]*(.*)$/i;
-  const lines = text.split('\n');
-  const offsets = [];
-  let pos = 0;
-  for (const ln of lines) { offsets.push(pos); pos += ln.length + 1; }
-
-  const blocks = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!FIELD_LINE.test(lines[i])) continue;
-    let j = i;
-    const fields = {};
-    while (j < lines.length) {
-      const m = lines[j].match(FIELD_LINE);
-      if (m) { fields[m[1].toLowerCase().replace(/\s+/g, '')] = m[2].trim(); j++; continue; }
-      if (!lines[j].trim() && j + 1 < lines.length && FIELD_LINE.test(lines[j+1])) { j++; continue; }
-      break;
-    }
-    if (fields.cat || fields.catalog) blocks.push({ fields, start: offsets[i], end: offsets[j-1] + lines[j-1].length });
-    i = j - 1;
-  }
-
-  // Lo que hay ANTES del primer bloque de campos vale para todo el email: un
-  // anuncio de dos discos pone "Please pre-order" y "Shipping late September"
-  // una sola vez, arriba. Buscarlos solo en la ventana de cada release hacia que
-  // los viera el primero y ninguno mas — el segundo entraba sin fecha y sin
-  // forthcoming, y sin fecha no hay etiqueta de año, y sin año el escaparate lo
-  // da por agotado de verdad en vez de ofrecer la peticion.
-  const cabecera = blocks.length ? text.slice(0, blocks[0].start) : '';
-
-  blocks.forEach((b, idx) => {
-    const propio = text.slice(idx === 0 ? 0 : blocks[idx-1].end, b.start);
-    // La ventana propia manda; la cabecera solo se consulta si esa calla. Asi un
-    // release con su propia fecha no hereda la de la cabecera.
-    const before = propio;
-    const after  = text.slice(b.end, idx === blocks.length-1 ? text.length : blocks[idx+1].start);
-    const warnings = [];
-
-    // "Artist:" sometimes carries the whole subject line rather than the artist
-    // ("Gradient - Random Layers (Alt Dub) AD010"). Keep the part before " - ".
-    let artist = b.fields.artist || '';
-    if (artist.includes(' - ')) {
-      warnings.push(`Artist traía la línea del asunto ("${artist}") → recortado a "${artist.split(' - ')[0].trim()}"`);
-      artist = artist.split(' - ')[0].trim();
-    }
-
-    const gbp = parseFloat((b.fields.price || '').replace(/[^\d.]/g, ''));
-    if (!gbp) warnings.push('sin Price en el email — quedará al suelo de €9.99');
-
-    // The pre-order marker sits in the prose BEFORE the block. A digest instead
-    // says "shipping to you today/next Monday": that stock is already on its
-    // way, so it must NOT be tagged forthcoming or the graduation cron strips
-    // the tag ~15 min later and it reads as a sync bug.
-    const MARCA_PRE = /Please\s+Pre-?Order/i;
-    const isPreorder = MARCA_PRE.test(propio) || (idx > 0 && MARCA_PRE.test(cabecera));
-    // The digest's opening line covers every release it carries; the
-    // per-release windows only get consulted when this is not a digest.
-    const shipped    = digest === 'shipping' ||
-                       /shipping\s+to\s+you\s+(today|next\s+\w+)/i.test(before) ||
-                       /shipping\s+(today|this\s+week)/i.test(before);
-    // Absence of BOTH markers is ambiguous, not evidence: it is what a partial
-    // copy looks like, since both live in the prose above the field block. Say
-    // so — silently dropping `forthcoming` from a real pre-order is the same
-    // bug as tagging a shipped record, just from the other side. Inside a
-    // digest that ambiguity does not exist, so do not raise it there: it would
-    // fire on all but the first row and send the operator hunting for text
-    // they never failed to copy.
-    if (!isPreorder) {
-      warnings.push(
-        digest === 'shipping'
-          ? 'ya enviándose (viene en un digest de envíos) → no es pre-order, sin tag forthcoming'
-          : shipped
-            ? 'NO es pre-order (el email dice que ya se envía) → sin tag forthcoming'
-            : 'no aparece "Please Pre-Order" NI "shipping to you" → queda SIN tag forthcoming. Si es un pre-order, te faltó copiar el texto de encima del bloque de campos: selecciona el email entero.');
-    }
-
-    let ship = rdShipDate(propio, emailDate);
-    if (!ship.date && idx > 0) ship = rdShipDate(cabecera, emailDate);
-    if (!ship.date) warnings.push('sin fecha de envío reconocible — el tag release: irá vacío');
-    else if (ship.approx) warnings.push(`fecha aproximada ("${ship.raw}") → ${ship.date}, revísala`);
-
-    // Dropbox link belongs to the window AFTER the block. Digests carry a
-    // Mailchimp click-tracker with the params corrupted in plaintext instead —
-    // not recoverable by regex, the operator must use the mailchi.mp archive.
-    const dropbox = after.match(/https:\/\/www\.dropbox\.com\/scl\/fo\/[^\s)"'<]+/);
-    const zipUrl = dropbox ? rdCleanDropbox(dropbox[0]) : '';
-    // Los enlaces del promopack DE ESTE bloque, no los del email entero. En el
-    // archivo van tras el tracker de Mailchimp, y un email de varios discos
-    // lleva uno por disco justo debajo de su ficha (LOG88 y LOG86, las tres de
-    // Phonogramme). Coger todos los del email y quedarse con el primer Dropbox
-    // le dio a LOG86 el ZIP de LOG88. Se filtra por la etiqueta, que es fija en
-    // el archivo real: "Download Zip" (Rubadub) y "Download promopack" /
-    // "Promopack: download" (TV); el resto de la ventana son clips, stocklist y
-    // el pie, que en el ultimo bloque tambien cae en `after`.
-    const zipLinks = [...after.matchAll(/([^\n()]{0,60})\((https:\/\/[^)\s]+)\)/g)]
-      .filter(m => /download\s*(zip|promo)|promopack/i.test(m[1]))
-      .map(m => m[2].replace(/&amp;/g, '&'));
-    if (!zipUrl) {
-      warnings.push(/list-manage\.com\/track\/click/i.test(after)
-        ? 'el enlace del ZIP es un redirect de Mailchimp (digest): ábrelo en el archivo mailchi.mp y pega ese HTML'
-        : 'sin enlace de Dropbox — descarga el promopack a mano');
-    }
-
-    // Portada: la imagen INMEDIATAMENTE ANTERIOR a la ficha del disco, dentro de
-    // su propia ventana (entre el bloque anterior y este). Asi van Rubadub y
-    // Triple Vision: imagen, Artist/Title/Cat…, tracklist, "Download Zip".
-    // Antes se buscaba en before+after y se preferia `_compresseds/` a
-    // `images/`: si la portada propia era images/ y la del disco siguiente
-    // _compresseds/, se llevaba la del siguiente (UTTU199 con la de UTTU195,
-    // M055 con la de M056). Medido sobre el archivo: ninguna portada queda
-    // detras de su ficha, asi que mirar solo antes no pierde ninguna.
-    // Hosts de portada: Rubadub sirve desde mcusercontent (images/ o
-    // _compresseds/; gallery.mailchimp.com es el logo de cabecera, nunca la
-    // funda), Triple Vision desde su bucket con el sufijo _front.
-    const esPortada = (u) => /mcusercontent\.com\/.*(_compresseds\/|\/images\/)/i.test(u)
-                          || /digitaloceanspaces\.com\/.*_front[-.]/i.test(u);
-    const coverUrl = [...propio.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].map(m => m[1]).filter(esPortada).pop() || '';
-
-    // ── Triple Vision o Rubadub ───────────────────────────────
-    // Se distingue por el nombre del campo del catalogo, no por un parametro:
-    // "Catalog:" es de TV y "Cat:" de Rubadub, y asi un pegado mixto tambien
-    // sale bien sin que nadie tenga que decir de quien es cada email.
-    const esTV = !!b.fields.catalog;
-
-    // TV pone el precio en euros y ya negociado; Rubadub en libras, y ahi si
-    // hace falta el FX. En los dos casos lo que sale es dealerPrice en EUR.
-    let dealer = null;
-    if (esTV) dealer = gbp ? Number(gbp.toFixed(2)) : null;
-    else      dealer = gbp ? Number((gbp * fx).toFixed(2)) : null;
-
-    // TV trae la fecha como campo en dd-mm-yyyy; Rubadub en prosa inglesa.
-    let release = ship.date;
-    if (esTV && b.fields.releasedate) {
-      const d = b.fields.releasedate.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
-      if (d) release = `${d[3]}-${d[2].padStart(2,'0')}-${d[1].padStart(2,'0')}`;
-    }
-
-    // TV no dice "Please Pre-Order": lo que manda es si la fecha de salida
-    // sigue por delante. Rubadub si lo dice, y ahi manda el marcador.
-    const esFuturo = release ? release > new Date(emailDate.getTime()).toISOString().slice(0,10) : false;
-    const forthcoming = esTV ? esFuturo : isPreorder;
-
-    // La descripcion importa para Shopify y cada uno la deja en otro sitio:
-    // W&S en el SALESPAPER.pdf del ZIP, TV en un _promotext.txt dentro del ZIP,
-    // y Rubadub EN NINGUN SITIO salvo el propio email — 6 de sus 7 promopacks
-    // no traen ni txt ni pdf. Asi que aqui se rescata la prosa del email, que
-    // es la unica fuente que tiene ese distribuidor.
-    // Prosa DE ESTE disco. En un email de varios, la ventana anterior termina
-    // con la prosa del disco de arriba y la posterior sigue hasta la portada del
-    // de abajo: coger "el trozo mas largo de las dos" desplazaba la descripcion
-    // un bloque (medido: 848 de 3.039 nombraban solo al artista de otro disco).
-    // Ahora: detras, desde la ficha hasta la portada del disco siguiente; delante,
-    // el email entero si trae un solo disco, y si trae varios solo lo que hay
-    // entre su portada y su ficha (lo anterior es la entradilla del email).
-    const portadaSiguiente = idx < blocks.length - 1
-      ? [...after.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].find(m => esPortada(m[1])) : null;
-    const prosaDetras = portadaSiguiente ? after.slice(0, portadaSiguiente.index) : after;
-    const portadaPropia = [...propio.matchAll(/\[\[IMG:([^\]]+)\]\]/g)].filter(m => esPortada(m[1])).pop();
-    const prosaDelante = blocks.length === 1 ? before : (portadaPropia ? propio.slice(portadaPropia.index) : '');
-    const prosa = descFromProse(prosaDelante, prosaDetras, b.fields);
-
-    rows.push({
-      catno: b.fields.catalog || b.fields.cat,
-      artist,
-      title: b.fields.title || '',
-      label: b.fields.label || '',
-      // TV si trae genero como campo; en Rubadub se deja vacio a proposito y lo
-      // rellena el SALESPAPER, porque adivinarlo es peor que no ponerlo.
-      genre: esTV ? (b.fields.genre || '') : '',
-      release,
-      dealerPrice: dealer,
-      format: b.fields.format || '',
-      coverUrl,
-      zipUrl,
-      source: esTV ? 'tv' : 'rd',
-      forthcoming,
-      _gbp: esTV ? null : (gbp || null),
-      _desc: prosa,
-      _zipLinks: zipLinks,      // enlaces "Download Zip" de este bloque (tracker o directos)
-      _digest: digest,          // '' | 'shipping' | 'presales'
-      _warnings: warnings,
-    });
-  });
-
-  // Un mismo enlace en bloques de discos DISTINTOS no es de ninguno. Pasa en el
-  // texto plano de los digests (BLNK029 y UTTU200 llevan el tracker identico) y
-  // bajarlo le daria a uno el ZIP del otro. Se quita de los dos y se dice. El
-  // mismo disco listado dos veces (TOMTOM002) no cuenta.
-  const dueños = new Map();
-  for (const r of rows) for (const u of r._zipLinks) {
-    if (!dueños.has(u)) dueños.set(u, new Set());
-    dueños.get(u).add(rdKey(r.catno));
-  }
-  const catnoDe = new Map(rows.map(r => [rdKey(r.catno), r.catno]));
-  for (const r of rows) {
-    const compartidos = r._zipLinks.filter(u => dueños.get(u).size > 1);
-    if (!compartidos.length) continue;
-    const propio = rdKey(r.catno);
-    r._zipLinks = r._zipLinks.filter(u => dueños.get(u).size === 1);
-    r._zipShared = [...new Set(compartidos.flatMap(u => [...dueños.get(u)]))].filter(k => k !== propio).map(k => catnoDe.get(k));
-    r._warnings.push(`el enlace del ZIP es el mismo que el de ${r._zipShared.join(', ')} — no se usa, baja este a mano`);
-  }
-
-  return rows;
-}
-
 // ── SEÑAL DE PEDIDO ────────────────────────────────────────────
 // Un Fwd/Re de Eduardo al distribuidor es su pedido. Marcar el EMAIL entero como
 // pedido no vale: un email puede anunciar varios discos y solo se pidio uno. El
@@ -9961,7 +9585,7 @@ async function mailFetchBody(secret, name) {
 // Sirve para ver de un vistazo si el Apps Script ha dejado de empujar: estuvo
 // parado del 28-08 al 16-09 sin que nada lo dijera.
 const MAIL_DISTRIBUIDOR = { RD: 'Rubadub', RDORD: 'Rubadub', TV: 'Triple Vision', TVORD: 'Triple Vision',
-                            WS: 'W&S', WSORD: 'W&S', DBH: 'DBH' };
+                            WS: 'W&S', WSORD: 'W&S', DBH: 'DBH', MT: 'Mother Tongue', KUDOS: 'Kudos' };
 function mailFreshness(idx) {
   const out = {};
   for (const e of idx || []) {
@@ -10116,22 +9740,12 @@ const MAIL_SOURCES = {
   RD:    { label: 'Rubadub',       kind: 'material' },
   WSORD: { label: 'W&S · pedido',  kind: 'pedido'   },
   RDORD: { label: 'RD · pedido',   kind: 'pedido'   },
+  // Llegan como Fwd de Eduardo (ver FUENTES_REENVIO): sin parser todavia, se
+  // listan como material para verlos en la tabla.
+  MT:    { label: 'Mother Tongue', kind: 'material' },
+  KUDOS: { label: 'Kudos',         kind: 'material' },
 };
 
-// Un digest es un catalogo, no un anuncio. Se reconoce por el asunto.
-const MAIL_DIGEST = [
-  /All-Rubadub-Pre-sales/i, /New-Releases-Shipping/i, /Imports-Shipping-Today/i,
-  /Triple-Vision-New-Releases/i, /Wordandsound-Update/i, /Newsletter-KW\d+/i,
-  /Label-Special/i, /Represses/i,
-];
-// Una correccion de un email anterior: mismo disco, otra version. No es material
-// nuevo, y en TV ademas significa que la URL del promopack ha cambiado.
-const MAIL_REVISION = /^(ART-UPDATE|UPDATE|Price-correction|Artist-and-release-title-correction|Updated-artwork|New-release-date|RELEASE-DATE-SET|Repress)/i;
-// La señal de pedido no vive solo bajo WSORD__/RDORD__: los Fwd/Re de Eduardo al
-// distribuidor se archivan con el prefijo del distribuidor. Si se cuentan como
-// material duplican el anuncio original. Sin falsos positivos: "Repress-" y
-// "Release-" no llevan guion tras "Re".
-const MAIL_ORDER = /^(Fwd|Re)-/;
 
 // Un catno de verdad mezcla letras y digitos; exigirlo evita colar "VIA" o
 // "RAWAX" como si lo fueran. Es DECORATIVO — para reconocer el disco de un
@@ -10156,7 +9770,7 @@ function mailCatno(prefix, subject) {
 
 function triageEmail(e) {
   const src = MAIL_SOURCES[e.prefix] || { label: e.prefix || '?', kind: 'material' };
-  const esPedido = src.kind === 'pedido' || MAIL_ORDER.test(e.subject);
+  const esPedido = src.kind === 'pedido' || (!FUENTES_REENVIO.has(e.prefix) && MAIL_ORDER.test(e.subject));
   return {
     ...e,
     label: esPedido && src.kind === 'material' ? `${src.label} · pedido` : src.label,
@@ -10196,6 +9810,551 @@ const saveMailState = (s) => {
 //   • Variant Inventory Policy: continue   (oversell → negative stock = demand)
 //   • Tags                    : + forthcoming + release:YYYY-MM-DD
 // After bulk-upload to Shopify, the Forthcoming section shows them automatically.
+// ── BANDEJA DE ESCUCHA (Pre-order, fase 2) ─────────────────────
+// Los promopacks de RD/TV que el worker ya bajo a R2 (lib/listen.ts), con una
+// cola propia: el admin no va dentro de PlayerProvider. Las URLs firmadas
+// caducan en 1 h; si una pista falla por eso (401/403) se piden otra vez las
+// de lo que hay en la cola y se sigue en la misma pista y segundo. Cada pestana
+// carga solo su vista, de 30 en 30 (listen-list vista= / cursor).
+// Decisiones: Pre-order solo marca (la carga al tab es la fase 3), Pendiente
+// lo pasa a su pestana (sale de "por decidir"), Rechazar usa el mismo filtro
+// del 20-10 (temporal/definitivo). Los precios son coste dealer, no de venta.
+const LISTEN_ESTADO = {
+  listo:           { txt: 'listo',           col: S.accent },
+  descarga_manual: { txt: 'descarga manual', col: '#ff8800' },
+  sin_zip:         { txt: 'error',           col: S.danger },
+  sin_audio:       { txt: 'error',           col: S.danger },
+  error:           { txt: 'error',           col: S.danger },
+};
+const LISTEN_VISTAS = [
+  ['por_decidir', 'Por decidir'],
+  ['pendientes', 'Pendientes'],
+  ['elegidos', 'Elegidos pre-order'],
+  ['rechazados', 'Rechazados'],
+  ['cargados', 'Cargados'],
+];
+const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : d === 'cargado' ? 'cargados' : 'rechazados';
+const LISTEN_PAGINA = 30;
+const coma = n => Number(n).toFixed(2).replace('.', ',');
+const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
+
+// `onCargar(discos)`: lo pone el tab Pre-order; mete los elegidos en su manifest
+// y devuelve {anadidos, enTienda: [{clave, catno, como, handle}], sinAudio, errores}.
+// `ultimaCarga`: lo que "List pre-orders" acaba de marcar como cargado, para
+// moverlo a Cargados sin esperar a la lista de KV (tarda hasta 60 s).
+function ListenInbox({ onCargar, ultimaCarga }) {
+  const [secret, setSecret] = useMailSecret();
+  const [cache, setCache] = useState(() => new Map());  // clave -> disco (con _exp), de todas las cargas
+  const [lista, setLista] = useState(null);       // {vista, claves, count, cursor}; null = sin cargar
+  const [counts, setCounts] = useState(null);
+  const [lastRun, setLastRun] = useState(null);
+  const [cargando, setCargando] = useState(false);
+  const [err, setErr] = useState('');
+  const [aviso, setAviso] = useState('');
+  const [vista, setVista] = useState('por_decidir');
+  const [busy, setBusy] = useState('');           // clave con una decision en vuelo
+  const [rechazando, setRechazando] = useState(''); // clave eligiendo temporal/definitivo
+  const [cola, setCola] = useState([]);           // [{clave, idx}]
+  const [pos, setPos] = useState(-1);
+  const [playing, setPlaying] = useState(false);
+  const [tiempo, setTiempo] = useState({ t: 0, d: 0 });
+  const [verCola, setVerCola] = useState(false);
+  const [toast, setToast] = useState('');
+  const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
+  const [motivoCarga, setMotivoCarga] = useState({});  // clave -> {txt, col}: por que no entro (o entro sin audio)
+  const [promote, setPromote] = useState(null);       // {activo, pruebas, audio, covers} del worker
+  const [cargandoPre, setCargandoPre] = useState(false);
+  const toastRef = useRef(0);
+  const audioRef = useRef(null);
+  const cacheRef = useRef(new Map());
+  const colaRef = useRef([]);
+  const posRef = useRef(-1);
+  const reanudarRef = useRef({ t: 0, play: true });
+  const ultimoTRef = useRef(0);
+  const reintentoRef = useRef('');                // "clave:idx" ya renovada una vez
+  const decididoRef = useRef(new Map());          // clave -> decision tomada en esta pestana (la lista de KV tarda)
+  useEffect(() => { colaRef.current = cola; }, [cola]);
+  useEffect(() => { posRef.current = pos; }, [pos]);
+
+  const porClave = cache;
+  const actual = pos >= 0 ? cola[pos] : null;
+  const actualItem = actual ? porClave.get(actual.clave) : null;
+  const actualTrack = actualItem?.tracks?.[actual.idx] || null;
+  const srcActual = actualTrack?.url || '';
+  // Que pista toca, aparte de su URL: dos pistas con la misma URL, o volver a
+  // pulsar la que suena, tambien tienen que recargar.
+  const idActual = actual ? `${pos}:${actual.clave}:${actual.idx}` : '';
+
+  const pide = async (qs) => {
+    const r = await fetch(`${WORKER_URL}?action=listen-list&${qs}`, { headers: { 'Authorization': `Bearer ${secret}` } });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error('Secreto incorrecto.');
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+  const guarda = (its, expiresIn) => {
+    const exp = Date.now() + (expiresIn || 3600) * 1000;
+    const m = new Map(cacheRef.current);
+    for (const it of its) m.set(it.clave, { ...it, _exp: exp });
+    cacheRef.current = m;
+    setCache(m);
+  };
+  // Si al guardar cambia la URL de lo que suena, sigue donde iba y como iba.
+  const mantener = () => { const a = audioRef.current; reanudarRef.current = { t: a?.currentTime || 0, play: a ? !a.paused : false }; };
+
+  // Una pestana: la primera pagina, o la siguiente con `mas`.
+  const cargarVista = async (v, mas = false) => {
+    if (!secret) { setErr('Pega el BOOTSTRAP_AUTH_SECRET.'); return false; }
+    setCargando(true); setErr('');
+    try {
+      const cur = mas && lista?.vista === v ? lista.cursor : null;
+      const d = await pide(`vista=${v}&limit=${LISTEN_PAGINA}${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
+      mantener();
+      guarda(d.items || [], d.expires_in);
+      setCounts(d.counts || null);
+      setLastRun(d.last_run || null);
+      setPromote(d.promote || null);
+      // La lista de KV va hasta 60 s por detras de lo recien decidido: en la
+      // primera pagina se suma lo que esta pestana ya sabe que es de esta vista
+      // y se quita lo que sabe que ya no lo es.
+      let claves = (d.items || []).map(x => x.clave);
+      let count = d.count ?? 0;
+      if (!cur) {
+        const cambiado = new Map([...decididoRef.current].map(([c, dec]) => [c, vistaDeDecision(dec)]));
+        const fuera = claves.filter(c => cambiado.has(c) && cambiado.get(c) !== v);
+        const dentro = [...cambiado].filter(([c, vv]) => vv === v && !claves.includes(c)).map(([c]) => c).filter(c => cacheRef.current.has(c));
+        claves = [...dentro, ...claves.filter(c => !fuera.includes(c))];
+        count = Math.max(0, count + dentro.length - fuera.length);
+        if (d.counts) setCounts({ ...d.counts, [v]: count });
+      }
+      setLista(l => ({ vista: v, claves: [...(cur && l?.vista === v ? l.claves : []), ...claves], count, cursor: d.cursor || null }));
+      return true;
+    } catch (e) {
+      setErr(`listen-list: ${e.message}`);
+      return false;
+    } finally { setCargando(false); }
+  };
+  const cambiaVista = (v) => { setVista(v); setRechazando(''); cargarVista(v); };
+
+  // URLs nuevas para todo lo que hay en la cola (de la pestana que sea).
+  const renovar = async (reanudar) => {
+    const claves = [...new Set(colaRef.current.map(c => c.clave))];
+    try {
+      reanudarRef.current = reanudar;
+      for (let i = 0; i < claves.length; i += 100) {
+        const d = await pide(`claves=${encodeURIComponent(claves.slice(i, i + 100).join(','))}`);
+        guarda(d.items || [], d.expires_in);
+      }
+      return true;
+    } catch (e) {
+      setErr(`listen-list: ${e.message}`);
+      return false;
+    }
+  };
+
+  // Cambia la pista (o sus URLs tras renovar): carga y, si toca, suena.
+  useEffect(() => {
+    const a = audioRef.current; if (!a) return;
+    if (!srcActual) { a.pause(); a.removeAttribute('src'); setPlaying(false); return; }
+    const { t, play } = reanudarRef.current;
+    reanudarRef.current = { t: 0, play: true };
+    a.src = srcActual;
+    const go = () => {
+      if (t) { try { a.currentTime = t; } catch { /* sin metadata aun: empieza en 0 */ } }
+      if (play) a.play().catch(() => setPlaying(false));
+    };
+    a.addEventListener('loadedmetadata', go, { once: true });
+    return () => a.removeEventListener('loadedmetadata', go);
+  }, [srcActual, idActual]);
+
+  // A una pista concreta de la cola. Si a sus URLs les queda menos de un
+  // minuto, se renuevan antes de empezar.
+  const irA = async (i) => {
+    if (i < 0 || i >= colaRef.current.length) { setPos(-1); return; }
+    const it = cacheRef.current.get(colaRef.current[i].clave);
+    if (!it || Date.now() > it._exp - 60_000) await renovar({ t: 0, play: true });
+    reanudarRef.current = { t: 0, play: true };
+    setPos(i);
+  };
+  const siguiente = () => irA(posRef.current + 1);
+
+  const pistasDe = it => (it.tracks || []).map((_, idx) => ({ clave: it.clave, idx }));
+  // Pulsar una pista: suena YA. Esa pista y las siguientes del disco pasan justo
+  // detras de lo ya oido (si estaban en la cola, se mueven, no se duplican) y la
+  // cola que hubiera sigue detras, en su orden.
+  const escuchar = (it, idx = 0) => {
+    const mueve = x => x.clave === it.clave && x.idx >= idx;
+    const c = colaRef.current, p = posRef.current;
+    const antes = c.slice(0, p + 1).filter(x => !mueve(x));
+    const despues = c.slice(p + 1).filter(x => !mueve(x));
+    const n = [...antes, ...pistasDe(it).slice(idx), ...despues];
+    colaRef.current = n;
+    setCola(n);
+    setPos(-1);
+    setTimeout(() => irA(antes.length), 0);
+  };
+  const avisa = (txt) => {
+    setToast(txt);
+    clearTimeout(toastRef.current);
+    toastRef.current = setTimeout(() => setToast(''), 2000);
+  };
+  const enCola = useMemo(() => new Set(cola.map(c => `${c.clave}:${c.idx}`)), [cola]);
+  const todoEnCola = it => (it.tracks || []).length > 0 && it.tracks.every((_, idx) => enCola.has(`${it.clave}:${idx}`));
+  // Anade sin repetir; no arranca sola: la barra aparece y se le da a ▶.
+  const aCola = (discos) => {
+    const ya = new Set(colaRef.current.map(c => `${c.clave}:${c.idx}`));
+    const nuevas = discos.flatMap(pistasDe).filter(c => !ya.has(`${c.clave}:${c.idx}`));
+    if (nuevas.length) {
+      const c = [...colaRef.current, ...nuevas];
+      colaRef.current = c;
+      setCola(c);
+    }
+    avisa(nuevas.length ? `Añadida${nuevas.length > 1 ? 's' : ''} ${nuevas.length} pista${nuevas.length > 1 ? 's' : ''} a la cola` : 'Ya estaban en la cola');
+    return nuevas.length;
+  };
+  const quitarDeCola = (i) => {
+    const c = colaRef.current.filter((_, j) => j !== i);
+    colaRef.current = c;
+    setCola(c);
+    const p = posRef.current;
+    if (i < p) setPos(p - 1);
+    else if (i === p) {
+      // La que sonaba: pasa a la siguiente, que ahora ocupa el mismo indice.
+      if (i < c.length) { reanudarRef.current = { t: 0, play: !audioRef.current?.paused }; setPos(-1); setTimeout(() => setPos(i), 0); }
+      else setPos(-1);
+    }
+    if (!c.length) setVerCola(false);
+  };
+  const vaciarCola = () => { colaRef.current = []; setCola([]); setPos(-1); setVerCola(false); setTodoAnadido(null); };
+
+  const onError = async () => {
+    const cur = colaRef.current[posRef.current]; if (!cur) return;
+    const it = cacheRef.current.get(cur.clave);
+    const tr = it?.tracks?.[cur.idx];
+    if (!tr) { siguiente(); return; }
+    const id = `${cur.clave}:${cur.idx}`;
+    let status = 0;
+    try { status = (await fetch(tr.url, { method: 'HEAD' })).status; } catch { /* sin red: status 0 */ }
+    if ((status === 401 || status === 403 || Date.now() > it._exp) && reintentoRef.current !== id) {
+      reintentoRef.current = id;
+      if (await renovar({ t: ultimoTRef.current, play: true })) return;   // el efecto sigue en el mismo punto
+    }
+    setAviso(`No se pudo reproducir ${it.catno} · ${tr.name}${status ? ` (HTTP ${status})` : ''}: se salta.`);
+    siguiente();
+  };
+
+  const toggle = () => {
+    const a = audioRef.current; if (!a) return;
+    if (!srcActual) { if (colaRef.current.length) irA(0); return; }
+    if (a.paused) a.play().catch(() => {}); else a.pause();
+  };
+  const buscar = (e) => {
+    const a = audioRef.current; if (!a || !tiempo.d) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * tiempo.d;
+  };
+
+  const decidir = async (it, decision, tipo) => {
+    setBusy(it.clave); setErr('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=listen-decide`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clave: it.clave, decision, tipo }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      const previo = cacheRef.current.get(it.clave);
+      const nuevo = { ...previo, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined,
+        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined, en_tienda_como: undefined } : {}) };
+      const m = new Map(cacheRef.current).set(it.clave, nuevo);
+      cacheRef.current = m;
+      setCache(m);
+      decididoRef.current.set(it.clave, nuevo.decision);
+      // Cambia de pestana: sale de la lista abierta y se mueven los contadores.
+      const de = vistaDeDecision(it.decision), a = vistaDeDecision(nuevo.decision);
+      if (de !== a) {
+        setCounts(c => c && { ...c, [de]: Math.max(0, (c[de] || 0) - 1), [a]: (c[a] || 0) + 1 });
+        setLista(l => l && l.vista === de ? { ...l, claves: l.claves.filter(c => c !== it.clave), count: Math.max(0, l.count - 1) } : l);
+      }
+      setRechazando('');
+    } catch (e) {
+      setErr(`No se pudo guardar la decisión de ${it.catno}: ${e.message}`);
+    } finally { setBusy(''); }
+  };
+
+  // "Cargar elegidos": TODOS los elegidos (no solo la pagina abierta) al
+  // manifest del Pre-order. Solo mete filas; "cargado" lo marca "List pre-orders".
+  // La lista de KV puede ir hasta 60 s por detras de una decision recien tomada
+  // (2026-11-03: 4 elegidos, la lista solo dio 1), asi que se une con lo que
+  // esta pestana sabe que es elegido y se confirma disco a disco con claves=,
+  // que lee cada registro (get) y no la lista.
+  const cargarElegidos = async () => {
+    if (!onCargar) return;
+    setCargandoPre(true); setErr('');
+    try {
+      const claves = new Set();
+      let cur = null;
+      do {
+        const d = await pide(`vista=elegidos&limit=100${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
+        for (const it of d.items || []) claves.add(it.clave);
+        cur = d.cursor || null;
+      } while (cur);
+      for (const it of cacheRef.current.values()) if (it.decision === 'preorder') claves.add(it.clave);
+      const todos = [];
+      const pedir = [...claves];
+      for (let i = 0; i < pedir.length; i += 100) {
+        const d = await pide(`claves=${encodeURIComponent(pedir.slice(i, i + 100).join(','))}`);
+        mantener();
+        guarda(d.items || [], d.expires_in);
+        todos.push(...(d.items || []).filter(it => it.decision === 'preorder'));
+      }
+      if (!todos.length) { setAviso('No hay elegidos que cargar.'); return; }
+      const deTodos = new Map(todos.map(x => [x.clave, x]));
+      // La pestana y su contador, con los elegidos confirmados (no los de la lista atrasada).
+      setCounts(c => c && { ...c, elegidos: todos.length });
+      setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: [...new Set([...l.claves, ...todos.map(x => x.clave)])], count: Math.max(l.count, todos.length) } : l);
+      const res = await onCargar(todos);
+      const motivos = {};
+      for (const x of res.enTienda || []) motivos[x.clave] = { txt: `no entra: ya en tienda como ${x.handle || x.como}${x.handle && x.como !== x.handle ? ` (SKU ${x.como})` : ''}`, col: '#ff8800' };
+      for (const c of res.sinAudio || []) motivos[c] = { txt: 'en el manifest sin audio: espera su ZIP', col: '#ff8800' };
+      for (const e of res.errores || []) if (e.clave !== '—') motivos[e.clave] = { txt: `no entra: ${e.error}`, col: S.danger };
+      for (const c of res.anadidos || []) if (!motivos[c]) motivos[c] = { txt: 'en el manifest: falta "List pre-orders"', col: S.accent };
+      setMotivoCarga(m => ({ ...m, ...motivos }));
+      // Lo que ya esta en la tienda no se queda en Elegidos: pasa a Cargados con
+      // su motivo (sin copiar nada), y "deshacer carga" lo devuelve.
+      const aCargados = [];
+      for (const x of res.enTienda || []) {
+        const como = x.handle || x.como;
+        try {
+          const r = await fetch(`${WORKER_URL}?action=listen-decide`, {
+            method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clave: x.clave, decision: 'cargado', en_tienda: como }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+          aCargados.push({ clave: x.clave, cargado_at: d.item.cargado_at, en_tienda_como: d.item.en_tienda_como });
+        } catch (e) { motivos[x.clave] = { txt: `ya en tienda como ${como}, pero no se pudo pasar a Cargados: ${e.message}`, col: S.danger }; }
+      }
+      if (aCargados.length) {
+        const m = new Map(cacheRef.current);
+        for (const x of aCargados) {
+          m.set(x.clave, { ...(m.get(x.clave) || deTodos.get(x.clave)), decision: 'cargado', decided_at: x.cargado_at, cargado_at: x.cargado_at, en_tienda_como: x.en_tienda_como });
+          decididoRef.current.set(x.clave, 'cargado');
+        }
+        cacheRef.current = m;
+        setCache(m);
+        const fuera = new Set(aCargados.map(x => x.clave));
+        setCounts(c => c && { ...c, elegidos: Math.max(0, (c.elegidos || 0) - fuera.size), cargados: (c.cargados || 0) + fuera.size });
+        setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: l.claves.filter(c => !fuera.has(c)), count: Math.max(0, l.count - fuera.size) } : l);
+        setMotivoCarga(mc => { const n = { ...mc }; for (const c of fuera) delete n[c]; return n; });
+      }
+      setMotivoCarga(m => ({ ...m, ...Object.fromEntries(Object.entries(motivos).filter(([c]) => !aCargados.some(x => x.clave === c))) }));
+      setAviso(`Cargar elegidos — ${resumenCarga(todos.length, res)}${aCargados.length ? ` Los ya en tienda pasan a Cargados (${aCargados.length}).` : ''} "Cargado" se marca al pulsar "List pre-orders".`);
+    } catch (e) {
+      setErr(`Cargar elegidos: ${e.message}`);
+    } finally { setCargandoPre(false); }
+  };
+
+  // Tras "List pre-orders": lo cargado pasa a Cargados aqui mismo.
+  useEffect(() => {
+    if (!ultimaCarga?.items?.length) return;
+    const m = new Map(cacheRef.current);
+    const movidos = [];
+    for (const x of ultimaCarga.items) {
+      const prev = m.get(x.clave);
+      if (prev && prev.decision !== 'cargado') movidos.push({ clave: x.clave, de: vistaDeDecision(prev.decision) });
+      m.set(x.clave, { ...(prev || { clave: x.clave, catno: x.clave, tracks: [] }), decision: 'cargado', decided_at: x.cargado_at, cargado_at: x.cargado_at, handle: x.handle });
+      decididoRef.current.set(x.clave, 'cargado');
+    }
+    cacheRef.current = m;
+    setCache(m);
+    setMotivoCarga(mc => { const n = { ...mc }; for (const x of ultimaCarga.items) delete n[x.clave]; return n; });
+    if (movidos.length) {
+      setCounts(c => {
+        if (!c) return c;
+        const n = { ...c };
+        for (const x of movidos) { n[x.de] = Math.max(0, (n[x.de] || 0) - 1); n.cargados = (n.cargados || 0) + 1; }
+        return n;
+      });
+      const fuera = new Set(movidos.map(x => x.clave));
+      setLista(l => l && l.vista !== 'cargados' ? { ...l, claves: l.claves.filter(c => !fuera.has(c)), count: Math.max(0, l.count - l.claves.filter(c => fuera.has(c)).length) } : l);
+    }
+  }, [ultimaCarga]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const visibles = (lista?.claves || []).map(c => cache.get(c)).filter(Boolean);
+  const conAudio = visibles.filter(it => it.tracks?.length);
+  const pistasVisibles = conAudio.reduce((n, it) => n + it.tracks.length, 0);
+  const todoVisibleEnCola = conAudio.length > 0 && conAudio.every(todoEnCola);
+  const btn = { background: 'none', border: `1px solid ${S.border}`, color: S.muted, cursor: 'pointer', fontSize: 8, padding: '2px 7px', borderRadius: 2, fontFamily: 'inherit', flexShrink: 0, whiteSpace: 'nowrap' };
+  const btnOn = { ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 };
+
+  return (
+    <details style={{ marginBottom: 14, border: `1px solid ${S.border}`, borderRadius: 4, background: S.bg }} open={!!lista}>
+      <summary style={{ cursor: 'pointer', padding: '8px 14px', fontSize: 9, color: S.muted, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }}>
+        🎧 Bandeja de escucha {counts ? `· ${counts.por_decidir} por decidir` : ''}
+      </summary>
+      <div style={{ padding: cola.length ? '0 14px 76px' : '0 14px 14px' }}>
+        <audio ref={audioRef} preload="metadata"
+          onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+          onPlaying={() => { reintentoRef.current = ''; }}
+          onTimeUpdate={e => { ultimoTRef.current = e.currentTarget.currentTime; setTiempo({ t: e.currentTarget.currentTime, d: e.currentTarget.duration || 0 }); }}
+          onEnded={siguiente} onError={onError} />
+        {err && <div style={{ marginBottom: 10, padding: 8, background: '#1a0000', border: `1px solid ${S.danger}44`, borderRadius: 2, fontSize: 10, color: S.danger }}>{err}</div>}
+        {aviso && <div onClick={() => setAviso('')} style={{ marginBottom: 10, padding: 8, border: '1px solid #ff880055', borderRadius: 2, fontSize: 10, color: '#ff8800', cursor: 'pointer' }}>{aviso} <span style={{ color: S.muted }}>(cerrar)</span></div>}
+
+        {lista === null ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input type="password" value={secret} onChange={e => setSecret(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cargarVista(vista); }}
+              placeholder="BOOTSTRAP_AUTH_SECRET"
+              style={{ flex: '1 1 260px', background: S.surf, border: `1px solid ${S.border}`, color: S.text, borderRadius: 2, padding: '6px 10px', fontSize: 11, fontFamily: 'monospace', outline: 'none' }} />
+            <button onClick={() => cargarVista(vista)} disabled={cargando} style={{ background: S.accent, border: 'none', color: '#080808', cursor: 'pointer', fontSize: 9, padding: '6px 16px', borderRadius: 2, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'inherit', fontWeight: 700 }}>
+              {cargando ? 'Cargando…' : 'Cargar'}
+            </button>
+          </div>
+        ) : (<>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            {LISTEN_VISTAS.map(([k, label]) => (
+              <button key={k} onClick={() => cambiaVista(k)} style={vista === k ? btnOn : btn}>{label} ({counts?.[k] ?? 0})</button>
+            ))}
+            <span style={{ flex: 1 }} />
+            {vista === 'elegidos' && onCargar && (counts?.elegidos || 0) > 0 && (
+              <button onClick={cargarElegidos} disabled={cargandoPre} title="Mete los elegidos en el manifest de abajo. Lo que ya está en la tienda no entra."
+                style={{ ...btn, background: S.accent, color: '#080808', borderColor: S.accent, fontWeight: 700 }}>
+                {cargandoPre ? 'Cargando…' : `Cargar elegidos al Pre-order (${counts.elegidos})`}
+              </button>
+            )}
+            {conAudio.length > 0 && (todoVisibleEnCola
+              ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ {todoAnadido?.vista === vista ? todoAnadido.n : pistasVisibles} en cola</span>
+              : <button onClick={() => setTodoAnadido({ vista, n: aCola(conAudio) })} style={btn}>+ todo a la cola ({pistasVisibles} pistas)</button>)}
+            <button onClick={() => cargarVista(vista)} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
+          </div>
+          {promote?.pruebas && <div style={{ marginBottom: 10, padding: '6px 10px', border: '1px solid #ff880077', background: '#1a1000', borderRadius: 2, fontSize: 10, color: '#ff8800', fontWeight: 700 }}>
+            CSV de pruebas: "List pre-orders" copia el audio a {promote.audio} y {promote.covers}. No importes ese CSV en Shopify.
+          </div>}
+          {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
+            Última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC · {lastRun.nuevos ?? 0} nuevos · modo {lastRun.mode}
+          </div>}
+          {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
+
+          {visibles.map(it => {
+            const est = LISTEN_ESTADO[it.estado] || LISTEN_ESTADO.error;
+            const sonando = actual?.clave === it.clave;
+            return (
+              <div key={it.clave} style={{ display: 'flex', gap: 10, padding: '10px 0', borderTop: `1px solid ${S.border}` }}>
+                <div style={{ width: 56, height: 56, flexShrink: 0, background: S.surf, borderRadius: 2, overflow: 'hidden' }}>
+                  {it.cover?.url && <img src={it.cover.url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 9, color: S.accent, fontFamily: 'monospace' }}>{it.catno}</span>
+                    <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
+                    <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
+                    {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
+                    {motivoCarga[it.clave] && it.decision === 'preorder' && <span title="Resultado del último Cargar elegidos. Add stock no se toca desde aquí." style={{ fontSize: 8, color: motivoCarga[it.clave].col, border: `1px solid ${motivoCarga[it.clave].col}66`, borderRadius: 2, padding: '0 5px' }}>{motivoCarga[it.clave].txt}</span>}
+                  </div>
+                  <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
+                    {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '',
+                      it.dealerPrice == null ? '' : it.gbp != null
+                        ? `£${coma(it.gbp)} × ${String(it.fx ?? RD_GBP_EUR).replace('.', ',')} = ${coma(it.dealerPrice)} € coste dealer`
+                        : `${coma(it.dealerPrice)} € coste dealer`,
+                      it.distribuidor].filter(Boolean).join(' · ')}
+                  </div>
+                  {it.estado !== 'listo' && <div style={{ fontSize: 9, color: est.col, marginTop: 3 }}>
+                    {it.detalle || ''}{it.zip_link && <> · <a href={it.zip_link} target="_blank" rel="noreferrer" style={{ color: est.col }}>bajar el ZIP ↗</a></>}
+                  </div>}
+                  {it.estado === 'listo' && it.detalle && <div style={{ fontSize: 8, color: S.muted, marginTop: 2 }}>{it.detalle}</div>}
+                  {it.tracks?.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                    {it.tracks.map((t, idx) => {
+                      const esta = sonando && actual.idx === idx;
+                      return <button key={idx} onClick={() => escuchar(it, idx)} title={t.name}
+                        style={{ ...btn, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', color: esta ? '#080808' : S.text, background: esta ? S.accent : 'none' }}>
+                        {esta && playing ? '♪ ' : '▶ '}{t.name}</button>;
+                    })}
+                    {todoEnCola(it)
+                      ? <span style={{ ...btn, color: S.accent, borderColor: `${S.accent}55`, cursor: 'default' }}>✓ en cola</span>
+                      : <button onClick={() => aCola([it])} style={btn}>+ cola</button>}
+                  </div>}
+                  <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
+                    {it.decision === 'cargado' && (it.en_tienda_como
+                      ? <span title="No se copió nada: ya estaba en la tienda. Deshacer lo devuelve a Elegidos." style={{ fontSize: 8, color: '#ff8800', fontWeight: 700 }}>CARGADO EL {fechaCorta(it.cargado_at)} · ya en tienda como {it.en_tienda_como}</span>
+                      : <span title="Audio y portada copiados al producto por List pre-orders; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>)}
+                    {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
+                    {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
+                    {it.decision === 'cargado' ? (
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} title="Vuelve a Elegidos; lo ya copiado al producto se queda" style={btn}>deshacer carga</button>
+                    ) : rechazando === it.clave ? (<>
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'temporal')} title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={btn}>No, por ahora</button>
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'definitivo')} title="No vuelve a salir (se puede recuperar)" style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Nunca</button>
+                      <button onClick={() => setRechazando('')} style={btn}>cancelar</button>
+                    </>) : (<>
+                      {it.decision !== 'preorder' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} style={{ ...btn, color: S.accent, borderColor: `${S.accent}55` }}>Pre-order</button>}
+                      {it.decision !== 'pendiente' && it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'pendiente')} title="Se queda en la bandeja; el audio se borra a los 30 días de entrar" style={btn}>Pendiente</button>}
+                      {it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => setRechazando(it.clave)} style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Rechazar</button>}
+                      {it.decision && <button disabled={busy === it.clave} onClick={() => decidir(it, null)} style={btn}>deshacer</button>}
+                    </>)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {lista.cursor && (
+            <button onClick={() => cargarVista(vista, true)} disabled={cargando} style={{ ...btn, display: 'block', margin: '10px auto 0', fontSize: 9, padding: '5px 14px' }}>
+              {cargando ? 'Cargando…' : `Cargar ${Math.min(LISTEN_PAGINA, lista.count - visibles.length)} más (quedan ${lista.count - visibles.length})`}
+            </button>
+          )}
+
+          {cola.length > 0 && (
+            <div style={{ position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 12, width: 'min(900px, calc(100vw - 32px))', zIndex: 50 }}>
+              {toast && <div style={{ marginBottom: 6, padding: '5px 10px', background: S.accent, color: '#080808', fontSize: 10, fontWeight: 700, borderRadius: 3, width: 'fit-content' }}>{toast}</div>}
+              {verCola && (
+                <div style={{ marginBottom: 6, maxHeight: 260, overflowY: 'auto', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, padding: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 9, color: S.muted, letterSpacing: 1, textTransform: 'uppercase', flex: 1 }}>Cola · {cola.length} pistas</span>
+                    <button onClick={vaciarCola} style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>vaciar cola</button>
+                  </div>
+                  {cola.map((c, i) => {
+                    const it = porClave.get(c.clave);
+                    const t = it?.tracks?.[c.idx];
+                    return (
+                      <div key={`${c.clave}:${c.idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', borderTop: i ? `1px solid ${S.border}` : 'none' }}>
+                        <span style={{ fontSize: 9, color: i === pos ? S.accent : S.muted, width: 18, textAlign: 'right' }}>{i === pos ? '♪' : i + 1}</span>
+                        <button onClick={() => irA(i)} style={{ flex: 1, minWidth: 0, background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', fontSize: 10, color: i === pos ? S.accent : S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', padding: 0 }}>
+                          <span style={{ fontFamily: 'monospace' }}>{it?.catno || c.clave}</span> · {t?.name || `pista ${c.idx + 1}`}
+                        </button>
+                        <button onClick={() => quitarDeCola(i)} title="Quitar de la cola" style={btn}>✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div style={{ padding: '8px 10px', background: S.surf, border: `1px solid ${S.border}`, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+                {actualItem?.cover?.url && <img src={actualItem.cover.url} alt="" style={{ width: 36, height: 36, objectFit: 'cover', borderRadius: 2 }} />}
+                <button onClick={() => irA(pos - 1)} disabled={pos <= 0} style={btn}>⏮</button>
+                <button onClick={toggle} style={{ width: 30, height: 30, borderRadius: '50%', background: S.accent, border: 'none', cursor: 'pointer', fontSize: 11, color: '#080808' }}>{playing ? '⏸' : '▶'}</button>
+                <button onClick={siguiente} disabled={pos >= cola.length - 1} style={btn}>⏭</button>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, color: S.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {actualTrack
+                      ? <><span style={{ color: S.accent, fontFamily: 'monospace' }}>{actualItem.catno}</span> · {actualTrack.name}</>
+                      : <span style={{ color: S.muted }}>Cola lista — dale a ▶</span>}
+                  </div>
+                  <div onClick={buscar} style={{ height: 6, background: S.border, borderRadius: 3, marginTop: 4, cursor: 'pointer', overflow: 'hidden' }}>
+                    <div style={{ width: `${actualTrack && tiempo.d ? (tiempo.t / tiempo.d) * 100 : 0}%`, height: '100%', background: S.accent }} />
+                  </div>
+                </div>
+                <span style={{ fontSize: 9, color: S.muted, whiteSpace: 'nowrap' }}>{actualTrack ? `${mmss(tiempo.t)} / ${mmss(tiempo.d)}` : ''}</span>
+                <button onClick={() => setVerCola(v => !v)} title="Ver la cola" style={{ ...btn, fontSize: 10, color: verCola ? '#080808' : S.text, background: verCola ? S.accent : 'none' }}>☰ {cola.length}</button>
+              </div>
+            </div>
+          )}
+        </>)}
+      </div>
+    </details>
+  );
+}
+
 function PreorderImporter() {
   const [manifest, setManifest]     = useState([]);   // [{catno, artist, title, label, genre, release, dealerPrice, tracks, format, coverUrl, zipUrl, source}]
   const [manifestName, setManifestName] = useState(null);
@@ -10210,7 +10369,7 @@ function PreorderImporter() {
   const [margin, setMargin]         = useState(60);
   const [ignoredKeys, setIgnoredKeys] = useState([]);  // manifest fields normalizeRow dropped
   const [rdText, setRdText]         = useState('');    // pasted Rubadub email(s)
-  const [rdFx, setRdFx]             = useState(1.17);  // GBP→EUR, applied in the parser
+  const [rdFx, setRdFx]             = useState(RD_GBP_EUR);  // GBP→EUR, applied in the parser (misma constante que la bandeja)
   const [rdDate, setRdDate]         = useState(() => new Date().toISOString().slice(0,10));
   const [rdPreview, setRdPreview]   = useState(null);  // parsed rows awaiting confirmation
   const [rdError, setRdError]       = useState('');
@@ -10236,6 +10395,7 @@ function PreorderImporter() {
   const [zipDirBusy, setZipDirBusy] = useState(false);
   const [mailLinking, setMailLinking] = useState(null);  // {done,total} al resolver enlaces bajo demanda
   const [downloading, setDownloading] = useState(false);
+  const [ultimaCarga, setUltimaCarga] = useState(null);  // {items:[{clave, cargado_at, handle}]}: para la bandeja
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
   const [downloadStats, setDownloadStats] = useState({ ok: 0, missing: 0, failed: 0 }); // download-all outcome breakdown
@@ -10891,6 +11051,55 @@ function PreorderImporter() {
     } finally { setMailRechazando(''); }
   };
 
+  // Bandeja de escucha → manifest (fase 3). Por cada elegido: si ya esta en la
+  // tienda (las mismas reglas que el archivo: buscaEnTienda + UNLISTED) no entra
+  // y se devuelve "en tienda como X"; si no, se reconstruye la fila analizando
+  // su email con el mismo parser que el archivo y entra marcada `_listen`, para
+  // que el Process tome el audio de la bandeja en vez de un ZIP. Repetible: el
+  // manifest se indexa por catno. "Cargado" lo marca el Process, no esto.
+  const cargarDesdeBandeja = async (discos) => {
+    const out = { anadidos: [], enTienda: [], sinAudio: [], errores: [] };
+    const live = liveHandles || await fetchLiveHandles().then(x => { setLiveHandles(x); return x; }).catch(() => new Set());
+    let unlisted = [];
+    try { unlisted = await preorderUnlistedFetch(mailSecret); }
+    catch (e) { out.errores.push({ clave: '—', error: `sin productos unlisted (${e.message}); pueden contar como sin alta` }); }
+    const clavesUnlisted = new Set(unlisted.map(u => rdKey(u.sku)).filter(Boolean));
+    const skuUnlisted = new Map(unlisted.map(u => [rdKey(u.sku), u.sku]));
+    const indice = indiceTienda([...live, ...clavesUnlisted]);
+    const filas = [];
+    for (const d of discos) {
+      const como = buscaEnTienda(indice, d.catno);
+      if (como) {
+        out.enTienda.push({ clave: d.clave, catno: d.catno, como: live.skuReal?.get(como) || skuUnlisted.get(como) || como,
+          handle: live.handleDe?.get(como) || (clavesUnlisted.has(como) ? `${skuUnlisted.get(como) || como} (unlisted)` : '') });
+        continue;
+      }
+      const html = await mailFetchBody(mailSecret, d.email);
+      if (!html) { out.errores.push({ clave: d.clave, error: 'no se pudo leer su email' }); continue; }
+      let rows = [];
+      try { rows = parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() }); }
+      catch (e) { out.errores.push({ clave: d.clave, error: e.message }); continue; }
+      const row = rows.find(r => rdKey(r.catno) === d.clave);
+      if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
+      // Como mailAddPicked: fuera los campos de trabajo del parseo; `_desc` se queda.
+      const limpia = { ...row };
+      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_trackers']) delete limpia[k];
+      // Sin audio en la bandeja (descarga manual): entra como cualquier fila, a la espera de ZIP.
+      if (d.tracks?.length) limpia._listen = d.clave; else out.sinAudio.push(d.clave);
+      filas.push(limpia);
+      out.anadidos.push(d.clave);
+    }
+    if (filas.length) {
+      setManifest(prev => {
+        const byCatno = new Map(prev.map(r => [r.catno.toUpperCase(), r]));
+        for (const row of filas) byCatno.set(row.catno.toUpperCase(), row);
+        return [...byCatno.values()];
+      });
+      setManifestName(name => name || 'Bandeja de escucha');
+    }
+    return out;
+  };
+
   const mailAddPicked = async () => {
     const vivos = new Set((mailRows || []).filter(r => r._live).map(r => rdKey(r.catno)));
     const cl = clasificaFilas(mailRows || [], { enTienda: k => vivos.has(k), rechazos: mailRechazos });
@@ -11054,6 +11263,8 @@ function PreorderImporter() {
     const isLive = (catno) => liveHandles ? liveHandles.has(rdKey(catno)) : false;
     for (const m of manifest) {
       const alreadyLive = isLive(m.catno);
+      // Fila de la bandeja de escucha: el audio ya esta en R2, no espera ZIP.
+      if (m._listen) { ready.push({ ...m, _zip: '🎧 bandeja de escucha', _alreadyLive: alreadyLive }); continue; }
       const zf = zipForCatno(m.catno);
       if (zf) { ready.push({ ...m, _zip: zf.name, _alreadyLive: alreadyLive }); matchedZipNames.add(zf.name); }
       else needZip.push({ ...m, _alreadyLive: alreadyLive });
@@ -11091,6 +11302,7 @@ function PreorderImporter() {
       const list = recon.ready;
       const total = list.length;
       const processed = [];
+      const cargadosBandeja = [];
 
       for (let i = 0; i < list.length; i++) {
         const m = list[i];
@@ -11131,13 +11343,16 @@ function PreorderImporter() {
         let coverNamedInZip = null;   // null = no hubo ZIP; false = habia imagenes pero ninguna se llamaba funda
         let tracks   = [];
         let itemError = '';
+        let bloqueo  = '';   // fila _listen sin audio copiado: no puede ir al CSV
         let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
 
         // Primero lo arrastrado; si no, la carpeta de Drive. Asi quien prefiera
         // seguir arrastrando no nota el cambio, y quien conecte la carpeta se
         // ahorra el paso entero.
-        let zipFile = zipForCatno(catno);
-        if (!zipFile && zipDir) {
+        // Filas _listen (bandeja de escucha): ni ZIP soltado ni carpeta; el audio
+        // lo copia el worker (listen-promote) mas abajo. El resto, como siempre.
+        let zipFile = m._listen ? null : zipForCatno(catno);
+        if (!zipFile && zipDir && !m._listen) {
           const h = zipDir.idx.get(rdKey(catno));
           if (h) {
             try {
@@ -11203,6 +11418,40 @@ function PreorderImporter() {
           } catch(e) { itemError = e.message; }
         }
 
+        if (m._listen) {
+          try {
+            // El texto, si la bandeja lo guardo: el mismo tratamiento que dentro del ZIP.
+            const lr = await fetch(`${WORKER_URL}?action=listen-list&claves=${encodeURIComponent(m._listen)}`, { headers: { 'Authorization': `Bearer ${mailSecret}` } });
+            const textos = lr.ok ? ((await lr.json()).items?.[0]?.textos || {}) : {};
+            if (textos.promotext) {
+              try { const t = (await (await fetch(textos.promotext)).text()).trim(); if (t) zipDesc = t; } catch { /* mejor sin descripcion que sin producto */ }
+            }
+            if (textos.salespaper) {
+              try {
+                const extracted = await extractSalesPaperText(await (await fetch(textos.salespaper)).blob());
+                if (extracted) {
+                  if (!genre && extracted.genre) genre = mapGenrePreorder(extracted.genre);
+                  if (extracted.desc) zipDesc = extracted.desc;
+                }
+              } catch { /* PDF parse is best-effort; never block the import */ }
+            }
+            setProgress({ done:i, total, current:`${catno} — copiando audio de la bandeja…` });
+            const r = await fetchAdmin(`${WORKER_URL}?action=listen-promote`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clave: m._listen, safeKey, handle }),
+            }, mailSecret);
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            tracks = d.tracks || [];
+            coverUrl = d.coverUrl || '';
+            // La de la bandeja ya es la buena (la del ZIP o la del email espejada).
+            coverNamedInZip = coverUrl ? true : null;
+            if (tracks.length) cargadosBandeja.push({ clave: m._listen, cargado_at: d.cargado_at, handle });
+            bloqueo = bloqueoListen({ listen: m._listen, error: '', tracks });
+          } catch (e) { bloqueo = bloqueoListen({ listen: m._listen, error: e.message, tracks: [] }); }
+          if (bloqueo) itemError = bloqueo;
+        }
+
         // Fallback cover: if no ZIP cover, use the manifest's distributor cover
         // URL (img.php). It's an external hotlink, not on R2, but better than
         // a blank pre-order tile until the ZIP lands.
@@ -11265,7 +11514,7 @@ function PreorderImporter() {
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
-          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError, _bloqueo: bloqueo, _listen: m._listen || '',
           _zipFound: !!zipFile, _release: release,
           _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
           _genre: genre,                              // editable in review; rebuilds Tags
@@ -11307,6 +11556,7 @@ function PreorderImporter() {
       }
 
       setResults(processed);
+      if (cargadosBandeja.length) setUltimaCarga({ items: cargadosBandeja });
       autoRecomputeEntities('Pre-order');
       setStatus('review');
     } catch(e) {
@@ -11329,7 +11579,22 @@ function PreorderImporter() {
   ].filter(Boolean).join(', ');
 
   const downloadCSV = async () => {
-    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    // Una fila de la bandeja sin su audio copiado saldria como producto sin
+    // pistas: el CSV no se genera hasta excluirla o repetir "List pre-orders".
+    const bloqueadas = filasBloqueadas(results, excluded);
+    if (bloqueadas.length) {
+      setError(`CSV bloqueado: ${bloqueadas.map(r => `${r._catno} (${r._bloqueo})`).join('; ')}. Exclúyela(s) con ✕ o vuelve a pulsar "List pre-orders".`);
+      return;
+    }
+    // Rubadub no trae genero en el correo: una fila de la bandeja sin genero que
+    // resuelva se completa a mano en su tarjeta (como en el importer de Rubadub).
+    const sinGenero = filasSinGenero(results, excluded, generoResuelve);
+    if (sinGenero.length) {
+      setError(`Falta el género de ${sinGenero.map(r => r._catno).join(', ')}: escríbelo en su tarjeta (o exclúyela con ✕) antes de generar el CSV.`);
+      return;
+    }
+    setError('');
+    // Sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
@@ -11400,6 +11665,10 @@ function PreorderImporter() {
           })()}
         </div>
       </div>
+
+      {/* Siempre montada (tambien durante y despues de "List pre-orders"): no pierde
+          su estado y se puede seguir decidiendo con los resultados delante. */}
+      <ListenInbox onCargar={cargarDesdeBandeja} ultimaCarga={ultimaCarga} />
 
       {/* Archivo de emails → una sola vista de todos los releases */}
       {status==='idle'&&(
@@ -11954,10 +12223,27 @@ function PreorderImporter() {
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
 
+          {esCsvDePruebas(results)&&(
+            <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:11,color:'#ff8800',fontWeight:700}}>
+              CSV de pruebas: apunta a staging-audio/, no lo importes en Shopify.
+            </div>
+          )}
+          {filasSinGenero(results, excluded, generoResuelve).length>0&&(
+            <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:10,color:'#ff8800',lineHeight:1.5}}>
+              Falta el género de {filasSinGenero(results, excluded, generoResuelve).map(r=>r._catno).join(', ')} (Rubadub no lo trae en el correo). Elígelo en su tarjeta antes de generar el CSV.
+            </div>
+          )}
+          {filasBloqueadas(results, excluded).length>0&&(
+            <div style={{padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}66`,borderRadius:4,marginBottom:12,fontSize:10,color:S.danger,lineHeight:1.5}}>
+              {filasBloqueadas(results, excluded).length} disco(s) de la bandeja sin su audio copiado: el CSV no se genera hasta excluirlos (✕) o volver a pulsar "List pre-orders".
+            </div>
+          )}
+
           <div style={{padding:'8px 12px',background:'#0a1200',border:`1px solid ${S.accent}33`,borderRadius:4,marginBottom:12,fontSize:9,color:S.muted,lineHeight:1.6}}>
             After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
           </div>
 
+          <datalist id="preorder-generos">{GENEROS_CANONICOS.map(g=><option key={g.id} value={g.label} />)}</datalist>
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>{
               const isOut = !!excluded[r._catno] || r._alreadyLive;
@@ -11974,14 +12260,15 @@ function PreorderImporter() {
                     ? <div title="Already a live product — excluded from export" style={{position:'absolute',top:4,right:4,background:'#ff8800',border:'none',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700,lineHeight:1}}>ALREADY LIVE</div>
                     : <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
                   }
-                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>{r._bloqueo&&!isOut?'BLOQUEA CSV':'ERR'}</div>}
                   {!r._coverUrl&&!r._error&&!r._alreadyLive&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>
                   <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
                   <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
                   <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
-                  <input value={r._genre||''} placeholder="(no genre)" onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  <input value={r._genre||''} list="preorder-generos" placeholder={r._listen&&!isOut?'FALTA GÉNERO':'(no genre)'} onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._listen&&!isOut&&!generoResuelve(r._genre)?'#ff8800':r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  {r._listen&&!isOut&&!generoResuelve(r._genre)&&<div style={{fontSize:8,color:'#ff8800',marginTop:2}}>{r._genre?'no es un género de la tienda':'falta el género'}: bloquea el CSV</div>}
                   <div style={{fontSize:8,color:S.muted,marginTop:3}}>{formatExpected(addDays(r._release,14))}</div>
                   <div style={{fontSize:10,color:S.accent,marginTop:2,fontWeight:700}}>€{r['Variant Price']}</div>
                   {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
@@ -12068,6 +12355,11 @@ function tagsDeGenero(valorCrudo, ctx = {}) {
 // elegido pasa por tagsDeGenero() como cualquier otro valor.
 const GENERO_SIN = 'sin';
 const GENEROS_CANONICOS = [...new Set(GENRES.map(g => g.seccion))].flatMap(generosDeSeccion);
+
+// ¿Da un genero canonico de la tienda? (lo que tagsDeGenero convierte en tag).
+function generoResuelve(valor) {
+  return !!resolveGenre(String(valor || '').split(/[/,;|]/).map(x => x.trim()).filter(Boolean));
+}
 
 function generoSugerido(crudo) {
   const partes = String(crudo || '').split(/[\/,;|]/).map(x => x.trim()).filter(Boolean);

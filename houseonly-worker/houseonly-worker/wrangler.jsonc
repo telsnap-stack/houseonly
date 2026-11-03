@@ -15,6 +15,12 @@
     {
       "binding": "R2",
       "bucket_name": "houseonly-audio"
+    },
+    // Audio de la bandeja de escucha: bucket SIN acceso publico (ni r2.dev ni
+    // dominio). houseonly-audio se sirve entero por r2.dev (2026-11-02).
+    {
+      "binding": "LISTEN_R2",
+      "bucket_name": "houseonly-listen"
     }
   ],
   "kv_namespaces": [
@@ -65,7 +71,9 @@
     //        Discogs. Solo en produccion: prod y staging tienen SYNC_STATE
     //        distinto y sus candados de pedido no se ven, asi que eBay no puede
     //        correr en los dos. Staging se prueba a mano con ?action=ebay-run.
-    "crons": ["7,22,37,52 * * * *", "0 6 * * *", "3,18,33,48 * * * *"]
+    // 41   — bandeja de escucha (LISTEN_CRON en src/lib/listen.ts): ingesta de
+    //        audio de RD/TV. No hace nada hasta meta:listen_mode = live.
+    "crons": ["7,22,37,52 * * * *", "0 6 * * *", "3,18,33,48 * * * *", "41 * * * *"]
   },
   "env": {
     "staging": {
@@ -77,6 +85,10 @@
         {
           "binding": "R2",
           "bucket_name": "houseonly-audio"
+        },
+        {
+          "binding": "LISTEN_R2",
+          "bucket_name": "houseonly-listen"
         }
       ],
       "kv_namespaces": [
@@ -117,8 +129,16 @@
       // Staging corre SOLO la tanda de avisos. El poll de Discogs sigue fuera
       // por lo que explica el comentario de arriba: competia por el mismo cupo
       // de 60/min que necesita produccion, y en dry no creaba nada.
+      // + la bandeja de escucha (:41), que no toca Discogs. Su audio va a
+      // listen-staging/ de houseonly-listen (compartido con prod) para no pisar listen/.
       "triggers": {
-        "crons": ["0 6 * * *"]
+        "crons": ["0 6 * * *", "41 * * * *"]
+      },
+      "vars": {
+        "LISTEN_R2_PREFIX": "listen-staging/",
+        // listen-promote en staging nunca escribe en el audio/ y covers/ reales.
+        "LISTEN_PROMOTE_AUDIO_PREFIX": "staging-audio/",
+        "LISTEN_PROMOTE_COVERS_PREFIX": "staging-covers/"
       }
     }
   }
