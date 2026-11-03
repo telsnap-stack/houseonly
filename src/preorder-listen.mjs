@@ -21,6 +21,16 @@ export function bloqueoListen({ listen, error, tracks }) {
   return '';
 }
 
+/**
+ * Filas de la bandeja sin genero utilizable. Rubadub no trae genero en el
+ * correo (el parser lo deja vacio) y casi nunca SALESPAPER: como en el importer
+ * de Rubadub, el genero lo pone una persona. Mientras tanto la fila esta
+ * incompleta y frena el CSV. `resuelve(genero)` dice si da un genero canonico.
+ */
+export function filasSinGenero(results, excluded = {}, resuelve = g => !!String(g || '').trim()) {
+  return (results || []).filter(r => r._listen && !excluded[r._catno] && !r._alreadyLive && !resuelve(r._genre));
+}
+
 /** El CSV apunta al audio/portadas de pruebas de staging (listen-promote en staging). */
 const PRUEBAS = /\/staging-(audio|covers)\//;
 export function esCsvDePruebas(results) {

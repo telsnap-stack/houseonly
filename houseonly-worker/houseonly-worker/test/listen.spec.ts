@@ -384,4 +384,21 @@ describe("listen: decisiones y limpieza", () => {
 		expect((await E.R2.list({ prefix: "audio/CAR007/" })).objects).toHaveLength(1);
 		expect(await rel("CAR006")).not.toBeNull();
 	});
+
+	it("un elegido ya en tienda pasa a Cargados con su motivo, sin copiar nada; deshacer lo devuelve a Elegidos", async () => {
+		await pon(base("TIE001", { decision: "preorder", decided_at: NOW.toISOString() }));
+		await pon(base("PEN010", { decision: "pendiente", decided_at: NOW.toISOString() }));
+		const decide = (body: any) => handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify(body) }), E, true, NOW.getTime());
+		expect((await decide({ clave: "TIE001", decision: "cargado" })).status).toBe(400);              // sin en_tienda, no
+		expect((await decide({ clave: "PEN010", decision: "cargado", en_tienda: "x" })).status).toBe(409); // solo elegidos
+		const r: any = await (await decide({ clave: "TIE001", decision: "cargado", en_tienda: "tie001" })).json();
+		expect(r.item).toMatchObject({ decision: "cargado", en_tienda_como: "tie001", cargado_at: NOW.toISOString() });
+		expect(await rel("TIE001")).toMatchObject({ decision: "cargado", en_tienda_como: "tie001" });
+		expect((await E.R2.list()).objects).toHaveLength(0);
+		await decide({ clave: "TIE001", decision: "preorder" });
+		const vuelto = await rel("TIE001");
+		expect(vuelto.decision).toBe("preorder");
+		expect(vuelto.en_tienda_como).toBeUndefined();
+		expect(vuelto.cargado_at).toBeUndefined();
+	});
 });
