@@ -918,7 +918,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1930,6 +1930,10 @@ export default {
     //   POST ?action=listen-promote Bearer {clave, safeKey, handle}: copia a audio/ y covers/
     if (action === 'listen-promote' && request.method === 'POST') {
       return await handleListenPromote(request, env, bearerAdminValido(request, env), R2_PUBLIC);
+    }
+    //   POST ?action=listen-upload&clave= Bearer  ZIP de audio conseguido a mano
+    if (action === 'listen-upload' && request.method === 'POST') {
+      return await handleListenUpload(request, env, bearerAdminValido(request, env));
     }
     if (action === 'listen-decide' && request.method === 'POST') {
       return await handleListenDecide(request, env, bearerAdminValido(request, env));
