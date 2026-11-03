@@ -16,8 +16,8 @@
  * 4. Ejecuta pushDistributorEmails() a mano una vez y autoriza los permisos.
  *    Sube todo lo que quepa en ~5 minutos (Apps Script corta a los 6). Si hay
  *    mas, el log dice cuantos quedan: repite hasta "nada nuevo que subir".
- * 5. Activadores → nuevo activador → pushDistributorEmails, diario, sobre las
- *    15:30 (despues del que archiva a Drive).
+ * 5. Sin activador propio (desde 2026-11-03): saveDistributorEmails() la llama
+ *    al terminar, y ese corre cada 6 horas.
  *
  * Es idempotente por partida doble: aqui se pregunta al worker que tiene ya, y
  * el worker ademas rechaza duplicados por nombre. Ejecutarla de mas no rompe

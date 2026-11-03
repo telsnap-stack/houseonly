@@ -8,14 +8,23 @@
  *  1. https://script.google.com  → New project. Paste this whole file in.
  *  2. Run `setup` once (creates the Gmail label, asks permission — approve).
  *  3. Triggers (clock icon) → Add Trigger → function `saveDistributorEmails`,
- *     Time-driven → Day timer → every day.
- *  4. Done. New pre-order emails save as .html into the folder below.
+ *     Time-driven → Hour timer → every 6 hours. It is the ONLY trigger: it
+ *     calls pushDistributorEmails() itself when it finishes (see below).
+ *  4. Done. New pre-order emails save as .html into the folder below and go
+ *     on to the worker in the same run.
  *
  * Saves only emails it hasn't saved before (Gmail label "saved-to-drive"),
  * so it never duplicates and never misses one. The .html it writes is the raw
  * email HTML body — exactly what the importer's builders parse.
  *
- * CHANGES vs previous version (2026-09-16, tarde):
+ * CHANGES vs previous version (2026-11-03):
+ *  - saveDistributorEmails() llama a pushDistributorEmails() al terminar, asi
+ *    que lo archivado en Drive sube al worker en la misma ejecucion.
+ *  - Un solo activador, saveDistributorEmails cada 6 horas. Los dos diarios
+ *    (este y el de pushDistributorEmails de las 15:30) se han borrado. Con un
+ *    pase al dia, un anuncio podia tardar hasta 24 h en llegar a la bandeja.
+ *
+ * CHANGES vs version of 2026-09-16 (tarde):
  *  - FIX: el backfill no llegaba al correo antiguo de Rubadub. Miraba solo
  *    newer_than:30d y como mucho las 300 conversaciones MAS RECIENTES por
  *    distribuidor; Rubadub manda tanto que 300 no pasaban del 17-08. Asi se
@@ -135,11 +144,11 @@ var SOURCES = [
 function setup() {
   getFolder_();                 // verify folder access
   getOrCreateLabel_();
-  Logger.log('Setup OK. Now add a daily time trigger for saveDistributorEmails.');
+  Logger.log('Setup OK. Now add a 6-hour time trigger for saveDistributorEmails.');
 }
 
-// Daily entry point (used by the time trigger). Scans the newest 100 threads
-// per source from the last 30 days — Rubadub alone sends ~10-15 a day.
+// Entry point of the only time trigger (every 6 hours). Scans the newest 100
+// threads per source from the last 30 days — Rubadub alone sends ~10-15 a day.
 function saveDistributorEmails() {
   var folder = getFolder_(), label = getOrCreateLabel_(), totalSaved = 0;
   for (var s = 0; s < SOURCES.length; s++) {
@@ -147,6 +156,10 @@ function saveDistributorEmails() {
       '(' + SOURCES[s].query + ') newer_than:30d in:anywhere', 100, null).saved;
   }
   Logger.log('Done. Saved %s new file(s).', totalSaved);
+
+  // Y sube al worker lo archivado (pushDistributorEmails.gs, mismo proyecto):
+  // un solo activador para los dos pasos.
+  pushDistributorEmails();
 }
 
 // Backfill por semanas, sin tope de 30 dias ni de 300 conversaciones. Empieza en
