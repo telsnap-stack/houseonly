@@ -187,10 +187,10 @@ async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
 interface IdxEntry { name: string; prefix: string; subject: string; date: string }
 
 /** Anuncios de RD/TV recientes, del mas antiguo al mas nuevo (caducan antes). */
-export function emailsCandidatos(idx: IdxEntry[], hoy: Date): IdxEntry[] {
-  const desde = new Date(hoy.getTime() - MAX_EMAIL_AGE_DAYS * 86400000).toISOString().slice(0, 10);
+export function emailsCandidatos(idx: IdxEntry[], hoy: Date, dias = MAX_EMAIL_AGE_DAYS, fuente = ''): IdxEntry[] {
+  const desde = new Date(hoy.getTime() - dias * 86400000).toISOString().slice(0, 10);
   return idx
-    .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde)
+    .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde && (!fuente || e.prefix === fuente))
     // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
     .filter(e => !MAIL_ORDER.test(e.subject) && (e.prefix === 'DBH' || !MAIL_DIGEST.some(re => re.test(e.subject))))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
@@ -523,7 +523,7 @@ export async function leeTienda(env: ListenEnv): Promise<Tienda> {
   throw new Error('Shopify products: demasiadas paginas');
 }
 
-export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date } = {}): Promise<ListenRunResult> {
+export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date; dias?: number; fuente?: string } = {}): Promise<ListenRunResult> {
   const now = opts.now || new Date();
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
@@ -536,7 +536,7 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   let intentos = 0;
   // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
   let tienda: Tienda | null = null;
-  ingesta: for (const email of emailsCandidatos(idx, now)) {
+  ingesta: for (const email of emailsCandidatos(idx, now, opts.dias, opts.fuente)) {
     if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
     if (intentos >= PER_RUN) { out.quedan = true; break; }
     out.emails_vistos++;
@@ -1010,7 +1010,17 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */
-export async function handleListenRun(env: ListenEnv, autorizado: boolean): Promise<Response> {
+/**
+ * Pasada a mano. Opcional, solo aqui (el cron no los usa): ?dias=N (1-14) amplia
+ * la ventana de emails y ?fuente=DBH la limita a un distribuidor, para probar
+ * una fuente nueva con sus emails de la ultima semana. Ojo: los Dropbox de
+ * Rubadub de hace mas de 3 dias pueden haber caducado.
+ */
+export async function handleListenRun(env: ListenEnv, autorizado: boolean, request?: Request): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
-  return json({ ok: true, ...(await runListenIngest(env, { force: true })) });
+  const q = request ? new URL(request.url).searchParams : new URLSearchParams();
+  const dias = q.has('dias') ? Math.min(14, Math.max(1, Math.floor(Number(q.get('dias')) || 0))) : undefined;
+  const fuente = (q.get('fuente') || '').toUpperCase();
+  if (fuente && !LISTEN_SOURCES[fuente]) return json({ error: `fuente desconocida: ${fuente}` }, 400);
+  return json({ ok: true, ...(await runListenIngest(env, { force: true, dias, fuente })) });
 }
