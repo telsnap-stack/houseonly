@@ -151,6 +151,17 @@ function parseProduct({ node }) {
   };
 }
 
+// Generos fuera de la tabla con 10+ discos activos (worker, recalculo diario:
+// lib/generos-extra.ts). Una peticion por visita; si falla, ninguno.
+let generosExtraPromesa = null;
+function generosExtra() {
+  if (!generosExtraPromesa) generosExtraPromesa = fetch(`${WORKER_URL}?action=generos-extra`)
+    .then(r => (r.ok ? r.json() : { generos: [] }))
+    .then(d => (Array.isArray(d?.generos) ? d.generos : []))
+    .catch(() => []);
+  return generosExtraPromesa;
+}
+
 // ¿Hay al menos un disco con este tag en esta seccion? Cache por sesion; si la
 // consulta falla, false: ante la duda la pildora no sale.
 const hayDiscosCache = new Map();
@@ -2898,7 +2909,14 @@ function Filters({ filters, onChange }) {
       .then(ids => { if (vivo) setConDiscos(new Set(ids.filter(Boolean))); });
     return () => { vivo = false; };
   }, [seccion, filters.forthcoming, filters.dnb]);
-  const generos = pildorasDeSeccion(seccion, conDiscos);
+  // Los extra, detras de los de la tabla; solo en la vista donde tienen discos.
+  const [extra, setExtra] = useState([]);
+  useEffect(() => { let vivo = true; generosExtra().then(g => { if (vivo) setExtra(g); }); return () => { vivo = false; }; }, []);
+  const vista = filters.forthcoming ? (filters.dnb ? 'forthcoming_dnb' : 'forthcoming_house') : (filters.dnb ? 'dnb' : 'house');
+  const canonicas = pildorasDeSeccion(seccion, conDiscos);
+  const generos = [...canonicas, ...extra
+    .filter(g => g?.id && (g.vistas?.[vista] || 0) > 0 && !canonicas.some(c => c.id === g.id))
+    .map(g => ({ id: g.id, label: g.label || g.id }))];
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
       <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ appearance:'none', WebkitAppearance:'none', background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
