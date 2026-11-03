@@ -22,6 +22,8 @@ interface Env {
   // (prod); staging usa staging-audio/ y staging-covers/.
   LISTEN_PROMOTE_AUDIO_PREFIX?: string;
   LISTEN_PROMOTE_COVERS_PREFIX?: string;
+  // Prefijo de los ZIP de W&S en LISTEN_R2 (privado). Sin definir = ws-zips/
+  WS_ZIPS_R2_PREFIX?: string;
   // STOCK_LEDGER: registro de ?action=stock-add, compartido con staging.
   STOCK_LEDGER: KVNamespace;
   // ENTITIES: artistas y sellos canonicos. Diseño en docs/entities.md.
@@ -950,6 +952,7 @@ import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo, 
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
 import { handleGenerosExtra, handleGenerosExtraRebuild, recalculaGenerosExtra } from './lib/generos-extra';
+import { handleWsZips } from './lib/ws-zips';
 import {
   EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
   handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun, handleEbayStoreCategories, handleDiscogsSnapshot,
@@ -2242,6 +2245,16 @@ export default {
       } catch (e: any) {
         return jsonRes({ error: 'mt-enrich failed', message: e?.message || String(e) }, 502);
       }
+    }
+
+    // ── W&S ZIPS (bookmarklet) ──────────────────────────────
+    // ws-zips-job (POST, admin) → token de trabajo para el bookmarklet
+    // ws-zips-status (GET) · ws-zips-upload (POST, cuerpo = ZIP) · ws-zips-none (POST)
+    //   → admin o token de trabajo, solo los ArtId de ese trabajo
+    // ws-zips-get (GET) · ws-zips-clean (POST) → solo admin
+    // Por que el navegador y no el worker baja de W&S: src/lib/ws-zips.ts.
+    if (action?.startsWith('ws-zips-')) {
+      return await handleWsZips(action!, request, env, bearerAdminValido(request, env), CORS);
     }
 
     // ── STORY CONTEXT (Stories knowledge line) ──────────────

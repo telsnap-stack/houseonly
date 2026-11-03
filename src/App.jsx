@@ -13,6 +13,7 @@ import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { parseDistributorEmail, parseDbhEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
+import { codigoTrabajoWs, urlBookmarkletWs } from "./wsBookmarklet.mjs";
 import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from "./preorder-listen.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor, tagGeneroLibre } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
@@ -3447,6 +3448,99 @@ function ZipImporter() {
     });
   };
 
+  // ── ZIPs desde W&S (bookmarklet) ──
+  // El bookmarklet baja /release/{ArtId}/assets con la sesion de W&S del
+  // navegador y los deja en R2 (ws-zips/); aqui se bajan como File con el mismo
+  // nombre que da W&S ({ArtId}-{CATNO}.zip) y entran por assignFiles, igual que
+  // los soltados a mano. Por que no lo hace el worker: src/wsBookmarklet.mjs.
+  const [wsItems, setWsItems]   = useState([]);        // [{artId, artNo}] de la factura, uno por ArtId
+  const [wsEstado, setWsEstado] = useState({});        // artId → 'ok' | 'sin_assets' | 'pendiente'
+  const [wsCodigo, setWsCodigo] = useState('');
+  const [wsMsg, setWsMsg]       = useState('');
+  const [wsOcupado, setWsOcupado] = useState(false);
+  const bookmarkletRef = useRef(null);
+  useEffect(() => {
+    // React 19 bloquea href="javascript:" en JSX; se pone a mano.
+    if (bookmarkletRef.current) bookmarkletRef.current.setAttribute('href', urlBookmarkletWs());
+  });
+  useEffect(() => {
+    setWsItems([]); setWsEstado({}); setWsCodigo(''); setWsMsg('');
+    if (!excelFile) return;
+    let vivo = true;
+    (async () => {
+      try {
+        const XLSX = await loadXLSX();
+        const wb = XLSX.read(await excelFile.arrayBuffer());
+        const hoja = wb.Sheets['invoice'] || wb.Sheets[wb.SheetNames[0]];
+        const vistos = new Set();
+        const items = [];
+        for (const r of XLSX.utils.sheet_to_json(hoja, { defval: '' })) {
+          const artId = String(r.ArtId ?? '').trim();
+          if (!/^\d+$/.test(artId) || vistos.has(artId)) continue;
+          vistos.add(artId);
+          items.push({ artId, artNo: String(r.ArtNo || '').trim() });
+        }
+        if (vivo) setWsItems(items);
+      } catch (e) { if (vivo) setWsMsg(`No se pudo leer ArtId del Excel: ${e.message}`); }
+    })();
+    return () => { vivo = false; };
+  }, [excelFile]);
+
+  const wsAplicaEstados = (lista) => setWsEstado(Object.fromEntries((lista || []).map(i => [i.artId, i.estado])));
+  const wsJson = async (r, que) => {
+    if (!r.ok) throw new Error(`${que} ${r.status}: ${(await r.text().catch(() => '')).slice(0, 160)}`);
+    return r.json();
+  };
+  const wsPreparar = async () => {
+    setWsOcupado(true); setWsMsg('');
+    try {
+      const d = await wsJson(await fetchAdmin(`${WORKER_URL}?action=ws-zips-job`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: wsItems }),
+      }), 'ws-zips-job');
+      const codigo = codigoTrabajoWs(WORKER_URL, d.token);
+      setWsCodigo(codigo); wsAplicaEstados(d.items);
+      try { await navigator.clipboard.writeText(codigo); setWsMsg('Código copiado. Ve a wordandsound.net, pulsa el bookmarklet y pégalo.'); }
+      catch { setWsMsg('Copia el código de abajo, ve a wordandsound.net, pulsa el bookmarklet y pégalo.'); }
+    } catch (e) { setWsMsg(e.message); }
+    setWsOcupado(false);
+  };
+  const wsActualizar = async () => {
+    const d = await wsJson(await fetchAdmin(`${WORKER_URL}?action=ws-zips-status&artids=${wsItems.map(i => i.artId).join(',')}`), 'ws-zips-status');
+    wsAplicaEstados(d.items);
+    return d.items;
+  };
+  const wsTraer = async () => {
+    setWsOcupado(true); setWsMsg('');
+    try {
+      const listos = (await wsActualizar()).filter(i => i.estado === 'ok');
+      const porId = Object.fromEntries(wsItems.map(i => [i.artId, i.artNo]));
+      const files = [];
+      for (let k = 0; k < listos.length; k++) {
+        const { artId } = listos[k];
+        setWsMsg(`Bajando ZIPs ${k + 1} de ${listos.length}…`);
+        const r = await fetchAdmin(`${WORKER_URL}?action=ws-zips-get&artid=${artId}`);
+        if (!r.ok) throw new Error(`ws-zips-get ${artId}: ${r.status}`);
+        files.push(new File([await r.blob()], `${artId}-${porId[artId] || artId}.zip`, { type: 'application/zip' }));
+      }
+      assignFiles(files);
+      setWsMsg(listos.length ? `${listos.length} ZIPs de W&S añadidos.` : 'Aún no hay ZIPs: pulsa el bookmarklet en wordandsound.net.');
+    } catch (e) { setWsMsg(e.message); }
+    setWsOcupado(false);
+  };
+  const wsLimpiar = async () => {
+    const conAlgo = wsItems.filter(i => wsEstado[i.artId] && wsEstado[i.artId] !== 'pendiente');
+    if (!conAlgo.length || !window.confirm(`¿Borrar del almacén los ${conAlgo.length} ZIPs/marcas de W&S de esta factura? Los ya añadidos al importer siguen aquí.`)) return;
+    setWsOcupado(true);
+    try {
+      for (const i of conAlgo) await wsJson(await fetchAdmin(`${WORKER_URL}?action=ws-zips-clean&artid=${i.artId}`, { method: 'POST' }), 'ws-zips-clean');
+      await wsActualizar();
+      setWsMsg('Almacén limpio.');
+    } catch (e) { setWsMsg(e.message); }
+    setWsOcupado(false);
+  };
+  const wsCuenta = (e) => wsItems.filter(i => wsEstado[i.artId] === e).length;
+  const wsSinAssets = new Set(wsItems.filter(i => wsEstado[i.artId] === 'sin_assets').map(i => rdKey(i.artNo)));
+
   // W&S no pone el numero dentro del Excel (InvRef va vacio): va en el nombre,
   // "264564.xlsx" o "53725_263599.xlsx".
   const numeroWs = (excelFile?.name || '').match(/(\d{5,})(?!.*\d{5,})/)?.[1] || '';
@@ -3670,6 +3764,32 @@ function ZipImporter() {
         </div>
       </div>
       {zipFiles.length>0&&<div style={{ maxHeight:100, overflowY:'auto', marginBottom:12, fontSize:9, color:S.muted, fontFamily:'monospace', display:'flex', flexWrap:'wrap', gap:4 }}>{zipFiles.map((f,i)=><span key={i} style={{ background:S.border, padding:'2px 8px', borderRadius:10, color:S.text }}>{catnoFromFilename(f.name)}</span>)}</div>}
+      {status==='idle'&&excelFile&&wsItems.length>0&&(
+        <div style={{ marginBottom:14, padding:'10px 14px', background:S.bg, border:`1px solid ${S.border}`, borderRadius:3 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:8, marginBottom:6 }}>
+            <span style={{ fontSize:10, color:S.accent, fontWeight:700, letterSpacing:1, textTransform:'uppercase' }}>ZIPs desde W&S · {wsItems.length} discos</span>
+            <a ref={bookmarkletRef} onClick={e=>e.preventDefault()} title="Arrástralo a la barra de marcadores" style={{ fontSize:9, color:S.text, border:`1px dashed ${S.border}`, borderRadius:10, padding:'2px 10px', textDecoration:'none', cursor:'grab' }}>⇢ W&S ZIPs (arrástrame a marcadores)</a>
+          </div>
+          {Object.keys(wsEstado).length>0&&(
+            <div style={{ fontSize:9, color:S.muted, marginBottom:6 }}>{wsCuenta('ok')} en el almacén · {wsCuenta('sin_assets')} sin assets · {wsCuenta('pendiente')} pendientes</div>
+          )}
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+            <button disabled={wsOcupado} onClick={wsPreparar} style={{ background:S.border, border:'none', color:S.text, cursor:'pointer', fontSize:9, padding:'6px 12px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>1 · Código para el bookmarklet</button>
+            <button disabled={wsOcupado} onClick={wsTraer} style={{ background:S.accent, border:'none', color:'#080808', cursor:'pointer', fontSize:9, padding:'6px 12px', borderRadius:2, letterSpacing:1, textTransform:'uppercase', fontFamily:'inherit', fontWeight:700 }}>2 · Traer ZIPs de W&S</button>
+            {wsCuenta('ok')+wsCuenta('sin_assets')>0&&<button disabled={wsOcupado} onClick={wsLimpiar} style={{ background:'none', border:`1px solid ${S.border}`, color:S.muted, cursor:'pointer', fontSize:9, padding:'6px 10px', borderRadius:2, fontFamily:'inherit' }}>Borrar del almacén</button>}
+          </div>
+          {wsCodigo&&<input readOnly value={wsCodigo} onFocus={e=>e.target.select()} style={{ marginTop:8, width:'100%', boxSizing:'border-box', background:S.surf, border:`1px solid ${S.border}`, color:S.muted, fontSize:9, fontFamily:'monospace', padding:'4px 8px', borderRadius:2 }} />}
+          {wsMsg&&<div style={{ marginTop:6, fontSize:9, color:S.text }}>{wsMsg}</div>}
+          {wsCuenta('sin_assets')>0&&(
+            <div style={{ marginTop:8, display:'flex', flexWrap:'wrap', gap:4, alignItems:'center' }}>
+              <span style={{ fontSize:9, color:'#ff8800' }}>Sin assets en W&S, usar Bandcamp:</span>
+              {wsItems.filter(i=>wsEstado[i.artId]==='sin_assets').map(i=>(
+                <span key={i.artId} title={`ArtId ${i.artId}`} style={{ background:'#1a1000', border:'1px solid #ff880066', borderRadius:10, padding:'1px 8px', fontSize:9, fontFamily:'monospace', color:'#ff8800' }}>{i.artNo||i.artId}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {status==='idle'&&excelFile&&(
         <div style={{marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
@@ -3715,7 +3835,7 @@ function ZipImporter() {
                 </div>
                 <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
                   {missingZips.slice(0,60).map((m,i2)=>(
-                    <span key={i2} title={m.titulo} style={{background:S.bg,border:`1px solid ${S.border}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:S.text}}>{m.catno}</span>
+                    <span key={i2} title={m.titulo} style={{background:S.bg,border:`1px solid ${wsSinAssets.has(rdKey(m.catno))?'#ff880066':S.border}`,borderRadius:10,padding:'1px 8px',fontSize:9,fontFamily:'monospace',color:wsSinAssets.has(rdKey(m.catno))?'#ff8800':S.text}}>{m.catno}{wsSinAssets.has(rdKey(m.catno))?' · sin assets W&S, usar Bandcamp':''}</span>
                   ))}
                   {missingZips.length>60&&<span style={{fontSize:9,color:S.muted}}>y {missingZips.length-60} más</span>}
                 </div>
