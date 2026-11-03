@@ -1,6 +1,8 @@
+// Copia de referencia: la version que manda es la desplegada en Apps Script.
+
 /**
- * Save Word & Sound + DBH + Triple Vision + Rubadub + Mother Tongue + Kudos
- * PRE-ORDER emails as .html files into a Drive folder.
+ * Save Word & Sound + DBH + Triple Vision + Rubadub PRE-ORDER emails as .html
+ * files into a Drive folder.
  *
  * SETUP (one time):
  *  1. https://script.google.com  → New project. Paste this whole file in.
@@ -13,16 +15,7 @@
  * so it never duplicates and never misses one. The .html it writes is the raw
  * email HTML body — exactly what the importer's builders parse.
  *
- * CHANGES vs previous version (2026-11-02, cambiado por Eduardo en Apps Script;
- * esta copia del repo se alinea a mano con lo desplegado):
- *  - DBH: acepta tambien subject:"Shipping this week".
- *  - NEW: MT (Mother Tongue) y KUDOS. No escriben a la direccion archivada: se
- *    buscan los REENVIOS de Eduardo desde emontagut@houseonly.store. Sin
- *    adjuntos (las facturas van por el importer). El tab los trata como
- *    material aunque el asunto empiece por Fwd (FUENTES_REENVIO en
- *    houseonly-worker/.../src/lib/distributor-email.mjs).
- *
- * CHANGES vs version of 2026-09-16 (tarde):
+ * CHANGES vs previous version (2026-09-16, tarde):
  *  - FIX: el backfill no llegaba al correo antiguo de Rubadub. Miraba solo
  *    newer_than:30d y como mucho las 300 conversaciones MAS RECIENTES por
  *    distribuidor; Rubadub manda tanto que 300 no pasaban del 17-08. Asi se
@@ -83,7 +76,7 @@ var SOURCES = [
     prefix: 'DBH',
     // DBH pre-order announcements + newsletter. Excludes receipts & account mail.
     query: 'from:noreply@dbh-music.com ' +
-           '(subject:Upcoming OR subject:"Out soon" OR subject:Newsletter OR subject:"Shipping this week") ' +
+           '(subject:Upcoming OR subject:"Out soon" OR subject:"Shipping this week" OR subject:Newsletter) ' +
            '-subject:"has been received" -subject:"has been shipped" ' +
            '-subject:"account data"'
   },
@@ -108,20 +101,6 @@ var SOURCES = [
            '-subject:invoice -subject:unsubscribe'
   },
   {
-    prefix: 'MT',
-    // Mother Tongue: reenvios de Eduardo con la lista mayorista. Fuera las
-    // respuestas (Re:) y lo que trae adjunto.
-    query: 'from:emontagut@houseonly.store "Mother Tongue" "Wholesale Price" ' +
-           '-subject:"Re:" -has:attachment'
-  },
-  {
-    prefix: 'KUDOS',
-    // Kudos: reenvios de Eduardo de los anuncios de Kudos Distribution. Fuera
-    // facturas y lo que trae adjunto.
-    query: 'from:emontagut@houseonly.store "Kudos Distribution" ' +
-           '-subject:invoice -has:attachment'
-  },
-  {
     prefix: 'WSORD',
     // W&S order confirmations — the "ordered" signal for the forthcoming
     // pipeline. Subject pattern: 'WAS Order #NNNNN - Telsnap S.L.: EUR X'.
@@ -135,6 +114,21 @@ var SOURCES = [
     // source saves attachments too (see saveAttachments below).
     query: 'from:distribution@rubadub.co.uk subject:Quote',
     saveAttachments: true
+  },
+  {
+    prefix: 'MT',
+    // Mother Tongue monthly pre-order announcement, forwarded by Eduardo from
+    // emontagut@houseonly.store. "Wholesale Price" only appears in the
+    // announcement itself; reply chains and invoice threads are excluded.
+    query: 'from:emontagut@houseonly.store "Mother Tongue" "Wholesale Price" ' +
+           '-subject:"Re:" -has:attachment'
+  },
+  {
+    prefix: 'KUDOS',
+    // Kudos Distribution mailouts (Forthcoming Schedule, Shipping Next Week...)
+    // forwarded by Eduardo from emontagut@houseonly.store. Invoices excluded.
+    query: 'from:emontagut@houseonly.store "Kudos Distribution" ' +
+           '-subject:invoice -has:attachment'
   }
 ];
 
