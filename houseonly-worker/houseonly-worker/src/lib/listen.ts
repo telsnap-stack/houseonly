@@ -691,12 +691,19 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const u = new URL(request.url);
   const origin = u.origin;
   const lastRun = JSON.parse((await env.SYNC_STATE.get(LAST_RUN_KEY)) || 'null');
+  // Para que el tab avise de que el CSV sale con el audio de pruebas (staging).
+  const audioPre = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/';
+  const promote = {
+    activo: (await env.SYNC_STATE.get(PROMOTE_KEY)) === 'on',
+    audio: audioPre, covers: env.LISTEN_PROMOTE_COVERS_PREFIX || 'covers/',
+    pruebas: audioPre !== 'audio/',
+  };
 
   const pedidas = (u.searchParams.get('claves') || '').split(',').map(c => claveCatno(c)).filter(Boolean).slice(0, LIMIT_MAX);
   if (pedidas.length) {
     const recs = await Promise.all(pedidas.map(c => env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + c, 'json')));
     const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
-    return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, items, cursor: null });
+    return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, promote, items, cursor: null });
   }
 
   const vista = u.searchParams.get('vista') || 'por_decidir';
@@ -719,7 +726,7 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const recs = await Promise.all(pagina.map(k => env.SYNC_STATE.get<ListenRelease>(k.name, 'json')));
   const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
   const sig = desde + limit < deVista.length ? String(desde + limit) : null;
-  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, items, cursor: sig });
+  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, promote, items, cursor: sig });
 }
 
 // ── carga al Pre-order ─────────────────────────────────────────
