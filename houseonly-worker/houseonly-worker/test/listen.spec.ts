@@ -105,12 +105,14 @@ describe("listen: qué emails y qué ficheros", () => {
 			e("DBH", "DBH-Music---Out-soon-DBH001"), e("DBH", "DBH-Music---Newsletter-KW45-2026"),
 			e("WS", "Wordandsound-Update"), e("MT", "Fwd-Mother-Tongue"),
 			e("RD", "Old-CAT004", "2026-10-29"), e("TV", "Newsletter-KW45-2026"),
+			e("RD", "Older-CAT005", "2026-10-25"),
 		];
 		// listen-run a mano: ventana mas larga y una sola fuente.
-		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Old-CAT004", "Artist---Title-CAT001"]);
+		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Older-CAT005", "Old-CAT004", "Artist---Title-CAT001"]);
 		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
+		// La ventana del cron es de 7 dias: CAT004 (hace 4) entra, CAT005 (hace 8) no.
 		expect(emailsCandidatos(idx, NOW).map(x => x.subject)).toEqual(
-			["CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
+			["Old-CAT004", "CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
 	});
 
 	it("MP3 en orden natural, sin __MACOSX ni ._; portada JPG con 'front' antes que la mayor; PNG fuera", () => {
