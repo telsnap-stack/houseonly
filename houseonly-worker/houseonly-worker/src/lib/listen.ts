@@ -136,6 +136,8 @@ export interface ListenRelease {
   handle?: string;               // el handle con que va al CSV
   promovidos?: string[];         // claves copiadas en houseonly-audio
   en_tienda_como?: string;       // "cargado" sin copiar nada: ya estaba en la tienda
+  resumen?: string;              // prosa del correo (recortada), para decidir sin audio
+  subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
 }
 
 export interface ListenRunResult {
@@ -387,51 +389,58 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     if (!mp3.length) return { ...rel, estado: viaPista ? 'descarga_manual' : 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
     if (viaPista) rel.detalle = 'promopack del enlace de la pista (sin botón Download Zip)';
 
-    for (let i = 0; i < mp3.length; i++) {
-      const data = unFichero(zip, mp3[i]);
-      const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(base(mp3[i]))}.mp3`;
-      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
-      subidas.push(key);
-      rel.tracks.push({ name: base(mp3[i]).replace(/\.mp3$/i, ''), key, bytes: data.byteLength });
-      rel.bytes += data.byteLength;
-    }
-
-    for (const [campo, nombre, destino, tipo] of [
-      ['promotext', promotext, 'promotext.txt', 'text/plain; charset=utf-8'],
-      ['salespaper', salespaper, 'salespaper.pdf', 'application/pdf'],
-    ] as const) {
-      if (!nombre) continue;
-      const data = unFichero(zip, nombre);
-      const key = `${dir}${destino}`;
-      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: tipo } });
-      subidas.push(key);
-      rel.textos = { ...rel.textos, [campo]: key };
-      rel.bytes += data.byteLength;
-    }
-
-    if (portada) {
-      const data = unFichero(zip, portada);
-      const key = `${dir}cover.jpg`;
-      await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
-      subidas.push(key);
-      rel.cover = { key, from: 'zip' };
-      rel.bytes += data.byteLength;
-    } else if (row.coverUrl) {
-      const cover = await portadaDelEmail(row.coverUrl);
-      if (cover) {
-        const key = `${dir}cover${cover.ext}`;
-        await env.LISTEN_R2.put(key, cover.data, { httpMetadata: { contentType: cover.type } });
-        subidas.push(key);
-        rel.cover = { key, from: 'email' };
-        rel.bytes += cover.data.byteLength;
-      }
-    }
+    await guardaDelZip(env, rel, zip, { mp3, portada, promotext, salespaper }, dir, subidas);
+    if (!portada && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, dir, subidas);
     return rel;
   } catch (e: any) {
     // A medias no sirve: lo subido se borra para que el reintento empiece limpio.
     if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
     return { ...rel, estado: 'error', tracks: [], bytes: 0, cover: undefined, detalle: e?.message || String(e) };
   }
+}
+
+/** Pistas, textos y portada (si el ZIP la trae) a la bandeja. Anota cada clave en `subidas`. */
+async function guardaDelZip(env: ListenEnv, rel: ListenRelease, zip: Uint8Array,
+  f: { mp3: string[]; portada: string | null; promotext: string | null; salespaper: string | null }, dir: string, subidas: string[]): Promise<void> {
+  for (let i = 0; i < f.mp3.length; i++) {
+    const data = unFichero(zip, f.mp3[i]);
+    const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(base(f.mp3[i]))}.mp3`;
+    await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
+    subidas.push(key);
+    rel.tracks.push({ name: base(f.mp3[i]).replace(/\.mp3$/i, ''), key, bytes: data.byteLength });
+    rel.bytes += data.byteLength;
+  }
+  for (const [campo, nombre, destino, tipo] of [
+    ['promotext', f.promotext, 'promotext.txt', 'text/plain; charset=utf-8'],
+    ['salespaper', f.salespaper, 'salespaper.pdf', 'application/pdf'],
+  ] as const) {
+    if (!nombre) continue;
+    const data = unFichero(zip, nombre);
+    const key = `${dir}${destino}`;
+    await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: tipo } });
+    subidas.push(key);
+    rel.textos = { ...rel.textos, [campo]: key };
+    rel.bytes += data.byteLength;
+  }
+  if (f.portada) {
+    const data = unFichero(zip, f.portada);
+    const key = `${dir}cover.jpg`;
+    await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
+    subidas.push(key);
+    rel.cover = { key, from: 'zip' };
+    rel.bytes += data.byteLength;
+  }
+}
+
+/** La portada del correo a la bandeja (tambien para los que no traen promopack). */
+async function guardaPortadaDelCorreo(env: ListenEnv, rel: ListenRelease, url: string, dir: string, subidas: string[] = []): Promise<void> {
+  const cover = await portadaDelEmail(url);
+  if (!cover) return;
+  const key = `${dir}cover${cover.ext}`;
+  await env.LISTEN_R2.put(key, cover.data, { httpMetadata: { contentType: cover.type } });
+  subidas.push(key);
+  rel.cover = { key, from: 'email' };
+  rel.bytes += cover.data.byteLength;
 }
 
 async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: string; ext: string } | null> {
@@ -488,6 +497,11 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
       intentos++;
       const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
+      // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
+      // portada y la prosa del correo, para decidir y, si se consigue el audio
+      // por otra via, subirlo a mano (listen-upload).
+      if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
+      if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
       await guardaRelease(env, rel);
       out.nuevos++;
       out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
@@ -805,6 +819,48 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
   Object.assign(r, { decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
   await guardaRelease(env, r);
   return json({ ok: true, clave, tracks, coverUrl, cover_from: r.cover?.from || null, cargado_at: at });
+}
+
+/**
+ * POST ?action=listen-upload&clave=CLAVE (Bearer), cuerpo = ZIP (application/zip)
+ * "Descarga manual": el audio de un disco que llego sin promopack (o con uno que
+ * no servia) conseguido por otra via. Mismo tratamiento que el ZIP de la
+ * ingesta: MP3, textos y portada si la trae (si no, se queda la del correo).
+ * Sustituye el audio que hubiera. Tope: ZIP_MAX_BYTES.
+ */
+export async function handleListenUpload(request: Request, env: ListenEnv, autorizado: boolean, ahora = Date.now()): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  const clave = claveCatno(new URL(request.url).searchParams.get('clave'));
+  if (!clave) return json({ error: 'clave required' }, 400);
+  const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
+  if (!r) return json({ error: 'not found' }, 404);
+  if (!request.body) return json({ error: 'falta el ZIP' }, 400);
+  let zip: Uint8Array;
+  try { zip = await leeConTope(request as unknown as Response, ZIP_MAX_BYTES); }
+  catch (e) { if (e instanceof Demasiado) return json({ error: `ZIP demasiado grande (${e.message})` }, 413); throw e; }
+  let lista: Array<{ name: string; size: number }>;
+  try { lista = contenidoZip(zip); } catch { return json({ error: 'no es un ZIP valido' }, 400); }
+  const f = eligeFicheros(lista);
+  if (!f.mp3.length) return json({ error: 'el ZIP no trae MP3' }, 400);
+
+  // Fuera el audio y los textos anteriores; la portada solo si el ZIP trae otra.
+  const viejas = [...r.tracks.map(t => t.key), ...Object.values(r.textos || {}).filter(Boolean) as string[],
+    ...(f.portada && r.cover ? [r.cover.key] : [])].filter(k => k.startsWith(prefijo(env)));
+  if (viejas.length) await env.LISTEN_R2.delete(viejas);
+  const cover = f.portada ? undefined : r.cover;
+  const coverBytes = cover ? Math.max(0, r.bytes - r.tracks.reduce((s, t) => s + t.bytes, 0)) : 0;
+  const nuevo: ListenRelease = { ...r, tracks: [], textos: undefined, cover, bytes: coverBytes, estado: 'listo',
+    detalle: `audio subido a mano el ${new Date(ahora).toISOString().slice(0, 10)}`, subido_a_mano_at: new Date(ahora).toISOString() };
+  delete nuevo.audio_limpiado_at;
+  const subidas: string[] = [];
+  try {
+    await guardaDelZip(env, nuevo, zip, f, `${prefijo(env)}${clave}/`, subidas);
+  } catch (e: any) {
+    if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
+    return json({ error: e?.message || String(e) }, 500);
+  }
+  await guardaRelease(env, nuevo);
+  return json({ ok: true, item: await conUrls(env, new URL(request.url).origin, nuevo) });
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */

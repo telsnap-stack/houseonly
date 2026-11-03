@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote,
+	handleListenPromote, handleListenUpload,
 } from "../src/lib/listen";
 
 const E = env as any;
@@ -137,7 +137,8 @@ describe("listen: ingesta", () => {
 		await archiva("RD__X---Y-OKK001__2026-11-01.html", rdEmail("OKK001"));
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 2, por_estado: { descarga_manual: 1, listo: 1 } });
 		expect(await rel("BIG001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fo/big/X?rlkey=k&dl=1", tracks: [] });
-		expect((await E.LISTEN_R2.list({ prefix: "listen/BIG001/" })).objects).toHaveLength(0);
+		// Ningun MP3; solo la portada del correo, para verlo en la bandeja.
+		expect((await E.LISTEN_R2.list({ prefix: "listen/BIG001/" })).objects.map((o: any) => o.key)).toEqual(["listen/BIG001/cover.jpg"]);
 	});
 
 	// MYD015: sin "Download Zip", el Dropbox colgado del nombre de la primera pista.
@@ -178,7 +179,7 @@ describe("listen: ingesta", () => {
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 2, por_estado: { descarga_manual: 2 } });
 		expect(await rel("OTR001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fo/otra/X?rlkey=k&dl=1", tracks: [] });
 		expect(await rel("SUE001")).toMatchObject({ estado: "descarga_manual", zip_link: "https://www.dropbox.com/scl/fi/uno/A1.mp3?rlkey=k&dl=0" });
-		expect((await E.LISTEN_R2.list({ prefix: "listen/OTR001/" })).objects).toHaveLength(0);
+		expect((await E.LISTEN_R2.list({ prefix: "listen/OTR001/" })).objects.map((o: any) => o.key)).toEqual(["listen/OTR001/cover.jpg"]);
 	});
 
 	it("sin modo live no hace nada", async () => {
@@ -400,5 +401,33 @@ describe("listen: decisiones y limpieza", () => {
 		expect(vuelto.decision).toBe("preorder");
 		expect(vuelto.en_tienda_como).toBeUndefined();
 		expect(vuelto.cargado_at).toBeUndefined();
+	});
+
+	it("sin promopack: el disco se queda con la portada del correo; con listen-upload pasa a listo con el audio subido a mano", async () => {
+		redes(zipDe({}));
+		await archiva("RD__X---Y-SIN001__2026-11-01.html", rdEmail("SIN001", "https://example.com/no-es-un-zip"));
+		await runListenIngest(E, { now: NOW });
+		const d = await rel("SIN001");
+		expect(d).toMatchObject({ estado: "sin_zip", tracks: [], cover: { key: "listen/SIN001/cover.jpg", from: "email" } });
+
+		const sube = (body: any, ok = true, clave = "SIN001") =>
+			handleListenUpload(new Request(`https://w/?action=listen-upload&clave=${clave}`, { method: "POST", body }), E, ok, NOW.getTime());
+		expect((await sube(zipDe({ "a.mp3": 5 }), false)).status).toBe(401);
+		expect((await sube(zipDe({ "a.mp3": 5 }), true, "NOPE01")).status).toBe(404);
+		expect((await sube(new Uint8Array([1, 2, 3]))).status).toBe(400);              // no es un ZIP
+		expect((await sube(zipDe({ "solo.jpg": 5 }))).status).toBe(400);               // sin MP3
+
+		// Sin JPG en el ZIP: se queda la portada del correo.
+		const r1: any = await (await sube(zipDe({ "A1 - Uno.mp3": 10, "B1 - Dos.mp3": 20 }))).json();
+		expect(r1.item).toMatchObject({ estado: "listo", subido_a_mano_at: NOW.toISOString(), cover: { from: "email" } });
+		expect(r1.item.tracks.map((t: any) => t.name)).toEqual(["A1 - Uno", "B1 - Dos"]);
+		expect(r1.item.tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
+		// Otra subida sustituye: fuera las pistas viejas; con JPG, portada nueva del ZIP.
+		await sube(zipDe({ "Otra.mp3": 7, "front.jpg": 4 }));
+		const d2 = await rel("SIN001");
+		expect(d2.tracks.map((t: any) => t.key)).toEqual(["listen/SIN001/01-Otra.mp3"]);
+		expect(d2.cover).toEqual({ key: "listen/SIN001/cover.jpg", from: "zip" });
+		expect((await E.LISTEN_R2.list({ prefix: "listen/SIN001/" })).objects.map((o: any) => o.key).sort())
+			.toEqual(["listen/SIN001/01-Otra.mp3", "listen/SIN001/cover.jpg"]);
 	});
 });
