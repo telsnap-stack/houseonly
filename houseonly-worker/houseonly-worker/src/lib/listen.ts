@@ -44,8 +44,8 @@
  *   guarda tambien, para la descripcion del producto.
  */
 import { unzipSync } from 'fflate';
-import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
-import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
+import { parseDistributorEmail, parseDbhEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
+import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
@@ -72,9 +72,10 @@ const LAST_RUN_KEY = 'meta:listen_last_run';
 const REL_PREFIX = 'listen:rel:';
 const MAIL_PREFIX = 'listen:mail:';
 
-// Fase 1: solo Rubadub y Triple Vision. DBH, MT y Kudos vendran cada uno con su
+// Rubadub y Triple Vision (fase 1); DBH desde el 2026-11-03 (parseDbhEmail, el
+// ZIP es release_zip/<id> de su tienda). MT y Kudos vendran cada uno con su
 // propio mecanismo de audio.
-export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision' };
+export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision', DBH: 'DBH' };
 
 // Los st= de Dropbox caducan: solo emails recientes. 3 dias cubre el fin de
 // semana, en el que el Apps Script no empuja (medido: los del 30-10 aun bajaban
@@ -97,9 +98,10 @@ const DIA_MS = 86400000;
 
 const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 // Mismos hosts que ?action=zip-proxy.
-const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$/i;
+const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$|^dbh-music\.com$/i;
 // Portadas del email: los mismos hosts que espeja ?action=mirror.
-const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com)$/i;
+// Mas la de la ficha de DBH (img.php de su tienda).
+const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com|dbh-music\.com)$/i;
 
 export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'error';
 export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado';
@@ -153,7 +155,9 @@ export interface ListenRunResult {
   emails_cerrados: number;
   nuevos: number;
   por_estado: Partial<Record<ListenEstado, number>>;
-  saltados: { duplicado: number; rechazado: number; no_preorder: number };
+  saltados: { duplicado: number; rechazado: number; no_preorder: number; en_tienda: number };
+  en_tienda?: string[];          // "<catno> como <handle>"
+  tienda_error?: string;
   limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
   portadas?: number;
   quedan: boolean;
@@ -183,11 +187,12 @@ async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
 interface IdxEntry { name: string; prefix: string; subject: string; date: string }
 
 /** Anuncios de RD/TV recientes, del mas antiguo al mas nuevo (caducan antes). */
-export function emailsCandidatos(idx: IdxEntry[], hoy: Date): IdxEntry[] {
-  const desde = new Date(hoy.getTime() - MAX_EMAIL_AGE_DAYS * 86400000).toISOString().slice(0, 10);
+export function emailsCandidatos(idx: IdxEntry[], hoy: Date, dias = MAX_EMAIL_AGE_DAYS, fuente = ''): IdxEntry[] {
+  const desde = new Date(hoy.getTime() - dias * 86400000).toISOString().slice(0, 10);
   return idx
-    .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde)
-    .filter(e => !MAIL_ORDER.test(e.subject) && !MAIL_DIGEST.some(re => re.test(e.subject)))
+    .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde && (!fuente || e.prefix === fuente))
+    // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
+    .filter(e => !MAIL_ORDER.test(e.subject) && (e.prefix === 'DBH' || !MAIL_DIGEST.some(re => re.test(e.subject))))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
 }
 
@@ -216,6 +221,7 @@ function esZipDescargable(u: string): boolean {
     if (p.protocol !== 'https:' || !ZIP_HOSTS.test(p.hostname)) return false;
     if (/dropbox\.com$/i.test(p.hostname)) return /\/(scl\/fo|sh)\//i.test(p.pathname);
     if (/digitaloceanspaces\.com$/i.test(p.hostname)) return /promopack/i.test(p.pathname);
+    if (/dbh-music\.com$/i.test(p.hostname)) return /^\/shop\/release_zip\/\d+$/.test(p.pathname);
     return true;
   } catch { return false; }
 }
@@ -334,13 +340,15 @@ function unFichero(zip: Uint8Array, name: string): Uint8Array {
 export function eligeFicheros(lista: Array<{ name: string; size: number }>): { mp3: string[]; portada: string | null; promotext: string | null; salespaper: string | null } {
   const mp3 = lista.filter(f => esMp3(f.name)).map(f => f.name).sort(orden.compare);
   const jpgs = lista.filter(f => esJpg(f.name));
-  const preferida = jpgs.find(f => /front|cover|sleeve/i.test(base(f.name)));
-  const portada = preferida?.name || jpgs.sort((a, b) => b.size - a.size)[0]?.name || null;
-  // Los mismos que lee el Process del tab: TV {CATNO}_promotext.txt (o un .txt),
+  // La trasera nunca es la portada (DBH trae {CATNO}_cover.jpg y {CATNO}_cover_back.jpg).
+  const trasera = (f: { name: string }) => /back/i.test(base(f.name));
+  const preferida = jpgs.find(f => /front|cover|sleeve/i.test(base(f.name)) && !trasera(f));
+  const portada = preferida?.name || jpgs.sort((a, b) => Number(trasera(a)) - Number(trasera(b)) || b.size - a.size)[0]?.name || null;
+  // Los mismos que lee el Process del tab: TV {CATNO}_promotext.txt, DBH {CATNO}_info.txt (o un .txt),
   // W&S/Rubadub SALESPAPER.pdf (o un .pdf). Si pesan demasiado, no.
   const txts = lista.filter(f => /\.txt$/i.test(f.name) && !esBasura(f.name) && f.size <= TEXTO_MAX_BYTES);
   const pdfs = lista.filter(f => /\.pdf$/i.test(f.name) && !esBasura(f.name) && f.size <= PDF_MAX_BYTES);
-  const promotext = (txts.find(f => /_promotext\.txt$/i.test(f.name)) || txts[0])?.name || null;
+  const promotext = (txts.find(f => /_(promotext|info)\.txt$/i.test(f.name)) || txts[0])?.name || null;
   const salespaper = (pdfs.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || pdfs[0])?.name || null;
   return { mp3, portada, promotext, salespaper };
 }
@@ -471,29 +479,77 @@ async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: s
 // otro email (una revision, por ejemplo) lo vuelve a anunciar.
 const REINTENTABLE: ListenEstado[] = ['sin_zip', 'error'];
 
-export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date } = {}): Promise<ListenRunResult> {
+// ── ya en tienda ───────────────────────────────────────────
+
+export interface Tienda { indice: ReturnType<typeof indiceTienda>; handleDe: Map<string, string> }
+
+/**
+ * Lo que ya existe en Shopify no entra a la bandeja (2026-11-03: MSLP022LTD
+ * salio en "Por decidir" estando activo). Las mismas reglas que "Cargar
+ * elegidos" en el tab (indiceTienda + buscaEnTienda sobre handle y SKU), pero
+ * con TODOS los productos menos los archivados: un borrador o un unlisted
+ * tambien estan ya dados de alta. Admin API leyendo productos (no el indice de
+ * busqueda): ~1600 productos = 7 paginas de 250 (coste pedido ~500 cada una).
+ */
+export async function leeTienda(env: ListenEnv): Promise<Tienda> {
+  const claves: string[] = [];
+  const handleDe = new Map<string, string>();
+  let after: string | null = null;
+  for (let pagina = 0, esperas = 0; pagina < 40;) {
+    const r: any = await shopifyAdminGraphQL(env as unknown as ShopifyAdminEnv, `
+      query($after: String) {
+        products(first: 250, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { handle status variants(first: 1) { nodes { sku } } }
+        }
+      }`, { after });
+    if (r?.errors?.some((e: any) => e?.extensions?.code === 'THROTTLED') && esperas++ < 5) {
+      await new Promise(ok => setTimeout(ok, 2000));
+      continue;
+    }
+    const conn = r?.data?.products;
+    if (r?.errors?.length || !conn) throw new Error(`Shopify products: ${JSON.stringify(r?.errors || r).slice(0, 200)}`);
+    for (const n of conn.nodes) {
+      if (n.status === 'ARCHIVED') continue;
+      for (const k of [claveCatno(n.handle), claveCatno(n.variants?.nodes?.[0]?.sku)].filter(Boolean)) {
+        claves.push(k);
+        if (!handleDe.has(k)) handleDe.set(k, n.handle);
+      }
+    }
+    if (!conn.pageInfo?.hasNextPage) return { indice: indiceTienda(claves), handleDe };
+    after = conn.pageInfo.endCursor;
+    pagina++;
+  }
+  throw new Error('Shopify products: demasiadas paginas');
+}
+
+export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date; dias?: number; fuente?: string } = {}): Promise<ListenRunResult> {
   const now = opts.now || new Date();
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
     mode, emails_vistos: 0, emails_cerrados: 0, nuevos: 0, por_estado: {},
-    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 }, quedan: false, finished_at: '',
+    saltados: { duplicado: 0, rechazado: 0, no_preorder: 0, en_tienda: 0 }, limpiados: { rechazados: 0, sin_audio: 0, fuera: 0, cargados: 0 }, quedan: false, finished_at: '',
   };
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
   const idx: IdxEntry[] = JSON.parse((await env.EMAILS.get('idx')) || '[]');
   let intentos = 0;
-  for (const email of emailsCandidatos(idx, now)) {
+  // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
+  let tienda: Tienda | null = null;
+  ingesta: for (const email of emailsCandidatos(idx, now, opts.dias, opts.fuente)) {
     if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
     if (intentos >= PER_RUN) { out.quedan = true; break; }
     out.emails_vistos++;
     const html = await env.EMAILS.get(`msg:${email.name}`);
     if (!html) continue;
     const [y, m, d] = email.date.split('-').map(Number);
-    const rows = parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, m - 1, d) });
+    const rows = email.prefix === 'DBH' ? parseDbhEmail(html)
+      : parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, m - 1, d) });
 
     let completo = true;
     const vistos = new Set<string>();
-    const unDisco = new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
+    // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
+    const unDisco = email.prefix !== 'DBH' && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
     for (const row of rows) {
       const clave = claveCatno(row.catno);
       if (!clave || vistos.has(clave)) continue;
@@ -503,6 +559,18 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
       const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
       if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
+      if (!tienda) {
+        // Sin saber que hay en la tienda no entra nada: el email queda abierto
+        // y la pasada de la hora siguiente lo reintenta.
+        try { tienda = await leeTienda(env); }
+        catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+      }
+      const como = buscaEnTienda(tienda.indice, row.catno);
+      if (como) {
+        out.saltados.en_tienda++;
+        (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
+        continue;
+      }
       if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
       intentos++;
       const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
@@ -766,7 +834,7 @@ const LIMIT_MAX = 100;
 async function conUrls(env: ListenEnv, origin: string, r: ListenRelease) {
   return {
     ...r,
-    tracks: await Promise.all(r.tracks.map(async (t, i) => ({ name: nombreDePista(t.name, r.catno, i), bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
+    tracks: await Promise.all(r.tracks.map(async (t, i) => ({ name: nombreDePista(t.name, r.catno, i, r.artist), bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
     cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
     textos: {
       promotext: r.textos?.promotext ? await urlFirmada(env, origin, r.textos.promotext) : null,
@@ -868,7 +936,7 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
     const n = r.tracks.length;
     return json({
       ok: true, clave, ya_cargado: true, cargado_at: r.cargado_at, cover_from: r.cover?.from || null,
-      tracks: r.tracks.map((t, i) => ({ name: nombreDePista(t.name, r.catno, i), url: `${publicBase}/${r.promovidos![i]}` })),
+      tracks: r.tracks.map((t, i) => ({ name: nombreDePista(t.name, r.catno, i, r.artist), url: `${publicBase}/${r.promovidos![i]}` })),
       coverUrl: r.promovidos[n] ? `${publicBase}/${r.promovidos[n]}` : '',
     });
   }
@@ -883,7 +951,7 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
     const destino = `${audioPre}${safeKey}/${nombreProcess(t.name)}`;
     await copia(env.LISTEN_R2, t.key, env.R2, destino);
     promovidos.push(destino);
-    tracks.push({ name: nombreDePista(t.name, r.catno, i), url: `${publicBase}/${destino}` });
+    tracks.push({ name: nombreDePista(t.name, r.catno, i, r.artist), url: `${publicBase}/${destino}` });
   }
   let coverUrl = '';
   if (r.cover) {
@@ -942,7 +1010,17 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */
-export async function handleListenRun(env: ListenEnv, autorizado: boolean): Promise<Response> {
+/**
+ * Pasada a mano. Opcional, solo aqui (el cron no los usa): ?dias=N (1-14) amplia
+ * la ventana de emails y ?fuente=DBH la limita a un distribuidor, para probar
+ * una fuente nueva con sus emails de la ultima semana. Ojo: los Dropbox de
+ * Rubadub de hace mas de 3 dias pueden haber caducado.
+ */
+export async function handleListenRun(env: ListenEnv, autorizado: boolean, request?: Request): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
-  return json({ ok: true, ...(await runListenIngest(env, { force: true })) });
+  const q = request ? new URL(request.url).searchParams : new URLSearchParams();
+  const dias = q.has('dias') ? Math.min(14, Math.max(1, Math.floor(Number(q.get('dias')) || 0))) : undefined;
+  const fuente = (q.get('fuente') || '').toUpperCase();
+  if (fuente && !LISTEN_SOURCES[fuente]) return json({ error: `fuente desconocida: ${fuente}` }, 400);
+  return json({ ok: true, ...(await runListenIngest(env, { force: true, dias, fuente })) });
 }

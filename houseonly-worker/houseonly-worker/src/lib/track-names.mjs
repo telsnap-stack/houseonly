@@ -43,13 +43,27 @@ function limpiaNombre(fname, catno) {
 
 /**
  * Para mostrar y para el producto: lo de arriba y, si lo que queda no es un
- * titulo (un numero suelto "1", el catno, un codigo como "DMSR8411"), "Pista N".
+ * titulo (un numero suelto "1", el catno, un codigo como "DMSR8411"), la cara
+ * del fichero ("CITS007_A1-snippet" → "A1", "Side B 2" → "B2") y, si tampoco
+ * la trae, "Pista N".
  */
-export function nombreDePista(crudo, catno, i) {
+export function nombreDePista(crudo, catno, i, artista = '') {
   // El catno, escrito con o sin separadores ("LN017-Sugar…" con catno LN-017).
   const k = claveCatno(catno);
-  const sinCatno = k ? String(crudo || '').replace(new RegExp('^' + k.split('').join('[\\s._-]*') + '[\\s._-]*', 'i'), '') : String(crudo || '');
-  const n = limpiaNombre(sinCatno, catno);
+  let sinCatno = k ? String(crudo || '').replace(new RegExp('^' + k.split('').join('[\\s._-]*') + '[\\s._-]*', 'i'), '') : String(crudo || '');
+  // DBH: "<catno> - <n>. <artista> - <titulo>", a veces con el artista otra vez
+  // detras de la cara ("ME015 - 1. George Apergis - A1 George Apergis - Psilocybe").
+  const art = String(artista || '').trim();
+  const delArtista = art ? new RegExp('^' + art.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+[-–]\\s+', 'i') : null;
+  if (delArtista) sinCatno = sinCatno.replace(/^\d{1,2}\.\s+/, m => delArtista.test(sinCatno.slice(m.length)) ? '' : m).replace(delArtista, '');
+  // Cara sin numero ("B. Gradien Flow", PLZ014S): la del artista, sin mas.
+  if (delArtista) sinCatno = sinCatno.replace(/^[A-D]\.\s+/, '');
+  // Lo guardado no lleva extension: sin la ".mp3" de vuelta, limpiaNombre se
+  // comeria "A1. Orcas Chord" desde el punto como si fuera una.
+  let n = limpiaNombre(`${sinCatno}.mp3`, catno);
+  if (delArtista) n = n.replace(delArtista, '');
   const sinTitulo = !n || /^\d+$/.test(n) || claveCatno(n) === claveCatno(catno) || /^[A-Z]{2,}[\s-]?\d+[A-Z0-9-]*$/.test(n);
-  return sinTitulo ? `Pista ${i + 1}` : n;
+  if (!sinTitulo) return n;
+  const cara = sinCatno.match(/(?:^|[\s._-])(?:side[\s._-]*)?([A-D])[\s._-]?(\d{1,2})(?=$|[\s._-])/i);
+  return cara ? `${cara[1].toUpperCase()}${Number(cara[2])}` : `Pista ${i + 1}`;
 }

@@ -7,6 +7,7 @@ import {
 	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
+import { parseDbhEmail } from "../src/lib/distributor-email.mjs";
 
 const E = env as any;
 const SECRET = "listen-test-secret";
@@ -21,6 +22,24 @@ const rdEmail = (cat: string, link = TRACKER) => `<html><body>
 <img src="https://mcusercontent.com/x/images/${cat}.jpg">
 <p>Artist: Test Artist<br>Title: Test EP<br>Label: Test Rec<br>Cat: ${cat}<br>Format: 12"<br>Price: £8.99</p>
 <p>A1. Uno <a href="${link}">Download Zip</a></p></body></html>`;
+
+// Ficha de DBH con la estructura real de su tienda (sin datos reales).
+const dbhFicha = (id: number, cat: string, etiqueta = "Coming&nbsp;soon", genero = "Techno - Minimal") => `
+<table style="width: 100%;margin-top:30px;margin-bottom:30px;"><tr><td style="max-width:50%;width: 50%;">
+<img src="https://dbh-music.com/public/script/img.php?v=1&amp;imgsrc=${id}_uploaded.jpg&amp;timestamp=1&amp;id=${id}&amp;size=300x300" alt="${cat}" /></td>
+<td><table><tr><td colspan="2"><span  style="text-transform: uppercase;background-color:#f0ad4e;display: inline;">${etiqueta}</span></td></tr>
+<tr><td style="color:#999;" valign="top">Catalog</td><td style="color:#fff;padding-bottom:10px;" valign="top">${cat}&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Title</td><td style="color:#fff;" valign="top">Test EP&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Artist</td><td style="color:#fff;" valign="top">Test Artist&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Label</td><td style="color:#fff;" valign="top">test rec&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Release</td><td style="color:#fff;" valign="top">2026-12-07&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Tracks</td><td style="color:#fff;" valign="top">2&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Genres</td><td style="color:#fff;" valign="top">${genero}&nbsp;</td></tr>
+<tr><td style="color:#999;" valign="top">Format</td><td style="color:#fff;" valign="top"><span style="background-color: #777;">12"</span></td></tr>
+<tr><td colspan="2"><a href="https://dbh-music.com/shop/release_view/${id}"class="vk_retail">&#x1F6D2; 8.80 &euro;</a>
+<a href="https://dbh-music.com/shop/release_zip/${id}" rel="nofollow">&darr; ZIP</a></td></tr></table></td></tr></table><hr>`;
+const dbhEmail = (prosa: string, ...fichas: string[]) => `<html><head><style>.row {margin:0;}</style></head><body>
+<p>Hello Eduardo,<br />${prosa}<br />Direct order: https://dbh-music.com/shop/release_view/1</p><div class="row">${fichas.join("")}</div></body></html>`;
 
 const zipDe = (files: Record<string, number>) =>
 	zipSync(Object.fromEntries(Object.entries(files).map(([n, size]) => [n, new Uint8Array(size).fill(7)])));
@@ -43,6 +62,12 @@ function redes(zip: Uint8Array, extra: Record<string, () => Response> = {}) {
 	});
 }
 
+// La tienda de Shopify que ve la ingesta (leeTienda): por defecto vacia, sin red.
+const tiendaCon = (nodes: any[]) => vi.spyOn(shopifyAdmin, "shopifyAdminGraphQL").mockResolvedValue({
+	data: { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } },
+});
+const producto = (handle: string, sku: string, status = "ACTIVE") => ({ handle, status, variants: { nodes: [{ sku }] } });
+
 const rel = async (clave: string) => JSON.parse((await E.SYNC_STATE.get(`listen:rel:${clave}`)) || "null");
 
 beforeEach(async () => {
@@ -51,19 +76,41 @@ beforeEach(async () => {
 	for (const o of (await E.R2.list()).objects) await E.R2.delete(o.key);
 	E.BOOTSTRAP_AUTH_SECRET = SECRET;
 	await E.SYNC_STATE.put("meta:listen_mode", "live");
+	tiendaCon([]);
 });
 afterEach(() => vi.restoreAllMocks());
 
+describe("parseDbhEmail", () => {
+	it("una fila por ficha, con el genero tal cual, precio dealer en EUR y portada a 1000 px", () => {
+		const rows = parseDbhEmail(dbhEmail("OUT SOON: DBH-777 - Test<br />Prosa del disco.", dbhFicha(777, "DBH-777"), dbhFicha(555, "OLD555", "Back in Stock", "House - Deep House")));
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toMatchObject({
+			catno: "DBH-777", artist: "Test Artist", title: "Test EP", label: "test rec", genre: "Techno - Minimal",
+			release: "2026-12-07", dealerPrice: 8.8, format: '12"', source: "dbh", forthcoming: true,
+			zipUrl: "https://dbh-music.com/shop/release_zip/777",
+			coverUrl: "https://dbh-music.com/public/script/img.php?v=1&imgsrc=777_uploaded.jpg&timestamp=1&id=777&size=1000x1000",
+		});
+		expect(rows[0]._desc).toBe("OUT SOON: DBH-777 - Test\nProsa del disco.");
+		// La prosa es del disco que nombra; la ficha de "Back in Stock" no la hereda.
+		expect(rows[1]).toMatchObject({ catno: "OLD555", forthcoming: false, genre: "House - Deep House", _desc: "" });
+	});
+});
+
 describe("listen: qué emails y qué ficheros", () => {
-	it("solo anuncios RD/TV recientes; fuera pedidos, digests, otros distribuidores y lo viejo", () => {
+	it("solo anuncios RD/TV/DBH recientes; fuera pedidos, digests, otros distribuidores y lo viejo", () => {
 		const e = (prefix: string, subject: string, date = "2026-11-01") => ({ name: `${prefix}__${subject}__${date}.html`, prefix, subject, date });
 		const idx = [
 			e("RD", "Artist---Title-CAT001"), e("TV", "CAT002---T---A-20-11-2026", "2026-10-31"),
 			e("RD", "Fwd-Artist---Title-CAT003"), e("RD", "All-Rubadub-Pre-sales-Week-26th"),
-			e("DBH", "Out-soon-DBH001"), e("WS", "Wordandsound-Update"), e("MT", "Fwd-Mother-Tongue"),
-			e("RD", "Old-CAT004", "2026-10-29"),
+			e("DBH", "DBH-Music---Out-soon-DBH001"), e("DBH", "DBH-Music---Newsletter-KW45-2026"),
+			e("WS", "Wordandsound-Update"), e("MT", "Fwd-Mother-Tongue"),
+			e("RD", "Old-CAT004", "2026-10-29"), e("TV", "Newsletter-KW45-2026"),
 		];
-		expect(emailsCandidatos(idx, NOW).map(x => x.subject)).toEqual(["CAT002---T---A-20-11-2026", "Artist---Title-CAT001"]);
+		// listen-run a mano: ventana mas larga y una sola fuente.
+		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Old-CAT004", "Artist---Title-CAT001"]);
+		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
+		expect(emailsCandidatos(idx, NOW).map(x => x.subject)).toEqual(
+			["CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
 	});
 
 	it("MP3 en orden natural, sin __MACOSX ni ._; portada JPG con 'front' antes que la mayor; PNG fuera", () => {
@@ -75,6 +122,10 @@ describe("listen: qué emails y qué ficheros", () => {
 		expect(r.mp3).toEqual(["A2 - x.mp3", "A10 - x.mp3", "B1 - x.mp3"]);
 		expect(r.portada).toBe("CAT_front.jpeg");
 		expect(eligeFicheros([{ name: "a.mp3", size: 1 }, { name: "label.png", size: 9 }]).portada).toBeNull();
+		// DBH: la trasera nunca, pese mas o vaya delante; su _info.txt es el texto.
+		const dbh = eligeFicheros([{ name: "X1_cover_back.jpg", size: 900 }, { name: "X1_cover.jpg", size: 100 }, { name: "notas.txt", size: 5 }, { name: "X1_info.txt", size: 50 }]);
+		expect(dbh).toMatchObject({ portada: "X1_cover.jpg", promotext: "X1_info.txt" });
+		expect(eligeFicheros([{ name: "back.jpg", size: 900 }, { name: "x.jpg", size: 100 }]).portada).toBe("x.jpg");
 	});
 
 	it("Dropbox siempre con dl=1", () => {
@@ -127,6 +178,51 @@ describe("listen: ingesta", () => {
 		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+	});
+
+	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
+		const f = redes(zipDe({ "a.mp3": 10 }));
+		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
+		await archiva("RD__X---Y-MSLP022LTD__2026-11-01.html", rdEmail("MSLP022LTD"));
+		await archiva("RD__X---Y-UR025__2026-11-01.html", rdEmail("UR-025"));
+		await archiva("RD__X---Y-OLD001__2026-11-01.html", rdEmail("OLD001"));
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 1, emails_cerrados: 3, saltados: { en_tienda: 2 } });
+		expect(r.en_tienda).toEqual(["MSLP022LTD como mslp022ltd", "UR-025 como otra-cosa"]);
+		expect(await rel("MSLP022LTD")).toBeNull();
+		expect(await rel("OLD001")).toMatchObject({ estado: "listo" });
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+	});
+
+	it("si no se puede leer la tienda no entra nada y el email queda abierto para la hora siguiente", async () => {
+		redes(zipDe({ "a.mp3": 10 }));
+		vi.spyOn(shopifyAdmin, "shopifyAdminGraphQL").mockRejectedValue(new Error("Shopify Admin API 503"));
+		await archiva("RD__X---Y-TST009__2026-11-01.html", rdEmail("TST009"));
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 0, emails_cerrados: 0, quedan: true, tienda_error: "Shopify Admin API 503" });
+		expect(await E.SYNC_STATE.get("listen:mail:RD__X---Y-TST009__2026-11-01.html")).toBeNull();
+		tiendaCon([]);
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, emails_cerrados: 1 });
+	});
+
+	it("DBH: solo las fichas Coming soon; ZIP de release_zip, portada sin trasera, _info.txt como texto", async () => {
+		const zip = zipDe({ "DBH777_info.txt": 40, "DBH777_cover_back.jpg": 900, "DBH777_cover.jpg": 100,
+			"DBH777 - 1. Test Artist - A1. Uno.mp3": 30, "DBH777 - 2. Test Artist - B1. Dos.mp3": 20 });
+		const f = redes(zip, { "https://dbh-music.com/shop/release_zip/777": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }) });
+		await archiva("DBH__DBH-Music---OUT-SOON-DBH777---Test__2026-11-01.html",
+			dbhEmail("OUT SOON: DBH-777 - Test Artist - Test EP<br />Muy recomendado.", dbhFicha(777, "DBH-777"), dbhFicha(555, "OLD555", "Back in Stock")), "2026-11-01", "DBH");
+		// La newsletter vuelve a traer el mismo disco: entra una sola vez.
+		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter", dbhFicha(777, "DBH777")), "2026-11-02", "DBH");
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 2, saltados: { no_preorder: 1, duplicado: 1 } });
+		const d = await rel("DBH777");
+		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07",
+			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
+		expect(d.gbp).toBeUndefined();
+		expect((await E.LISTEN_R2.head("listen/DBH777/cover.jpg")).size).toBe(100);
+		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(1);
+		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=DBH777"), E, true)).json();
+		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {

@@ -1,5 +1,6 @@
 /**
- * Parser de los emails de distribuidor (Rubadub y Triple Vision), compartido
+ * Parser de los emails de distribuidor (Rubadub y Triple Vision; DBH con su
+ * propio parseDbhEmail, 2026-11-03), compartido
  * entre el tab Pre-order del admin (src/App.jsx) y el worker (lib/listen.ts, la
  * bandeja de escucha), para que los dos lean el mismo email igual. Movido tal
  * cual desde App.jsx el 2026-11-02: sin DOMParser ni nada del navegador, solo
@@ -389,6 +390,67 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
     r._warnings.push(`el enlace del ZIP es el mismo que el de ${r._zipShared.join(', ')} — no se usa, baja este a mano`);
   }
 
+  return rows;
+}
+
+// ── DBH (source:dbh) ───────────────────────────────────────────
+// Todos los emails de DBH (Out soon, Upcoming, bienvenidas, Newsletter KW..)
+// acaban en la misma ficha HTML por disco, generada por su tienda: una etiqueta
+// (Coming soon | New this week | New last week | Back in Stock) y una tabla
+// Catalog / Title / Artist / Label / Release (ISO) / Tracks / Genres / Format,
+// el precio dealer en EUR y el enlace release_zip/<id> (publico, sin sesion,
+// el ZIP se genera al pedirlo: no caduca). Medido 2026-11-03 sobre los 103
+// emails archivados: 1.240 fichas, ningun disco con dos catnos distintos.
+// La prosa de encima (Katalognummer:, "IIL 014", ...) no es fiable para datos;
+// solo vale como descripcion, y solo del disco al que nombra.
+// forthcoming = "Coming soon": lo demas ya se envia.
+const DBH_FICHA = /<table style="width: 100%;margin-top:30px/;
+const DBH_CAMPO = /valign="top">(Catalog|Title|Artist|Label|Release|Genres|Format)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>/g;
+const dbhTexto = h => decodeHtmlEntities(String(h || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+export function parseDbhEmail(raw) {
+  const html = String(raw || '');
+  const [cabeza, ...fichas] = html.split(DBH_FICHA);
+  // La prosa: desde el saludo hasta la primera ficha, sin enlaces de pedido/escucha.
+  const prosa = decodeHtmlEntities(cabeza.replace(/<(head|style|script|title)\b[\s\S]*?<\/\1>/gi, '').replace(/<br\s*\/?>|<\/p>/gi, '\n').replace(/<[^>]+>/g, ''))
+    .split('\n').map(l => l.trim())
+    .filter(l => l && !/^(Hello\b|Direct order:|SoundCloud:|Teaser:|Worldwide exclusive)/i.test(l) && !/^https?:\/\//.test(l));
+  const desde = prosa.findIndex(l => /\S/.test(l) && !/^DBH-Music\b|^-->$/.test(l));
+  const desc = prosa.slice(Math.max(desde, 0)).filter(l => !/^DBH-Music\b|^-->$/.test(l)).join('\n').slice(0, 2400);
+  const claveProsa = rdKey(desc);
+  const rows = [];
+  for (const f of fichas) {
+    const c = {};
+    for (const [, k, v] of f.matchAll(DBH_CAMPO)) c[k.toLowerCase()] = dbhTexto(v);
+    if (!c.catalog) continue;
+    const etiquetas = [...f.matchAll(/<span[^>]*background-color:#[0-9a-f]{6};[^>]*>([\s\S]*?)<\/span>/gi)].map(m => dbhTexto(m[1]));
+    const zip = f.match(/https:\/\/dbh-music\.com\/shop\/release_zip\/\d+/)?.[0] || '';
+    const precio = f.match(/release_view\/\d+"[^>]*>([\s\S]*?)<\/a>/)?.[1];
+    const euros = precio ? Number((dbhTexto(precio).match(/(\d+(?:[.,]\d+)?)\s*€/) || [])[1]?.replace(',', '.')) : NaN;
+    const img = decodeHtmlEntities(f.match(/<img src="([^"]+)"/)?.[1] || '');
+    const release = /^\d{4}-\d{2}-\d{2}$/.test(c.release || '') ? c.release : '';
+    rows.push({
+      catno: c.catalog,
+      artist: c.artist || '',
+      title: c.title || '',
+      label: c.label || '',
+      // Tal cual ("Techno - Minimal"): lo resuelve genres.mjs, y si no resuelve
+      // la fila queda sin genero hasta que alguien lo elija.
+      genre: c.genres || '',
+      release,
+      dealerPrice: Number.isFinite(euros) ? euros : null,
+      format: c.format || '',
+      // La de 300 px responde 302; a 1000 px sale la imagen.
+      coverUrl: /^https:\/\/dbh-music\.com\/public\/script\/img\.php\?/.test(img) ? img.replace(/([?&]size=)\d+x\d+/, '$11000x1000') : '',
+      zipUrl: zip,
+      source: 'dbh',
+      forthcoming: etiquetas.some(e => /^coming soon$/i.test(e)),
+      _desc: claveProsa.includes(rdKey(c.catalog)) ? desc : '',
+      _zipLinks: zip ? [zip] : [],
+      _digest: '',
+      _warnings: [],
+    });
+  }
   return rows;
 }
 
