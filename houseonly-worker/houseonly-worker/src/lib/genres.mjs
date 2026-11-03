@@ -161,6 +161,13 @@ export const RUIDO_DE_PRENSADO = ['limited', 'collectors edition', 'colored', 'o
 export const genreTag = id => `genre:${id}`;
 
 /**
+ * DBH (2026-11-03, decision de Eduardo): su genero va tal cual al producto, sin
+ * alias ni mapeo. Si no esta en esta lista, su propio tag con el valor PEGADO,
+ * como los canonicos: "House - Deep House" → genre:housedeephouse.
+ */
+export const tagGeneroLibre = valor => genreTag(String(valor || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, ''));
+
+/**
  * Los tags de un genero Y los de sus hijos. Lo usa el BUSCADOR: quien escribe
  * "house" espera que salga tambien el deep house y el tech house.
  *
