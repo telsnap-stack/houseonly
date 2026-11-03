@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload,
+	handleListenPromote, handleListenUpload, completaPortadas,
 } from "../src/lib/listen";
 
 const E = env as any;
@@ -316,6 +316,9 @@ describe("listen: decisiones y limpieza", () => {
 		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
 		expect(p1).toMatchObject({ count: 5, cursor: "2" });
 		expect(p1.promote).toEqual({ activo: false, audio: "audio/", covers: "covers/", pruebas: false });
+		expect(p1.modo).toBe("live");                                    // el interruptor de ahora
+		await E.SYNC_STATE.put("meta:listen_mode", "off");
+		expect((await pide("vista=por_decidir")).modo).toBe("off");
 		const p3 = await pide("vista=por_decidir&limit=2&cursor=4");
 		expect(p3.items.map((x: any) => x.clave)).toEqual(["PAG005"]);
 		expect(p3.cursor).toBeNull();
@@ -365,11 +368,27 @@ describe("listen: decisiones y limpieza", () => {
 			// Vista Cargados y deshacer: vuelve a Elegidos sin tocar lo copiado.
 			const lista = async (v: string) => ((await (await handleListenList(new Request(`https://w/?action=listen-list&vista=${v}`), E, true)).json()) as any).items.map((x: any) => x.clave);
 			expect(await lista("cargados")).toEqual(["PRO001"]);
-			await handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "PRO001", decision: "preorder" }) }), E, true, NOW.getTime());
+			// El producto ya existe en la tienda: deshacer NO borra lo copiado.
+			const deshacer = (existe: boolean | null) => handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "PRO001", decision: "preorder" }) }),
+				E, true, NOW.getTime(), async () => existe);
+			const d1: any = await (await deshacer(true)).json();
+			expect(d1.copias).toEqual({ borradas: 0, conservadas: "el producto pro001 existe en la tienda" });
 			expect(await lista("elegidos")).toEqual(["PRO001"]);
 			const vuelto = await rel("PRO001");
 			expect(vuelto.cargado_at).toBeUndefined();
 			expect(vuelto.promovidos).toBeUndefined();
+			expect((await E.R2.list({ prefix: "staging-audio/PRO001/" })).objects).toHaveLength(1);
+
+			// Otra carga y deshacer sin producto en la tienda: se borran las copias (audio y portada).
+			await promo(cuerpo);
+			const d2: any = await (await deshacer(false)).json();
+			expect(d2.copias).toEqual({ borradas: 2 });
+			expect((await E.R2.list({ prefix: "staging-audio/" })).objects).toHaveLength(0);
+			expect((await E.R2.list({ prefix: "staging-covers/" })).objects).toHaveLength(0);
+
+			// Sin poder comprobar la tienda: se conservan.
+			await promo(cuerpo);
+			expect(((await (await deshacer(null)).json()) as any).copias).toEqual({ borradas: 0, conservadas: "no se pudo comprobar la tienda" });
 			expect((await E.R2.list({ prefix: "staging-audio/PRO001/" })).objects).toHaveLength(1);
 		} finally { delete E.LISTEN_PROMOTE_AUDIO_PREFIX; delete E.LISTEN_PROMOTE_COVERS_PREFIX; }
 	});
@@ -420,7 +439,7 @@ describe("listen: decisiones y limpieza", () => {
 		// Sin JPG en el ZIP: se queda la portada del correo.
 		const r1: any = await (await sube(zipDe({ "A1 - Uno.mp3": 10, "B1 - Dos.mp3": 20 }))).json();
 		expect(r1.item).toMatchObject({ estado: "listo", subido_a_mano_at: NOW.toISOString(), cover: { from: "email" } });
-		expect(r1.item.tracks.map((t: any) => t.name)).toEqual(["A1 - Uno", "B1 - Dos"]);
+		expect(r1.item.tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);   // humanizados (track-names.mjs)
 		expect(r1.item.tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
 		// Otra subida sustituye: fuera las pistas viejas; con JPG, portada nueva del ZIP.
 		await sube(zipDe({ "Otra.mp3": 7, "front.jpg": 4 }));
@@ -429,5 +448,19 @@ describe("listen: decisiones y limpieza", () => {
 		expect(d2.cover).toEqual({ key: "listen/SIN001/cover.jpg", from: "zip" });
 		expect((await E.LISTEN_R2.list({ prefix: "listen/SIN001/" })).objects.map((o: any) => o.key).sort())
 			.toEqual(["listen/SIN001/01-Otra.mp3", "listen/SIN001/cover.jpg"]);
+	});
+
+	it("los sin audio que entraron sin portada la recuperan de su correo, una sola vez", async () => {
+		const f = redes(zipDe({}));
+		await archiva("RD__X---Y-VIE001__2026-11-01.html", rdEmail("VIE001"));
+		await E.SYNC_STATE.put("listen:rel:VIE001", JSON.stringify({
+			clave: "VIE001", catno: "VIE001", distribuidor: "RD", artist: "A", title: "T", estado: "sin_zip", tracks: [], bytes: 0,
+			email: "RD__X---Y-VIE001__2026-11-01.html", email_date: "2026-11-01", ingested_at: "2026-11-01T10:00:00Z",
+		}), { metadata: { c: "VIE001", e: "sin_zip", n: 0, at: "2026-11-01T10:00:00Z" } });
+		expect(await completaPortadas(E)).toBe(1);
+		expect(await rel("VIE001")).toMatchObject({ cover: { key: "listen/VIE001/cover.jpg", from: "email" }, portada_comprobada: true });
+		const llamadas = f.mock.calls.length;
+		expect(await completaPortadas(E)).toBe(0);                       // ya comprobada: no vuelve a mirar
+		expect(f.mock.calls.length).toBe(llamadas);
 	});
 });

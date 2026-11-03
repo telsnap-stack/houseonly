@@ -46,6 +46,8 @@
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { claveCatno, claveKV, nuevoRechazo } from './preorder-rechazos.mjs';
+import { nombreDePista } from './track-names.mjs';
+import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
 export interface ListenEnv {
   SYNC_STATE: KVNamespace;
@@ -56,6 +58,10 @@ export interface ListenEnv {
   R2: R2Bucket;                   // houseonly-audio (publico): destino de listen-promote
   LISTEN_PROMOTE_AUDIO_PREFIX?: string;
   LISTEN_PROMOTE_COVERS_PREFIX?: string;
+  // Shopify (deshacer carga: ¿algun producto usa ya lo copiado?)
+  WISHLIST?: KVNamespace;
+  SHOPIFY_ADMIN_CLIENT_ID?: string;
+  SHOPIFY_ADMIN_CLIENT_SECRET?: string;
 }
 
 // Su propia expresion de cron, lejos de :03 (eBay) y :07 (Discogs).
@@ -137,6 +143,7 @@ export interface ListenRelease {
   promovidos?: string[];         // claves copiadas en houseonly-audio
   en_tienda_como?: string;       // "cargado" sin copiar nada: ya estaba en la tienda
   resumen?: string;              // prosa del correo (recortada), para decidir sin audio
+  portada_comprobada?: boolean;  // completaPortadas ya miro su correo
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
 }
 
@@ -148,6 +155,7 @@ export interface ListenRunResult {
   por_estado: Partial<Record<ListenEstado, number>>;
   saltados: { duplicado: number; rechazado: number; no_preorder: number };
   limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
+  portadas?: number;
   quedan: boolean;
   finished_at: string;
 }
@@ -162,6 +170,7 @@ function metaDe(r: ListenRelease) {
     a: r.artist.slice(0, 60), t: r.title.slice(0, 60), r: r.release,
     n: r.tracks.length, at: r.ingested_at,
     x: r.decision, dt: r.decided_at, al: r.audio_limpiado_at,
+    pc: r.portada_comprobada ? 1 : undefined,
   };
 }
 
@@ -514,9 +523,48 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
     }
   }
   out.limpiados = await limpiaBandeja(env, now);
+  out.portadas = await completaPortadas(env);
   out.finished_at = new Date().toISOString();
   await env.SYNC_STATE.put(LAST_RUN_KEY, JSON.stringify(out));
   return out;
+}
+
+// ── portadas que faltan ────────────────────────────────────────
+
+const PORTADAS_POR_PASADA = 10;
+
+/**
+ * Los discos sin audio que entraron antes de guardar la portada del correo
+ * (los tres de Egyptian Lover del 03-11): se vuelve a leer su correo y se guarda
+ * la portada. Una vez por disco (portada_comprobada), haya o no portada.
+ */
+export async function completaPortadas(env: ListenEnv): Promise<number> {
+  let hechas = 0, vistas = 0;
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.metadata || {};
+      if (m.n !== 0 || m.pc) continue;
+      if (vistas >= PORTADAS_POR_PASADA) return hechas;
+      const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
+      if (!r || r.cover || r.tracks.length) continue;
+      vistas++;
+      const html = await env.EMAILS.get(`msg:${r.email}`);
+      if (html) {
+        const [y, mo, d] = r.email_date.split('-').map(Number);
+        const row: any = parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, mo - 1, d) })
+          .find((x: any) => claveCatno(x.catno) === r.clave);
+        if (row?.coverUrl) await guardaPortadaDelCorreo(env, r, row.coverUrl, `${prefijo(env)}${r.clave}/`).catch(() => {});
+        if (row?._desc && !r.resumen) r.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
+      }
+      if (r.cover) hechas++;
+      r.portada_comprobada = true;
+      await guardaRelease(env, r);
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  return hechas;
 }
 
 // ── limpieza ───────────────────────────────────────────────────
@@ -584,7 +632,18 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
  * Rechazar escribe el mismo preorder:rejected que el tab (filtro del 20-10);
  * salir de rechazado lo borra.
  */
-export async function handleListenDecide(request: Request, env: ListenEnv, autorizado: boolean, ahora = Date.now()): Promise<Response> {
+/** ¿Hay en la tienda un producto con ese handle? null si no se pudo saber. */
+async function productoEnTienda(env: ListenEnv, handle: string): Promise<boolean | null> {
+  try {
+    const d = await shopifyAdminGraphQL(env as unknown as ShopifyAdminEnv,
+      `query($q: String!) { products(first: 1, query: $q) { nodes { handle } } }`, { q: `handle:'${handle.replace(/'/g, '')}'` });
+    const nodes = d?.data?.products?.nodes;
+    return Array.isArray(nodes) ? nodes.some((n: any) => n.handle === handle) : null;
+  } catch { return null; }
+}
+
+export async function handleListenDecide(request: Request, env: ListenEnv, autorizado: boolean, ahora = Date.now(),
+  existeEnTienda: (handle: string) => Promise<boolean | null> = h => productoEnTienda(env, h)): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
   const body: any = await request.json().catch(() => null);
   const clave = claveCatno(body?.clave);
@@ -600,8 +659,21 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   if (cargadoEnTienda && r.decision !== 'preorder') return json({ error: 'solo un elegido para pre-order pasa a cargado por estar en tienda' }, 409);
 
   // Deshacer una carga: vuelve a Elegidos. Lo copiado a audio/ y covers/ se
-  // queda (puede estar ya en un producto); un Process nuevo lo sobrescribe.
-  if (r.decision === 'cargado') { delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como; }
+  // borra SOLO si ningun producto de la tienda lo usa (su handle no existe); si
+  // existe, o no se puede comprobar, se queda (borrarlo dejaria el producto sin audio).
+  let copias: { borradas: number; conservadas?: string } | undefined;
+  if (r.decision === 'cargado' && decision !== 'cargado') {
+    const mias = (r.promovidos || []).filter(k => {
+      const a = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/', c = env.LISTEN_PROMOTE_COVERS_PREFIX || 'covers/';
+      return (k.startsWith(a) || k.startsWith(c)) && !k.includes('..');
+    });
+    if (mias.length) {
+      const existe = r.handle ? await existeEnTienda(r.handle) : null;
+      if (existe === false) { await env.R2.delete(mias); copias = { borradas: mias.length }; }
+      else copias = { borradas: 0, conservadas: existe ? `el producto ${r.handle} existe en la tienda` : 'no se pudo comprobar la tienda' };
+    }
+    delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como;
+  }
   if (decision === 'rechazado') {
     const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
     if ('error' in rec) return json({ error: rec.error }, 400);
@@ -616,7 +688,7 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   if (cargadoEnTienda) { r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
   await guardaRelease(env, r);
   return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null,
-    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null } });
+    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null }, ...(copias ? { copias } : {}) });
 }
 
 // ── URLs firmadas ──────────────────────────────────────────────
@@ -689,7 +761,7 @@ const LIMIT_MAX = 100;
 async function conUrls(env: ListenEnv, origin: string, r: ListenRelease) {
   return {
     ...r,
-    tracks: await Promise.all(r.tracks.map(async t => ({ name: t.name, bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
+    tracks: await Promise.all(r.tracks.map(async (t, i) => ({ name: nombreDePista(t.name, r.catno, i), bytes: t.bytes, url: await urlFirmada(env, origin, t.key) }))),
     cover: r.cover ? { from: r.cover.from, url: await urlFirmada(env, origin, r.cover.key) } : null,
     textos: {
       promotext: r.textos?.promotext ? await urlFirmada(env, origin, r.textos.promotext) : null,
@@ -715,6 +787,7 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const lastRun = JSON.parse((await env.SYNC_STATE.get(LAST_RUN_KEY)) || 'null');
   // Para que el tab avise de que el CSV sale con el audio de pruebas (staging).
   const audioPre = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/';
+  const modo = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';   // el interruptor de ahora, no el de la ultima pasada
   const promote = {
     activo: (await env.SYNC_STATE.get(PROMOTE_KEY)) === 'on',
     audio: audioPre, covers: env.LISTEN_PROMOTE_COVERS_PREFIX || 'covers/',
@@ -725,7 +798,7 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   if (pedidas.length) {
     const recs = await Promise.all(pedidas.map(c => env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + c, 'json')));
     const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
-    return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, promote, items, cursor: null });
+    return json({ ok: true, count: items.length, expires_in: SIGNED_TTL_S, last_run: lastRun, modo, promote, items, cursor: null });
   }
 
   const vista = u.searchParams.get('vista') || 'por_decidir';
@@ -748,7 +821,7 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const recs = await Promise.all(pagina.map(k => env.SYNC_STATE.get<ListenRelease>(k.name, 'json')));
   const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
   const sig = desde + limit < deVista.length ? String(desde + limit) : null;
-  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, promote, items, cursor: sig });
+  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, modo, promote, items, cursor: sig });
 }
 
 // ── carga al Pre-order ─────────────────────────────────────────
@@ -790,7 +863,7 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
     const n = r.tracks.length;
     return json({
       ok: true, clave, ya_cargado: true, cargado_at: r.cargado_at, cover_from: r.cover?.from || null,
-      tracks: r.tracks.map((t, i) => ({ name: t.name, url: `${publicBase}/${r.promovidos![i]}` })),
+      tracks: r.tracks.map((t, i) => ({ name: nombreDePista(t.name, r.catno, i), url: `${publicBase}/${r.promovidos![i]}` })),
       coverUrl: r.promovidos[n] ? `${publicBase}/${r.promovidos[n]}` : '',
     });
   }
@@ -801,11 +874,11 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
   const coversPre = env.LISTEN_PROMOTE_COVERS_PREFIX || 'covers/';
   const promovidos: string[] = [];
   const tracks: Array<{ name: string; url: string }> = [];
-  for (const t of r.tracks) {
+  for (const [i, t] of r.tracks.entries()) {
     const destino = `${audioPre}${safeKey}/${nombreProcess(t.name)}`;
     await copia(env.LISTEN_R2, t.key, env.R2, destino);
     promovidos.push(destino);
-    tracks.push({ name: t.name, url: `${publicBase}/${destino}` });
+    tracks.push({ name: nombreDePista(t.name, r.catno, i), url: `${publicBase}/${destino}` });
   }
   let coverUrl = '';
   if (r.cover) {
