@@ -1918,14 +1918,14 @@ export default {
 
     // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
     //   GET  ?action=listen-list   Bearer  discos + URLs firmadas (1 h)
-    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano
+    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano (&dias=1-14 &fuente=DBH)
     //   GET  ?action=listen-file   firma   el MP3/portada, con Range
     //   POST ?action=listen-decide Bearer  preorder | pendiente | rechazado | null
     if (action === 'listen-list' && request.method === 'GET') {
       return await handleListenList(request, env, bearerAdminValido(request, env));
     }
     if (action === 'listen-run' && request.method === 'POST') {
-      return await handleListenRun(env, bearerAdminValido(request, env));
+      return await handleListenRun(env, bearerAdminValido(request, env), request);
     }
     //   POST ?action=listen-promote Bearer {clave, safeKey, handle}: copia a audio/ y covers/
     if (action === 'listen-promote' && request.method === 'POST') {

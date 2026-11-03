@@ -106,6 +106,8 @@ describe("listen: qué emails y qué ficheros", () => {
 			e("WS", "Wordandsound-Update"), e("MT", "Fwd-Mother-Tongue"),
 			e("RD", "Old-CAT004", "2026-10-29"), e("TV", "Newsletter-KW45-2026"),
 		];
+		// listen-run a mano: ventana mas larga y una sola fuente.
+		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Old-CAT004", "Artist---Title-CAT001"]);
 		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
 		expect(emailsCandidatos(idx, NOW).map(x => x.subject)).toEqual(
 			["CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
