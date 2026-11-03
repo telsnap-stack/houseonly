@@ -12,6 +12,7 @@ import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 import { parseDistributorEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
+import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga } from "./preorder-listen.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
 import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
@@ -270,6 +271,7 @@ async function fetchLiveHandles() {
   // ("WPA-4/ UR-079" frente a "WPA-4/UR-079"). Va colgado del Set para no
   // cambiar lo que devuelve a los demas.
   set.skuReal = new Map();
+  set.handleDe = new Map();
   let cursor = null;
   let safety = 25; // up to 25 × 250 = 6250 products
   while (safety-- > 0) {
@@ -297,6 +299,8 @@ async function fetchLiveHandles() {
       const skuTal = e.node.variants?.edges?.[0]?.node?.sku || '';
       const sku = rdKey(skuTal);
       if (sku) set.add(sku);
+      // Handle tal cual, por clave: la bandeja dice "en tienda como <handle>".
+      for (const k of [h, sku].filter(Boolean)) if (!set.handleDe.has(k)) set.handleDe.set(k, e.node.handle);
       if (skuTal) for (const k of [h, sku].filter(Boolean)) {
         const v = set.skuReal.get(k);
         set.skuReal.set(k, v && v !== skuTal ? null : skuTal);   // null = ambiguo
@@ -9835,8 +9839,10 @@ const coma = n => Number(n).toFixed(2).replace('.', ',');
 const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
 
 // `onCargar(discos)`: lo pone el tab Pre-order; mete los elegidos en su manifest
-// y devuelve {anadidos, enTienda: [{clave, como}], sinAudio, errores}.
-function ListenInbox({ onCargar }) {
+// y devuelve {anadidos, enTienda: [{clave, catno, como, handle}], sinAudio, errores}.
+// `ultimaCarga`: lo que "List pre-orders" acaba de marcar como cargado, para
+// moverlo a Cargados sin esperar a la lista de KV (tarda hasta 60 s).
+function ListenInbox({ onCargar, ultimaCarga }) {
   const [secret, setSecret] = useMailSecret();
   const [cache, setCache] = useState(() => new Map());  // clave -> disco (con _exp), de todas las cargas
   const [lista, setLista] = useState(null);       // {vista, claves, count, cursor}; null = sin cargar
@@ -9855,7 +9861,8 @@ function ListenInbox({ onCargar }) {
   const [verCola, setVerCola] = useState(false);
   const [toast, setToast] = useState('');
   const [todoAnadido, setTodoAnadido] = useState(null);  // {vista, n}: pistas que anadio "+ todo"
-  const [enTiendaComo, setEnTiendaComo] = useState({});  // clave -> SKU con que esta ya en la tienda
+  const [motivoCarga, setMotivoCarga] = useState({});  // clave -> {txt, col}: por que no entro (o entro sin audio)
+  const [promote, setPromote] = useState(null);       // {activo, pruebas, audio, covers} del worker
   const [cargandoPre, setCargandoPre] = useState(false);
   const toastRef = useRef(0);
   const audioRef = useRef(null);
@@ -9865,6 +9872,7 @@ function ListenInbox({ onCargar }) {
   const reanudarRef = useRef({ t: 0, play: true });
   const ultimoTRef = useRef(0);
   const reintentoRef = useRef('');                // "clave:idx" ya renovada una vez
+  const decididoRef = useRef(new Map());          // clave -> decision tomada en esta pestana (la lista de KV tarda)
   useEffect(() => { colaRef.current = cola; }, [cola]);
   useEffect(() => { posRef.current = pos; }, [pos]);
 
@@ -9905,7 +9913,21 @@ function ListenInbox({ onCargar }) {
       guarda(d.items || [], d.expires_in);
       setCounts(d.counts || null);
       setLastRun(d.last_run || null);
-      setLista(l => ({ vista: v, claves: [...(cur && l?.vista === v ? l.claves : []), ...(d.items || []).map(x => x.clave)], count: d.count ?? 0, cursor: d.cursor || null }));
+      setPromote(d.promote || null);
+      // La lista de KV va hasta 60 s por detras de lo recien decidido: en la
+      // primera pagina se suma lo que esta pestana ya sabe que es de esta vista
+      // y se quita lo que sabe que ya no lo es.
+      let claves = (d.items || []).map(x => x.clave);
+      let count = d.count ?? 0;
+      if (!cur) {
+        const cambiado = new Map([...decididoRef.current].map(([c, dec]) => [c, vistaDeDecision(dec)]));
+        const fuera = claves.filter(c => cambiado.has(c) && cambiado.get(c) !== v);
+        const dentro = [...cambiado].filter(([c, vv]) => vv === v && !claves.includes(c)).map(([c]) => c).filter(c => cacheRef.current.has(c));
+        claves = [...dentro, ...claves.filter(c => !fuera.includes(c))];
+        count = Math.max(0, count + dentro.length - fuera.length);
+        if (d.counts) setCounts({ ...d.counts, [v]: count });
+      }
+      setLista(l => ({ vista: v, claves: [...(cur && l?.vista === v ? l.claves : []), ...claves], count, cursor: d.cursor || null }));
       return true;
     } catch (e) {
       setErr(`listen-list: ${e.message}`);
@@ -10047,6 +10069,7 @@ function ListenInbox({ onCargar }) {
       const m = new Map(cacheRef.current).set(it.clave, nuevo);
       cacheRef.current = m;
       setCache(m);
+      decididoRef.current.set(it.clave, nuevo.decision);
       // Cambia de pestana: sale de la lista abierta y se mueven los contadores.
       const de = vistaDeDecision(it.decision), a = vistaDeDecision(nuevo.decision);
       if (de !== a) {
@@ -10060,31 +10083,73 @@ function ListenInbox({ onCargar }) {
   };
 
   // "Cargar elegidos": TODOS los elegidos (no solo la pagina abierta) al
-  // manifest del Pre-order. Solo mete filas; "cargado" lo marca el Process.
+  // manifest del Pre-order. Solo mete filas; "cargado" lo marca "List pre-orders".
+  // La lista de KV puede ir hasta 60 s por detras de una decision recien tomada
+  // (2026-11-03: 4 elegidos, la lista solo dio 1), asi que se une con lo que
+  // esta pestana sabe que es elegido y se confirma disco a disco con claves=,
+  // que lee cada registro (get) y no la lista.
   const cargarElegidos = async () => {
     if (!onCargar) return;
     setCargandoPre(true); setErr('');
     try {
-      const todos = [];
+      const claves = new Set();
       let cur = null;
       do {
         const d = await pide(`vista=elegidos&limit=100${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
-        mantener();
-        guarda(d.items || [], d.expires_in);
-        todos.push(...(d.items || []));
+        for (const it of d.items || []) claves.add(it.clave);
         cur = d.cursor || null;
       } while (cur);
+      for (const it of cacheRef.current.values()) if (it.decision === 'preorder') claves.add(it.clave);
+      const todos = [];
+      const pedir = [...claves];
+      for (let i = 0; i < pedir.length; i += 100) {
+        const d = await pide(`claves=${encodeURIComponent(pedir.slice(i, i + 100).join(','))}`);
+        mantener();
+        guarda(d.items || [], d.expires_in);
+        todos.push(...(d.items || []).filter(it => it.decision === 'preorder'));
+      }
+      if (!todos.length) { setAviso('No hay elegidos que cargar.'); return; }
+      // La pestana y su contador, con los elegidos confirmados (no los de la lista atrasada).
+      setCounts(c => c && { ...c, elegidos: todos.length });
+      setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: [...new Set([...l.claves, ...todos.map(x => x.clave)])], count: Math.max(l.count, todos.length) } : l);
       const res = await onCargar(todos);
-      setEnTiendaComo(m => ({ ...m, ...Object.fromEntries((res.enTienda || []).map(x => [x.clave, x.como])) }));
-      const partes = [`${res.anadidos.length} al manifest`];
-      if (res.enTienda?.length) partes.push(`${res.enTienda.length} ya en tienda (no entran)`);
-      if (res.sinAudio?.length) partes.push(`${res.sinAudio.length} sin audio en la bandeja (necesitan ZIP)`);
-      if (res.errores?.length) partes.push(`${res.errores.length} con error: ${res.errores.map(e => `${e.clave} (${e.error})`).join(', ')}`);
-      setAviso(`Cargar elegidos: ${partes.join(' · ')}. "Cargado" se marca al hacer Process.`);
+      const motivos = {};
+      for (const x of res.enTienda || []) motivos[x.clave] = { txt: `no entra: ya en tienda como ${x.handle || x.como}${x.handle && x.como !== x.handle ? ` (SKU ${x.como})` : ''}`, col: '#ff8800' };
+      for (const c of res.sinAudio || []) motivos[c] = { txt: 'en el manifest sin audio: espera su ZIP', col: '#ff8800' };
+      for (const e of res.errores || []) if (e.clave !== '—') motivos[e.clave] = { txt: `no entra: ${e.error}`, col: S.danger };
+      for (const c of res.anadidos || []) if (!motivos[c]) motivos[c] = { txt: 'en el manifest: falta "List pre-orders"', col: S.accent };
+      setMotivoCarga(m => ({ ...m, ...motivos }));
+      setAviso(`Cargar elegidos — ${resumenCarga(todos.length, res)} "Cargado" se marca al pulsar "List pre-orders".`);
     } catch (e) {
       setErr(`Cargar elegidos: ${e.message}`);
     } finally { setCargandoPre(false); }
   };
+
+  // Tras "List pre-orders": lo cargado pasa a Cargados aqui mismo.
+  useEffect(() => {
+    if (!ultimaCarga?.items?.length) return;
+    const m = new Map(cacheRef.current);
+    const movidos = [];
+    for (const x of ultimaCarga.items) {
+      const prev = m.get(x.clave);
+      if (prev && prev.decision !== 'cargado') movidos.push({ clave: x.clave, de: vistaDeDecision(prev.decision) });
+      m.set(x.clave, { ...(prev || { clave: x.clave, catno: x.clave, tracks: [] }), decision: 'cargado', decided_at: x.cargado_at, cargado_at: x.cargado_at, handle: x.handle });
+      decididoRef.current.set(x.clave, 'cargado');
+    }
+    cacheRef.current = m;
+    setCache(m);
+    setMotivoCarga(mc => { const n = { ...mc }; for (const x of ultimaCarga.items) delete n[x.clave]; return n; });
+    if (movidos.length) {
+      setCounts(c => {
+        if (!c) return c;
+        const n = { ...c };
+        for (const x of movidos) { n[x.de] = Math.max(0, (n[x.de] || 0) - 1); n.cargados = (n.cargados || 0) + 1; }
+        return n;
+      });
+      const fuera = new Set(movidos.map(x => x.clave));
+      setLista(l => l && l.vista !== 'cargados' ? { ...l, claves: l.claves.filter(c => !fuera.has(c)), count: Math.max(0, l.count - l.claves.filter(c => fuera.has(c)).length) } : l);
+    }
+  }, [ultimaCarga]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const visibles = (lista?.claves || []).map(c => cache.get(c)).filter(Boolean);
   const conAudio = visibles.filter(it => it.tracks?.length);
@@ -10133,6 +10198,9 @@ function ListenInbox({ onCargar }) {
               : <button onClick={() => setTodoAnadido({ vista, n: aCola(conAudio) })} style={btn}>+ todo a la cola ({pistasVisibles} pistas)</button>)}
             <button onClick={() => cargarVista(vista)} disabled={cargando} style={btn}>{cargando ? '…' : '↻ recargar'}</button>
           </div>
+          {promote?.pruebas && <div style={{ marginBottom: 10, padding: '6px 10px', border: '1px solid #ff880077', background: '#1a1000', borderRadius: 2, fontSize: 10, color: '#ff8800', fontWeight: 700 }}>
+            CSV de pruebas: "List pre-orders" copia el audio a {promote.audio} y {promote.covers}. No importes ese CSV en Shopify.
+          </div>}
           {lastRun && <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
             Última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC · {lastRun.nuevos ?? 0} nuevos · modo {lastRun.mode}
           </div>}
@@ -10152,7 +10220,7 @@ function ListenInbox({ onCargar }) {
                     <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
                     <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
-                    {enTiendaComo[it.clave] && it.decision === 'preorder' && <span title="No entra al manifest: decide tú (Add stock no se toca desde aquí)" style={{ fontSize: 8, color: '#ff8800', border: '1px solid #ff880066', borderRadius: 2, padding: '0 5px' }}>en tienda como {enTiendaComo[it.clave]}</span>}
+                    {motivoCarga[it.clave] && it.decision === 'preorder' && <span title="Resultado del último Cargar elegidos. Add stock no se toca desde aquí." style={{ fontSize: 8, color: motivoCarga[it.clave].col, border: `1px solid ${motivoCarga[it.clave].col}66`, borderRadius: 2, padding: '0 5px' }}>{motivoCarga[it.clave].txt}</span>}
                   </div>
                   <div style={{ fontSize: 9, color: S.muted, marginTop: 2 }}>
                     {[it.label, it.format, it.release ? `sale ${fechaCorta(it.release)}` : '',
@@ -10178,7 +10246,7 @@ function ListenInbox({ onCargar }) {
                   </div>}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
-                    {it.decision === 'cargado' && <span title="Audio y portada copiados al producto; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>}
+                    {it.decision === 'cargado' && <span title="Audio y portada copiados al producto por List pre-orders; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>}
                     {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'cargado' ? (
@@ -10295,6 +10363,7 @@ function PreorderImporter() {
   const [zipDirBusy, setZipDirBusy] = useState(false);
   const [mailLinking, setMailLinking] = useState(null);  // {done,total} al resolver enlaces bajo demanda
   const [downloading, setDownloading] = useState(false);
+  const [ultimaCarga, setUltimaCarga] = useState(null);  // {items:[{clave, cargado_at, handle}]}: para la bandeja
   const [downloadDone, setDownloadDone] = useState(false);   // true after a full download-all run completes
   const [downloadProgress, setDownloadProgress] = useState(0); // n of total fired, for live button label
   const [downloadStats, setDownloadStats] = useState({ ok: 0, missing: 0, failed: 0 }); // download-all outcome breakdown
@@ -10968,7 +11037,11 @@ function PreorderImporter() {
     const filas = [];
     for (const d of discos) {
       const como = buscaEnTienda(indice, d.catno);
-      if (como) { out.enTienda.push({ clave: d.clave, como: live.skuReal?.get(como) || skuUnlisted.get(como) || como }); continue; }
+      if (como) {
+        out.enTienda.push({ clave: d.clave, catno: d.catno, como: live.skuReal?.get(como) || skuUnlisted.get(como) || como,
+          handle: live.handleDe?.get(como) || (clavesUnlisted.has(como) ? `${skuUnlisted.get(como) || como} (unlisted)` : '') });
+        continue;
+      }
       const html = await mailFetchBody(mailSecret, d.email);
       if (!html) { out.errores.push({ clave: d.clave, error: 'no se pudo leer su email' }); continue; }
       let rows = [];
@@ -11197,6 +11270,7 @@ function PreorderImporter() {
       const list = recon.ready;
       const total = list.length;
       const processed = [];
+      const cargadosBandeja = [];
 
       for (let i = 0; i < list.length; i++) {
         const m = list[i];
@@ -11237,6 +11311,7 @@ function PreorderImporter() {
         let coverNamedInZip = null;   // null = no hubo ZIP; false = habia imagenes pero ninguna se llamaba funda
         let tracks   = [];
         let itemError = '';
+        let bloqueo  = '';   // fila _listen sin audio copiado: no puede ir al CSV
         let zipDesc  = '';   // press text from ZIP SALESPAPER.pdf (W&S), enriches description
 
         // Primero lo arrastrado; si no, la carpeta de Drive. Asi quien prefiera
@@ -11339,7 +11414,10 @@ function PreorderImporter() {
             coverUrl = d.coverUrl || '';
             // La de la bandeja ya es la buena (la del ZIP o la del email espejada).
             coverNamedInZip = coverUrl ? true : null;
-          } catch (e) { itemError = 'bandeja de escucha: ' + e.message; }
+            if (tracks.length) cargadosBandeja.push({ clave: m._listen, cargado_at: d.cargado_at, handle });
+            bloqueo = bloqueoListen({ listen: m._listen, error: '', tracks });
+          } catch (e) { bloqueo = bloqueoListen({ listen: m._listen, error: e.message, tracks: [] }); }
+          if (bloqueo) itemError = bloqueo;
         }
 
         // Fallback cover: if no ZIP cover, use the manifest's distributor cover
@@ -11404,7 +11482,7 @@ function PreorderImporter() {
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
-          _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
+          _coverUrl: coverUrl, _tracks: tracks, _error: itemError, _bloqueo: bloqueo,
           _zipFound: !!zipFile, _release: release,
           _alreadyLive: !!m._alreadyLive,             // exact cat-no already a live product
           _genre: genre,                              // editable in review; rebuilds Tags
@@ -11446,6 +11524,7 @@ function PreorderImporter() {
       }
 
       setResults(processed);
+      if (cargadosBandeja.length) setUltimaCarga({ items: cargadosBandeja });
       autoRecomputeEntities('Pre-order');
       setStatus('review');
     } catch(e) {
@@ -11468,7 +11547,15 @@ function PreorderImporter() {
   ].filter(Boolean).join(', ');
 
   const downloadCSV = async () => {
-    // Antes de nada: sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
+    // Una fila de la bandeja sin su audio copiado saldria como producto sin
+    // pistas: el CSV no se genera hasta excluirla o repetir "List pre-orders".
+    const bloqueadas = filasBloqueadas(results, excluded);
+    if (bloqueadas.length) {
+      setError(`CSV bloqueado: ${bloqueadas.map(r => `${r._catno} (${r._bloqueo})`).join('; ')}. Exclúyela(s) con ✕ o vuelve a pulsar "List pre-orders".`);
+      return;
+    }
+    setError('');
+    // Sin cola autenticada no se genera CSV (ver exigirColaAutenticada).
     exigirColaAutenticada();
     const kept = results.filter(r => !excluded[r._catno] && !r._alreadyLive);
     if (!kept.length) return;
@@ -11540,7 +11627,9 @@ function PreorderImporter() {
         </div>
       </div>
 
-      {status==='idle'&&<ListenInbox onCargar={cargarDesdeBandeja} />}
+      {/* Siempre montada (tambien durante y despues de "List pre-orders"): no pierde
+          su estado y se puede seguir decidiendo con los resultados delante. */}
+      <ListenInbox onCargar={cargarDesdeBandeja} ultimaCarga={ultimaCarga} />
 
       {/* Archivo de emails → una sola vista de todos los releases */}
       {status==='idle'&&(
@@ -12095,6 +12184,17 @@ function PreorderImporter() {
             <Btn ch="⬇ Download Shopify CSV" onClick={downloadCSV} />
           </div>
 
+          {esCsvDePruebas(results)&&(
+            <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:11,color:'#ff8800',fontWeight:700}}>
+              CSV de pruebas: apunta a staging-audio/, no lo importes en Shopify.
+            </div>
+          )}
+          {filasBloqueadas(results, excluded).length>0&&(
+            <div style={{padding:'8px 12px',background:'#1a0000',border:`1px solid ${S.danger}66`,borderRadius:4,marginBottom:12,fontSize:10,color:S.danger,lineHeight:1.5}}>
+              {filasBloqueadas(results, excluded).length} disco(s) de la bandeja sin su audio copiado: el CSV no se genera hasta excluirlos (✕) o volver a pulsar "List pre-orders".
+            </div>
+          )}
+
           <div style={{padding:'8px 12px',background:'#0a1200',border:`1px solid ${S.accent}33`,borderRadius:4,marginBottom:12,fontSize:9,color:S.muted,lineHeight:1.6}}>
             After uploading to Shopify admin (bulk product import, handle-matched), these appear in the <b style={{color:S.accent}}>Forthcoming</b> section automatically — stock 0, oversell on, "Expected" date = release + 14 days.
           </div>
@@ -12115,7 +12215,7 @@ function PreorderImporter() {
                     ? <div title="Already a live product — excluded from export" style={{position:'absolute',top:4,right:4,background:'#ff8800',border:'none',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700,lineHeight:1}}>ALREADY LIVE</div>
                     : <button title={isOut?'Restore':'Remove from CSV'} onClick={()=>setExcluded(p=>({...p,[r._catno]:!p[r._catno]}))} style={{position:'absolute',top:4,right:4,background:isOut?S.accent:'rgba(220,40,40,0.9)',border:'none',borderRadius:2,fontSize:9,color:'#fff',padding:'2px 6px',fontWeight:700,cursor:'pointer',fontFamily:'inherit',lineHeight:1}}>{isOut?'↺':'✕'}</button>
                   }
-                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>ERR</div>}
+                  {r._error&&<div style={{position:'absolute',top:4,right:30,background:S.danger,borderRadius:2,fontSize:7,color:'#fff',padding:'2px 5px',fontWeight:700}}>{r._bloqueo&&!isOut?'BLOQUEA CSV':'ERR'}</div>}
                   {!r._coverUrl&&!r._error&&!r._alreadyLive&&<div style={{position:'absolute',top:4,right:30,background:'#ff8800',borderRadius:2,fontSize:7,color:'#080808',padding:'2px 5px',fontWeight:700}}>{r._zipFound?'NO IMG':'NO ZIP'}</div>}
                 </div>
                 <div style={{padding:'8px 8px 6px'}}>

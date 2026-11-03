@@ -314,6 +314,7 @@ describe("listen: decisiones y limpieza", () => {
 		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0 });
 		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
 		expect(p1).toMatchObject({ count: 5, cursor: "2" });
+		expect(p1.promote).toEqual({ activo: false, audio: "audio/", covers: "covers/", pruebas: false });
 		const p3 = await pide("vista=por_decidir&limit=2&cursor=4");
 		expect(p3.items.map((x: any) => x.clave)).toEqual(["PAG005"]);
 		expect(p3.cursor).toBeNull();
