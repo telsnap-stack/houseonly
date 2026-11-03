@@ -46,3 +46,21 @@ test('fila de la bandeja sin genero que resuelva: incompleta hasta ponerlo o exc
   results[0]._genre = 'House';
   assert.deepEqual(filasSinGenero(results, {}, resuelve).map(r => r._catno), ['LN-017']);
 });
+
+test('DBH va tal cual: con cualquier genero no frena el CSV; sin genero, si', () => {
+  const resuelve = g => ['House'].includes(g);
+  const valido = (g, r) => r?._source === 'dbh' ? !!String(g || '').trim() : resuelve(g);
+  const results = [
+    { _catno: 'ME015', _listen: 'ME015', _source: 'dbh', _genre: 'Techno - Detroit' },
+    { _catno: 'X1', _listen: 'X1', _source: 'dbh', _genre: '' },
+    { _catno: 'R1', _listen: 'R1', _source: 'rd', _genre: 'Techno - Detroit' },
+  ];
+  assert.deepEqual(filasSinGenero(results, {}, valido).map(r => r._catno), ['X1', 'R1']);
+});
+
+test('tagGeneroLibre: el valor de DBH pegado, como los canonicos', async () => {
+  const { tagGeneroLibre } = await import('../houseonly-worker/houseonly-worker/src/lib/genres.mjs');
+  assert.equal(tagGeneroLibre('House - Deep House'), 'genre:housedeephouse');
+  assert.equal(tagGeneroLibre('Miscellaneous - Disco / Nu Disco'), 'genre:miscellaneousdisconudisco');
+  assert.equal(tagGeneroLibre('Électro'), 'genre:electro');
+});
