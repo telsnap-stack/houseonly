@@ -951,6 +951,7 @@ import { handleIgFeed, handleIgFeedAdd, handleIgFeedRemove } from './lib/ig-feed
 import { handlePreorderRejects, handlePreorderReject, handlePreorderRejectUndo, handlePreorderUnlisted } from './lib/preorder-rejects';
 import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './lib/google-feed';
 import { handleShopPolicies } from './lib/shop-policies';
+import { handleGenerosExtra, handleGenerosExtraRebuild, recalculaGenerosExtra } from './lib/generos-extra';
 import { handleWsZips } from './lib/ws-zips';
 import {
   EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
@@ -1517,6 +1518,16 @@ export default {
     // /contact, /privacy, /terms y /legal. Publico. lib/shop-policies.ts.
     if (action === 'shop-policies' && request.method === 'GET') {
       return await handleShopPolicies(env);
+    }
+
+    // ── GENEROS EXTRA DE LA REJILLA ─────────────────────────
+    // Generos fuera de la tabla con 10+ discos activos, calculados a diario
+    // (cron 0 6). Lectura publica con 1 h de cache. lib/generos-extra.ts.
+    if (action === 'generos-extra' && request.method === 'GET') {
+      return await handleGenerosExtra(env);
+    }
+    if (action === 'generos-extra-rebuild' && request.method === 'POST') {
+      return await handleGenerosExtraRebuild(env, bearerAdminValido(request, env));
     }
 
     // ── FEED DE GOOGLE MERCHANT CENTER ──────────────────────
@@ -3313,6 +3324,12 @@ export default {
         rebuildGoogleFeed(env).then(
           (r) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: true, ...r })),
           (err) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+        ),
+      );
+      // Generos extra de la rejilla: si falla, se queda el de ayer.
+      ctx.waitUntil(
+        recalculaGenerosExtra(env).catch(
+          (err) => env.SYNC_STATE.put('meta:generos_extra_error', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), error: err?.message || String(err) })),
         ),
       );
       ctx.waitUntil(

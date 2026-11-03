@@ -28,7 +28,7 @@ export function bloqueoListen({ listen, error, tracks }) {
  * incompleta y frena el CSV. `resuelve(genero)` dice si da un genero canonico.
  */
 export function filasSinGenero(results, excluded = {}, resuelve = g => !!String(g || '').trim()) {
-  return (results || []).filter(r => r._listen && !excluded[r._catno] && !r._alreadyLive && !resuelve(r._genre));
+  return (results || []).filter(r => r._listen && !excluded[r._catno] && !r._alreadyLive && !resuelve(r._genre, r));
 }
 
 /** El CSV apunta al audio/portadas de pruebas de staging (listen-promote en staging). */

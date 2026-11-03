@@ -16,7 +16,7 @@ import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { codigoTrabajoWs, urlBookmarkletWs } from "./wsBookmarklet.mjs";
 import { filasBloqueadas, bloqueoListen, esCsvDePruebas, resumenCarga, filasSinGenero } from "./preorder-listen.mjs";
 import { GIFT_CARD, esTarjetaRegalo, sinTarjetas, esRutaTarjeta, importeDeVariante, portadaDe } from "./giftcard.mjs";
-import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
+import { GENRES, generosDeSeccion, pildorasDeSeccion, genreTag, generoDeTags, resolveGenre, clasificaValor, tagGeneroLibre } from "../houseonly-worker/houseonly-worker/src/lib/genres.mjs";
 
 const S = {
   bg:'#080808', surf:'#111', border:'#1e1e1e',
@@ -150,6 +150,17 @@ function parseProduct({ node }) {
     // caducar los pre-orders que no traen fecha de salida.
     createdAt: node.createdAt || '',
   };
+}
+
+// Generos fuera de la tabla con 10+ discos activos (worker, recalculo diario:
+// lib/generos-extra.ts). Una peticion por visita; si falla, ninguno.
+let generosExtraPromesa = null;
+function generosExtra() {
+  if (!generosExtraPromesa) generosExtraPromesa = fetch(`${WORKER_URL}?action=generos-extra`)
+    .then(r => (r.ok ? r.json() : { generos: [] }))
+    .then(d => (Array.isArray(d?.generos) ? d.generos : []))
+    .catch(() => []);
+  return generosExtraPromesa;
 }
 
 // ¿Hay al menos un disco con este tag en esta seccion? Cache por sesion; si la
@@ -2899,7 +2910,14 @@ function Filters({ filters, onChange }) {
       .then(ids => { if (vivo) setConDiscos(new Set(ids.filter(Boolean))); });
     return () => { vivo = false; };
   }, [seccion, filters.forthcoming, filters.dnb]);
-  const generos = pildorasDeSeccion(seccion, conDiscos);
+  // Los extra, detras de los de la tabla; solo en la vista donde tienen discos.
+  const [extra, setExtra] = useState([]);
+  useEffect(() => { let vivo = true; generosExtra().then(g => { if (vivo) setExtra(g); }); return () => { vivo = false; }; }, []);
+  const vista = filters.forthcoming ? (filters.dnb ? 'forthcoming_dnb' : 'forthcoming_house') : (filters.dnb ? 'dnb' : 'house');
+  const canonicas = pildorasDeSeccion(seccion, conDiscos);
+  const generos = [...canonicas, ...extra
+    .filter(g => g?.id && (g.vistas?.[vista] || 0) > 0 && !canonicas.some(c => c.id === g.id))
+    .map(g => ({ id: g.id, label: g.label || g.id }))];
   const sel = (key, opts, placeholder) => (
     <div style={{ position:'relative', flexShrink:0 }}>
       <select value={filters[key]||''} onChange={e=>onChange(key,e.target.value||null)} style={{ appearance:'none', WebkitAppearance:'none', background:filters[key]?S.accent:S.surf, color:filters[key]?'#080808':S.muted, border:`1px solid ${filters[key]?S.accent:S.border}`, borderRadius:20, cursor:'pointer', fontSize:9, fontWeight:filters[key]?700:400, letterSpacing:1.5, padding:'6px 28px 6px 14px', textTransform:'uppercase', fontFamily:'inherit', outline:'none', minWidth:100 }}>
@@ -5529,19 +5547,6 @@ function DBHImporter() {
    * eso DBH no tenia nunca valores desconocidos: el 100% resuelto era un
    * artefacto. Lo que no reconozca sale tal cual y acaba en la cola.
    */
-  function mapGenre(genreStr) {
-    const g = String(genreStr || '').toLowerCase();
-    if (g.includes('deep house') || g.includes('deep')) return 'Deep House';
-    if (g.includes('tech house')) return 'Tech House';
-    if (g.includes('afro')) return 'Afro House';
-    if (g.includes('chicago')) return 'Chicago House';
-    if (g.includes('soulful')) return 'Soulful House';
-    if (g.includes('acid')) return 'Acid House';
-    if (g.includes('detroit')) return 'Detroit House';
-    if (g.includes('disco')) return 'Disco House';
-    return genreStr || '';
-  }
-
   function catnoFromZip(name) {
     return name.replace(/\.zip$/i,'').replace(/\s*\(\d+\)\s*$/,'').trim().toUpperCase();
   }
@@ -5590,7 +5595,8 @@ function DBHImporter() {
         const title   = decodeHtml(row['Title'] || '');
         const artist  = decodeHtml(row['Artist'] || '');
         const label   = decodeHtml(row['Label'] || '');
-        const genre   = mapGenre(decodeHtml(row['Genre'] || ''));
+        // Tal cual (DBH, 2026-11-03): sin mapGenre, que hacia "Techno - Acid" → "Acid House".
+        const genre   = decodeHtml(row['Genre'] || '').trim();
         const year    = row['Release Date'] ? new Date(row['Release Date']).getFullYear() : '';
         const ppu     = parseFloat(row['PPU'] || 0);
         const rawPrice = ppu * (1 + margin / 100);
@@ -5650,7 +5656,7 @@ function DBHImporter() {
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
         const audioHtml = tracks.length ? `<script type="application/json" id="tracks">${JSON.stringify(tracks)}<\/script>` : '';
 
-        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', ...tagsDeGenero(genre, { sku: catno, title }).tags, String(year), tags?tags:''].filter(Boolean).join(', ');
+        const shopifyTags = ['vinyl','source:dbh', label?`label:${label}`:'', ...tagsDeGenero(genre, { sku: catno, title, libre: true }).tags, String(year), tags?tags:''].filter(Boolean).join(', ');
 
         processed.push({
           _catno: catno, _title: title, _artist: artist,
@@ -11457,10 +11463,10 @@ function PreorderImporter() {
         const artist = (ov.artist != null ? ov.artist : deriveArtist(m)).trim();
         const title  = (ov.title  != null ? ov.title  : deriveTitle(m)).trim();
         const label  = m.label;
-        // DBH desde la bandeja: su genero tal cual ("Techno - Minimal"), que lo
-        // resuelva genres.mjs; mapGenrePreorder lo convertiria ("Techno - Detroit"
-        // → "Detroit House"). Si no resuelve, la fila queda FALTA GÉNERO.
-        let   genre  = m._listen && m.source === 'dbh' ? (m.genre || '') : mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
+        // DBH: su genero tal cual ("Techno - Detroit"); mapGenrePreorder lo
+        // convertiria en "Detroit House". tagsDeGenero(libre) le da su tag si
+        // genres.mjs no lo conoce.
+        let   genre  = m.source === 'dbh' ? (m.genre || '') : mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
         const release = m.release;                          // YYYY-MM-DD (raw street date)
         // Nunca sin año. El escaparate trata la ausencia de etiqueta de año como
         // "agotado de verdad" (isBackorderEligible corta con `if (!y) return
@@ -11650,7 +11656,7 @@ function PreorderImporter() {
           'vinyl',
           `source:${m.source || 'dbh'}`,
           label ? `label:${label}` : '',
-          ...tagsDeGenero(genre, { sku: m.catno || '', title: m.title || '' }).tags,
+          ...tagsDeGenero(genre, { sku: m.catno || '', title: m.title || '', libre: m.source === 'dbh' }).tags,
           ...dnbTagsFor(m.source, genre),
           year ? String(year) : '',
           // Only a release that is genuinely still forthcoming gets the tag.
@@ -11720,7 +11726,7 @@ function PreorderImporter() {
     'vinyl',
     `source:${r._source || 'dbh'}`,
     r._label ? `label:${r._label}` : '',
-    ...tagsDeGenero(r._genre, { sku: r._catno || '', title: r._title || '' }).tags,
+    ...tagsDeGenero(r._genre, { sku: r._catno || '', title: r._title || '', libre: r._source === 'dbh' }).tags,
     ...dnbTagsFor(r._source, r._genre),
     r._year || '',
     r._forthcoming === false ? '' : 'forthcoming',
@@ -11737,7 +11743,7 @@ function PreorderImporter() {
     }
     // Rubadub no trae genero en el correo: una fila de la bandeja sin genero que
     // resuelva se completa a mano en su tarjeta (como en el importer de Rubadub).
-    const sinGenero = filasSinGenero(results, excluded, generoResuelve);
+    const sinGenero = filasSinGenero(results, excluded, generoValido);
     if (sinGenero.length) {
       setError(`Falta el género de ${sinGenero.map(r => r._catno).join(', ')}: escríbelo en su tarjeta (o exclúyela con ✕) antes de generar el CSV.`);
       return;
@@ -12377,9 +12383,9 @@ function PreorderImporter() {
               CSV de pruebas: apunta a staging-audio/, no lo importes en Shopify.
             </div>
           )}
-          {filasSinGenero(results, excluded, generoResuelve).length>0&&(
+          {filasSinGenero(results, excluded, generoValido).length>0&&(
             <div style={{padding:'8px 12px',background:'#1a1000',border:'1px solid #ff880077',borderRadius:4,marginBottom:12,fontSize:10,color:'#ff8800',lineHeight:1.5}}>
-              Falta el género de {filasSinGenero(results, excluded, generoResuelve).map(r=>r._catno).join(', ')} (el correo no lo trae, o el del distribuidor no es de la tienda). Elígelo en su tarjeta antes de generar el CSV.
+              Falta el género de {filasSinGenero(results, excluded, generoValido).map(r=>r._catno).join(', ')} (el correo no lo trae, o el del distribuidor no es de la tienda). Elígelo en su tarjeta antes de generar el CSV.
             </div>
           )}
           {filasBloqueadas(results, excluded).length>0&&(
@@ -12416,8 +12422,8 @@ function PreorderImporter() {
                   <div style={{fontSize:9,color:S.muted,fontFamily:'monospace',marginBottom:2}}>{r._catno}</div>
                   <div style={{fontSize:10,fontWeight:700,color:S.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._title||r._catno}</div>
                   <div style={{fontSize:9,color:S.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r._artist}</div>
-                  <input value={r._genre||''} list="preorder-generos" placeholder={r._listen&&!isOut?'FALTA GÉNERO':'(no genre)'} onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._listen&&!isOut&&!generoResuelve(r._genre)?'#ff8800':r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
-                  {r._listen&&!isOut&&!generoResuelve(r._genre)&&<div style={{fontSize:8,color:'#ff8800',marginTop:2}}>{r._genre?'no es un género de la tienda':'falta el género'}: bloquea el CSV</div>}
+                  <input value={r._genre||''} list="preorder-generos" placeholder={r._listen&&!isOut?'FALTA GÉNERO':'(no genre)'} onChange={e=>{const v=e.target.value;setResults(rs=>rs.map(x=>x._catno===r._catno?{...x,_genre:v}:x));}} style={{width:'100%',boxSizing:'border-box',marginTop:4,background:r._genre?'#0d0d0d':'#1a0d0d',border:`1px solid ${r._listen&&!isOut&&!generoValido(r._genre, r)?'#ff8800':r._genre?S.border:'#ff8800'}`,borderRadius:2,color:r._genre?S.accent:'#ff8800',fontSize:9,fontFamily:'inherit',padding:'3px 5px',outline:'none'}} />
+                  {r._listen&&!isOut&&!generoValido(r._genre, r)&&<div style={{fontSize:8,color:'#ff8800',marginTop:2}}>{r._genre?'no es un género de la tienda':'falta el género'}: bloquea el CSV</div>}
                   <div style={{fontSize:8,color:S.muted,marginTop:3}}>{formatExpected(addDays(r._release,14))}</div>
                   <div style={{fontSize:10,color:S.accent,marginTop:2,fontWeight:700}}>€{r['Variant Price']}</div>
                   {r._error&&<div style={{fontSize:8,color:S.danger,marginTop:4,lineHeight:1.4}}>{r._error}</div>}
@@ -12472,17 +12478,23 @@ let entitiesSecret = '';
  * Lo que no resuelve NO se escribe: se devuelve en `desconocidos` para que el
  * importer lo mande a la cola una sola vez por producto. Esa es la puerta que
  * impide que la proxima importacion vuelva a llenar el catalogo de "Dark D".
+ *
+ * Excepcion, ctx.libre (DBH, 2026-11-03): si no resuelve, el valor entero va
+ * tal cual —genre:<pegado> (tagGeneroLibre) y el valor como tag plano, que es
+ * su nombre legible— y no pasa por la cola.
  */
 let pendientesDeCola = [];
 
 function tagsDeGenero(valorCrudo, ctx = {}) {
   const partes = String(valorCrudo || '').split(/[\/,;|]/).map(x => x.trim()).filter(Boolean);
   const g = resolveGenre(partes);
+  const libre = String(valorCrudo || '').trim();
+  if (ctx.libre && !g && libre) return { tags: [tagGeneroLibre(libre), libre], desconocidos: [], resuelto: true };
   const subgeneros = partes.filter(x => clasificaValor(x) === 'conservar');
   const desconocidos = [...new Set(partes.filter(x => clasificaValor(x) === 'desconocido'))];
   const tags = g ? [g.tag, ...subgeneros] : [];
   // Una entrada por valor y producto, no una por trozo repetido.
-  for (const v of desconocidos) {
+  if (!ctx.libre) for (const v of desconocidos) {
     pendientesDeCola.push({ value: v, sku: String(ctx.sku || ''), title: String(ctx.title || '') });
   }
 
@@ -12508,6 +12520,11 @@ const GENEROS_CANONICOS = [...new Set(GENRES.map(g => g.seccion))].flatMap(gener
 // ¿Da un genero canonico de la tienda? (lo que tagsDeGenero convierte en tag).
 function generoResuelve(valor) {
   return !!resolveGenre(String(valor || '').split(/[/,;|]/).map(x => x.trim()).filter(Boolean));
+}
+
+// ¿Puede ir al CSV? DBH va tal cual (tagGeneroLibre): le basta con traer uno.
+function generoValido(valor, fila) {
+  return fila?._source === 'dbh' ? !!String(valor || '').trim() : generoResuelve(valor);
 }
 
 function generoSugerido(crudo) {
