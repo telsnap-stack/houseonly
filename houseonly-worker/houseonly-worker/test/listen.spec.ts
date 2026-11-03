@@ -43,6 +43,12 @@ function redes(zip: Uint8Array, extra: Record<string, () => Response> = {}) {
 	});
 }
 
+// La tienda de Shopify que ve la ingesta (leeTienda): por defecto vacia, sin red.
+const tiendaCon = (nodes: any[]) => vi.spyOn(shopifyAdmin, "shopifyAdminGraphQL").mockResolvedValue({
+	data: { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } },
+});
+const producto = (handle: string, sku: string, status = "ACTIVE") => ({ handle, status, variants: { nodes: [{ sku }] } });
+
 const rel = async (clave: string) => JSON.parse((await E.SYNC_STATE.get(`listen:rel:${clave}`)) || "null");
 
 beforeEach(async () => {
@@ -51,6 +57,7 @@ beforeEach(async () => {
 	for (const o of (await E.R2.list()).objects) await E.R2.delete(o.key);
 	E.BOOTSTRAP_AUTH_SECRET = SECRET;
 	await E.SYNC_STATE.put("meta:listen_mode", "live");
+	tiendaCon([]);
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -127,6 +134,31 @@ describe("listen: ingesta", () => {
 		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+	});
+
+	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
+		const f = redes(zipDe({ "a.mp3": 10 }));
+		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
+		await archiva("RD__X---Y-MSLP022LTD__2026-11-01.html", rdEmail("MSLP022LTD"));
+		await archiva("RD__X---Y-UR025__2026-11-01.html", rdEmail("UR-025"));
+		await archiva("RD__X---Y-OLD001__2026-11-01.html", rdEmail("OLD001"));
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 1, emails_cerrados: 3, saltados: { en_tienda: 2 } });
+		expect(r.en_tienda).toEqual(["MSLP022LTD como mslp022ltd", "UR-025 como otra-cosa"]);
+		expect(await rel("MSLP022LTD")).toBeNull();
+		expect(await rel("OLD001")).toMatchObject({ estado: "listo" });
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+	});
+
+	it("si no se puede leer la tienda no entra nada y el email queda abierto para la hora siguiente", async () => {
+		redes(zipDe({ "a.mp3": 10 }));
+		vi.spyOn(shopifyAdmin, "shopifyAdminGraphQL").mockRejectedValue(new Error("Shopify Admin API 503"));
+		await archiva("RD__X---Y-TST009__2026-11-01.html", rdEmail("TST009"));
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 0, emails_cerrados: 0, quedan: true, tienda_error: "Shopify Admin API 503" });
+		expect(await E.SYNC_STATE.get("listen:mail:RD__X---Y-TST009__2026-11-01.html")).toBeNull();
+		tiendaCon([]);
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, emails_cerrados: 1 });
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
