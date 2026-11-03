@@ -4,8 +4,9 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas,
+	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda,
 } from "../src/lib/listen";
+import * as shopifyAdmin from "../src/lib/shopify-admin";
 
 const E = env as any;
 const SECRET = "listen-test-secret";
@@ -462,5 +463,19 @@ describe("listen: decisiones y limpieza", () => {
 		const llamadas = f.mock.calls.length;
 		expect(await completaPortadas(E)).toBe(0);                       // ya comprobada: no vuelve a mirar
 		expect(f.mock.calls.length).toBe(llamadas);
+	});
+
+	it("productoEnTienda pregunta por handle con productByIdentifier (no el indice de busqueda)", async () => {
+		const q = vi.spyOn(shopifyAdmin, "shopifyAdminGraphQL");
+		q.mockResolvedValueOnce({ data: { productByIdentifier: { id: "gid://shopify/Product/1" } } });
+		expect(await productoEnTienda(E, "mslp022ltd")).toBe(true);
+		expect(q.mock.calls[0][1]).toContain("productByIdentifier(identifier: { handle: $h })");
+		expect(q.mock.calls[0][2]).toEqual({ h: "mslp022ltd" });
+		q.mockResolvedValueOnce({ data: { productByIdentifier: null } });
+		expect(await productoEnTienda(E, "cits007")).toBe(false);
+		q.mockResolvedValueOnce({ errors: [{ message: "Access denied" }] });
+		expect(await productoEnTienda(E, "x")).toBeNull();
+		q.mockRejectedValueOnce(new Error("sin red"));
+		expect(await productoEnTienda(E, "x")).toBeNull();
 	});
 });
