@@ -21,6 +21,16 @@ describe("nombres de pista", () => {
 		expect(nombreDePista("LN017-Sugar - A1 Heaven is a Place In Flint", "LN-017", 0)).toBe("Sugar - A1 Heaven is a Place In Flint");
 	});
 
+	it("DBH: <catno> - <n>. <artista> - <titulo>, de los ZIP reales del 03-11", () => {
+		expect(nombreDePista("PLZ014S - 1. Daniel Neighbour - A1. Orcas Chord", "PLZ014S", 0, "Daniel Neighbour")).toBe("Orcas Chord");
+		expect(nombreDePista("PLZ014S - 3. Daniel Neighbour - B. Gradien Flow", "PLZ014S", 2, "Daniel Neighbour")).toBe("Gradien Flow");
+		expect(nombreDePista("RXP 001 - 2. REX PACIFICATOR - B1 - BluntHead", "RXP 001", 1, "REX PACIFICATOR")).toBe("BluntHead");
+		expect(nombreDePista("HWX-07.1 - 1. SHAKA - A1. Groove Therapy", "HWX-07.1", 0, "SHAKA")).toBe("Groove Therapy");
+		expect(nombreDePista("ME015 - 1. George Apergis - A1 George Apergis - Psilocybe (Original Mix)", "ME015", 0, "George Apergis")).toBe("Psilocybe (Original Mix)");
+		// Sin extension (como se guarda): el punto de "A1." no es una extension.
+		expect(nombreDePista("A1. Uno", "TST001", 0)).toBe("Uno");
+	});
+
 	it("sin titulo: la cara del fichero, o Pista N si no la trae", () => {
 		expect(nombreDePista("XYZ001 Side B 2 snippet", "XYZ001", 3)).toBe("B2");
 		expect(nombreDePista("XYZ001-A01", "XYZ001", 0)).toBe("A1");
