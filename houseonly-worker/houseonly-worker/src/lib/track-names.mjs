@@ -33,6 +33,8 @@ function limpiaNombre(fname, catno) {
     n = n.replace(/^\d{1,2}[\s_.\-]+/, '');
     if (n === before) break;
   }
+  // "(2 min clip)", "(90 sec preview)" (Subwax, 2026-11-04): el parentesis entero.
+  n = n.replace(/\s*\(\s*\d+(?:[.,]\d+)?\s*(?:min(?:ute)?s?|sec(?:ond)?s?|s)\s+(?:sound\s+)?(?:clip|snippet|preview|edit)s?\s*\)\s*$/i, '');
   // "sound clip" (Dapple, 2026-11-03) antes que "clip" a secas, o quedaba "… sound".
   n = n.replace(/[\s_.\-]*\(?\s*(sound\s+clip|snippet|snip|preview|clip|teaser|taster)s?\s*\)?\s*$/i, '');
   n = n.replace(/[\s_-]*\(\s*\d+\s*sec\s+taster\s*\)\s*$/i, '');
@@ -42,12 +44,28 @@ function limpiaNombre(fname, catno) {
 }
 
 /**
+ * Los nombres de un ZIP sin la marca UTF-8 se leen como latin1, y Subwax los
+ * escribe en UTF-8 con los acentos descompuestos: "NaiÌ\u0088m" es "Naïm". Si
+ * reinterpretado como bytes es UTF-8 valido, era eso; si no (un "Café" de
+ * verdad en latin1), se deja.
+ */
+export function nombreLegible(n) {
+  const s = String(n || '');
+  if (/[\u0080-\u00ff]/.test(s) && !/[^\u0000-\u00ff]/.test(s)) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(s, c => c.charCodeAt(0))).normalize('NFC'); }
+    catch { /* no era UTF-8 */ }
+  }
+  return s.normalize('NFC');
+}
+
+/**
  * Para mostrar y para el producto: lo de arriba y, si lo que queda no es un
  * titulo (un numero suelto "1", el catno, un codigo como "DMSR8411"), la cara
  * del fichero ("CITS007_A1-snippet" → "A1", "Side B 2" → "B2") y, si tampoco
  * la trae, "Pista N".
  */
 export function nombreDePista(crudo, catno, i, artista = '') {
+  crudo = nombreLegible(crudo);
   // El catno, escrito con o sin separadores ("LN017-Sugar…" con catno LN-017).
   const k = claveCatno(catno);
   let sinCatno = k ? String(crudo || '').replace(new RegExp('^' + k.split('').join('[\\s._-]*') + '[\\s._-]*', 'i'), '') : String(crudo || '');
