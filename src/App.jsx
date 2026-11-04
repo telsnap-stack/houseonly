@@ -10,7 +10,7 @@ import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib
 import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
-import { parseDistributorEmail, parseDbhEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
+import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
 import { clausulasDeSeccion, partesDeBusqueda } from "./catalogo.mjs";
 import { codigoTrabajoWs, urlBookmarkletWs } from "./wsBookmarklet.mjs";
@@ -9838,6 +9838,7 @@ const MAIL_SOURCES = {
   DBH:   { label: 'DBH',           kind: 'material' },
   TV:    { label: 'Triple Vision', kind: 'material' },
   RD:    { label: 'Rubadub',       kind: 'material' },
+  SUBWAX: { label: 'Subwax',       kind: 'material' },
   WSORD: { label: 'W&S · pedido',  kind: 'pedido'   },
   RDORD: { label: 'RD · pedido',   kind: 'pedido'   },
   // Llegan como Fwd de Eduardo (ver FUENTES_REENVIO): sin parser todavia, se
@@ -11235,7 +11236,11 @@ function PreorderImporter() {
       const html = await mailFetchBody(mailSecret, d.email);
       if (!html) { out.errores.push({ clave: d.clave, error: 'no se pudo leer su email' }); continue; }
       let rows = [];
-      try { rows = d.distribuidor === 'DBH' ? parseDbhEmail(html) : parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() }); }
+      try {
+        rows = d.distribuidor === 'DBH' ? parseDbhEmail(html)
+          : d.distribuidor === 'SUBWAX' ? parseSubwaxEmail(html)
+          : parseDistributorEmail(html, { fx: rdFx, emailDate: parseLocalDate(d.email_date) || new Date() });
+      }
       catch (e) { out.errores.push({ clave: d.clave, error: e.message }); continue; }
       const row = rows.find(r => rdKey(r.catno) === d.clave);
       if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
@@ -11472,7 +11477,8 @@ function PreorderImporter() {
         // DBH: su genero tal cual ("Techno - Detroit"); mapGenrePreorder lo
         // convertiria en "Detroit House". tagsDeGenero(libre) le da su tag si
         // genres.mjs no lo conoce.
-        let   genre  = m.source === 'dbh' ? (m.genre || '') : mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
+        // Subwax no trae genero: vacio, sin bloquear (generoValido).
+        let   genre  = m.source === 'dbh' || m.source === 'subwax' ? (m.genre || '') : mapGenrePreorder(m.genre);   // may be empty (W&S); filled from ZIP SALESPAPER below
         const release = m.release;                          // YYYY-MM-DD (raw street date)
         // Nunca sin año. El escaparate trata la ausencia de etiqueta de año como
         // "agotado de verdad" (isBackorderEligible corta con `if (!y) return
@@ -12529,7 +12535,9 @@ function generoResuelve(valor) {
 }
 
 // ¿Puede ir al CSV? DBH va tal cual (tagGeneroLibre): le basta con traer uno.
+// Subwax no trae genero y no se bloquea (2026-11-04): si se elige uno, mejor.
 function generoValido(valor, fila) {
+  if (fila?._source === 'subwax') return true;
   return fila?._source === 'dbh' ? !!String(valor || '').trim() : generoResuelve(valor);
 }
 

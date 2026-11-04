@@ -44,7 +44,7 @@
  *   guarda tambien, para la descripcion del producto.
  */
 import { unzipSync } from 'fflate';
-import { parseDistributorEmail, parseDbhEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
+import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { ENLACE_DE_SUSCRIPCION } from './distributor-email.mjs';
 import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
@@ -74,9 +74,22 @@ const REL_PREFIX = 'listen:rel:';
 const MAIL_PREFIX = 'listen:mail:';
 
 // Rubadub y Triple Vision (fase 1); DBH desde el 2026-11-03 (parseDbhEmail, el
-// ZIP es release_zip/<id> de su tienda). MT y Kudos vendran cada uno con su
-// propio mecanismo de audio.
-export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision', DBH: 'DBH' };
+// ZIP es release_zip/<id> de su tienda); Subwax desde el 2026-11-04
+// (parseSubwaxEmail, ZIP en subwax.es tras un tracker). MT y Kudos vendran cada
+// uno con su propio mecanismo de audio.
+export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Triple Vision', DBH: 'DBH', SUBWAX: 'Subwax' };
+
+// Fuentes cuyo correo es un catalogo de fichas, cada una con su ZIP: ni enlace
+// de pista (MYD015, cosa de Rubadub) ni precio en libras.
+const POR_FICHAS = new Set(['DBH', 'SUBWAX']);
+
+/** Las fichas de un email archivado, con el parser de su distribuidor. */
+function filasDelEmail(prefix: string, html: string, fecha: string): any[] {
+  if (prefix === 'DBH') return parseDbhEmail(html);
+  if (prefix === 'SUBWAX') return parseSubwaxEmail(html);
+  const [y, m, d] = fecha.split('-').map(Number);
+  return parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, m - 1, d) });
+}
 
 // Solo emails recientes. 7 dias desde el 03-11 (con 3 se quedaban fuera los
 // anuncios que llegan tarde al indice). Ojo: los st= de Dropbox de Rubadub
@@ -100,7 +113,7 @@ const DIA_MS = 86400000;
 
 const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 // Mismos hosts que ?action=zip-proxy.
-const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$|^dbh-music\.com$/i;
+const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com$|^xcdn\.triplevision\.nl$|^dbh-music\.com$|^(www\.)?subwax\.es$/i;
 // Portadas del email: los mismos hosts que espeja ?action=mirror.
 // Mas la de la ficha de DBH (img.php de su tienda).
 const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com|dbh-music\.com)$/i;
@@ -256,6 +269,7 @@ function esZipDescargable(u: string): boolean {
     if (/dropbox\.com$/i.test(p.hostname)) return /\/(scl\/fo|sh)\//i.test(p.pathname);
     if (/digitaloceanspaces\.com$/i.test(p.hostname)) return /promopack/i.test(p.pathname);
     if (/dbh-music\.com$/i.test(p.hostname)) return /^\/shop\/release_zip\/\d+$/.test(p.pathname);
+    if (/subwax\.es$/i.test(p.hostname)) return /^\/wp-content\/uploads\/\d{4}\/\d{2}\/[^/]+_pack\.zip$/i.test(p.pathname);
     return true;
   } catch { return false; }
 }
@@ -417,13 +431,16 @@ export function eligeFicheros(lista: Array<{ name: string; size: number }>): { m
   const jpgs = lista.filter(f => esJpg(f.name));
   // La trasera nunca es la portada (DBH trae {CATNO}_cover.jpg y {CATNO}_cover_back.jpg).
   const trasera = (f: { name: string }) => /back/i.test(base(f.name));
-  const preferida = jpgs.find(f => /front|cover|sleeve/i.test(base(f.name)) && !trasera(f));
+  // Subwax: {CATNO}_A / _B y {CATNO}_1_Front / _2_Back; la A (o la 1) es la frontal.
+  const frontal = (f: { name: string }) => /front|cover|sleeve/i.test(base(f.name)) || /[_\s-](A|1)(?=[_\s.-])/.test(base(f.name));
+  const preferida = jpgs.find(f => frontal(f) && !trasera(f));
   const portada = preferida?.name || jpgs.sort((a, b) => Number(trasera(a)) - Number(trasera(b)) || b.size - a.size)[0]?.name || null;
   // Los mismos que lee el Process del tab: TV {CATNO}_promotext.txt, DBH {CATNO}_info.txt (o un .txt),
   // W&S/Rubadub SALESPAPER.pdf (o un .pdf). Si pesan demasiado, no.
   const txts = lista.filter(f => /\.txt$/i.test(f.name) && !esBasura(f.name) && f.size <= TEXTO_MAX_BYTES);
   const pdfs = lista.filter(f => /\.pdf$/i.test(f.name) && !esBasura(f.name) && f.size <= PDF_MAX_BYTES);
-  const promotext = (txts.find(f => /_(promotext|info)\.txt$/i.test(f.name)) || txts[0])?.name || null;
+  // Subwax: "{CATNO} info.txt", con espacio.
+  const promotext = (txts.find(f => /[_\s](promotext|info)\.txt$/i.test(f.name)) || txts[0])?.name || null;
   const salespaper = (pdfs.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || pdfs[0])?.name || null;
   return { mp3, portada, promotext, salespaper };
 }
@@ -636,14 +653,12 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
     out.emails_vistos++;
     const html = await env.EMAILS.get(`msg:${email.name}`);
     if (!html) continue;
-    const [y, m, d] = email.date.split('-').map(Number);
-    const rows = email.prefix === 'DBH' ? parseDbhEmail(html)
-      : parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, m - 1, d) });
+    const rows = filasDelEmail(email.prefix, html, email.date);
 
     let completo = true;
     const vistos = new Set<string>();
     // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
-    const unDisco = email.prefix !== 'DBH' && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
+    const unDisco = !POR_FICHAS.has(email.prefix) && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
     for (const row of rows) {
       const clave = claveCatno(row.catno);
       if (!clave || vistos.has(clave)) continue;
@@ -714,9 +729,7 @@ export async function completaPortadas(env: ListenEnv): Promise<number> {
       vistas++;
       const html = await env.EMAILS.get(`msg:${r.email}`);
       if (html) {
-        const [y, mo, d] = r.email_date.split('-').map(Number);
-        const row: any = parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, mo - 1, d) })
-          .find((x: any) => claveCatno(x.catno) === r.clave);
+        const row: any = filasDelEmail(r.distribuidor, html, r.email_date).find((x: any) => claveCatno(x.catno) === r.clave);
         if (row?.coverUrl) await guardaPortadaDelCorreo(env, r, row.coverUrl, `${prefijo(env)}${r.clave}/`).catch(() => {});
         if (row?._desc && !r.resumen) r.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
       }
@@ -1146,14 +1159,11 @@ export async function reparaSinZip(env: ListenEnv, now = new Date(), despues = '
       out.siguiente = k.name;
       const reparado_at = now.toISOString();
       const html = await env.EMAILS.get(`msg:${prev.email}`);
-      const [y, mo, d] = prev.email_date.split('-').map(Number);
-      const rows: any[] = !html || !HAY_TRACKER.test(html) ? []
-        : prev.distribuidor === 'DBH' ? parseDbhEmail(html)
-        : parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, mo - 1, d) });
+      const rows: any[] = !html || !HAY_TRACKER.test(html) ? [] : filasDelEmail(prev.distribuidor, html, prev.email_date);
       const row = rows.find(r => claveCatno(r.catno) === prev.clave);
       if (!row) { out.sin_tracker++; await guardaRelease(env, { ...prev, reparado_at, reparado_v: REPARA_VERSION }); continue; }
       out.intentados++;
-      const unDisco = prev.distribuidor !== 'DBH' && new Set(rows.map(r => claveCatno(r.catno)).filter(Boolean)).size === 1;
+      const unDisco = !POR_FICHAS.has(prev.distribuidor) && new Set(rows.map(r => claveCatno(r.catno)).filter(Boolean)).size === 1;
       const email: IdxEntry = { name: prev.email, prefix: prev.distribuidor, subject: '', date: prev.email_date };
       const n = await ingiereDisco(env, row, email, prev.ingested_at, unDisco ? html! : undefined);
       await guardaRelease(env, {
