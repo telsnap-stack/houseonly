@@ -158,6 +158,7 @@ export interface ListenRunResult {
   por_estado: Partial<Record<ListenEstado, number>>;
   saltados: { duplicado: number; rechazado: number; no_preorder: number; en_tienda: number };
   en_tienda?: string[];          // "<catno> como <handle>"
+  descartados_asunto?: string[]; // "<fichero> (<motivo>)": no se abren
   tienda_error?: string;
   limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
   portadas?: number;
@@ -187,14 +188,41 @@ async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
 
 interface IdxEntry { name: string; prefix: string; subject: string; date: string }
 
-/** Anuncios de RD/TV recientes, del mas antiguo al mas nuevo (caducan antes). */
-export function emailsCandidatos(idx: IdxEntry[], hoy: Date, dias = MAX_EMAIL_AGE_DAYS, fuente = ''): IdxEntry[] {
+// Rubadub: fuera solo sus listas masivas conocidas, de ~150-200 fichas y
+// ninguna de pre-order. Lo demas se abre aunque el asunto suene a digest: el
+// parser ya descarta lo que no es "Please pre-order". Con MAIL_DIGEST (que es
+// del tab) se quedaron fuera los represses de Theo Parrish y de Short Span
+// (2026-11-04); asi un asunto nuevo no vuelve a dejar discos fuera.
+const RD_MASIVAS = [/Imports-Shipping-Today/i, /New-Releases-Shipping/i, /All-Rubadub-Pre-sales/i];
+
+/** Por que no se abre un email, o null si se abre. */
+function motivoDescarte(e: IdxEntry): string | null {
+  if (MAIL_ORDER.test(e.subject)) return 'pedido';
+  // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
+  if (e.prefix === 'DBH') return null;
+  if (e.prefix === 'RD') return RD_MASIVAS.some(re => re.test(e.subject)) ? 'lista masiva' : null;
+  return MAIL_DIGEST.some(re => re.test(e.subject)) ? 'digest' : null;
+}
+
+/**
+ * Emails de la ventana, del mas antiguo al mas nuevo (caducan antes): los que se
+ * abren y los que se descartan por el asunto, con el motivo.
+ */
+export function triaEmails(idx: IdxEntry[], hoy: Date, dias = MAX_EMAIL_AGE_DAYS, fuente = '') {
   const desde = new Date(hoy.getTime() - dias * 86400000).toISOString().slice(0, 10);
-  return idx
+  const candidatos: IdxEntry[] = [], descartados: { email: IdxEntry; motivo: string }[] = [];
+  const ventana = idx
     .filter(e => LISTEN_SOURCES[e.prefix] && e.date >= desde && (!fuente || e.prefix === fuente))
-    // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
-    .filter(e => !MAIL_ORDER.test(e.subject) && (e.prefix === 'DBH' || !MAIL_DIGEST.some(re => re.test(e.subject))))
     .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
+  for (const e of ventana) {
+    const motivo = motivoDescarte(e);
+    if (motivo) descartados.push({ email: e, motivo }); else candidatos.push(e);
+  }
+  return { candidatos, descartados };
+}
+
+export function emailsCandidatos(idx: IdxEntry[], hoy: Date, dias = MAX_EMAIL_AGE_DAYS, fuente = ''): IdxEntry[] {
+  return triaEmails(idx, hoy, dias, fuente).candidatos;
 }
 
 // ── enlaces y descargas ────────────────────────────────────────
@@ -537,7 +565,10 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   let intentos = 0;
   // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
   let tienda: Tienda | null = null;
-  ingesta: for (const email of emailsCandidatos(idx, now, opts.dias, opts.fuente)) {
+  const { candidatos, descartados } = triaEmails(idx, now, opts.dias, opts.fuente);
+  // A la vista en el resumen: si algo se queda fuera por el asunto, se ve.
+  if (descartados.length) out.descartados_asunto = descartados.map(d => `${d.email.name} (${d.motivo})`);
+  ingesta: for (const email of candidatos) {
     if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
     if (intentos >= PER_RUN) { out.quedan = true; break; }
     out.emails_vistos++;

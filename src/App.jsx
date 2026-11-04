@@ -10377,6 +10377,11 @@ function ListenInbox({ onCargar, ultimaCarga }) {
           <div style={{ fontSize: 9, color: S.muted, marginBottom: 10 }}>
             Ingesta <b style={{ color: modo === 'live' ? S.accent : '#ff8800' }}>{modo === 'live' ? 'encendida' : `apagada${modo ? ` (${modo})` : ''}`}</b>
             {lastRun && <> · última pasada {String(lastRun.finished_at || '').slice(0, 16).replace('T', ' ')} UTC, {lastRun.nuevos ?? 0} nuevos</>}
+            {/* Lo que la ingesta no abre por el asunto (pedidos, listas masivas, digests de TV): si se queda algo fuera, se ve aqui. */}
+            {lastRun?.descartados_asunto?.length > 0 && <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer' }}>{lastRun.descartados_asunto.length} correos sin abrir por el asunto</summary>
+              {lastRun.descartados_asunto.map(d => <div key={d} style={{ paddingLeft: 10 }}>{d.replace(/\.html \(/, ' (')}</div>)}
+            </details>}
           </div>
           {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
 
