@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { trackNameFromFilename, nombreDePista } from "../src/lib/track-names.mjs";
+import { trackNameFromFilename, nombreDePista, nombreLegible } from "../src/lib/track-names.mjs";
 
 describe("nombres de pista", () => {
 	it("el humanizador del importer de Mother Tongue, igual que antes", () => {
@@ -36,5 +36,16 @@ describe("nombres de pista", () => {
 		expect(nombreDePista("XYZ001-A01", "XYZ001", 0)).toBe("A1");
 		expect(nombreDePista("02", "XYZ001", 1)).toBe("Pista 2");
 		expect(nombreDePista("A1 Truth Like Memory", "XYZ001", 0)).toBe("Truth Like Memory");
+	});
+
+	it("Subwax: nombres UTF-8 leidos como latin1 (acentos descompuestos) y \"(2 min clip)\"", () => {
+		// Como los deja fflate cuando el ZIP no marca UTF-8: cada byte, un caracter.
+		const latin1 = (t: string) => Array.from(new TextEncoder().encode(t.normalize("NFD")), b => String.fromCharCode(b)).join("");
+		expect(nombreDePista(latin1("HEALER003 B2 Squash - Fanta Sí (Baby Rollén Remix) (2 min clip)"), "HEALER003", 3, "Squash"))
+			.toBe("Fanta Sí (Baby Rollén Remix)");
+		expect(nombreDePista(latin1("ABOUNAIM002 A2. Abou Naïm - Wake Up Bro (Snippet)"), "ABOUNAIM002", 1, "Various")).toBe("Abou Naïm - Wake Up Bro");
+		expect(nombreDePista("MID-FLOW01 A1 Sweet Treat (PREVIEW)", "MID-FLOW01", 0, "Unknown Artist")).toBe("Sweet Treat");
+		// Un latin1 de verdad no se toca.
+		expect(nombreLegible("Café")).toBe("Café");
 	});
 });

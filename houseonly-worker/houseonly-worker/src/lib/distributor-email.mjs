@@ -454,6 +454,57 @@ export function parseDbhEmail(raw) {
   return rows;
 }
 
+// ── SUBWAX ─────────────────────────────────────────────────────
+// "New pre-orders - week NN/AAAA" (Mailchimp, desde 2026-11-04): todo el correo
+// es de pre-orders. Cada ficha es la portada (a tamaño completo, la misma del
+// ZIP) y un <div> con "ARTISTA - TITULO" en negrita, "CATNO - FORMATO - SELLO",
+// la prosa y "Price: 9,69€ / Audio clips / Download files". Sin genero ni fecha.
+// "Download files" es un tracker de un salto al ZIP de subwax.es; "Audio clips"
+// es un SoundCloud privado y no se usa.
+const SUBWAX_FICHA = /<div\b[^>]*>\s*<span\b[^>]*>\s*<strong>([\s\S]*?)<\/strong>\s*<\/span>\s*<br\s*\/?>\s*<span\b[^>]*>([\s\S]*?)<\/span>([\s\S]*?)<\/div>/gi;
+const SUBWAX_PORTADA = /<img\b[^>]*src="(https:\/\/mcusercontent\.com\/[^"]+\/images\/[^"]+)"/gi;
+
+export function parseSubwaxEmail(raw) {
+  const html = String(raw || '');
+  const rows = [];
+  for (const m of html.matchAll(SUBWAX_FICHA)) {
+    const cuerpo = m[3];
+    if (!/Price:/i.test(cuerpo)) continue;
+    // "Big Motion<br>(Incl. ... Remixes)": el salto de linea es un espacio.
+    const cabeza = dbhTexto(m[1].replace(/<br\s*\/?>/gi, ' '));
+    const linea = dbhTexto(m[2]).split(' - ');
+    if (linea.length < 2 || !linea[0]) continue;
+    const corte = cabeza.indexOf(' - ');
+    const precio = Number((dbhTexto(cuerpo).match(/Price:\s*(\d+(?:[.,]\d+)?)\s*€/i) || [])[1]?.replace(',', '.'));
+    // La portada de la ficha: la ultima imagen de mcusercontent antes de su <div>
+    // (la primera del correo es la cabecera, en /_compresseds/, y no casa).
+    const antes = html.slice(0, m.index);
+    const portadas = [...antes.matchAll(SUBWAX_PORTADA)].map(x => decodeHtmlEntities(x[1]));
+    const zip = decodeHtmlEntities((cuerpo.match(/<a\b[^>]*href="([^"]+)"[^>]*>\s*Download files\s*<\/a>/i) || [])[1] || '');
+    const prosa = dbhTexto(cuerpo.split(/Price:/i)[0].replace(/<br\s*\/?>|<\/p>/gi, '\n'));
+    rows.push({
+      catno: linea[0].trim(),
+      artist: corte > 0 ? cabeza.slice(0, corte).trim() : cabeza,
+      title: corte > 0 ? cabeza.slice(corte + 3).trim() : '',
+      label: linea.length > 2 ? linea[linea.length - 1].trim() : '',
+      // Sin genero ni fecha en el correo: vacios, sin bloquear la fila.
+      genre: '',
+      release: '',
+      dealerPrice: Number.isFinite(precio) ? precio : null,
+      format: linea.length > 2 ? linea.slice(1, -1).join(' - ').trim() : linea[1].trim(),
+      coverUrl: portadas.at(-1) || '',
+      zipUrl: '',
+      source: 'subwax',
+      forthcoming: true,
+      _desc: prosa.slice(0, 2400),
+      _zipLinks: zip ? [zip] : [],
+      _digest: '',
+      _warnings: [],
+    });
+  }
+  return rows;
+}
+
 // ── TRIAGE POR ASUNTO ──────────────────────────────────────────
 // Del nombre del fichero archivado ({PREFIJO}__{asunto}__{fecha}.html), sin abrir
 // el cuerpo. Lo usan el tab (triageEmail) y la bandeja de escucha del worker.
