@@ -45,6 +45,8 @@ describe("nombres de pista", () => {
 			.toBe("Fanta Sí (Baby Rollén Remix)");
 		expect(nombreDePista(latin1("ABOUNAIM002 A2. Abou Naïm - Wake Up Bro (Snippet)"), "ABOUNAIM002", 1, "Various")).toBe("Abou Naïm - Wake Up Bro");
 		expect(nombreDePista("MID-FLOW01 A1 Sweet Treat (PREVIEW)", "MID-FLOW01", 0, "Unknown Artist")).toBe("Sweet Treat");
+		// "A3 . Titulo" (MATHPLUS021).
+		expect(nombreDePista("A3 . Whats Going on Inside the Sun", "MATHPLUS021", 2, "Hieroglyphic Being")).toBe("Whats Going on Inside the Sun");
 		// Un latin1 de verdad no se toca.
 		expect(nombreLegible("Café")).toBe("Café");
 	});

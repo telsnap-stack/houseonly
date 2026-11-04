@@ -353,18 +353,44 @@ async function destinosDeFicha(row: { _enlacesFicha?: string[]; _textoEnlace?: R
   return out;
 }
 
-// MP3 sueltos por pista: solo los de Fett Distro (Sotofett, via Rubadub), que
-// cuelga el audio de cada cara (~1,3 MB, solo http). Los de groovedis.com no
-// entran: esos discos se quedan con su motivo y se deciden a mano (04-11).
-const MP3_SUELTO = /^https?:\/\/(www\.)?fett-distro\.com\/audio\/[^/?#]+\.mp3$/i;
+// MP3 sueltos por pista de discos de Rubadub, en los hosts que les alojan el
+// audio: Fett Distro (~1,3 MB por cara, solo http) y Groovedis (http → https).
+// Los correos que Groovedis manda por su cuenta no son una fuente (04-11).
+const MP3_SUELTO_HOSTS: Record<string, RegExp> = {
+  'fett-distro.com': /^\/audio\/[^/]+\.mp3$/i,
+  'groovedis.com': /^\/singles\/[^/]+\.mp3$/i,
+};
 const MP3_SUELTO_MAX_BYTES = 25 * 1024 * 1024;
-export const esMp3Suelto = (u: string) => MP3_SUELTO.test(u);
+
+/**
+ * La URL del MP3 sin lo que le pega Mailchimp (?utm_…&mc_eid=…; con ello
+ * RDUB702 no casaba) y, si viene mal escrita ("http://%20http://www.groovedis…",
+ * MO26), la ultima URL de dentro. '' si no es un MP3 suelto admitido.
+ */
+export function mp3Suelto(raw: string): string {
+  for (const c of [raw, raw.slice(raw.lastIndexOf('http'))]) {
+    let p: URL;
+    try { p = new URL(c); } catch { continue; }
+    const host = p.hostname.replace(/^www\./i, '').toLowerCase();
+    const ruta = MP3_SUELTO_HOSTS[host];
+    if (/^https?:$/.test(p.protocol) && ruta?.test(p.pathname)) return `${p.protocol}//${p.hostname}${p.pathname}`;
+  }
+  return '';
+}
+export const esMp3Suelto = (u: string) => !!mp3Suelto(u);
 
 /** Por que un disco no tiene promopack, para decidir si vale la pena pedirlo. */
 export function porQueSinZip(destinos: string[]): string {
-  const host = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  // Con el enlace mal escrito ("http://%20http://www.groovedis.com/…", MO26) vale la ultima URL de dentro.
+  const host = (u: string) => {
+    for (const c of [u, u.slice(u.lastIndexOf('http'))]) { try { return new URL(c).hostname.replace(/^www\./, ''); } catch { /* la siguiente */ } }
+    return '';
+  };
   const mp3 = destinos.filter(u => /\.mp3(\?|$)/i.test(u));
-  if (mp3.length) return `sin promopack: MP3 sueltos por pista (${[...new Set(mp3.map(host))].join(', ')})`;
+  if (mp3.length) {
+    const hosts = [...new Set(mp3.map(host).filter(Boolean))];
+    return `sin promopack: MP3 sueltos por pista${hosts.length ? ` (${hosts.join(', ')})` : ''}`;
+  }
   if (destinos.some(u => /(^|\.)(youtube\.com|youtu\.be|soundcloud\.com|bandcamp\.com)$/i.test(host(u))))
     return 'sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)';
   if (!destinos.length) return 'sin promopack: la ficha no trae ningún enlace';
@@ -488,7 +514,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       const pares = await destinosDeFicha(row);
       const destinos = pares.map(p => p.destino);
       const carpeta = destinos.find(esZipDescargable);
-      const sueltas = pares.filter(p => esMp3Suelto(p.destino));
+      const sueltas = pares.filter(p => esMp3Suelto(p.destino)).map(p => ({ ...p, destino: mp3Suelto(p.destino) }));
       if (!carpeta && sueltas.length) {
         await guardaPistasSueltas(env, rel, sueltas, dir, subidas);
         if (row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, dir, subidas);
@@ -1154,8 +1180,9 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 const REPARA_POR_PASADA = 6;
 // Sube cuando la reparacion aprende algo nuevo, para que repase los ya
 // reintentados: 2 = enlaces de la ficha sin "Download Zip" y el porque (04-11);
-// 3 = MP3 sueltos de fett-distro.com (04-11).
-const REPARA_VERSION = 3;
+// 3 = MP3 sueltos de fett-distro.com (04-11); 4 = motivo sin dominios vacios (MO26);
+// 5 = MP3 sueltos con el query de Mailchimp y de groovedis.com (04-11).
+const REPARA_VERSION = 5;
 const HAY_TRACKER = /https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 
 export interface ListenRepairResult {
