@@ -45,6 +45,7 @@
  */
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
+import { ENLACE_DE_SUSCRIPCION } from './distributor-email.mjs';
 import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
@@ -117,7 +118,8 @@ const ZIP_HOSTS = /^(www\.)?dropbox\.com$|^dl\.dropboxusercontent\.com$|^triple-
 // Mas la de la ficha de DBH (img.php de su tienda).
 const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-assets\.ams3\.cdn\.digitaloceanspaces\.com|dbh-music\.com)$/i;
 
-export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'error';
+// caducado: el Dropbox del promopack ya no baja (pedir el promo).
+export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'caducado' | 'error';
 export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado';
 // Las que se pueden poner a mano; 'cargado' solo lo pone listen-promote.
 export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado'];
@@ -162,6 +164,7 @@ export interface ListenRelease {
   portada_comprobada?: boolean;  // completaPortadas ya miro su correo
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
   reparado_at?: string;          // listen-repair ya lo reintento (sin_zip)
+  reparado_v?: number;           // con que version de listen-repair (REPARA_VERSION)
 }
 
 export interface ListenRunResult {
@@ -191,7 +194,7 @@ function metaDe(r: ListenRelease) {
     n: r.tracks.length, at: r.ingested_at,
     x: r.decision, dt: r.decided_at, al: r.audio_limpiado_at,
     pc: r.portada_comprobada ? 1 : undefined,
-    rz: r.reparado_at ? 1 : undefined,
+    rz: r.reparado_v || (r.reparado_at ? 1 : undefined),
   };
 }
 
@@ -284,6 +287,7 @@ export const SALTOS_TRACKER = 3;
 export async function destinoDeTracker(raw: string): Promise<string> {
   let u = raw.replace(/&amp;/g, '&');
   for (let i = 0; i < SALTOS_TRACKER && TRACKER.test(u); i++) {
+    if (ENLACE_DE_SUSCRIPCION.test(u)) return '';
     // redirect:'manual' para leer el Location sin bajar nada.
     const r = await fetchConTimeout(u, { redirect: 'manual' });
     await r.body?.cancel();
@@ -334,6 +338,30 @@ async function dropboxDePista(enlaces: string[]): Promise<string> {
     if (esDropbox(dest)) return dest;
   }
   return '';
+}
+
+const ENLACES_FICHA_MAX = 12;
+
+/** Adonde llevan los enlaces de la ficha (ya resueltos los trackers), sin repetir. */
+async function destinosDeFicha(row: { _enlacesFicha?: string[] }): Promise<string[]> {
+  const out: string[] = [];
+  for (const u of (row._enlacesFicha || []).slice(0, ENLACES_FICHA_MAX)) {
+    if (ENLACE_DE_SUSCRIPCION.test(u)) continue;
+    const d = TRACKER.test(u) ? await destinoDeTracker(u).catch(() => '') : u;
+    if (d && !out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
+/** Por que un disco no tiene promopack, para decidir si vale la pena pedirlo. */
+export function porQueSinZip(destinos: string[]): string {
+  const host = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  const mp3 = destinos.filter(u => /\.mp3(\?|$)/i.test(u));
+  if (mp3.length) return `sin promopack: MP3 sueltos por pista (${[...new Set(mp3.map(host))].join(', ')})`;
+  if (destinos.some(u => /(^|\.)(youtube\.com|youtu\.be|soundcloud\.com|bandcamp\.com)$/i.test(host(u))))
+    return 'sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)';
+  if (!destinos.length) return 'sin promopack: la ficha no trae ningún enlace';
+  return 'sin promopack: ningún enlace de la ficha lleva a uno';
 }
 
 /**
@@ -446,15 +474,31 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
         viaPista = true;
       }
     }
-    if (!url) return { ...rel, estado: 'sin_zip', detalle: 'el email no trae un enlace de promopack descargable' };
+    if (!url) {
+      // Sin "Download Zip": los demas enlaces de su ficha. Si uno lleva a la
+      // carpeta del promopack (SS041 la cuelga de la tracklist), se usa; si no,
+      // se dice por que no hay promopack.
+      const destinos = await destinosDeFicha(row);
+      const carpeta = destinos.find(esZipDescargable);
+      if (!carpeta) return { ...rel, estado: 'sin_zip', detalle: porQueSinZip(destinos) };
+      url = /dropbox\.com/i.test(carpeta) ? dropboxDescarga(carpeta) : carpeta;
+      rel.detalle = 'promopack de otro enlace de la ficha (sin botón Download Zip)';
+    }
     // Por el enlace de pista, cualquier cosa que no sea el promopack: a mano.
     const fallo = viaPista ? 'descarga_manual' as const : 'error' as const;
 
     const res = await fetchConTimeout(url, { redirect: 'follow' });
-    if (!res.ok) { await res.body?.cancel(); return { ...rel, estado: fallo, detalle: `promopack: HTTP ${res.status}`, zip_link: url }; }
+    // Un Dropbox caducado (los st= de Rubadub) responde 404/410 o una pagina:
+    // eso es "enlace caducado", para saber que hay que pedir el promo.
+    const caducado = esDropbox(url) ? { ...rel, estado: 'caducado' as const, detalle: 'el Dropbox del promopack ha caducado: pide el promo', zip_link: url } : null;
+    if (!res.ok) {
+      await res.body?.cancel();
+      if (caducado && (res.status === 404 || res.status === 410)) return caducado;
+      return { ...rel, estado: fallo, detalle: `promopack: HTTP ${res.status}`, zip_link: url };
+    }
     if (/text\/html/i.test(res.headers.get('content-type') || '')) {
       await res.body?.cancel();
-      return { ...rel, estado: fallo, detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
+      return caducado || { ...rel, estado: fallo, detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
     }
     let zip: Uint8Array;
     try { zip = await leeConTope(res, ZIP_MAX_BYTES); }
@@ -1075,14 +1119,21 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 // ── reparacion de los "sin ZIP" ────────────────────────────────
 
 const REPARA_POR_PASADA = 6;
+// Sube cuando la reparacion aprende algo nuevo, para que repase los ya
+// reintentados: 2 = enlaces de la ficha sin "Download Zip" y el porque (04-11).
+const REPARA_VERSION = 2;
 const HAY_TRACKER = /https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 
 export interface ListenRepairResult {
   intentados: number;
   por_estado: Partial<Record<ListenEstado, number>>;
-  siguen_sin_zip: string[];      // catno de los que ni con los saltos tienen promopack
+  siguen_sin_zip: string[];      // "<catno>: <por que>" de los que siguen sin promopack
   sin_tracker: number;           // su correo no lleva enlaces de Mailchimp: no se tocan
   quedan: boolean;
+  // La tanda siguiente empieza despues de esta clave. La lista de KV tarda en
+  // ver la marca recien escrita (hasta 60 s): sin cursor, la tanda siguiente
+  // repetia discos (SC1278, SC7095 y SS041 tres veces el 04-11).
+  siguiente?: string;
 }
 
 /**
@@ -1092,42 +1143,46 @@ export interface ListenRepairResult {
  * portada y textos. Cada disco una vez (reparado_at), tope por llamada como la
  * ingesta: se repite mientras quedan=true.
  */
-export async function reparaSinZip(env: ListenEnv, now = new Date()): Promise<ListenRepairResult> {
+export async function reparaSinZip(env: ListenEnv, now = new Date(), despues = ''): Promise<ListenRepairResult> {
   const out: ListenRepairResult = { intentados: 0, por_estado: {}, siguen_sin_zip: [], sin_tracker: 0, quedan: false };
   let cursor: string | undefined;
   do {
     const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
     for (const k of l.keys) {
+      // La lista de KV va en orden de clave: lo de tandas anteriores, fuera.
+      if (despues && k.name <= despues) continue;
       const m = k.metadata || {};
-      if (m.e !== 'sin_zip' || m.rz) continue;
+      if (m.e !== 'sin_zip' || (m.rz || 0) >= REPARA_VERSION) continue;
       if (out.intentados >= REPARA_POR_PASADA) { out.quedan = true; return out; }
       const prev = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
-      if (!prev || prev.estado !== 'sin_zip') continue;
+      if (!prev || prev.estado !== 'sin_zip' || (prev.reparado_v || 0) >= REPARA_VERSION) continue;
+      out.siguiente = k.name;
       const reparado_at = now.toISOString();
       const html = await env.EMAILS.get(`msg:${prev.email}`);
       const rows: any[] = !html || !HAY_TRACKER.test(html) ? [] : filasDelEmail(prev.distribuidor, html, prev.email_date);
       const row = rows.find(r => claveCatno(r.catno) === prev.clave);
-      if (!row) { out.sin_tracker++; await guardaRelease(env, { ...prev, reparado_at }); continue; }
+      if (!row) { out.sin_tracker++; await guardaRelease(env, { ...prev, reparado_at, reparado_v: REPARA_VERSION }); continue; }
       out.intentados++;
       const unDisco = !POR_FICHAS.has(prev.distribuidor) && new Set(rows.map(r => claveCatno(r.catno)).filter(Boolean)).size === 1;
       const email: IdxEntry = { name: prev.email, prefix: prev.distribuidor, subject: '', date: prev.email_date };
       const n = await ingiereDisco(env, row, email, prev.ingested_at, unDisco ? html! : undefined);
       await guardaRelease(env, {
         ...prev, estado: n.estado, detalle: n.detalle, zip_link: n.zip_link, tracks: n.tracks, bytes: n.bytes,
-        cover: n.cover || prev.cover, textos: n.textos || prev.textos, reparado_at,
+        cover: n.cover || prev.cover, textos: n.textos || prev.textos, reparado_at, reparado_v: REPARA_VERSION,
       });
       out.por_estado[n.estado] = (out.por_estado[n.estado] || 0) + 1;
-      if (n.estado === 'sin_zip') out.siguen_sin_zip.push(prev.catno);
+      if (n.estado === 'sin_zip') out.siguen_sin_zip.push(`${prev.catno}: ${n.detalle}`);
     }
     cursor = l.list_complete ? undefined : l.cursor;
   } while (cursor);
   return out;
 }
 
-/** POST ?action=listen-repair (Bearer) — una tanda de reparacion de sin_zip. */
-export async function handleListenRepair(env: ListenEnv, autorizado: boolean): Promise<Response> {
+/** POST ?action=listen-repair[&despues=<clave>] (Bearer) — una tanda de reparacion de sin_zip. */
+export async function handleListenRepair(env: ListenEnv, autorizado: boolean, request?: Request): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
-  return json({ ok: true, ...(await reparaSinZip(env)) });
+  const despues = request ? new URL(request.url).searchParams.get('despues') || '' : '';
+  return json({ ok: true, ...(await reparaSinZip(env, new Date(), despues)) });
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */

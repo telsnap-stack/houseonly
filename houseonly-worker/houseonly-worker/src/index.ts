@@ -1941,9 +1941,9 @@ export default {
     if (action === 'listen-run' && request.method === 'POST') {
       return await handleListenRun(env, bearerAdminValido(request, env), request);
     }
-    //   POST ?action=listen-repair Bearer  reintenta el promopack de los sin_zip (6 por llamada)
+    //   POST ?action=listen-repair[&despues=<clave>] Bearer  reintenta el promopack de los sin_zip (6 por llamada)
     if (action === 'listen-repair' && request.method === 'POST') {
-      return await handleListenRepair(env, bearerAdminValido(request, env));
+      return await handleListenRepair(env, bearerAdminValido(request, env), request);
     }
     //   POST ?action=listen-promote Bearer {clave, safeKey, handle}: copia a audio/ y covers/
     if (action === 'listen-promote' && request.method === 'POST') {
