@@ -17,7 +17,10 @@
  * so it never duplicates and never misses one. The .html it writes is the raw
  * email HTML body — exactly what the importer's builders parse.
  *
- * CHANGES vs previous version (2026-11-03):
+ * CHANGES vs previous version (2026-11-04):
+ *  - NEW: fuente SUBWAX (distribution@subwax.es).
+ *
+ * CHANGES vs version of 2026-11-03:
  *  - saveDistributorEmails() llama a pushDistributorEmails() al terminar, asi
  *    que lo archivado en Drive sube al worker en la misma ejecucion.
  *  - Un solo activador, saveDistributorEmails cada 6 horas. Los dos diarios
@@ -131,6 +134,12 @@ var SOURCES = [
     // announcement itself; reply chains and invoice threads are excluded.
     query: 'from:emontagut@houseonly.store "Mother Tongue" "Wholesale Price" ' +
            '-subject:"Re:" -has:attachment'
+  },
+  {
+    prefix: 'SUBWAX',
+    // Subwax (Barcelona), desde el 2026-11-04: "New pre-orders - week NN/AAAA"
+    // con fichas en EUR. Fuera facturas, pedidos y respuestas.
+    query: 'from:distribution@subwax.es -subject:invoice -subject:order -subject:"Re:"'
   },
   {
     prefix: 'KUDOS',
