@@ -290,6 +290,13 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
     // Nunca los de gestion de la suscripcion (baja, perfil, reenvio): no se piden.
     const enlacesFicha = [...new Set([...after.matchAll(/\((https?:\/\/[^)\s]+)\)/g)].map(m => m[1].replace(/&amp;/g, '&')))]
       .filter(u => !ENLACE_DE_SUSCRIPCION.test(u));
+    // El texto de cada enlace, lo que va delante en su linea ("B. Artista -
+    // Titulo (Dub) (https://…)"): nombra la pista cuando el enlace es un MP3.
+    const textoEnlace = {};
+    for (const m of after.matchAll(/([^\n]*?)\s*\((https?:\/\/[^)\s]+)\)/g)) {
+      const u = m[2].replace(/&amp;/g, '&'), t = m[1].replace(/\([^()]*$/, '').trim();
+      if (t && !(u in textoEnlace)) textoEnlace[u] = t.slice(0, 160);
+    }
     if (!zipUrl) {
       warnings.push(/list-manage\.com\/track\/click/i.test(after)
         ? 'el enlace del ZIP es un redirect de Mailchimp (digest): ábrelo en el archivo mailchi.mp y pega ese HTML'
@@ -373,6 +380,7 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
       _desc: prosa,
       _zipLinks: zipLinks,      // enlaces "Download Zip" de este bloque (tracker o directos)
       _enlacesFicha: enlacesFicha,   // todos los de su ventana (la bandeja)
+      _textoEnlace: textoEnlace,     // url -> su texto
       _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,
     });
