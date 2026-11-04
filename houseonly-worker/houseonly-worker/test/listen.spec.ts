@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip,
+	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
@@ -340,7 +340,7 @@ describe("listen: ingesta", () => {
 		const d = await rel("SS032");
 		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", ingested_at: NOW.toISOString() });
 		expect(d.tracks.length).toBe(1);
-		expect(d).toMatchObject({ reparado_v: 4 });
+		expect(d).toMatchObject({ reparado_v: 5 });
 		expect((await rel("NOTR001")).estado).toBe("sin_zip");
 		// Cada disco una vez.
 		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
@@ -421,15 +421,18 @@ describe("listen: ingesta", () => {
 		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
 			const url = String(input instanceof Request ? input.url : input);
 			const cara = url.match(/^https:\/\/us\.list-manage\.com\/([A-Z0-9]+)([ab])\?/);
-			if (cara) return new Response(null, { status: 302, headers: { location: `http://${host}/audio/${cara[1].toLowerCase()}${cara[2]}.mp3` } });
+			// Como en el correo real: Mailchimp pega su query al destino (RDUB702 no casaba por eso).
+			const ruta = host.includes("groovedis") ? "singles" : "audio";
+			if (cara) return new Response(null, { status: 302, headers: { location: `http://${host}/${ruta}/${cara[1].toLowerCase()}${cara[2]}.mp3?utm_source=Blackhole+Subscribers&mc_eid=x` } });
+			// (groovedis.com pasa de http a https; el fetch real sigue el 301, el simulado no hace falta.)
 			if (url.startsWith("https://us.list-manage.com/stock")) return new Response(null, { status: 302, headers: { location: "https://www.rubadub.co.uk/stocklist" } });
-			if (url.startsWith(`http://${host}/audio/`)) return new Response(new Uint8Array(40), { headers: { "content-type": "audio/mpeg" } });
+			if (/^https?:\/\/[^/]+\/(audio|singles)\/[a-z0-9]+\.mp3$/.test(url)) return new Response(new Uint8Array(40), { headers: { "content-type": "audio/mpeg" } });
 			if (url.startsWith("https://mcusercontent.com/")) return new Response(new Uint8Array(50), { headers: { "content-type": "image/jpeg" } });
 			return new Response("nope", { status: 404 });
 		});
 	}
 
-	it("MP3 sueltos por pista: los de fett-distro.com entran como pistas; los de groovedis.com no, con su motivo", async () => {
+	it("MP3 sueltos por pista de fett-distro.com y groovedis.com: entran como pistas, sin el query de Mailchimp", async () => {
 		const f = redesFett("fett-distro.com");
 		await archiva("RD__Uno-Dos---Split-RDUB-702__2026-11-01.html", fettEmail("RDUB702", "fett-distro.com"));
 		await runListenIngest(E, { now: NOW });
@@ -440,12 +443,27 @@ describe("listen: ingesta", () => {
 			["A. Uno - Dose (Sax Mix)", "listen/RDUB702/01-A.-Uno-Dose-Sax-Mix.mp3"], ["B. Dos - Fuji (Dub)", "listen/RDUB702/02-B.-Dos-Fuji-Dub.mp3"]]);
 		expect((await E.LISTEN_R2.head("listen/RDUB702/01-A.-Uno-Dose-Sax-Mix.mp3")).size).toBe(40);
 		expect(f.mock.calls.some(c => String(c[0]).includes("rubadub.co.uk"))).toBe(false);   // el destino de la stocklist ni se pide
+		// Se piden sin el query de Mailchimp.
+		expect(f.mock.calls.map(c => String(c[0])).filter(u => u.includes("fett-distro"))).toEqual(
+			["http://fett-distro.com/audio/rdub702a.mp3", "http://fett-distro.com/audio/rdub702b.mp3"]);
 		vi.restoreAllMocks();
 		tiendaCon([]);
 		redesFett("www.groovedis.com");
 		await archiva("RD__Uno-Dos---Split-MATH021__2026-11-01.html", fettEmail("MATH021", "www.groovedis.com"));
 		await runListenIngest(E, { now: NOW });
-		expect(await rel("MATH021")).toMatchObject({ estado: "sin_zip", detalle: "sin promopack: MP3 sueltos por pista (groovedis.com)", tracks: [] });
+		const g = await rel("MATH021");
+		expect(g).toMatchObject({ estado: "listo", detalle: "sin promopack: MP3 sueltos por pista de groovedis.com" });
+		expect(g.tracks.map((t: any) => t.name)).toEqual(["A. Uno - Dose (Sax Mix)", "B. Dos - Fuji (Dub)"]);
+		// Otro host con MP3 sueltos sigue sin entrar, con su motivo.
+		vi.restoreAllMocks();
+		tiendaCon([]);
+		redesFett("audio.example.com");
+		await archiva("RD__Uno-Dos---Split-OTRO001__2026-11-01.html", fettEmail("OTRO001", "audio.example.com"));
+		await runListenIngest(E, { now: NOW });
+		expect(await rel("OTRO001")).toMatchObject({ estado: "sin_zip", detalle: "sin promopack: MP3 sueltos por pista (audio.example.com)" });
+		// MO26: el enlace mal escrito se recupera.
+		expect(mp3Suelto("http://%20http://www.groovedis.com/singles/mo26-b1.mp3?utm_source=x")).toBe("http://www.groovedis.com/singles/mo26-b1.mp3");
+		expect(mp3Suelto("https://www.groovedis.com/otra/cosa.mp3")).toBe("");
 	});
 
 	it("los enlaces de baja o perfil de Mailchimp nunca se piden", async () => {

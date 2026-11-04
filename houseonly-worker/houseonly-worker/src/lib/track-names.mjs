@@ -27,7 +27,8 @@ function limpiaNombre(fname, catno) {
     if (skuRx) n = n.replace(new RegExp('^' + skuRx + '\\s*', 'i'), '');
     n = n.replace(/^[AB]\s*[-–]\s+/i, '');
     n = n.replace(/^\d+\s*[-–]\s*/, '');
-    n = n.replace(/^[AB]\d+\.?\s*[-–]?\s*/i, '');
+    // "A3 . Titulo" (MATHPLUS021): con espacio antes del punto.
+    n = n.replace(/^[AB]\d+\s*\.?\s*[-–]?\s*/i, '');
     n = n.replace(/^Side\s+[A-D][.\s_-]*\d*\s*[-–]?\s*/i, '');
     n = n.replace(/^TRACK\s+\d+[\s_\-]*/i, '');
     n = n.replace(/^\d{1,2}[\s_.\-]+/, '');
