@@ -362,9 +362,16 @@ export const esMp3Suelto = (u: string) => MP3_SUELTO.test(u);
 
 /** Por que un disco no tiene promopack, para decidir si vale la pena pedirlo. */
 export function porQueSinZip(destinos: string[]): string {
-  const host = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  // Con el enlace mal escrito ("http://%20http://www.groovedis.com/…", MO26) vale la ultima URL de dentro.
+  const host = (u: string) => {
+    for (const c of [u, u.slice(u.lastIndexOf('http'))]) { try { return new URL(c).hostname.replace(/^www\./, ''); } catch { /* la siguiente */ } }
+    return '';
+  };
   const mp3 = destinos.filter(u => /\.mp3(\?|$)/i.test(u));
-  if (mp3.length) return `sin promopack: MP3 sueltos por pista (${[...new Set(mp3.map(host))].join(', ')})`;
+  if (mp3.length) {
+    const hosts = [...new Set(mp3.map(host).filter(Boolean))];
+    return `sin promopack: MP3 sueltos por pista${hosts.length ? ` (${hosts.join(', ')})` : ''}`;
+  }
   if (destinos.some(u => /(^|\.)(youtube\.com|youtu\.be|soundcloud\.com|bandcamp\.com)$/i.test(host(u))))
     return 'sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)';
   if (!destinos.length) return 'sin promopack: la ficha no trae ningún enlace';
@@ -1154,8 +1161,8 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 const REPARA_POR_PASADA = 6;
 // Sube cuando la reparacion aprende algo nuevo, para que repase los ya
 // reintentados: 2 = enlaces de la ficha sin "Download Zip" y el porque (04-11);
-// 3 = MP3 sueltos de fett-distro.com (04-11).
-const REPARA_VERSION = 3;
+// 3 = MP3 sueltos de fett-distro.com (04-11); 4 = motivo sin dominios vacios (MO26).
+const REPARA_VERSION = 4;
 const HAY_TRACKER = /https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 
 export interface ListenRepairResult {
