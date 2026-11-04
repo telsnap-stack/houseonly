@@ -340,7 +340,7 @@ describe("listen: ingesta", () => {
 		const d = await rel("SS032");
 		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", ingested_at: NOW.toISOString() });
 		expect(d.tracks.length).toBe(1);
-		expect(d).toMatchObject({ reparado_v: 3 });
+		expect(d).toMatchObject({ reparado_v: 4 });
 		expect((await rel("NOTR001")).estado).toBe("sin_zip");
 		// Cada disco una vez.
 		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
@@ -402,6 +402,10 @@ describe("listen: ingesta", () => {
 		expect(porQueSinZip([])).toBe("sin promopack: la ficha no trae ningún enlace");
 		expect(porQueSinZip(["http://www.groovedis.com/singles/mo26-a1.mp3", "http://www.groovedis.com/singles/mo26-a2.mp3"]))
 			.toBe("sin promopack: MP3 sueltos por pista (groovedis.com)");
+		// MO26: un enlace mal escrito no deja un dominio vacio en la lista.
+		expect(porQueSinZip(["http://www.groovedis.com/singles/mo26-a1.mp3", "http://%20http://www.groovedis.com/singles/mo26-b1.mp3"]))
+			.toBe("sin promopack: MP3 sueltos por pista (groovedis.com)");
+		expect(porQueSinZip(["http://%20/x.mp3"])).toBe("sin promopack: MP3 sueltos por pista");
 		expect(porQueSinZip(["https://www.youtube.com/watch?v=x"])).toBe("sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)");
 		expect(porQueSinZip(["https://www.rubadub.co.uk/stocklist"])).toBe("sin promopack: ningún enlace de la ficha lleva a uno");
 	});
