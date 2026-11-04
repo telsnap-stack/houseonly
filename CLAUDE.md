@@ -111,4 +111,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-10-26-ebay.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-11-04-subwax-f264761.md`.
