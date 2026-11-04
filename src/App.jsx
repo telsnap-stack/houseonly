@@ -11246,7 +11246,7 @@ function PreorderImporter() {
       if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
       // Como mailAddPicked: fuera los campos de trabajo del parseo; `_desc` se queda.
       const limpia = { ...row };
-      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_enlacesFicha', '_trackers']) delete limpia[k];
+      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_enlacesFicha', '_textoEnlace', '_trackers']) delete limpia[k];
       // Sin audio en la bandeja (descarga manual): entra como cualquier fila, a la espera de ZIP.
       if (d.tracks?.length) limpia._listen = d.clave; else out.sinAudio.push(d.clave);
       filas.push(limpia);
