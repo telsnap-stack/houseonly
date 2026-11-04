@@ -920,7 +920,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, SALTOS_TRACKER } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1941,6 +1941,10 @@ export default {
     if (action === 'listen-run' && request.method === 'POST') {
       return await handleListenRun(env, bearerAdminValido(request, env), request);
     }
+    //   POST ?action=listen-repair Bearer  reintenta el promopack de los sin_zip (6 por llamada)
+    if (action === 'listen-repair' && request.method === 'POST') {
+      return await handleListenRepair(env, bearerAdminValido(request, env));
+    }
     //   POST ?action=listen-promote Bearer {clave, safeKey, handle}: copia a audio/ y covers/
     if (action === 'listen-promote' && request.method === 'POST') {
       return await handleListenPromote(request, env, bearerAdminValido(request, env), R2_PUBLIC);
@@ -2067,8 +2071,9 @@ export default {
     //   POST ?action=resolve-links {urls:[...]}  Bearer
     //   -> {results:[{url, dest, kind}]}   kind: dropbox | tvassets | otro | error
     //
-    // Solo sigue UN salto y solo desde dominios de tracking conocidos: es un
-    // seguidor de redirects, no un proxy abierto para cualquier URL.
+    // Solo desde dominios de tracking conocidos y solo mientras el destino siga
+    // siendo un tracker (Mailchimp a veces encadena dos; ver destinoDeTracker):
+    // es un seguidor de redirects, no un proxy abierto para cualquier URL.
     if (action === 'resolve-links' && request.method === 'POST') {
       const auth = request.headers.get('authorization') || '';
       const m = auth.match(/^Bearer\s+(.+)$/i);
@@ -2096,10 +2101,16 @@ export default {
         try {
           // redirect:'manual' para leer el Location sin descargar el fichero:
           // algunos promopacks pasan de 100 MB y aqui solo interesa la URL.
-          const r = await fetch(url, { method: 'GET', redirect: 'manual',
-                                       headers: { 'User-Agent': 'Mozilla/5.0' } });
-          const dest = r.headers.get('location') || '';
-          return { url, dest, kind: clasifica(dest), status: r.status };
+          let dest = url, status = 0;
+          for (let i = 0; i < SALTOS_TRACKER && PERMITIDO.test(dest); i++) {
+            const r = await fetch(dest, { method: 'GET', redirect: 'manual',
+                                         headers: { 'User-Agent': 'Mozilla/5.0' } });
+            await r.body?.cancel();
+            status = r.status;
+            dest = (r.headers.get('location') || '').replace(/&amp;/g, '&');
+          }
+          if (PERMITIDO.test(dest)) dest = '';
+          return { url, dest, kind: clasifica(dest), status };
         } catch (e: any) {
           return { url, dest: '', kind: 'error', error: e.message };
         }

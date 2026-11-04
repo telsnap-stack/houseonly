@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda,
+	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail } from "../src/lib/distributor-email.mjs";
@@ -256,6 +256,66 @@ describe("listen: ingesta", () => {
 		expect((await rel("SS041")).estado).toBe("sin_zip");
 		expect(await rel("NOPE001")).toBeNull();
 		expect(await rel("NOPE002")).toBeNull();
+	});
+
+	// En el correo de Theo Parrish, 4 de los enlaces cortos de Mailchimp llevan a
+	// OTRO tracker (rubadub.us1.../track/click) y ese al Dropbox.
+	const DOS_SALTOS = ["enlace02", "enlace04", "enlace08", "enlace99"];   // SS032, ELV001, SS104/105, SS093/94
+	function redesTheo(zip: Uint8Array, clickRoto = false) {
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+			const url = String(input instanceof Request ? input.url : input);
+			const salto = (to: string) => new Response(null, { status: 302, headers: { location: to } });
+			if (url.startsWith("https://us.list-manage.com/"))
+				return salto(DOS_SALTOS.some(c => url.includes(`/${c}?`)) ? "https://rubadub.us1.list-manage.com/track/click?u=1&amp;id=9" : DROPBOX);
+			if (url.startsWith("https://rubadub.us1.list-manage.com/track/click")) return clickRoto ? new Response("x", { status: 500 }) : salto(DROPBOX);
+			if (url.startsWith("https://www.dropbox.com/")) return new Response(zip, { headers: { "content-type": "application/zip" } });
+			if (url.startsWith("https://mcusercontent.com/")) return new Response(new Uint8Array(50), { headers: { "content-type": "image/jpeg" } });
+			return new Response("nope", { status: 404 });
+		});
+	}
+
+	it("RD: sigue los dos saltos de Mailchimp hasta el Dropbox; un tracker que no acaba no cuenta", async () => {
+		redesTheo(zipDe({ "A1.mp3": 30, "cover.jpg": 100 }));
+		await archiva("RD__New-Theo-Parrish-Sound-Signature-Represses__2026-10-30.html", RD_THEO_PARRISH, "2026-10-30");
+		await runListenIngest(E, { now: NOW });
+		await runListenIngest(E, { now: NOW });
+		for (const c of ["SS023", "SS032", "COD1", "SS09394", "ELV001", "SS017", "SS049", "SS104105"])
+			expect((await rel(c)).estado, c).toBe("listo");
+		expect((await rel("SS041")).estado).toBe("sin_zip");   // su ficha no trae enlace
+		vi.restoreAllMocks();
+		// Un tracker que lleva a otro tracker sin fin: '' (no se sigue mas de SALTOS_TRACKER).
+		const f = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://us.list-manage.com/otro" } }));
+		expect(await destinoDeTracker("https://us.list-manage.com/uno")).toBe("");
+		expect(f).toHaveBeenCalledTimes(3);
+		// Lo que no es un tracker ni se pide.
+		expect(await destinoDeTracker("https://example.com/x")).toBe("https://example.com/x");
+		expect(f).toHaveBeenCalledTimes(3);
+	});
+
+	it("listen-repair: reintenta los sin_zip de correos con Mailchimp, conserva la decision y no repite", async () => {
+		// Como entraron antes del arreglo: el segundo salto no llevaba a ningun sitio.
+		redesTheo(zipDe({ "A1.mp3": 30, "cover.jpg": 100 }), true);
+		await archiva("RD__New-Theo-Parrish-Sound-Signature-Represses__2026-10-30.html", RD_THEO_PARRISH, "2026-10-30");
+		await archiva("RD__Sin-tracker---Test-EP-NOTR001__2026-11-01.html", rdEmail("NOTR001", "https://example.com/no-zip"));
+		// Mientras el correo sigue abierto, sus sin_zip se reintentan y gastan tope: tres pasadas.
+		for (let i = 0; i < 3; i++) await runListenIngest(E, { now: NOW });
+		expect((await rel("SS032")).estado).toBe("sin_zip");
+		expect((await rel("NOTR001")).estado).toBe("sin_zip");
+		await handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "SS032", decision: "pendiente" }) }), E, true, NOW.getTime());
+		vi.restoreAllMocks();
+		redesTheo(zipDe({ "A1.mp3": 30, "cover.jpg": 100 }));
+
+		// 5 sin_zip en un correo con Mailchimp (4 de dos saltos + SS041, cuya ficha no
+		// trae enlace: sigue sin ZIP de verdad) y NOTR001, cuyo correo no lleva tracker.
+		const r1 = await reparaSinZip(E, NOW);
+		expect(r1).toMatchObject({ intentados: 5, por_estado: { listo: 4, sin_zip: 1 }, siguen_sin_zip: ["SS041"], sin_tracker: 1, quedan: false });
+		const d = await rel("SS032");
+		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", ingested_at: NOW.toISOString() });
+		expect(d.tracks.length).toBe(1);
+		expect(d.reparado_at).toBeTruthy();
+		expect((await rel("NOTR001")).estado).toBe("sin_zip");
+		// Cada disco una vez.
+		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
