@@ -342,16 +342,23 @@ async function dropboxDePista(enlaces: string[]): Promise<string> {
 
 const ENLACES_FICHA_MAX = 12;
 
-/** Adonde llevan los enlaces de la ficha (ya resueltos los trackers), sin repetir. */
-async function destinosDeFicha(row: { _enlacesFicha?: string[] }): Promise<string[]> {
-  const out: string[] = [];
+/** Adonde lleva cada enlace de la ficha (ya resueltos los trackers), con su texto; sin repetir destino. */
+async function destinosDeFicha(row: { _enlacesFicha?: string[]; _textoEnlace?: Record<string, string> }): Promise<Array<{ destino: string; texto: string }>> {
+  const out: Array<{ destino: string; texto: string }> = [];
   for (const u of (row._enlacesFicha || []).slice(0, ENLACES_FICHA_MAX)) {
     if (ENLACE_DE_SUSCRIPCION.test(u)) continue;
     const d = TRACKER.test(u) ? await destinoDeTracker(u).catch(() => '') : u;
-    if (d && !out.includes(d)) out.push(d);
+    if (d && !out.some(x => x.destino === d)) out.push({ destino: d, texto: row._textoEnlace?.[u] || '' });
   }
   return out;
 }
+
+// MP3 sueltos por pista: solo los de Fett Distro (Sotofett, via Rubadub), que
+// cuelga el audio de cada cara (~1,3 MB, solo http). Los de groovedis.com no
+// entran: esos discos se quedan con su motivo y se deciden a mano (04-11).
+const MP3_SUELTO = /^https?:\/\/(www\.)?fett-distro\.com\/audio\/[^/?#]+\.mp3$/i;
+const MP3_SUELTO_MAX_BYTES = 25 * 1024 * 1024;
+export const esMp3Suelto = (u: string) => MP3_SUELTO.test(u);
 
 /** Por que un disco no tiene promopack, para decidir si vale la pena pedirlo. */
 export function porQueSinZip(destinos: string[]): string {
@@ -478,8 +485,16 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       // Sin "Download Zip": los demas enlaces de su ficha. Si uno lleva a la
       // carpeta del promopack (SS041 la cuelga de la tracklist), se usa; si no,
       // se dice por que no hay promopack.
-      const destinos = await destinosDeFicha(row);
+      const pares = await destinosDeFicha(row);
+      const destinos = pares.map(p => p.destino);
       const carpeta = destinos.find(esZipDescargable);
+      const sueltas = pares.filter(p => esMp3Suelto(p.destino));
+      if (!carpeta && sueltas.length) {
+        await guardaPistasSueltas(env, rel, sueltas, dir, subidas);
+        if (row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, dir, subidas);
+        rel.detalle = `sin promopack: MP3 sueltos por pista de ${new URL(sueltas[0].destino).hostname.replace(/^www\./, '')}`;
+        return rel;
+      }
       if (!carpeta) return { ...rel, estado: 'sin_zip', detalle: porQueSinZip(destinos) };
       url = /dropbox\.com/i.test(carpeta) ? dropboxDescarga(carpeta) : carpeta;
       rel.detalle = 'promopack de otro enlace de la ficha (sin botón Download Zip)';
@@ -521,6 +536,24 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     // A medias no sirve: lo subido se borra para que el reintento empiece limpio.
     if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
     return { ...rel, estado: 'error', tracks: [], bytes: 0, cover: undefined, detalle: e?.message || String(e) };
+  }
+}
+
+/** Las pistas sueltas (esMp3Suelto), en el orden del correo y con el texto del enlace como nombre. */
+async function guardaPistasSueltas(env: ListenEnv, rel: ListenRelease, sueltas: Array<{ destino: string; texto: string }>, dir: string, subidas: string[]): Promise<void> {
+  for (let i = 0; i < sueltas.length; i++) {
+    const { destino, texto } = sueltas[i];
+    const res = await fetchConTimeout(destino, { redirect: 'follow' });
+    if (!res.ok) { await res.body?.cancel(); throw new Error(`pista ${i + 1}: HTTP ${res.status}`); }
+    if (!/audio\/(mpeg|mp3)/i.test(res.headers.get('content-type') || '')) { await res.body?.cancel(); throw new Error(`pista ${i + 1}: no es un MP3`); }
+    const data = await leeConTope(res, MP3_SUELTO_MAX_BYTES);
+    const nombre = texto || base(new URL(destino).pathname).replace(/\.mp3$/i, '');
+    // slug() quita la extension: sin ".mp3" se comeria "A. Uno…" desde el punto.
+    const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(`${nombre}.mp3`)}.mp3`;
+    await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
+    subidas.push(key);
+    rel.tracks.push({ name: nombre, key, bytes: data.byteLength });
+    rel.bytes += data.byteLength;
   }
 }
 
@@ -1120,8 +1153,9 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
 
 const REPARA_POR_PASADA = 6;
 // Sube cuando la reparacion aprende algo nuevo, para que repase los ya
-// reintentados: 2 = enlaces de la ficha sin "Download Zip" y el porque (04-11).
-const REPARA_VERSION = 2;
+// reintentados: 2 = enlaces de la ficha sin "Download Zip" y el porque (04-11);
+// 3 = MP3 sueltos de fett-distro.com (04-11).
+const REPARA_VERSION = 3;
 const HAY_TRACKER = /https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
 
 export interface ListenRepairResult {
