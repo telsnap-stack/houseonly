@@ -9926,6 +9926,7 @@ const LISTEN_ESTADO = {
   descarga_manual: { txt: 'descarga manual', col: '#ff8800' },
   sin_zip:         { txt: 'sin ZIP',         col: '#ff8800', ayuda: 'el correo no trae promopack' },
   sin_audio:       { txt: 'sin audio',       col: '#ff8800', ayuda: 'el ZIP no trae MP3' },
+  caducado:        { txt: 'enlace caducado', col: S.danger, ayuda: 'el Dropbox del promopack ya no baja: pide el promo' },
   error:           { txt: 'error',           col: S.danger },
 };
 const LISTEN_VISTAS = [
@@ -11240,7 +11241,7 @@ function PreorderImporter() {
       if (!row) { out.errores.push({ clave: d.clave, error: 'su email ya no lo trae' }); continue; }
       // Como mailAddPicked: fuera los campos de trabajo del parseo; `_desc` se queda.
       const limpia = { ...row };
-      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_trackers']) delete limpia[k];
+      for (const k of ['_gbp', '_warnings', '_digest', '_zipLinks', '_enlacesFicha', '_trackers']) delete limpia[k];
       // Sin audio en la bandeja (descarga manual): entra como cualquier fila, a la espera de ZIP.
       if (d.tracks?.length) limpia._listen = d.clave; else out.sinAudio.push(d.clave);
       filas.push(limpia);

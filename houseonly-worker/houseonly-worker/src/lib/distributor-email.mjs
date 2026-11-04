@@ -284,6 +284,12 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
     const zipLinks = [...after.matchAll(/([^\n()]{0,60})\((https:\/\/[^)\s]+)\)/g)]
       .filter(m => /download\s*(zip|promo)|promopack/i.test(m[1]))
       .map(m => m[2].replace(/&amp;/g, '&'));
+    // Todos los enlaces de la ventana, con o sin etiqueta: la bandeja los mira
+    // cuando no hay "Download Zip" (SS041 cuelga el Dropbox de la tracklist) y
+    // para decir por que no hay promopack (solo YouTube, MP3 sueltos...).
+    // Nunca los de gestion de la suscripcion (baja, perfil, reenvio): no se piden.
+    const enlacesFicha = [...new Set([...after.matchAll(/\((https?:\/\/[^)\s]+)\)/g)].map(m => m[1].replace(/&amp;/g, '&')))]
+      .filter(u => !ENLACE_DE_SUSCRIPCION.test(u));
     if (!zipUrl) {
       warnings.push(/list-manage\.com\/track\/click/i.test(after)
         ? 'el enlace del ZIP es un redirect de Mailchimp (digest): ábrelo en el archivo mailchi.mp y pega ese HTML'
@@ -366,6 +372,7 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
       _gbp: esTV ? null : (gbp || null),
       _desc: prosa,
       _zipLinks: zipLinks,      // enlaces "Download Zip" de este bloque (tracker o directos)
+      _enlacesFicha: enlacesFicha,   // todos los de su ventana (la bandeja)
       _digest: digest,          // '' | 'shipping' | 'presales'
       _warnings: warnings,
     });
@@ -381,6 +388,14 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
     dueños.get(u).add(rdKey(r.catno));
   }
   const catnoDe = new Map(rows.map(r => [rdKey(r.catno), r.catno]));
+  // Lo mismo con el resto de enlaces: uno que salga en varias fichas (el pie,
+  // la stocklist) no es de ninguna.
+  const enFichas = new Map();
+  for (const r of rows) for (const u of r._enlacesFicha) {
+    if (!enFichas.has(u)) enFichas.set(u, new Set());
+    enFichas.get(u).add(rdKey(r.catno));
+  }
+  for (const r of rows) r._enlacesFicha = r._enlacesFicha.filter(u => enFichas.get(u).size === 1);
   for (const r of rows) {
     const compartidos = r._zipLinks.filter(u => dueños.get(u).size > 1);
     if (!compartidos.length) continue;
@@ -471,6 +486,10 @@ export const MAIL_REVISION = /^(ART-UPDATE|UPDATE|Price-correction|Artist-and-re
 // material duplican el anuncio original. Sin falsos positivos: "Repress-" y
 // "Release-" no llevan guion tras "Re".
 export const MAIL_ORDER = /^(Fwd|Re)-/;
+
+// Enlaces de Mailchimp para gestionar la suscripcion: pedirlos podria dar de
+// baja la cuenta. Fuera de cualquier lista de enlaces que se vaya a seguir.
+export const ENLACE_DE_SUSCRIPCION = /list-manage\.com\/(unsubscribe|profile|vcard|forward|about|subscribe)\b|[?&]unsubscribe|mailchi\.mp\/[^/]+\/(unsubscribe|profile)/i;
 // Fuentes que llegan como REENVIO de Eduardo (Mother Tongue y Kudos no mandan a
 // la direccion archivada: el Apps Script busca sus Fwd desde
 // emontagut@houseonly.store). Ahi un "Fwd-" es el anuncio, no un pedido.

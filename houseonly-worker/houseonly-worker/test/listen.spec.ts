@@ -4,10 +4,10 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker,
+	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
-import { parseDbhEmail } from "../src/lib/distributor-email.mjs";
+import { parseDbhEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
 import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
 const E = env as any;
@@ -253,7 +253,8 @@ describe("listen: ingesta", () => {
 		for (const c of ["SHORT8", "SHORT11", "SHORT15", "SS023", "SS032", "COD1", "SS09394", "ELV001", "SS017", "SS041", "SS049", "SS104105"])
 			expect(await rel(c), c).not.toBeNull();
 		expect(await rel("SS09394")).toMatchObject({ catno: "SS093/94", artist: "Theo Parrish", release: "2026-11-15", estado: "listo" });
-		expect((await rel("SS041")).estado).toBe("sin_zip");
+		// SS041 no tiene "Download Zip": su Dropbox cuelga de la tracklist.
+		expect(await rel("SS041")).toMatchObject({ estado: "listo", detalle: "promopack de otro enlace de la ficha (sin botón Download Zip)" });
 		expect(await rel("NOPE001")).toBeNull();
 		expect(await rel("NOPE002")).toBeNull();
 	});
@@ -265,6 +266,8 @@ describe("listen: ingesta", () => {
 		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
 			const url = String(input instanceof Request ? input.url : input);
 			const salto = (to: string) => new Response(null, { status: 302, headers: { location: to } });
+			// enlace09 es "see our current stocklist", al pie de la ultima ficha.
+			if (url.startsWith("https://us.list-manage.com/enlace09?")) return salto("https://www.rubadub.co.uk/stocklist");
 			if (url.startsWith("https://us.list-manage.com/"))
 				return salto(DOS_SALTOS.some(c => url.includes(`/${c}?`)) ? "https://rubadub.us1.list-manage.com/track/click?u=1&amp;id=9" : DROPBOX);
 			if (url.startsWith("https://rubadub.us1.list-manage.com/track/click")) return clickRoto ? new Response("x", { status: 500 }) : salto(DROPBOX);
@@ -279,9 +282,8 @@ describe("listen: ingesta", () => {
 		await archiva("RD__New-Theo-Parrish-Sound-Signature-Represses__2026-10-30.html", RD_THEO_PARRISH, "2026-10-30");
 		await runListenIngest(E, { now: NOW });
 		await runListenIngest(E, { now: NOW });
-		for (const c of ["SS023", "SS032", "COD1", "SS09394", "ELV001", "SS017", "SS049", "SS104105"])
+		for (const c of ["SS023", "SS032", "COD1", "SS09394", "ELV001", "SS017", "SS041", "SS049", "SS104105"])
 			expect((await rel(c)).estado, c).toBe("listo");
-		expect((await rel("SS041")).estado).toBe("sin_zip");   // su ficha no trae enlace
 		vi.restoreAllMocks();
 		// Un tracker que lleva a otro tracker sin fin: '' (no se sigue mas de SALTOS_TRACKER).
 		const f = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 302, headers: { location: "https://us.list-manage.com/otro" } }));
@@ -305,17 +307,63 @@ describe("listen: ingesta", () => {
 		vi.restoreAllMocks();
 		redesTheo(zipDe({ "A1.mp3": 30, "cover.jpg": 100 }));
 
-		// 5 sin_zip en un correo con Mailchimp (4 de dos saltos + SS041, cuya ficha no
-		// trae enlace: sigue sin ZIP de verdad) y NOTR001, cuyo correo no lleva tracker.
+		// 4 sin_zip de dos saltos en un correo con Mailchimp, y NOTR001, cuyo correo no lleva tracker.
+		expect((await rel("NOTR001")).detalle).toBe("sin promopack: ningún enlace de la ficha lleva a uno");
 		const r1 = await reparaSinZip(E, NOW);
-		expect(r1).toMatchObject({ intentados: 5, por_estado: { listo: 4, sin_zip: 1 }, siguen_sin_zip: ["SS041"], sin_tracker: 1, quedan: false });
+		expect(r1).toMatchObject({ intentados: 4, por_estado: { listo: 4 }, siguen_sin_zip: [], sin_tracker: 1, quedan: false });
+		// La tanda siguiente empieza despues de la ultima clave mirada (la lista de KV
+		// tarda en ver la marca): con el cursor no repite aunque la lista vaya atrasada.
+		expect(r1.siguiente).toMatch(/^listen:rel:/);
+		expect(await reparaSinZip(E, NOW, "listen:rel:ZZZ")).toMatchObject({ intentados: 0, sin_tracker: 0 });
 		const d = await rel("SS032");
 		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", ingested_at: NOW.toISOString() });
 		expect(d.tracks.length).toBe(1);
-		expect(d.reparado_at).toBeTruthy();
+		expect(d).toMatchObject({ reparado_v: 2 });
 		expect((await rel("NOTR001")).estado).toBe("sin_zip");
 		// Cada disco una vez.
 		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
+	});
+
+	it("listen-repair por tandas: 6 por llamada y el cursor sigue donde lo dejo", async () => {
+		// 8 discos sin_zip, cada uno en su correo con un tracker roto.
+		redes(zipDe({ "A1.mp3": 30 }), { "https://us.list-manage.com/": () => new Response("x", { status: 500 }) });
+		for (let i = 1; i <= 8; i++) await archiva(`RD__T---EP-TAN00${i}__2026-11-01.html`, rdEmail(`TAN00${i}`));
+		for (let i = 0; i < 3; i++) await runListenIngest(E, { now: NOW });
+		vi.restoreAllMocks();
+		redes(zipDe({ "A1.mp3": 30 }));
+		const a = await reparaSinZip(E, NOW);
+		expect(a).toMatchObject({ intentados: 6, quedan: true, siguiente: "listen:rel:TAN006" });
+		const b = await reparaSinZip(E, NOW, a.siguiente);
+		expect(b).toMatchObject({ intentados: 2, quedan: false });
+		for (let i = 1; i <= 8; i++) expect((await rel(`TAN00${i}`)).estado).toBe("listo");
+	});
+
+	it("Dropbox caducado: 'caducado' con el enlace, no un error generico; y por que no hay promopack", async () => {
+		redes(zipDe({ "A1.mp3": 30 }), { "https://www.dropbox.com/": () => new Response("<html>expired</html>", { headers: { "content-type": "text/html" } }) });
+		await archiva("RD__Caducado---EP-CAD001__2026-11-01.html", rdEmail("CAD001"));
+		await runListenIngest(E, { now: NOW });
+		expect(await rel("CAD001")).toMatchObject({ estado: "caducado", detalle: "el Dropbox del promopack ha caducado: pide el promo" });
+		vi.restoreAllMocks();
+		tiendaCon([]);
+		redes(zipDe({ "A1.mp3": 30 }), { "https://www.dropbox.com/": () => new Response("gone", { status: 410 }) });
+		await archiva("RD__Caducado---EP-CAD002__2026-11-01.html", rdEmail("CAD002"));
+		await runListenIngest(E, { now: NOW });
+		expect((await rel("CAD002")).estado).toBe("caducado");
+
+		expect(porQueSinZip([])).toBe("sin promopack: la ficha no trae ningún enlace");
+		expect(porQueSinZip(["http://www.groovedis.com/singles/mo26-a1.mp3", "http://www.groovedis.com/singles/mo26-a2.mp3"]))
+			.toBe("sin promopack: MP3 sueltos por pista (groovedis.com)");
+		expect(porQueSinZip(["https://www.youtube.com/watch?v=x"])).toBe("sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)");
+		expect(porQueSinZip(["https://www.rubadub.co.uk/stocklist"])).toBe("sin promopack: ningún enlace de la ficha lleva a uno");
+	});
+
+	it("los enlaces de baja o perfil de Mailchimp nunca se piden", async () => {
+		const f = vi.spyOn(globalThis, "fetch");
+		expect(await destinoDeTracker("https://rubadub.us1.list-manage.com/unsubscribe?u=1&id=2")).toBe("");
+		expect(await destinoDeTracker("https://rubadub.us1.list-manage.com/profile?u=1&id=2")).toBe("");
+		expect(f).not.toHaveBeenCalled();
+		const html = rdEmail("SUB001") + '<a href="https://rubadub.us1.list-manage.com/unsubscribe?u=1&amp;id=2">unsubscribe</a>';
+		expect(parseDistributorEmail(html, { fx: 1.15, emailDate: new Date(2026, 10, 1) })[0]._enlacesFicha.some((u: string) => /unsubscribe/.test(u))).toBe(false);
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
