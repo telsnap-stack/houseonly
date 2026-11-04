@@ -340,7 +340,7 @@ describe("listen: ingesta", () => {
 		const d = await rel("SS032");
 		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", ingested_at: NOW.toISOString() });
 		expect(d.tracks.length).toBe(1);
-		expect(d).toMatchObject({ reparado_v: 2 });
+		expect(d).toMatchObject({ reparado_v: 3 });
 		expect((await rel("NOTR001")).estado).toBe("sin_zip");
 		// Cada disco una vez.
 		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
@@ -404,6 +404,44 @@ describe("listen: ingesta", () => {
 			.toBe("sin promopack: MP3 sueltos por pista (groovedis.com)");
 		expect(porQueSinZip(["https://www.youtube.com/watch?v=x"])).toBe("sin promopack: solo enlaces de escucha (YouTube, SoundCloud…)");
 		expect(porQueSinZip(["https://www.rubadub.co.uk/stocklist"])).toBe("sin promopack: ningún enlace de la ficha lleva a uno");
+	});
+
+	// Un 7" de Fett Distro (RDUB702): sin promopack, cada cara enlazada a su MP3.
+	const fettEmail = (cat: string, host: string) => `<html><body><p>Please Pre-Order</p><p>Shipping 24th December</p>
+<img src="https://mcusercontent.com/x/images/${cat}.jpg">
+<p>Artist: Uno / Dos<br>Title: Split<br>Label: Rubadub<br>Cat: ${cat}<br>Format: 7"<br>Price: £4.59</p>
+<p><a href="https://us.list-manage.com/${cat}a?e=0">A. Uno - Dose (Sax Mix)</a></p>
+<p><a href="https://us.list-manage.com/${cat}b?e=0">B. Dos - Fuji (Dub)</a></p>
+<p>Texto del disco.</p><p><a href="https://us.list-manage.com/stock?e=0">Click here to see our current stocklist</a></p></body></html>`;
+	function redesFett(host: string) {
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+			const url = String(input instanceof Request ? input.url : input);
+			const cara = url.match(/^https:\/\/us\.list-manage\.com\/([A-Z0-9]+)([ab])\?/);
+			if (cara) return new Response(null, { status: 302, headers: { location: `http://${host}/audio/${cara[1].toLowerCase()}${cara[2]}.mp3` } });
+			if (url.startsWith("https://us.list-manage.com/stock")) return new Response(null, { status: 302, headers: { location: "https://www.rubadub.co.uk/stocklist" } });
+			if (url.startsWith(`http://${host}/audio/`)) return new Response(new Uint8Array(40), { headers: { "content-type": "audio/mpeg" } });
+			if (url.startsWith("https://mcusercontent.com/")) return new Response(new Uint8Array(50), { headers: { "content-type": "image/jpeg" } });
+			return new Response("nope", { status: 404 });
+		});
+	}
+
+	it("MP3 sueltos por pista: los de fett-distro.com entran como pistas; los de groovedis.com no, con su motivo", async () => {
+		const f = redesFett("fett-distro.com");
+		await archiva("RD__Uno-Dos---Split-RDUB-702__2026-11-01.html", fettEmail("RDUB702", "fett-distro.com"));
+		await runListenIngest(E, { now: NOW });
+		const d = await rel("RDUB702");
+		expect(d).toMatchObject({ estado: "listo", detalle: "sin promopack: MP3 sueltos por pista de fett-distro.com",
+			cover: { key: "listen/RDUB702/cover.jpg", from: "email" } });
+		expect(d.tracks.map((t: any) => [t.name, t.key])).toEqual([
+			["A. Uno - Dose (Sax Mix)", "listen/RDUB702/01-A.-Uno-Dose-Sax-Mix.mp3"], ["B. Dos - Fuji (Dub)", "listen/RDUB702/02-B.-Dos-Fuji-Dub.mp3"]]);
+		expect((await E.LISTEN_R2.head("listen/RDUB702/01-A.-Uno-Dose-Sax-Mix.mp3")).size).toBe(40);
+		expect(f.mock.calls.some(c => String(c[0]).includes("rubadub.co.uk"))).toBe(false);   // el destino de la stocklist ni se pide
+		vi.restoreAllMocks();
+		tiendaCon([]);
+		redesFett("www.groovedis.com");
+		await archiva("RD__Uno-Dos---Split-MATH021__2026-11-01.html", fettEmail("MATH021", "www.groovedis.com"));
+		await runListenIngest(E, { now: NOW });
+		expect(await rel("MATH021")).toMatchObject({ estado: "sin_zip", detalle: "sin promopack: MP3 sueltos por pista (groovedis.com)", tracks: [] });
 	});
 
 	it("los enlaces de baja o perfil de Mailchimp nunca se piden", async () => {
