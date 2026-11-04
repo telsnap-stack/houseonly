@@ -148,6 +148,7 @@ export interface ListenRelease {
   resumen?: string;              // prosa del correo (recortada), para decidir sin audio
   portada_comprobada?: boolean;  // completaPortadas ya miro su correo
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
+  reparado_at?: string;          // listen-repair ya lo reintento (sin_zip)
 }
 
 export interface ListenRunResult {
@@ -177,6 +178,7 @@ function metaDe(r: ListenRelease) {
     n: r.tracks.length, at: r.ingested_at,
     x: r.decision, dt: r.decided_at, al: r.audio_limpiado_at,
     pc: r.portada_comprobada ? 1 : undefined,
+    rz: r.reparado_at ? 1 : undefined,
   };
 }
 
@@ -255,16 +257,33 @@ function esZipDescargable(u: string): boolean {
   } catch { return false; }
 }
 
-/** El promopack del disco: directo, o tras UN salto del tracker de Mailchimp. */
+// Mailchimp a veces encadena dos trackers: en el correo de Theo Parrish del
+// 30-10, us.list-manage.com/<codigo> → rubadub.us1.list-manage.com/track/click
+// → Dropbox. Con un solo salto, 5 de sus 8 promopacks salian "sin ZIP".
+export const SALTOS_TRACKER = 3;
+
+/**
+ * Adonde lleva un enlace de Mailchimp: se sigue mientras el destino siga siendo
+ * un tracker, hasta SALTOS_TRACKER saltos. Solo desde trackers (no es un proxy
+ * abierto). '' si no se llega a un destino fuera de Mailchimp.
+ */
+export async function destinoDeTracker(raw: string): Promise<string> {
+  let u = raw.replace(/&amp;/g, '&');
+  for (let i = 0; i < SALTOS_TRACKER && TRACKER.test(u); i++) {
+    // redirect:'manual' para leer el Location sin bajar nada.
+    const r = await fetchConTimeout(u, { redirect: 'manual' });
+    await r.body?.cancel();
+    u = (r.headers.get('location') || '').replace(/&amp;/g, '&');
+  }
+  return TRACKER.test(u) ? '' : u;
+}
+
+/** El promopack del disco: directo, o al final de los saltos del tracker de Mailchimp. */
 async function enlaceDelZip(row: { zipUrl?: string; _zipLinks?: string[] }): Promise<string> {
   const candidatos = [...new Set([row.zipUrl, ...(row._zipLinks || [])].filter(Boolean) as string[])];
   for (const raw of candidatos) {
     const u = raw.replace(/&amp;/g, '&');
-    if (esZipDescargable(u)) return /dropbox\.com/i.test(u) ? dropboxDescarga(u) : u;
-    if (!TRACKER.test(u)) continue;
-    // redirect:'manual' para leer el Location sin bajar nada (como resolve-links).
-    const r = await fetchConTimeout(u, { redirect: 'manual' });
-    const dest = r.headers.get('location') || '';
+    const dest = TRACKER.test(u) ? await destinoDeTracker(u) : u;
     if (esZipDescargable(dest)) return /dropbox\.com/i.test(dest) ? dropboxDescarga(dest) : dest;
   }
   return '';
@@ -292,13 +311,12 @@ export function cuentaPistas(html: string): number {
 
 const esDropbox = (u: string) => { try { return /(^|\.)dropbox\.com$/i.test(new URL(u).hostname); } catch { return false; } };
 
-/** El primer enlace de pista que lleve a Dropbox (directo o tras un salto del tracker). */
+/** El primer enlace de pista que lleve a Dropbox (directo o tras los saltos del tracker). */
 async function dropboxDePista(enlaces: string[]): Promise<string> {
   for (const u of enlaces) {
     if (esDropbox(u)) return u;
     if (!TRACKER.test(u)) continue;
-    const r = await fetchConTimeout(u, { redirect: 'manual' });
-    const dest = r.headers.get('location') || '';
+    const dest = await destinoDeTracker(u);
     if (esDropbox(dest)) return dest;
   }
   return '';
@@ -1039,6 +1057,67 @@ export async function handleListenUpload(request: Request, env: ListenEnv, autor
   }
   await guardaRelease(env, nuevo);
   return json({ ok: true, item: await conUrls(env, new URL(request.url).origin, nuevo) });
+}
+
+// ── reparacion de los "sin ZIP" ────────────────────────────────
+
+const REPARA_POR_PASADA = 6;
+const HAY_TRACKER = /https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
+
+export interface ListenRepairResult {
+  intentados: number;
+  por_estado: Partial<Record<ListenEstado, number>>;
+  siguen_sin_zip: string[];      // catno de los que ni con los saltos tienen promopack
+  sin_tracker: number;           // su correo no lleva enlaces de Mailchimp: no se tocan
+  quedan: boolean;
+}
+
+/**
+ * Los sin_zip que entraron cuando la ingesta seguia un solo salto del tracker
+ * (hasta el 04-11): se reabre su correo y se reintenta el promopack. Se conserva
+ * todo lo del disco (decision, fechas, resumen); solo cambian estado, audio,
+ * portada y textos. Cada disco una vez (reparado_at), tope por llamada como la
+ * ingesta: se repite mientras quedan=true.
+ */
+export async function reparaSinZip(env: ListenEnv, now = new Date()): Promise<ListenRepairResult> {
+  const out: ListenRepairResult = { intentados: 0, por_estado: {}, siguen_sin_zip: [], sin_tracker: 0, quedan: false };
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.metadata || {};
+      if (m.e !== 'sin_zip' || m.rz) continue;
+      if (out.intentados >= REPARA_POR_PASADA) { out.quedan = true; return out; }
+      const prev = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
+      if (!prev || prev.estado !== 'sin_zip') continue;
+      const reparado_at = now.toISOString();
+      const html = await env.EMAILS.get(`msg:${prev.email}`);
+      const [y, mo, d] = prev.email_date.split('-').map(Number);
+      const rows: any[] = !html || !HAY_TRACKER.test(html) ? []
+        : prev.distribuidor === 'DBH' ? parseDbhEmail(html)
+        : parseDistributorEmail(html, { fx: RD_GBP_EUR, emailDate: new Date(y, mo - 1, d) });
+      const row = rows.find(r => claveCatno(r.catno) === prev.clave);
+      if (!row) { out.sin_tracker++; await guardaRelease(env, { ...prev, reparado_at }); continue; }
+      out.intentados++;
+      const unDisco = prev.distribuidor !== 'DBH' && new Set(rows.map(r => claveCatno(r.catno)).filter(Boolean)).size === 1;
+      const email: IdxEntry = { name: prev.email, prefix: prev.distribuidor, subject: '', date: prev.email_date };
+      const n = await ingiereDisco(env, row, email, prev.ingested_at, unDisco ? html! : undefined);
+      await guardaRelease(env, {
+        ...prev, estado: n.estado, detalle: n.detalle, zip_link: n.zip_link, tracks: n.tracks, bytes: n.bytes,
+        cover: n.cover || prev.cover, textos: n.textos || prev.textos, reparado_at,
+      });
+      out.por_estado[n.estado] = (out.por_estado[n.estado] || 0) + 1;
+      if (n.estado === 'sin_zip') out.siguen_sin_zip.push(prev.catno);
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  return out;
+}
+
+/** POST ?action=listen-repair (Bearer) — una tanda de reparacion de sin_zip. */
+export async function handleListenRepair(env: ListenEnv, autorizado: boolean): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  return json({ ok: true, ...(await reparaSinZip(env)) });
 }
 
 /** POST ?action=listen-run (Bearer) — una pasada a mano, aunque el modo no sea live. */
