@@ -7,7 +7,8 @@ import {
 	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
-import { parseDbhEmail } from "../src/lib/distributor-email.mjs";
+import { parseDbhEmail, parseSubwaxEmail } from "../src/lib/distributor-email.mjs";
+import { SUBWAX_SEMANA45 } from "./fixtures/subwax";
 import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
 const E = env as any;
@@ -97,6 +98,22 @@ describe("parseDbhEmail", () => {
 	});
 });
 
+describe("parseSubwaxEmail", () => {
+	it("una fila por ficha: cabecera, linea de catalogo, euros con coma, portada de la ficha y Download files", () => {
+		const rows = parseSubwaxEmail(SUBWAX_SEMANA45);
+		expect(rows.map(r => r.catno)).toEqual(["ABOUNAIM002", "HEALER003", "MID-FLOW01", "SKKB032"]);
+		expect(rows[0]).toMatchObject({
+			artist: "Various", title: "Meet Some Friends EP", label: "Abou Naïm Records", format: '12" Vinyl',
+			dealerPrice: 9.19, genre: "", release: "", source: "subwax", forthcoming: true,
+			coverUrl: "https://mcusercontent.com/x/images/ficha1.jpeg", _zipLinks: ["https://us.list-manage.com/zip1?e=0"],
+			_desc: "Texto de la ficha 1.",
+		});
+		// El titulo partido con <br> y el "&amp;"; la cabecera del correo no es portada de nadie.
+		expect(rows[1]).toMatchObject({ artist: "Squash", title: "Big Motion (Incl. Sleeper & Baby Rollén Remixes)", coverUrl: "https://mcusercontent.com/x/images/ficha2.jpeg" });
+		expect(rows[0]._gbp).toBeUndefined();
+	});
+});
+
 describe("listen: qué emails y qué ficheros", () => {
 	it("solo anuncios RD/TV/DBH recientes; fuera pedidos, digests, otros distribuidores y lo viejo", () => {
 		const e = (prefix: string, subject: string, date = "2026-11-01") => ({ name: `${prefix}__${subject}__${date}.html`, prefix, subject, date });
@@ -126,6 +143,11 @@ describe("listen: qué emails y qué ficheros", () => {
 		expect(r.mp3).toEqual(["A2 - x.mp3", "A10 - x.mp3", "B1 - x.mp3"]);
 		expect(r.portada).toBe("CAT_front.jpeg");
 		expect(eligeFicheros([{ name: "a.mp3", size: 1 }, { name: "label.png", size: 9 }]).portada).toBeNull();
+		// Subwax: _A (o _1_Front) es la frontal aunque la _B pese mas; "{CATNO} info.txt", con espacio.
+		expect(eligeFicheros([{ name: "HEALER003_pack/HEALER003_B.jpeg", size: 900 }, { name: "HEALER003_pack/HEALER003_A.jpeg", size: 800 },
+			{ name: "HEALER003_pack/HEALER003 info.txt", size: 9 }, { name: "HEALER003_pack/notas.txt", size: 9 }]))
+			.toMatchObject({ portada: "HEALER003_pack/HEALER003_A.jpeg", promotext: "HEALER003_pack/HEALER003 info.txt" });
+		expect(eligeFicheros([{ name: "X_2_Back.jpeg", size: 900 }, { name: "X_1_Front.jpeg", size: 100 }]).portada).toBe("X_1_Front.jpeg");
 		// DBH: la trasera nunca, pese mas o vaya delante; su _info.txt es el texto.
 		const dbh = eligeFicheros([{ name: "X1_cover_back.jpg", size: 900 }, { name: "X1_cover.jpg", size: 100 }, { name: "notas.txt", size: 5 }, { name: "X1_info.txt", size: 50 }]);
 		expect(dbh).toMatchObject({ portada: "X1_cover.jpg", promotext: "X1_info.txt" });
@@ -316,6 +338,33 @@ describe("listen: ingesta", () => {
 		expect((await rel("NOTR001")).estado).toBe("sin_zip");
 		// Cada disco una vez.
 		expect(await reparaSinZip(E, NOW)).toMatchObject({ intentados: 0, sin_tracker: 0 });
+	});
+
+	it("Subwax: los 4 discos de la semana 45, ZIP de subwax.es tras el tracker, euros sin FX, portada _A e info.txt", async () => {
+		const zipDeCat = (c: string) => zipDe({ [`${c}_pack/${c}_A.jpeg`]: 100, [`${c}_pack/${c}_B.jpeg`]: 900, [`${c}_pack/${c} info.txt`]: 40,
+			[`${c}_pack/${c} A1 Uno (snippet).mp3`]: 30, [`${c}_pack/${c} B1 Dos (snippet).mp3`]: 20, [`__MACOSX/${c}_pack/._${c}_A.jpeg`]: 5 });
+		const cats = ["ABOUNAIM002", "HEALER003", "MID-FLOW01", "SKKB032"];
+		const f = vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any) => {
+			const url = String(input instanceof Request ? input.url : input);
+			const zipN = url.match(/^https:\/\/us\.list-manage\.com\/zip(\d)/);
+			if (zipN) return new Response(null, { status: 302, headers: { location: `https://subwax.es/wp-content/uploads/2026/11/${cats[+zipN[1] - 1]}_pack.zip` } });
+			const pack = url.match(/^https:\/\/subwax\.es\/wp-content\/uploads\/2026\/11\/(.+)_pack\.zip$/);
+			if (pack) return new Response(zipDeCat(pack[1]), { headers: { "content-type": "application/zip" } });
+			return new Response("nope", { status: 404 });
+		});
+		await archiva("SUBWAX__New-pre-orders---week-452026__2026-11-01.html", SUBWAX_SEMANA45, "2026-11-01", "SUBWAX");
+		const r = await runListenIngest(E, { now: NOW, fuente: "SUBWAX" });
+		expect(r).toMatchObject({ nuevos: 4, por_estado: { listo: 4 }, emails_cerrados: 1, quedan: false });
+		const d = await rel("MIDFLOW01");
+		expect(d).toMatchObject({ catno: "MID-FLOW01", distribuidor: "SUBWAX", artist: "Unknown Artist", label: "Mid-Flow Records",
+			dealerPrice: 9.39, release: "", cover: { key: "listen/MIDFLOW01/cover.jpg", from: "zip" },
+			textos: { promotext: "listen/MIDFLOW01/promotext.txt" }, resumen: "Texto de la ficha 3." });
+		expect(d.gbp).toBeUndefined();
+		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=MIDFLOW01"), E, true)).json();
+		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);   // sin catno, cara ni "(snippet)"
+		expect((await E.LISTEN_R2.head("listen/MIDFLOW01/cover.jpg")).size).toBe(100);   // la _A, no la _B
+		// "Audio clips" (SoundCloud) ni se pide.
+		expect(f.mock.calls.some(c => String(c[0]).includes("clips"))).toBe(false);
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
