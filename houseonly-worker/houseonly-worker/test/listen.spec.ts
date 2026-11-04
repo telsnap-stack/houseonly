@@ -8,6 +8,7 @@ import {
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail } from "../src/lib/distributor-email.mjs";
+import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
 const E = env as any;
 const SECRET = "listen-test-secret";
@@ -106,13 +107,14 @@ describe("listen: qué emails y qué ficheros", () => {
 			e("WS", "Wordandsound-Update"), e("MT", "Fwd-Mother-Tongue"),
 			e("RD", "Old-CAT004", "2026-10-29"), e("TV", "Newsletter-KW45-2026"),
 			e("RD", "Older-CAT005", "2026-10-25"),
+			e("RD", "New-Theo-Parrish-Sound-Signature-Represses", "2026-10-30"), e("RD", "Imports-Shipping-Today-X", "2026-10-30"),
 		];
 		// listen-run a mano: ventana mas larga y una sola fuente.
-		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Older-CAT005", "Old-CAT004", "Artist---Title-CAT001"]);
+		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Older-CAT005", "Old-CAT004", "New-Theo-Parrish-Sound-Signature-Represses", "Artist---Title-CAT001"]);
 		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
 		// La ventana del cron es de 7 dias: CAT004 (hace 4) entra, CAT005 (hace 8) no.
 		expect(emailsCandidatos(idx, NOW).map(x => x.subject)).toEqual(
-			["Old-CAT004", "CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
+			["Old-CAT004", "New-Theo-Parrish-Sound-Signature-Represses", "CAT002---T---A-20-11-2026", "DBH-Music---Newsletter-KW45-2026", "DBH-Music---Out-soon-DBH001", "Artist---Title-CAT001"]);
 	});
 
 	it("MP3 en orden natural, sin __MACOSX ni ._; portada JPG con 'front' antes que la mayor; PNG fuera", () => {
@@ -225,6 +227,35 @@ describe("listen: ingesta", () => {
 		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(1);
 		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=DBH777"), E, true)).json();
 		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
+	});
+
+	it("RD: los represses (asunto de digest) se abren; fuera solo las listas masivas, y el resumen las nombra", async () => {
+		redes(zipDe({ "A1.mp3": 30, "cover.jpg": 100 }));
+		// Correos reales del archivo: 3 fichas de Short Span y 9 de Theo Parrish
+		// (SS093/94 con barra; SS041 sin enlace al ZIP).
+		await archiva("RD__Short-Span-Represses---Short11-Short8-Short15__2026-10-27.html", RD_SHORT_SPAN, "2026-10-27");
+		await archiva("RD__New-Theo-Parrish-Sound-Signature-Represses__2026-10-30.html", RD_THEO_PARRISH, "2026-10-30");
+		await archiva("RD__Imports-Shipping-Today-Synaptic-Voyager__2026-11-02.html", rdEmail("NOPE001"), "2026-11-02");
+		await archiva("RD__Fwd-Artist---Title-CAT009__2026-11-01.html", rdEmail("NOPE002"));
+
+		// 12 discos con tope de 6: Short Span entero y 3 de Theo; su correo sigue abierto.
+		const r1 = await runListenIngest(E, { now: NOW });
+		expect(r1).toMatchObject({ nuevos: 6, emails_cerrados: 1, quedan: true });
+		expect(r1.descartados_asunto).toEqual([
+			"RD__Fwd-Artist---Title-CAT009__2026-11-01.html (pedido)",
+			"RD__Imports-Shipping-Today-Synaptic-Voyager__2026-11-02.html (lista masiva)",
+		]);
+		expect(await E.SYNC_STATE.get("listen:mail:RD__New-Theo-Parrish-Sound-Signature-Represses__2026-10-30.html")).toBeNull();
+
+		// La pasada siguiente sigue donde lo dejo: las 6 que faltan, y lo cierra.
+		const r2 = await runListenIngest(E, { now: NOW });
+		expect(r2).toMatchObject({ nuevos: 6, emails_cerrados: 1, quedan: false, saltados: { duplicado: 3 } });
+		for (const c of ["SHORT8", "SHORT11", "SHORT15", "SS023", "SS032", "COD1", "SS09394", "ELV001", "SS017", "SS041", "SS049", "SS104105"])
+			expect(await rel(c), c).not.toBeNull();
+		expect(await rel("SS09394")).toMatchObject({ catno: "SS093/94", artist: "Theo Parrish", release: "2026-11-15", estado: "listo" });
+		expect((await rel("SS041")).estado).toBe("sin_zip");
+		expect(await rel("NOPE001")).toBeNull();
+		expect(await rel("NOPE002")).toBeNull();
 	});
 
 	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
