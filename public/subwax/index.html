@@ -20,6 +20,7 @@
   color-scheme:dark;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
 button,input,select,textarea{font:inherit;color:inherit}
@@ -193,8 +194,10 @@ select{max-width:200px}
       <select id="lab" aria-label="Sello"></select>
       <label class="chk"><input type="checkbox" id="onlyCart"> Solo mi pedido</label>
       <label class="chk"><input type="checkbox" id="hideShop"> Ocultar los que ya tengo</label>
+      <label class="chk"><input type="checkbox" id="onlyNew"> Solo nuevos</label>
+      <button class="btn sm" id="fromTray" hidden title="Pone 2 copias de cada disco marcado como elegido en la bandeja del tab Pre-order">Traer elegidos de la bandeja</button>
     </div>
-    <div class="note" id="preNote" hidden>Los pre-orders van en una lista aparte del pedido normal (panel de la derecha). Subwax solo los acepta a clientes que piden cada mes, y pide mandarlos como máximo una vez por semana: después del primero, solo las copias nuevas.</div>
+    <div class="note" id="preNote" hidden>Lista aparte del pedido normal. Al descargar el Pre-order Form, esos discos quedan como <b>elegidos</b> en la bandeja del tab Pre-order del admin, que es la que los sube a la tienda con su audio. Subwax solo acepta pre-orders de clientes que piden cada mes y como máximo una vez por semana: después del primero, solo las copias nuevas.</div>
     <div class="note" id="goneNote" hidden>Discos que estaban en la stocklist y ya no aparecen (Subwax los quita cuando se agotan). Se conservan 90 días; solo para escuchar.</div>
     <div class="note err" id="errNote" hidden></div>
     <div class="list" id="list"></div>
@@ -241,7 +244,7 @@ const fecha = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocal
 const hace = iso => { const m = (Date.now() - Date.parse(iso)) / 60000; if (!(m >= 0)) return ''; if (m < 60) return `${Math.round(m)} min`; if (m < 48 * 60) return `${Math.round(m / 60)} h`; return `${Math.round(m / 1440)} días`; };
 
 let SECRET = '';
-let DATA = [], GONE = [], ORDERS = [], LAST = null, UPDATED = '';
+let DATA = [], GONE = [], ORDERS = [], LAST = null, UPDATED = '', BANDEJA = {};
 let tab = 0, selId = null, tall = false, carts = { order: {}, pre: {} };
 try { const c = JSON.parse(localStorage.getItem("subwax_carts") || "null"); if (c && c.order && c.pre) carts = c; } catch (e) { }
 function saveCart() { try { localStorage.setItem("subwax_carts", JSON.stringify(carts)); } catch (e) { } }
@@ -279,7 +282,7 @@ function aplica(j) {
   const st = j.stock || { rows: [], gone: [], updated_at: '' };
   DATA = st.rows.map((r, i) => ({ ...r, id: i }));
   GONE = st.gone.map((r, i) => ({ ...r, id: 100000 + i, section: 'GONE' }));
-  UPDATED = st.updated_at; LAST = j.last_refresh; ORDERS = j.orders || [];
+  UPDATED = st.updated_at; LAST = j.last_refresh; ORDERS = j.orders || []; BANDEJA = j.bandeja || {};
   PRIMERA = DATA.reduce((m, x) => (!m || x.first_seen < m) ? x.first_seen : m, '');
   const emb = DATA.filter(r => r.embed).length, pend = DATA.filter(r => r.listen && !r.embed && !r.embed_error).length;
   $("#status").innerHTML = UPDATED
@@ -317,6 +320,8 @@ async function resolverPendientes() {
 const inTab = r => r.section === TABS[tab][1];
 const isPre = r => r.section === "PRE ORDERS";
 const isGone = r => r.section === "GONE";
+const norm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+const TRAY = { preorder: 'elegido', pendiente: 'pendiente', rechazado: 'rechazado', cargado: 'cargado' };
 const mode = () => tab === 2 ? "pre" : "order";
 const cartOf = r => isPre(r) ? carts.pre : carts.order;
 const qOf = id => { const r = byId(id); return r ? (cartOf(r)[id] || 0) : 0; };
@@ -346,11 +351,12 @@ function drawLabels() {
   if (labs.some(x => x[0] === cur)) $("#lab").value = cur;
 }
 function visible() {
-  const q = $("#q").value.trim().toLowerCase(), lab = $("#lab").value, only = $("#onlyCart").checked, hideShop = $("#hideShop").checked;
+  const q = $("#q").value.trim().toLowerCase(), lab = $("#lab").value, only = $("#onlyCart").checked, hideShop = $("#hideShop").checked, onlyNew = $("#onlyNew").checked;
   const src = tab === 3 ? GONE : DATA;
   return src.filter(r => {
     if (only) { if (!carts[mode()][r.id] || (mode() === "pre") !== isPre(r)) return false; } else if (tab !== 3 && !inTab(r)) return false;
     if (hideShop && r.shop) return false;
+    if (onlyNew && !esNuevo(r)) return false;
     if (lab && r.label !== lab) return false;
     if (q && !(`${r.artist} ${r.title} ${r.label} ${r.cat}`.toLowerCase().includes(q))) return false;
     return true;
@@ -362,6 +368,8 @@ function pills(r) {
   if (r.shop) p.push(`<span class="pill shop" title="${esc(r.shop.title)} · SKU ${esc(r.shop.sku)} · ${esc(r.shop.status)}">en tienda · ${r.shop.qty ?? '?'}</span>`);
   const pd = pedidoDe(r.cat); if (pd) p.push(`<span class="pill ordered" title="Última vez ${fecha(pd.last)}">pedido ${pd.q}× · ${fecha(pd.last)}</span>`);
   if (r.gone_at) p.push(`<span class="pill gone">fuera desde ${fecha(r.gone_at)}</span>`);
+  const b = isPre(r) && BANDEJA[norm(r.cat)];
+  if (b) p.push(`<span class="pill ${b.decision === 'preorder' || b.decision === 'cargado' ? 'shop' : b.decision === 'rechazado' ? 'gone' : ''}" title="Bandeja del tab Pre-order">bandeja: ${TRAY[b.decision] || 'sin decidir'}</span>`);
   if (!r.listen) p.push('<span class="noaudio">sin audio</span>');
   else if (!r.embed) p.push(`<span class="noaudio">${r.embed_error ? 'solo en SoundCloud' : 'resolviendo audio…'}</span>`);
   return p.join('');
@@ -370,6 +378,7 @@ function drawList() {
   const rows = visible();
   $("#preNote").hidden = !(tab === 2 && !$("#onlyCart").checked);
   $("#goneNote").hidden = tab !== 3;
+  $("#fromTray").hidden = tab !== 2 || !Object.values(BANDEJA).some(b => b.decision === 'preorder');
   $("#list").innerHTML = rows.map(r => {
     const q = isGone(r) ? 0 : (cartOf(r)[r.id] || 0);
     return `<div class="row${r.id === selId ? " sel" : ""}" data-id="${r.id}">
@@ -506,7 +515,19 @@ document.addEventListener("click", async e => {
   select(id);
 });
 $("#q").addEventListener("input", drawList); $("#lab").addEventListener("change", drawList);
-$("#onlyCart").addEventListener("change", drawList); $("#hideShop").addEventListener("change", drawList);
+$("#onlyCart").addEventListener("change", drawList); $("#hideShop").addEventListener("change", drawList); $("#onlyNew").addEventListener("change", drawList);
+$("#fromTray").onclick = () => {
+  // Elegidos de la bandeja que aun no estan ni en el carrito ni en un pre-order anotado → 2 copias (lo estandar).
+  let n = 0;
+  for (const r of DATA) {
+    if (!isPre(r)) continue;
+    const b = BANDEJA[norm(r.cat)];
+    if (!b || b.decision !== 'preorder' || carts.pre[r.id] || pedidoDe(r.cat)) continue;
+    carts.pre[r.id] = 2; n++;
+  }
+  saveCart(); drawList(); drawCart();
+  say(n ? `${n} elegidos de la bandeja añadidos con 2 copias.` : 'Todos los elegidos de la bandeja ya están en el carrito o pedidos.');
+};
 $("#prev").onclick = () => move(-1); $("#next").onclick = () => move(1);
 $("#refresh").onclick = () => refrescar();
 $("#tall").onclick = () => { tall = !tall; $("#frame").classList.toggle("tall", tall); $("#tall").textContent = tall ? "Ocultar tracks" : "Tracks"; };
