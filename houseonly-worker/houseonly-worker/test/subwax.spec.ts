@@ -158,3 +158,41 @@ describe('subwax: refresh y pedidos', () => {
     expect((await handleSubwaxStock(E, false)).status).toBe(401);
   });
 });
+
+describe('subwax: puente con la bandeja de Pre-order', () => {
+  const rel = (clave: string, extra: any = {}) => ({
+    clave, catno: clave, distribuidor: 'SUBWAX', artist: 'A', title: 'T', label: 'L', format: '12"', release: '', dealerPrice: 8,
+    email: 'x.html', email_date: '2026-11-04', estado: 'listo', tracks: [], bytes: 0, ingested_at: '2026-11-04T09:00:00Z', ...extra,
+  });
+  const meta = (r: any) => ({ c: r.catno, d: r.distribuidor, e: r.estado, x: r.decision });
+  beforeEach(async () => {
+    await E.SYNC_STATE.delete('subwax:stock'); await E.SYNC_STATE.delete('subwax:orders');
+    for (const k of ['XRD045', 'BNSD010', 'OTRO1']) await E.SYNC_STATE.delete(`listen:rel:${k}`);
+    vi.restoreAllMocks();
+    vi.spyOn(shopifyAdmin, 'searchVariantsBySkus').mockResolvedValue([]);
+    const a = rel('XRD045', { decision: 'pendiente' }), b = rel('BNSD010', { decision: 'rechazado', rechazo: 'temporal' }), c = rel('OTRO1', { distribuidor: 'RD' });
+    for (const r of [a, b, c]) await E.SYNC_STATE.put(`listen:rel:${r.clave}`, JSON.stringify(r), { metadata: meta(r) });
+    await E.SYNC_STATE.put('preorder:rejected:BNSD010', JSON.stringify({ catno: 'BNSD010', tipo: 'temporal' }));
+    await refreshSubwax(E, { fetcher: fetcher(), maxResolve: 0, minRows: 1 });
+  });
+
+  it('subwax-stock devuelve la decision de la bandeja solo para Subwax', async () => {
+    const j: any = await (await handleSubwaxStock(E, true)).json();
+    expect(j.bandeja.XRD045).toMatchObject({ decision: 'pendiente', estado: 'listo' });
+    expect(j.bandeja.BNSD010.decision).toBe('rechazado');
+    expect(j.bandeja.OTRO1).toBeUndefined();
+  });
+
+  it('un Pre-order Form deja sus discos como elegidos (y levanta el rechazo); un Order Form no toca la bandeja', async () => {
+    const post = (body: any) => handleSubwaxOrder(new Request('https://w/?action=subwax-order', { method: 'POST', body: JSON.stringify(body) }), E, true);
+    const j: any = await (await post({ op: 'add', kind: 'preorder', lines: [{ cat: 'XRD045', qty: 2 }, { cat: 'BNSD010', qty: 2 }, { cat: 'CMR010', qty: 1 }] })).json();
+    expect(j.elegidos.sort()).toEqual(['BNSD010', 'XRD045']);
+    const x = JSON.parse(await E.SYNC_STATE.get('listen:rel:XRD045'));
+    expect(x.decision).toBe('preorder'); expect(x.decided_at).toBeTruthy();
+    const b = JSON.parse(await E.SYNC_STATE.get('listen:rel:BNSD010'));
+    expect(b.decision).toBe('preorder'); expect(b.rechazo).toBeUndefined();
+    expect(await E.SYNC_STATE.get('preorder:rejected:BNSD010')).toBeNull();
+    const o: any = await (await post({ op: 'add', kind: 'order', lines: [{ cat: 'XRD045', qty: 1 }] })).json();
+    expect(o.elegidos).toEqual([]);
+  });
+});

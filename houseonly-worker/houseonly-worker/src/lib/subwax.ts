@@ -28,6 +28,7 @@
 //   subwax:last_refresh  resumen de la ultima pasada (ok/error)
 import { unzipSync } from 'fflate';
 import { searchVariantsBySkus, type ShopifyAdminEnv } from './shopify-admin';
+import { decisionesBandeja, marcaElegidosPorCatno, type ListenEnv } from './listen';
 
 export const SUBWAX_SHEET_ID = '1SxRUuuJibwRtYKLv7-TrgK72LojMjSe0yNmOHIpi9Q4';
 export const SUBWAX_SHEET_XLSX = `https://docs.google.com/spreadsheets/d/${SUBWAX_SHEET_ID}/export?format=xlsx`;
@@ -40,6 +41,9 @@ const GONE_DIAS = 90;
 export interface SubwaxEnv extends ShopifyAdminEnv {
   SYNC_STATE: KVNamespace;
 }
+// La bandeja (listen.ts) pide mas bindings de los que aqui se usan; el worker
+// pasa el env entero, asi que el cast es seguro.
+const comoListen = (env: SubwaxEnv) => env as unknown as ListenEnv;
 
 export interface SubwaxRow {
   cat: string;
@@ -284,7 +288,10 @@ export async function handleSubwaxStock(env: SubwaxEnv, autorizado: boolean): Pr
   const stock = await leeStock(env);
   const last = JSON.parse((await env.SYNC_STATE.get(LAST_KEY)) || 'null');
   const orders: SubwaxOrder[] = JSON.parse((await env.SYNC_STATE.get(ORDERS_KEY)) || '[]');
-  return json({ stock, last_refresh: last, orders });
+  // Decision de la bandeja de Pre-order por catno normalizado (solo Subwax).
+  let bandeja: Record<string, unknown> = {};
+  try { bandeja = await decisionesBandeja(comoListen(env), 'SUBWAX'); } catch { /* sin bandeja, el player sigue */ }
+  return json({ stock, last_refresh: last, orders, bandeja });
 }
 
 export async function handleSubwaxRefresh(request: Request, env: SubwaxEnv, autorizado: boolean): Promise<Response> {
@@ -334,7 +341,13 @@ export async function handleSubwaxOrder(request: Request, env: SubwaxEnv, autori
     };
     orders.unshift(order);
     await env.SYNC_STATE.put(ORDERS_KEY, JSON.stringify(orders.slice(0, 500)));
-    return json({ ok: true, order, orders });
+    // Un Pre-order Form deja esos discos como elegidos en la bandeja, para que
+    // "Cargar elegidos" del tab Pre-order los suba a la tienda con su audio.
+    let elegidos: string[] = [];
+    if (kind === 'preorder') {
+      try { elegidos = await marcaElegidosPorCatno(comoListen(env), lines.map((l) => l.cat)); } catch { /* la bandeja no bloquea el pedido */ }
+    }
+    return json({ ok: true, order, orders, elegidos });
   }
   const id = String(body?.id || '');
   const i = orders.findIndex((o) => o.id === id);

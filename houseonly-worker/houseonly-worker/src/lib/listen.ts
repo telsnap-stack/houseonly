@@ -930,6 +930,45 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
     cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null }, ...(copias ? { copias } : {}) });
 }
 
+// ── Puente con el player de Subwax (src/lib/subwax.ts) ─────────
+// La bandeja y el player ven los mismos pre-orders de Subwax (los correos
+// semanales entran aqui; la Google Sheet, alli). Para no decidir dos veces:
+// el player muestra la decision de la bandeja y, al exportar un Pre-order
+// Form, lo pedido queda como elegido aqui.
+
+export interface DecisionBandeja { clave: string; decision: ListenDecision | null; estado: ListenEstado }
+
+/** Decisiones de la bandeja de un distribuidor, por catno normalizado (claveCatno). Solo metadata: no abre los discos. */
+export async function decisionesBandeja(env: ListenEnv, distribuidor: string): Promise<Record<string, DecisionBandeja>> {
+  const out: Record<string, DecisionBandeja> = {};
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys || []) {
+      const m = k.metadata as { c?: string; d?: string; e?: ListenEstado; x?: ListenDecision } | undefined;
+      if (!m || m.d !== distribuidor) continue;
+      out[claveCatno(m.c)] = { clave: k.name.slice(REL_PREFIX.length), decision: m.x ?? null, estado: m.e as ListenEstado };
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  return out;
+}
+
+/** Marca como elegidos (preorder) los discos de la bandeja con esos catnos. Devuelve los que cambio. No toca los ya cargados. */
+export async function marcaElegidosPorCatno(env: ListenEnv, catnos: string[], ahora = Date.now()): Promise<string[]> {
+  const cambiados: string[] = [];
+  for (const cat of new Set(catnos.map(claveCatno).filter(Boolean))) {
+    const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + cat, 'json');
+    if (!r || r.decision === 'preorder' || r.decision === 'cargado') continue;
+    if (r.decision === 'rechazado') await env.SYNC_STATE.delete(claveKV(r.catno));
+    delete r.rechazo;
+    r.decision = 'preorder'; r.decided_at = new Date(ahora).toISOString();
+    await guardaRelease(env, r);
+    cambiados.push(r.catno);
+  }
+  return cambiados;
+}
+
 // ── URLs firmadas ──────────────────────────────────────────────
 
 const enc = new TextEncoder();
