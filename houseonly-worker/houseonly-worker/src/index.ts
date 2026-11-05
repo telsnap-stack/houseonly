@@ -920,6 +920,7 @@ import { sendScoutReport } from './lib/scout-mail';
 import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
+import { handleSubwaxStock, handleSubwaxRefresh, handleSubwaxOrder, refreshSubwax } from './lib/subwax';
 import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, SALTOS_TRACKER } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
@@ -1928,6 +1929,21 @@ export default {
       const html = await env.EMAILS.get(`msg:${name}`);
       if (html == null) return jsonRes({ error: 'not found' }, 404);
       return jsonRes({ ok: true, name, html });
+    }
+
+    // ── SUBWAX PLAYER (src/lib/subwax.ts) ──────────────────
+    //   GET  ?action=subwax-stock    Bearer  stocklist (con embeds y stock de tienda), ultima pasada y pedidos
+    //   POST ?action=subwax-refresh  Bearer  baja la Google Sheet de Subwax, resuelve SoundCloud (&resolve=N) y cruza con Shopify
+    //   POST ?action=subwax-order    Bearer  {op:add|status|delete} libro de Order Forms / Pre-order Forms
+    // Tambien corre a diario dentro de DAILY_CRON. La pagina: /subwax/ del frontend.
+    if (action === 'subwax-stock' && request.method === 'GET') {
+      return await handleSubwaxStock(env, bearerAdminValido(request, env));
+    }
+    if (action === 'subwax-refresh' && request.method === 'POST') {
+      return await handleSubwaxRefresh(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'subwax-order' && request.method === 'POST') {
+      return await handleSubwaxOrder(request, env, bearerAdminValido(request, env));
     }
 
     // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
@@ -3335,6 +3351,13 @@ export default {
         rebuildGoogleFeed(env).then(
           (r) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: true, ...r })),
           (err) => env.SYNC_STATE.put('meta:google_feed_last_run', JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })),
+        ),
+      );
+      // Stocklist de Subwax (/subwax/): si falla, se queda la de ayer y el
+      // error en subwax:last_refresh (lo escribe el propio modulo).
+      ctx.waitUntil(
+        refreshSubwax(env).catch(
+          (err) => env.SYNC_STATE.put('subwax:last_refresh', JSON.stringify({ ok: false, at: new Date(event.scheduledTime).toISOString(), error: err?.message || String(err) })),
         ),
       );
       // Generos extra de la rejilla: si falla, se queda el de ayer.
