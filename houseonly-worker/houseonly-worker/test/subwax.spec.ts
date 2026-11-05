@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { zipSync, strToU8 } from "fflate";
-import { leeXlsx, parseStocklist, resuelveSoundcloud, refreshSubwax, handleSubwaxOrder, handleSubwaxStock, normSku, desentidad } from "../src/lib/subwax";
+import { leeXlsx, parseStocklist, resuelveSoundcloud, refreshSubwax, handleSubwaxOrder, handleSubwaxStock, handleSubwaxRefresh, resuelvePendientes, normSku, desentidad } from "../src/lib/subwax";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 
 const E = env as any;
@@ -126,6 +126,24 @@ describe('subwax: refresh y pedidos', () => {
     expect(r3).toMatchObject({ rows: 3, agotados: 1 });
     const s3 = JSON.parse(await E.SYNC_STATE.get('subwax:stock'));
     expect(s3.gone[0]).toMatchObject({ cat: 'CMR010', gone_at: '2026-11-07T06:00:00.000Z' });
+  });
+
+  it('only=resolve resuelve sobre lo guardado sin bajar la hoja ni tocar Shopify', async () => {
+    const spy = vi.spyOn(shopifyAdmin, 'searchVariantsBySkus').mockResolvedValue([]);
+    await refreshSubwax(E, { fetcher: fetcher(), maxResolve: 0, minRows: 1 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const f = fetcher();
+    const r1 = await resuelvePendientes(E, 2, f);
+    expect(r1).toMatchObject({ resueltos: 2, fallidos: 0, pendientes: 1 });
+    const r2 = await resuelvePendientes(E, 40, f);
+    expect(r2).toMatchObject({ resueltos: 1, pendientes: 0 });
+    expect((f as any).mock.calls.every((c: any) => String(c[0]).includes('oembed'))).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(await E.SYNC_STATE.get('subwax:stock')).rows.filter((r: any) => r.embed).length).toBe(3);
+    // Sin stock guardado no rompe; y la ruta exige Bearer.
+    await E.SYNC_STATE.delete('subwax:stock');
+    expect(await resuelvePendientes(E, 5, f)).toMatchObject({ pendientes: 0, sin_stock: true });
+    expect((await handleSubwaxRefresh(new Request('https://w/?action=subwax-refresh&only=resolve', { method: 'POST' }), E, false)).status).toBe(401);
   });
 
   it('no pisa la stocklist si la hoja deja de ser publica (html) o viene vacia', async () => {

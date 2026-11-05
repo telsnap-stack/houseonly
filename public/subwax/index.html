@@ -278,7 +278,7 @@ $("#loginForm").addEventListener('submit', async e => {
 });
 
 // ── Datos ────────────────────────────────────────────────────
-function aplica(j) {
+function aplica(j, opts = {}) {
   const st = j.stock || { rows: [], gone: [], updated_at: '' };
   DATA = st.rows.map((r, i) => ({ ...r, id: i }));
   GONE = st.gone.map((r, i) => ({ ...r, id: 100000 + i, section: 'GONE' }));
@@ -291,29 +291,41 @@ function aplica(j) {
   $("#errNote").hidden = !(LAST && LAST.ok === false);
   if (LAST && LAST.ok === false) $("#errNote").textContent = `La última actualización (${fecha(LAST.at)}) falló: ${LAST.error}. Se muestra la stocklist anterior.`;
   drawTabs(); drawLabels(); drawList(); drawCart(); drawHist();
-  if (pend) resolverPendientes();
+  if (selId != null && !document.querySelector('#frame iframe')) select(selId, false);   // el disco elegido ya tiene audio
+  if (pend && !opts.sinResolver) resolverPendientes();
 }
 async function cargar() {
   try { aplica(await api('subwax-stock')); } catch (e) { $("#status").textContent = `Error: ${e.message}`; return; }
   if (!UPDATED) refrescar();
 }
 let refrescando = false;
-async function refrescar(resolve) {
+async function refrescar() {
   if (refrescando) return; refrescando = true;
   $("#refresh").disabled = true; $("#refresh").textContent = 'Actualizando…';
   try {
-    const r = await api('subwax-refresh', { method: 'POST', query: resolve ? `&resolve=${resolve}` : '' });
+    const r = await api('subwax-refresh', { method: 'POST' });
     say(`Stocklist actualizada: ${r.rows} discos, ${r.nuevos} nuevos, ${r.agotados} agotados${r.shop_error ? ` · tienda: ${r.shop_error}` : ''}`);
     aplica(await api('subwax-stock'));
   } catch (e) { say(`No se pudo actualizar: ${e.message}`); }
   refrescando = false; $("#refresh").disabled = false; $("#refresh").textContent = 'Actualizar stocklist';
+  resolverPendientes();
 }
-// La primera vez hay ~420 enlaces de SoundCloud por resolver y el worker hace
-// 30 por pasada; se encadenan pasadas hasta acabar.
-let resolviendo = 0;
+// Audio: la primera vez hay ~420 enlaces de SoundCloud y el worker resuelve 40
+// por llamada (&only=resolve no baja la hoja ni toca Shopify). Se encadenan
+// llamadas hasta que no queda nada, refrescando la lista entre una y otra.
+let resolviendo = false;
 async function resolverPendientes() {
-  if (resolviendo++ > 20 || refrescando) return;
-  await refrescar(40);
+  if (resolviendo || refrescando) return;
+  if (!DATA.some(r => r.listen && !r.embed && !r.embed_error)) return;
+  resolviendo = true;
+  try {
+    for (let i = 0; i < 20; i++) {
+      const r = await api('subwax-refresh', { method: 'POST', query: '&only=resolve&resolve=40' });
+      aplica(await api('subwax-stock'), { sinResolver: true });
+      if (!r.pendientes || !(r.resueltos + r.fallidos)) break;
+    }
+  } catch (e) { say(`Audio: ${e.message}`); }
+  resolviendo = false;
 }
 
 // ── Util de filas ────────────────────────────────────────────

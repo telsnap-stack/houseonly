@@ -18,8 +18,10 @@ Sustituye al `Subwax_Player.html` local de la semana pasada.
   - SoundCloud: los enlaces de Subwax son privados (`…/s-TOKEN`) y el widget
     no los acepta por URL; se resuelven con `soundcloud.com/oembed` a
     `api.soundcloud.com/tracks/ID?secret_token=…`, **30 por pasada**
-    (`&resolve=N`, tope 60) para no agotar subpeticiones. El player encadena
-    pasadas hasta que no queden pendientes. 3 enlaces de la hoja dan 404 en
+    (`&resolve=N`, tope 60) para no agotar subpeticiones. `&only=resolve`
+    hace solo una pasada de audio sobre lo guardado (sin bajar la hoja ni
+    tocar Shopify); el player encadena esas llamadas, de 40 en 40, hasta que
+    no queden pendientes (~11 llamadas la primera vez en cada entorno). 3 enlaces de la hoja dan 404 en
     SoundCloud (BLDRMX02, KETIOV007, PSI003): salen como «solo en SoundCloud».
   - Tienda: `searchVariantsBySkus` con todos los catnos (lotes de 40), match
     exacto o sin separadores → `row.shop {sku, qty, status}`.

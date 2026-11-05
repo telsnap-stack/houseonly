@@ -282,6 +282,24 @@ export async function refreshSubwax(env: SubwaxEnv, opts: RefreshOpts = {}) {
   return resumen;
 }
 
+/** Solo audio: resuelve hasta `max` enlaces pendientes de la stocklist guardada, sin bajar la hoja ni tocar Shopify. */
+export async function resuelvePendientes(env: SubwaxEnv, max = 40, fetcher: typeof fetch = fetch) {
+  const stock = await leeStock(env);
+  if (!stock) return { ok: true, resueltos: 0, fallidos: 0, pendientes: 0, sin_stock: true };
+  let resueltos = 0, fallidos = 0;
+  for (const r of stock.rows) {
+    if (resueltos + fallidos >= max) break;
+    if (!r.listen || r.embed || r.embed_error) continue;
+    try {
+      const x = await resuelveSoundcloud(r.listen, fetcher);
+      if (x.embed) { r.embed = x.embed; resueltos++; } else { r.embed_error = x.error; fallidos++; }
+    } catch (e: any) { r.embed_error = e?.message || 'error'; fallidos++; }
+  }
+  if (resueltos + fallidos) await env.SYNC_STATE.put(STOCK_KEY, JSON.stringify(stock));
+  const pendientes = stock.rows.filter((r) => r.listen && !r.embed && !r.embed_error).length;
+  return { ok: true, resueltos, fallidos, pendientes };
+}
+
 // ── HANDLERS ────────────────────────────────────────────────────
 export async function handleSubwaxStock(env: SubwaxEnv, autorizado: boolean): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
@@ -298,6 +316,9 @@ export async function handleSubwaxRefresh(request: Request, env: SubwaxEnv, auto
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
   const u = new URL(request.url);
   const max = Math.max(0, Math.min(60, Number(u.searchParams.get('resolve') ?? RESOLVE_POR_PASADA)));
+  // &only=resolve: una pasada de audio sobre lo guardado (el player la encadena
+  // hasta que no quedan pendientes), sin bajar la hoja ni consultar Shopify.
+  if (u.searchParams.get('only') === 'resolve') return json(await resuelvePendientes(env, max || RESOLVE_POR_PASADA));
   try {
     return json(await refreshSubwax(env, { maxResolve: max }));
   } catch (e: any) {
