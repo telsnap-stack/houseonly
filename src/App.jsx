@@ -14360,7 +14360,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
 // (?action=subwax-stock / subwax-refresh / subwax-order, src/lib/subwax.ts),
 // con el mismo secreto de admin. Aqui solo el acceso y el resumen.
 function SubwaxPanel() {
-  const secret = useMailSecret();
+  const [secret] = useMailSecret();   // [valor, setter]: solo el valor
   const [info, setInfo] = useState(null);
   const [err, setErr] = useState('');
   useEffect(() => {
