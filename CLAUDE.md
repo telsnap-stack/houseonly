@@ -49,7 +49,7 @@ solo timeout. Se resolvió sola en unas horas.
 ## Conceptos clave del Worker
 
 - **Tags de origen (`source:*`)** marcan de qué importador viene cada producto:
-  `source:dbh` (DBH), `source:tv` (Triple Vision), `source:subwax` (Subwax), etc. Reemplazan a los tags
+  `source:dbh` (DBH), `source:tv` (Triple Vision), `source:subwax` (Subwax), `source:phantom` (Phantom), etc. Reemplazan a los tags
   legacy sin prefijo.
 - **Sync Discogs (Fase 3.5)**: al crear un producto en Shopify, el webhook
   `webhook-shopify-product` corre el matcher de Discogs. Matches altos/por
