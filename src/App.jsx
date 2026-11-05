@@ -14296,6 +14296,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           {tabBtn('tv','🥁 Triple Vision')}
           {tabBtn('rd','💿 Rubadub Import')}
           {tabBtn('preorder','📅 Pre-order')}
+          {tabBtn('subwax','🎧 Subwax')}
           {tabBtn('review','💿 Discogs Review')}
           {tabBtn('ebay','🛒 eBay')}
           {tabBtn('entities','🏷️ Entities')}
@@ -14309,6 +14310,7 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
         {tab==='tv'    && <TripleVisionImporter />}
         {tab==='rd'    && <RubadubImporter />}
         {tab==='preorder' && <PreorderImporter />}
+        {tab==='subwax' && <SubwaxPanel />}
         {tab==='review'&& <DiscogsReviewPanel />}
         {tab==='ebay'&& <EbayPanel />}
         {tab==='entities'&& <EntitiesPanel />}
@@ -14347,6 +14349,52 @@ function AdminPanel({ records, onUpdate, onAdd, onDelete, onLogout, onLoadMore, 
           <button onClick={()=>setInvPage(p=>Math.min(totalPages,p+1))} disabled={invPage===totalPages} style={{background:S.border,border:'none',color:invPage===totalPages?S.muted:S.text,cursor:invPage===totalPages?'not-allowed':'pointer',borderRadius:2,padding:'5px 12px',fontSize:10}}>Next →</button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── SUBWAX PLAYER ─────────────────────────────────────────────
+// El player de la stocklist de Subwax vive en /subwax/ (public/subwax/index.html,
+// pagina aparte servida por Pages): escuchar la stocklist, armar el Order Form
+// y el Pre-order Form y llevar el libro de pedidos. Datos del worker
+// (?action=subwax-stock / subwax-refresh / subwax-order, src/lib/subwax.ts),
+// con el mismo secreto de admin. Aqui solo el acceso y el resumen.
+function SubwaxPanel() {
+  const secret = useMailSecret();
+  const [info, setInfo] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    if (!secret) return;
+    let vivo = true;
+    fetch(`${WORKER_URL}?action=subwax-stock`, { headers: { 'Authorization': `Bearer ${secret}` } })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(j => { if (vivo) setInfo({ ...j, leido_at: Date.now() }); })
+      .catch(e => { if (vivo) setErr(e.message); });
+    return () => { vivo = false; };
+  }, [secret]);
+  const rows = info?.stock?.rows || [];
+  const orders = info?.orders || [];
+  const pre = rows.filter(r => r.section === 'PRE ORDERS').length;
+  const elegidos = Object.values(info?.bandeja || {}).filter(b => b.decision === 'preorder').length;
+  const linea = { fontSize: 11, color: S.muted, lineHeight: 1.7 };
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: S.muted, lineHeight: 1.6, marginBottom: 14, maxWidth: 620 }}>
+        Stocklist de <b style={{ color: S.text }}>Subwax Distribution</b> para escuchar y pedir: Order Form (novedades y catálogo) y Pre-order Form, con el libro de lo ya pedido y el cruce con la tienda. Los pre-orders que exportes quedan como <b style={{ color: S.text }}>elegidos</b> en la bandeja del tab Pre-order, que es la que los sube a la tienda.
+      </div>
+      <a href="/subwax/" target="_blank" rel="noopener" style={{ display: 'inline-block', background: S.accent, color: '#080808', fontWeight: 700, fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase', padding: '10px 16px', borderRadius: 2, textDecoration: 'none' }}>Abrir el Subwax Player ↗</a>
+      <div style={{ marginTop: 14 }}>
+        {err && <div style={{ ...linea, color: S.danger }}>No se pudo leer el estado: {err}</div>}
+        {!err && !info && <div style={linea}>Leyendo estado…</div>}
+        {info && !info.stock && <div style={linea}>Aún no hay stocklist guardada: el player la baja al abrirlo (y luego cada día a las 06:00 UTC).</div>}
+        {info?.stock && (
+          <div style={linea}>
+            Stocklist de hace {(() => { const h = Math.round((info.leido_at - Date.parse(info.stock.updated_at)) / 36e5); return !(h >= 0) ? '?' : h < 48 ? `${h} h` : `${Math.round(h / 24)} días`; })()} · {rows.length} discos ({pre} en pre-order) · {rows.filter(r => r.shop).length} ya en la tienda · {rows.filter(r => r.embed).length} con audio
+            <br />Pedidos anotados: {orders.length} ({orders.filter(o => o.status === 'draft').length} borradores, {orders.filter(o => o.status === 'sent').length} enviados) · elegidos de Subwax en la bandeja: {elegidos}
+            {info.last_refresh && info.last_refresh.ok === false && <><br /><span style={{ color: S.danger }}>La última actualización falló: {info.last_refresh.error}</span></>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

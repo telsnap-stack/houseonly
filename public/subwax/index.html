@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Subwax Player — House Only</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Player de la stocklist de Subwax, servido por Pages en /subwax/. Datos del
+   worker (?action=subwax-*), con el mismo secreto de admin que /admin. */
+:root{
+  --bg:#0b0b0a; --panel:#141413; --panel2:#1b1b19; --line:#2a2a27;
+  --fg:#f1f0ea; --muted:#9a9990; --acc:#d4ff00; --accfg:#0b0b0a;
+  --ok:#5fd38d; --warn:#ffb454; --bad:#ff6b5e; --info:#7fb8ff;
+  --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+a{color:var(--acc)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.wrap{max-width:1280px;margin:0 auto;padding:0 16px 80px;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start}
+header.top{grid-column:1/-1;display:flex;align-items:baseline;gap:14px;padding:18px 0 4px;flex-wrap:wrap}
+header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.01em}
+header.top h1 span{color:var(--acc)}
+header.top p{margin:0;color:var(--muted);font-size:12.5px;flex:1;min-width:200px}
+header.top .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.main{min-width:0}
+.player{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0 12px;border-bottom:1px solid var(--line)}
+.now{display:flex;align-items:center;gap:10px;margin-bottom:8px;min-width:0}
+.now .meta{min-width:0;flex:1}
+.now .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.now .s{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav{display:flex;gap:6px}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 11px;line-height:1;color:inherit;text-decoration:none;display:inline-block}
+.btn:hover{border-color:var(--muted)}
+.btn.acc{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600}
+.btn.acc:hover{filter:brightness(.92)}
+.btn.sm{padding:5px 8px;font-size:12px}
+.btn.ya{color:var(--muted);font-size:11px;padding:4px 7px}
+.btn.ya:hover{color:var(--info);border-color:var(--info)}
+.btn[disabled]{opacity:.4;cursor:not-allowed}
+.frame{border-radius:8px;overflow:hidden;background:var(--panel);height:166px;display:grid;place-items:center}
+.frame.tall{height:300px}
+.frame iframe{width:100%;height:100%;border:0;display:block}
+.frame .empty{color:var(--muted);padding:0 16px;text-align:center}
+.keys{color:var(--muted);font-size:12px;margin-top:8px}
+kbd{font-family:var(--mono);font-size:11px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.tools{display:flex;gap:8px;flex-wrap:wrap;padding:14px 0 10px;align-items:center}
+.tabs{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:3px;flex-wrap:wrap}
+.tab{background:none;border:0;border-radius:6px;padding:6px 11px;color:var(--muted)}
+.tab[aria-selected=true]{background:var(--panel2);color:var(--fg)}
+.tab small{font-family:var(--mono);color:var(--muted);margin-left:4px}
+input[type=search],select,input[type=text],input[type=password]{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+input[type=search]{flex:1 1 180px}
+select{max-width:200px}
+.chk{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:6px;padding:8px 12px;margin:0 0 10px;font-size:12.5px;color:var(--muted)}
+.note.err{border-left-color:var(--bad)}
+.list{border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:9px 8px;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+.row:hover{background:var(--panel)}
+.row.sel{background:var(--panel2);border-left-color:var(--acc)}
+.row .l1{display:flex;gap:8px;align-items:baseline;min-width:0}
+.row .cat{font-family:var(--mono);font-size:12px;color:var(--acc);flex:none}
+.row .name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .name em{font-style:normal;font-weight:400;color:var(--muted)}
+.row .l2{color:var(--muted);font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row .l2 .noaudio{color:var(--warn)}
+.pill{font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--line);color:var(--muted);font-family:var(--mono)}
+.pill.new{color:var(--acc);border-color:var(--acc)}
+.pill.shop{color:var(--ok);border-color:var(--ok)}
+.pill.ordered{color:var(--info);border-color:var(--info)}
+.pill.gone{color:var(--bad);border-color:var(--bad)}
+.row .ctl{grid-row:1/3;grid-column:2;display:flex;align-items:center;gap:8px}
+.price{font-family:var(--mono);font-size:12.5px;min-width:52px;text-align:right}
+.step{display:flex;align-items:center;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.step button{background:none;border:0;width:30px;height:30px;font-size:16px}
+.step button:hover{background:var(--panel2)}
+.step output{min-width:26px;text-align:center;font-family:var(--mono)}
+.step.has{border-color:var(--acc)}
+.step.has output{color:var(--acc);font-weight:600}
+.cart{position:sticky;top:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;max-height:calc(100vh - 24px);overflow:auto}
+.cart h2{margin:0 0 10px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+.field{display:grid;gap:3px;margin-bottom:8px}
+.field label{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.field input{width:100%}
+.rules{display:grid;gap:8px;margin:12px 0}
+.rule{font-size:12.5px}
+.rule .h{display:flex;justify-content:space-between;gap:8px}
+.rule .h b{font-family:var(--mono);font-weight:500}
+.bar{height:5px;background:var(--panel2);border-radius:3px;margin-top:4px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--warn);width:0}
+.rule.ok .bar i{background:var(--ok)}
+.rule.ok .h b{color:var(--ok)}
+.lines{margin:0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.lines li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);align-items:center;font-size:12.5px}
+.lines .q{font-family:var(--mono);color:var(--acc)}
+.lines .n{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lines .n span{color:var(--muted)}
+.lines .rm{background:none;border:0;color:var(--muted);padding:2px 6px}
+.lines .rm:hover{color:var(--bad)}
+.total{display:flex;justify-content:space-between;font-weight:600;padding:10px 0 4px}
+.total span:last-child{font-family:var(--mono)}
+.actions{display:grid;gap:8px;margin-top:10px}
+.actions .btn{padding:10px 12px;text-align:center}
+.msg{font-size:12.5px;color:var(--muted);min-height:1.3em;margin-top:6px}
+.cartempty{color:var(--muted);font-size:13px;padding:6px 0}
+.hist{margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+.hist h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px}
+.ord{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12.5px}
+.ord .h{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.ord .h b{font-family:var(--mono);font-weight:500}
+.ord .st{font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--line)}
+.ord .st.sent{color:var(--info);border-color:var(--info)}
+.ord .st.received{color:var(--ok);border-color:var(--ok)}
+.ord .st.cancelled{color:var(--bad);border-color:var(--bad)}
+.ord .d{color:var(--muted);margin-top:3px}
+.ord .a{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.ord .a button{background:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:11px;color:var(--muted)}
+.ord .a button:hover{color:var(--fg);border-color:var(--muted)}
+.ord ul{margin:6px 0 0;padding:0;list-style:none;color:var(--muted);font-size:12px}
+.status{font-size:12px;color:var(--muted)}
+.status b{color:var(--fg);font-weight:500}
+.mini{display:none}
+.login{min-height:100vh;display:grid;place-items:center;padding:16px}
+.login form{width:320px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px}
+.login h1{font-size:16px;margin:0 0 6px}
+.login p{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+.login label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 4px}
+.login input{width:100%}
+.login .btn{width:100%;margin-top:14px;padding:10px}
+.login .err{color:var(--bad);font-size:12.5px;margin-top:8px;min-height:1.2em}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .cart{position:static;max-height:none}
+  .frame.tall{height:260px}
+  .row{grid-template-columns:minmax(0,1fr)}
+  .row .ctl{grid-row:auto;grid-column:1;justify-content:space-between}
+  .keys{display:none}
+  .mini{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--acc);color:var(--accfg);padding:10px 16px;justify-content:space-between;align-items:center;font-weight:600;text-decoration:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="login" id="login">
+  <form id="loginForm" method="post" action="#" autocomplete="on">
+    <h1>Subwax <span style="color:var(--acc)">Player</span></h1>
+    <p>Mismo secreto de admin que <code>/admin</code> (<span id="envName"></span>). Queda en memoria hasta recargar; el llavero del navegador puede recordarlo.</p>
+    <label for="lu">Usuario</label>
+    <input id="lu" type="text" name="username" autocomplete="username" value="admin" readonly>
+    <label for="lp">Secreto</label>
+    <input id="lp" type="password" name="password" autocomplete="current-password" placeholder="BOOTSTRAP_AUTH_SECRET">
+    <button class="btn acc" type="submit" id="lb">Entrar</button>
+    <div class="err" id="lerr"></div>
+  </form>
+</div>
+
+<div class="wrap" id="app" hidden>
+  <header class="top">
+    <h1>Subwax <span>Player</span></h1>
+    <p>Stocklist de Subwax Distribution · pedidos de Telsnap S.L. · precios netos, sin IVA</p>
+    <div class="right">
+      <span class="status" id="status">Cargando…</span>
+      <button class="btn sm" id="refresh" title="Vuelve a bajar la Google Sheet de Subwax y cruza con la tienda">Actualizar stocklist</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="player" aria-label="Reproductor">
+      <div class="now">
+        <div class="meta"><div class="t" id="nowT">Elige un disco para escucharlo</div><div class="s" id="nowS">Clic en cualquier fila, o usa ↑ ↓ del teclado</div></div>
+        <div class="nav">
+          <button class="btn" id="prev" title="Anterior (↑)">←</button>
+          <button class="btn" id="next" title="Siguiente (↓)">→</button>
+          <button class="btn" id="tall" title="Mostrar lista de tracks">Tracks</button>
+          <a class="btn" id="sc" href="#" target="_blank" rel="noopener" hidden>SoundCloud ↗</a>
+        </div>
+      </div>
+      <div class="frame" id="frame"><div class="empty">El audio viene de la cuenta de SoundCloud de Subwax.</div></div>
+      <div class="keys"><kbd>↑</kbd> <kbd>↓</kbd> disco anterior / siguiente · <kbd>+</kbd> añadir copia · <kbd>−</kbd> quitar copia · <kbd>3</kbd> poner 3 copias</div>
+    </section>
+
+    <div class="tools">
+      <div class="tabs" role="tablist" id="tabs"></div>
+      <input type="search" id="q" placeholder="Buscar artista, título, sello o ref." aria-label="Buscar">
+      <select id="lab" aria-label="Sello"></select>
+      <label class="chk"><input type="checkbox" id="onlyCart"> Solo mi pedido</label>
+      <label class="chk"><input type="checkbox" id="hideShop"> Ocultar los que ya tengo</label>
+      <label class="chk"><input type="checkbox" id="onlyNew"> Solo nuevos</label>
+      <label class="chk"><input type="checkbox" id="hideOrdered"> Ocultar los ya pedidos</label>
+      <button class="btn sm" id="fromTray" hidden title="Pone 2 copias de cada disco marcado como elegido en la bandeja del tab Pre-order">Traer elegidos de la bandeja</button>
+    </div>
+    <div class="note" id="preNote" hidden>Lista aparte del pedido normal. Al descargar el Pre-order Form, esos discos quedan como <b>elegidos</b> en la bandeja del tab Pre-order del admin, que es la que los sube a la tienda con su audio. Subwax solo acepta pre-orders de clientes que piden cada mes y como máximo una vez por semana: después del primero, solo las copias nuevas.</div>
+    <div class="note" id="goneNote" hidden>Discos que estaban en la stocklist y ya no aparecen (Subwax los quita cuando se agotan). Se conservan 90 días; solo para escuchar.</div>
+    <div class="note err" id="errNote" hidden></div>
+    <div class="list" id="list"></div>
+  </div>
+
+  <aside class="cart" id="cart" aria-label="Pedido">
+    <h2><span id="cartH">Pedido</span></h2>
+    <div class="field"><label for="client">Client</label><input type="text" id="client" value="Telsnap S.L."></div>
+    <div class="field"><label for="date">Date</label><input type="text" id="date"></div>
+    <div class="rules">
+      <div class="rule" id="r1"><div class="h"><span>Importe mínimo 200 € netos</span><b></b></div><div class="bar"><i></i></div></div>
+      <div class="rule" id="r2"><div class="h"><span>3 referencias con 3 copias cada una</span><b></b></div><div class="bar"><i></i></div></div>
+    </div>
+    <p class="cartempty" id="preInfo" hidden>Lista aparte del pedido normal. Sin mínimo de importe. Se exporta con el formato del Order Form hasta que Subwax mande su plantilla de pre-order.</p>
+    <ul class="lines" id="lines"></ul>
+    <div class="total"><span>Total neto</span><span id="total">0,00 €</span></div>
+    <div class="actions">
+      <button class="btn acc" id="xlsx">Descargar Order Form (.xlsx)</button>
+      <button class="btn" id="copy">Copiar lista (para pegar en Excel)</button>
+      <button class="btn" id="clear">Vaciar pedido</button>
+    </div>
+    <div class="msg" id="msg" role="status"></div>
+    <div class="hist">
+      <h3>Historial de pedidos</h3>
+      <div id="hist"></div>
+    </div>
+  </aside>
+</div>
+<a class="mini" id="mini" href="#cart"><span id="miniN">Pedido</span><span id="miniT">0,00 €</span></a>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script>
+// ── Entorno ──────────────────────────────────────────────────
+const H = location.hostname;
+const PROD = H === 'houseonly.store' || H === 'www.houseonly.store' || H === 'houseonly.pages.dev';
+const WORKER = new URLSearchParams(location.search).get('worker') || (PROD ? 'https://houseonly-worker.emontagut.workers.dev' : 'https://houseonly-worker-staging.emontagut.workers.dev');
+const TEMPLATE_URL = '/subwax/Order_Form.xlsx';
+const TABS = [["Novedades", "NEW ARRIVALS"], ["Catálogo", "BACK CATALOGUE"], ["Pre-orders", "PRE ORDERS"], ["Agotados", "GONE"]];
+const NUEVO_DIAS = 14;
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = n => Number(n || 0).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+const fecha = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' }); };
+const hace = iso => { const m = (Date.now() - Date.parse(iso)) / 60000; if (!(m >= 0)) return ''; if (m < 60) return `${Math.round(m)} min`; if (m < 48 * 60) return `${Math.round(m / 60)} h`; return `${Math.round(m / 1440)} días`; };
+
+let SECRET = '';
+let DATA = [], GONE = [], ORDERS = [], LAST = null, UPDATED = '', BANDEJA = {};
+let tab = 0, selId = null, tall = false, carts = { order: {}, pre: {} };
+try { const c = JSON.parse(localStorage.getItem("subwax_carts") || "null"); if (c && c.order && c.pre) carts = c; } catch (e) { }
+function saveCart() { try { localStorage.setItem("subwax_carts", JSON.stringify(carts)); } catch (e) { } }
+
+// ── API ──────────────────────────────────────────────────────
+async function api(action, opts = {}) {
+  const r = await fetch(`${WORKER}?action=${action}${opts.query || ''}`, {
+    method: opts.method || 'GET',
+    headers: { 'Authorization': `Bearer ${SECRET}`, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  let j = null; try { j = await r.json(); } catch (e) { }
+  if (!r.ok) throw Object.assign(new Error((j && j.error) || `HTTP ${r.status}`), { status: r.status, body: j });
+  return j;
+}
+
+// ── Login (mismo truco que /admin para que el llavero lo recuerde) ──
+$("#envName").textContent = PROD ? 'producción' : 'staging';
+$("#loginForm").addEventListener('submit', async e => {
+  e.preventDefault();
+  const s = $("#lp").value.trim(); if (!s) return;
+  $("#lb").disabled = true; $("#lerr").textContent = '';
+  try {
+    const r = await fetch(`${WORKER}?action=admin-check`, { headers: { 'Authorization': `Bearer ${s}` } });
+    if (!r.ok) { $("#lerr").textContent = r.status === 401 ? 'Secreto incorrecto' : `El worker respondió ${r.status}`; $("#lb").disabled = false; return; }
+    SECRET = s; $("#lp").value = '';
+    try { history.replaceState(history.state, '', location.href); } catch (e2) { }
+    $("#login").hidden = true; $("#app").hidden = false;
+    await cargar();
+  } catch (e2) { $("#lerr").textContent = `Sin conexión con el worker: ${e2.message}`; $("#lb").disabled = false; }
+});
+
+// ── Datos ────────────────────────────────────────────────────
+function aplica(j, opts = {}) {
+  const st = j.stock || { rows: [], gone: [], updated_at: '' };
+  DATA = st.rows.map((r, i) => ({ ...r, id: i }));
+  GONE = st.gone.map((r, i) => ({ ...r, id: 100000 + i, section: 'GONE' }));
+  UPDATED = st.updated_at; LAST = j.last_refresh; ORDERS = j.orders || []; BANDEJA = j.bandeja || {};
+  PRIMERA = DATA.reduce((m, x) => (!m || x.first_seen < m) ? x.first_seen : m, '');
+  const emb = DATA.filter(r => r.embed).length, pend = DATA.filter(r => r.listen && !r.embed && !r.embed_error).length;
+  $("#status").innerHTML = UPDATED
+    ? `Stocklist de hace <b>${hace(UPDATED)}</b> · <b>${DATA.length}</b> discos · audio <b>${emb}</b>${pend ? ` · resolviendo ${pend}…` : ''} · en tienda <b>${DATA.filter(r => r.shop).length}</b>`
+    : 'Aún no hay stocklist: pulsa «Actualizar stocklist».';
+  $("#errNote").hidden = !(LAST && LAST.ok === false);
+  if (LAST && LAST.ok === false) $("#errNote").textContent = `La última actualización (${fecha(LAST.at)}) falló: ${LAST.error}. Se muestra la stocklist anterior.`;
+  drawTabs(); drawLabels(); drawList(); drawCart(); drawHist();
+  if (selId != null && !document.querySelector('#frame iframe')) select(selId, false);   // el disco elegido ya tiene audio
+  if (pend && !opts.sinResolver) resolverPendientes();
+}
+async function cargar() {
+  try { aplica(await api('subwax-stock')); } catch (e) { $("#status").textContent = `Error: ${e.message}`; return; }
+  if (!UPDATED) refrescar();
+}
+let refrescando = false;
+async function refrescar() {
+  if (refrescando) return; refrescando = true;
+  $("#refresh").disabled = true; $("#refresh").textContent = 'Actualizando…';
+  try {
+    const r = await api('subwax-refresh', { method: 'POST' });
+    say(`Stocklist actualizada: ${r.rows} discos, ${r.nuevos} nuevos, ${r.agotados} agotados${r.shop_error ? ` · tienda: ${r.shop_error}` : ''}`);
+    aplica(await api('subwax-stock'));
+  } catch (e) { say(`No se pudo actualizar: ${e.message}`); }
+  refrescando = false; $("#refresh").disabled = false; $("#refresh").textContent = 'Actualizar stocklist';
+  resolverPendientes();
+}
+// Audio: la primera vez hay ~420 enlaces de SoundCloud y el worker resuelve 40
+// por llamada (&only=resolve no baja la hoja ni toca Shopify). Se encadenan
+// llamadas hasta que no queda nada, refrescando la lista entre una y otra.
+let resolviendo = false;
+async function resolverPendientes() {
+  if (resolviendo || refrescando) return;
+  if (!DATA.some(r => r.listen && !r.embed && !r.embed_error)) return;
+  resolviendo = true;
+  try {
+    for (let i = 0; i < 20; i++) {
+      const r = await api('subwax-refresh', { method: 'POST', query: '&only=resolve&resolve=40' });
+      aplica(await api('subwax-stock'), { sinResolver: true });
+      if (!r.pendientes || !(r.resueltos + r.fallidos)) break;
+    }
+  } catch (e) { say(`Audio: ${e.message}`); }
+  resolviendo = false;
+}
+
+// ── Util de filas ────────────────────────────────────────────
+const inTab = r => r.section === TABS[tab][1];
+const isPre = r => r.section === "PRE ORDERS";
+const isGone = r => r.section === "GONE";
+const norm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+const TRAY = { preorder: 'elegido', pendiente: 'pendiente', rechazado: 'rechazado', cargado: 'cargado' };
+const mode = () => tab === 2 ? "pre" : "order";
+const cartOf = r => isPre(r) ? carts.pre : carts.order;
+const qOf = id => { const r = byId(id); return r ? (cartOf(r)[id] || 0) : 0; };
+const byId = id => id >= 100000 ? GONE[id - 100000] : DATA[id];
+// "nuevo" = aparecio en los ultimos 14 dias, pero no en la primera carga de
+// todas (si no, las primeras dos semanas todo seria nuevo).
+let PRIMERA = '';
+const esNuevo = r => r.first_seen && r.first_seen !== PRIMERA && (Date.now() - Date.parse(r.first_seen)) < NUEVO_DIAS * 86400e3;
+function pedidoDe(cat) {   // unidades ya pedidas (sin cancelados) y última fecha
+  let q = 0, last = '';
+  for (const o of ORDERS) if (o.status !== 'cancelled') for (const l of o.lines) if (l.cat === cat) { q += l.qty; if (!last || o.at > last) last = o.at; }
+  return q ? { q, last } : null;
+}
+
+function drawTabs() {
+  $("#tabs").innerHTML = TABS.map((t, i) => {
+    const n = t[1] === 'GONE' ? GONE.length : DATA.filter(r => r.section === t[1]).length;
+    return `<button class="tab" role="tab" aria-selected="${i === tab}" data-i="${i}">${t[0]}<small>${n}</small></button>`;
+  }).join("");
+}
+function drawLabels() {
+  const cur = $("#lab").value;
+  const src = tab === 3 ? GONE : DATA.filter(inTab);
+  const m = new Map(); src.forEach(r => m.set(r.label, (m.get(r.label) || 0) + 1));
+  const labs = [...m.entries()].sort((a, b) => a[0].localeCompare(b[0], "es", { sensitivity: "base" }));
+  $("#lab").innerHTML = '<option value="">Todos los sellos</option>' + labs.map(([l, n]) => `<option value="${esc(l)}">${esc(l)} (${n})</option>`).join("");
+  if (labs.some(x => x[0] === cur)) $("#lab").value = cur;
+}
+function visible() {
+  const q = $("#q").value.trim().toLowerCase(), lab = $("#lab").value, only = $("#onlyCart").checked, hideShop = $("#hideShop").checked, onlyNew = $("#onlyNew").checked, hideOrdered = $("#hideOrdered").checked;
+  const src = tab === 3 ? GONE : DATA;
+  return src.filter(r => {
+    if (only) { if (!carts[mode()][r.id] || (mode() === "pre") !== isPre(r)) return false; } else if (tab !== 3 && !inTab(r)) return false;
+    if (hideShop && r.shop) return false;
+    if (onlyNew && !esNuevo(r)) return false;
+    if (hideOrdered && pedidoDe(r.cat)) return false;
+    if (lab && r.label !== lab) return false;
+    if (q && !(`${r.artist} ${r.title} ${r.label} ${r.cat}`.toLowerCase().includes(q))) return false;
+    return true;
+  });
+}
+function pills(r) {
+  const p = [];
+  if (r.section !== 'GONE' && esNuevo(r)) p.push('<span class="pill new">nuevo</span>');
+  if (r.shop) p.push(`<span class="pill shop" title="${esc(r.shop.title)} · SKU ${esc(r.shop.sku)} · ${esc(r.shop.status)}">en tienda · ${r.shop.qty ?? '?'}</span>`);
+  const pd = pedidoDe(r.cat); if (pd) p.push(`<span class="pill ordered" title="Última vez ${fecha(pd.last)}">pedido ${pd.q}× · ${fecha(pd.last)}</span>`);
+  if (r.gone_at) p.push(`<span class="pill gone">fuera desde ${fecha(r.gone_at)}</span>`);
+  const b = isPre(r) && BANDEJA[norm(r.cat)];
+  if (b) p.push(`<span class="pill ${b.decision === 'preorder' || b.decision === 'cargado' ? 'shop' : b.decision === 'rechazado' ? 'gone' : ''}" title="Bandeja del tab Pre-order">bandeja: ${TRAY[b.decision] || 'sin decidir'}</span>`);
+  if (!r.listen) p.push('<span class="noaudio">sin audio</span>');
+  else if (!r.embed) p.push(`<span class="noaudio">${r.embed_error ? 'solo en SoundCloud' : 'resolviendo audio…'}</span>`);
+  return p.join('');
+}
+function drawList() {
+  const rows = visible();
+  $("#preNote").hidden = !(tab === 2 && !$("#onlyCart").checked);
+  $("#goneNote").hidden = tab !== 3;
+  $("#fromTray").hidden = tab !== 2 || !Object.values(BANDEJA).some(b => b.decision === 'preorder');
+  $("#list").innerHTML = rows.map(r => {
+    const q = isGone(r) ? 0 : (cartOf(r)[r.id] || 0);
+    return `<div class="row${r.id === selId ? " sel" : ""}" data-id="${r.id}">
+      <div class="l1"><span class="cat">${esc(r.cat)}</span><span class="name">${esc(r.artist)} <em>— ${esc(r.title)}</em></span></div>
+      <div class="l2"><span>${esc(r.label)}</span><span>${esc(r.format)}</span>${pills(r)}</div>
+      <div class="ctl"><span class="price">${fmt(r.price)}</span>
+        ${isPre(r) && !pedidoDe(r.cat) ? `<button class="btn sm ya" data-ya="${r.id}" title="Anotarlo como pre-order ya enviado a Subwax (2 copias, hoy), sin descargar nada">ya pedido</button>` : ''}
+        ${isGone(r) ? '' : `<div class="step${q ? " has" : ""}"><button data-d="-1" aria-label="Quitar una copia">−</button><output>${q}</output><button data-d="1" aria-label="Añadir una copia">+</button></div>`}
+      </div></div>`;
+  }).join("") || '<div class="cartempty" style="padding:20px 8px">Nada que mostrar con estos filtros.</div>';
+}
+
+// ── Player ───────────────────────────────────────────────────
+function select(id, play = true) {
+  const r = byId(id); if (!r) return; selId = id;
+  $("#nowT").textContent = `${r.artist} — ${r.title}`;
+  $("#nowS").textContent = `${r.label} · ${r.cat} · ${r.format} · ${fmt(r.price)}`;
+  const f = $("#frame"), sc = $("#sc");
+  if (r.embed) {
+    const src = "https://w.soundcloud.com/player/?url=" + encodeURIComponent(r.embed) + "&auto_play=" + (play ? "true" : "false") + "&color=%23d4ff00&hide_related=true&show_comments=false&show_user=true&show_teaser=false&visual=false";
+    f.innerHTML = `<iframe title="SoundCloud" allow="autoplay" src="${src}"></iframe>`;
+  } else {
+    f.innerHTML = `<div class="empty">${r.listen ? (r.embed_error ? 'Este disco no se puede reproducir aquí. Ábrelo con el botón SoundCloud ↗.' : 'Todavía se está resolviendo el audio de este disco. Prueba en un momento.') : 'Este disco no tiene audio en la stocklist.'}</div>`;
+  }
+  if (r.listen && /^https?:/.test(r.listen)) { sc.hidden = false; sc.href = r.listen; } else sc.hidden = true;
+  document.querySelectorAll(".row.sel").forEach(e => e.classList.remove("sel"));
+  const el = document.querySelector(`.row[data-id="${id}"]`); if (el) { el.classList.add("sel"); el.scrollIntoView({ block: "nearest" }); }
+}
+function move(d) {
+  const ids = visible().map(r => r.id); if (!ids.length) return;
+  let i = ids.indexOf(selId); i = i < 0 ? (d > 0 ? 0 : ids.length - 1) : Math.min(ids.length - 1, Math.max(0, i + d));
+  select(ids[i]);
+}
+
+// ── Carrito ──────────────────────────────────────────────────
+function setQty(id, q) {
+  const r = byId(id); if (!r || isGone(r)) return;
+  const cart = cartOf(r);
+  q = Math.max(0, Math.min(99, q)); if (q) cart[id] = q; else delete cart[id];
+  saveCart(); drawCart();
+  const el = document.querySelector(`.row[data-id="${id}"]`);
+  if (el) { const s = el.querySelector(".step"); if (s) { s.classList.toggle("has", !!q); s.querySelector("output").textContent = q; } }
+  if ($("#onlyCart").checked && !q) drawList();
+}
+function drawCart() {
+  const pre = mode() === "pre", cart = carts[mode()];
+  $("#cartH").textContent = pre ? "Pre-order" : "Pedido";
+  $(".rules").hidden = pre; $("#preInfo").hidden = !pre;
+  $("#xlsx").textContent = pre ? "Descargar Pre-order Form (.xlsx)" : "Descargar Order Form (.xlsx)";
+  const items = Object.keys(cart).map(Number).filter(i => DATA[i]).map(i => ({ r: DATA[i], q: cart[i] }));
+  let total = 0, units = 0, ok3 = 0; items.forEach(({ r, q }) => { total += r.price * q; units += q; if (q >= 3) ok3++; });
+  total = Math.round(total * 100) / 100;
+  $("#total").textContent = fmt(total);
+  $("#lines").innerHTML = items.length ? items.map(({ r, q }) => `<li><span class="q">${q}×</span><span class="n">${esc(r.cat)} <span>${esc(r.artist)}</span></span><button class="rm" data-rm="${r.id}" aria-label="Quitar ${esc(r.cat)}">✕</button></li>`).join("") : '<li class="cartempty" style="display:block;border:0">Aún no hay discos. Usa + en cada fila.</li>';
+  const r1 = $("#r1"), r2 = $("#r2");
+  r1.classList.toggle("ok", total >= 200); r1.querySelector("b").textContent = `${fmt(total)} / 200 €`; r1.querySelector("i").style.width = Math.min(100, total / 2) + "%";
+  r2.classList.toggle("ok", ok3 >= 3); r2.querySelector("b").textContent = `${Math.min(ok3, 3)} / 3`; r2.querySelector("i").style.width = Math.min(100, ok3 / 3 * 100) + "%";
+  $("#miniN").textContent = `${pre ? "Pre-order" : "Pedido"} · ${items.length} refs · ${units} uds`; $("#miniT").textContent = fmt(total);
+  ["xlsx", "copy", "clear"].forEach(k => $("#" + k).disabled = !items.length);
+  return { items, total, pre, ok: pre || (total >= 200 && ok3 >= 3) };
+}
+function say(t) { $("#msg").textContent = t; }
+
+// ── Historial ────────────────────────────────────────────────
+const ST = { draft: 'borrador', sent: 'enviado', received: 'recibido', cancelled: 'cancelado' };
+function drawHist() {
+  const h = $("#hist");
+  if (!ORDERS.length) { h.innerHTML = '<div class="cartempty">Aquí quedan los Order Forms que descargues.</div>'; return; }
+  h.innerHTML = ORDERS.slice(0, 30).map(o => {
+    const u = o.lines.reduce((s, l) => s + l.qty, 0);
+    const acts = [];
+    if (o.status === 'draft') acts.push(`<button data-st="sent" data-id="${o.id}">Marcar enviado</button>`);
+    if (o.status === 'sent') acts.push(`<button data-st="received" data-id="${o.id}">Marcar recibido</button>`, `<button data-st="draft" data-id="${o.id}">Volver a borrador</button>`);
+    if (o.status !== 'cancelled' && o.status !== 'received') acts.push(`<button data-st="cancelled" data-id="${o.id}">Cancelar</button>`);
+    acts.push(`<button data-redo="${o.id}">Cargar al carrito</button>`, `<button data-xl="${o.id}">.xlsx</button>`, `<button data-del="${o.id}">Borrar</button>`);
+    return `<div class="ord" data-ord="${o.id}">
+      <div class="h"><span>${o.kind === 'preorder' ? 'Pre-order' : 'Pedido'} · ${esc(o.date || fecha(o.at))}</span><span class="st ${o.status}">${ST[o.status] || o.status}</span></div>
+      <div class="d">${o.lines.length} refs · ${u} uds · <b>${fmt(o.total)}</b></div>
+      <details><summary style="cursor:pointer;color:var(--muted);font-size:11px;margin-top:4px">líneas</summary><ul>${o.lines.map(l => `<li>${l.qty}× ${esc(l.cat)} · ${esc(l.artist)} — ${esc(l.title)}</li>`).join('')}</ul></details>
+      <div class="a">${acts.join('')}</div></div>`;
+  }).join('');
+}
+async function orderOp(body) {
+  try { const j = await api('subwax-order', { method: 'POST', body }); ORDERS = j.orders || ORDERS; drawHist(); drawList(); return j; }
+  catch (e) { say(`No se pudo guardar el pedido: ${e.message}`); return null; }
+}
+
+// ── Excel ────────────────────────────────────────────────────
+let templateBuf = null;
+async function buildXlsx(items, pre, date, client) {
+  if (!templateBuf) templateBuf = await (await fetch(TEMPLATE_URL)).arrayBuffer();
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(templateBuf.slice(0));
+  const ws = wb.worksheets[0];
+  if (pre) ws.getCell("A2").value = "   PRE-ORDER FORM";
+  ws.getCell("B4").value = date; ws.getCell("B6").value = client;
+  items.forEach(({ r, q }, k) => {
+    const row = 9 + k;
+    ws.getCell(row, 1).value = q; ws.getCell(row, 2).value = r.label; ws.getCell(row, 3).value = r.cat; ws.getCell(row, 4).value = r.artist; ws.getCell(row, 5).value = r.title;
+  });
+  return wb.xlsx.writeBuffer();
+}
+function descarga(buf, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+const hoy = () => { const t = new Date(); return String(t.getDate()).padStart(2, "0") + "/" + String(t.getMonth() + 1).padStart(2, "0") + "/" + t.getFullYear(); };
+$("#date").value = hoy();
+
+// ── Eventos ──────────────────────────────────────────────────
+document.addEventListener("click", async e => {
+  const t = e.target.closest(".tab[data-i]"); if (t) { tab = +t.dataset.i; $("#onlyCart").checked = false; drawTabs(); drawLabels(); drawList(); drawCart(); say(""); return; }
+  const rm = e.target.closest("[data-rm]"); if (rm) { setQty(+rm.dataset.rm, 0); return; }
+  const st = e.target.closest("[data-st]"); if (st) { await orderOp({ op: 'status', id: st.dataset.id, status: st.dataset.st }); return; }
+  const del = e.target.closest("[data-del]"); if (del) {
+    if (del.dataset.armed) { await orderOp({ op: 'delete', id: del.dataset.del }); return; }
+    del.dataset.armed = 1; del.textContent = '¿Borrar? pulsa otra vez'; setTimeout(() => { delete del.dataset.armed; del.textContent = 'Borrar'; }, 3000); return;
+  }
+  const ya = e.target.closest("[data-ya]"); if (ya) {
+    const r = byId(+ya.dataset.ya); if (!r) return;
+    ya.disabled = true;
+    const j = await orderOp({ op: 'add', kind: 'preorder', date: hoy(), client: $("#client").value, lines: [{ cat: r.cat, qty: 2 }], note: 'anotado a mano desde el player' });
+    if (j && j.order) await orderOp({ op: 'status', id: j.order.id, status: 'sent' });
+    if (carts.pre[r.id]) { delete carts.pre[r.id]; saveCart(); drawCart(); }
+    say(j ? `${r.cat} anotado como pre-order ya enviado (2 copias).` : 'No se pudo anotar.');
+    return;
+  }
+  const redo = e.target.closest("[data-redo]"); if (redo) {
+    const o = ORDERS.find(x => x.id === redo.dataset.redo); if (!o) return;
+    const cart = o.kind === 'preorder' ? carts.pre : carts.order; let n = 0;
+    for (const l of o.lines) { const r = DATA.find(x => x.cat === l.cat); if (r) { cart[r.id] = l.qty; n++; } }
+    saveCart(); tab = o.kind === 'preorder' ? 2 : 0; drawTabs(); drawLabels(); drawList(); drawCart();
+    say(n === o.lines.length ? 'Pedido cargado al carrito.' : `Cargadas ${n} de ${o.lines.length} líneas: el resto ya no está en la stocklist.`); return;
+  }
+  const xl = e.target.closest("[data-xl]"); if (xl) {
+    const o = ORDERS.find(x => x.id === xl.dataset.xl); if (!o) return;
+    try { descarga(await buildXlsx(o.lines.map(l => ({ r: l, q: l.qty })), o.kind === 'preorder', o.date || fecha(o.at), o.client), `${o.kind === 'preorder' ? 'Pre_Order' : 'Order'}_Form_Telsnap_${o.id}.xlsx`); }
+    catch (e2) { say('No se pudo generar el archivo.'); }
+    return;
+  }
+  const row = e.target.closest(".row"); if (!row) return;
+  const id = +row.dataset.id, b = e.target.closest(".step button");
+  if (b) { setQty(id, qOf(id) + (+b.dataset.d)); return; }
+  select(id);
+});
+$("#q").addEventListener("input", drawList); $("#lab").addEventListener("change", drawList);
+$("#onlyCart").addEventListener("change", drawList); $("#hideShop").addEventListener("change", drawList); $("#onlyNew").addEventListener("change", drawList); $("#hideOrdered").addEventListener("change", drawList);
+$("#fromTray").onclick = () => {
+  // Elegidos de la bandeja que aun no estan ni en el carrito ni en un pre-order anotado → 2 copias (lo estandar).
+  let n = 0;
+  for (const r of DATA) {
+    if (!isPre(r)) continue;
+    const b = BANDEJA[norm(r.cat)];
+    if (!b || b.decision !== 'preorder' || carts.pre[r.id] || pedidoDe(r.cat)) continue;
+    carts.pre[r.id] = 2; n++;
+  }
+  saveCart(); drawList(); drawCart();
+  say(n ? `${n} elegidos de la bandeja añadidos con 2 copias.` : 'Todos los elegidos de la bandeja ya están en el carrito o pedidos.');
+};
+$("#prev").onclick = () => move(-1); $("#next").onclick = () => move(1);
+$("#refresh").onclick = () => refrescar();
+$("#tall").onclick = () => { tall = !tall; $("#frame").classList.toggle("tall", tall); $("#tall").textContent = tall ? "Ocultar tracks" : "Tracks"; };
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input,select,textarea") || $("#app").hidden) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+  else if (selId != null && (e.key === "+" || e.key === "=")) setQty(selId, qOf(selId) + 1);
+  else if (selId != null && (e.key === "-" || e.key === "_")) setQty(selId, qOf(selId) - 1);
+  else if (selId != null && e.key === "3") setQty(selId, 3);
+});
+$("#clear").onclick = function () {
+  if (this.dataset.armed) { carts[mode()] = {}; saveCart(); delete this.dataset.armed; this.textContent = "Vaciar pedido"; drawCart(); drawList(); say("Pedido vaciado."); return; }
+  this.dataset.armed = 1; this.textContent = "Pulsa otra vez para vaciar"; setTimeout(() => { delete this.dataset.armed; this.textContent = "Vaciar pedido"; }, 3000);
+};
+$("#copy").onclick = async () => {
+  const { items } = drawCart();
+  const tsv = items.map(({ r, q }) => [q, r.label, r.cat, r.artist, r.title].join("\t")).join("\n");
+  try { await navigator.clipboard.writeText(tsv); say("Copiado. Pega en la fila 9 del Order Form."); }
+  catch (e) { const ta = document.createElement("textarea"); ta.value = tsv; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); say("Copiado."); } catch (_) { say("No se pudo copiar."); } ta.remove(); }
+};
+$("#xlsx").onclick = async () => {
+  const { items, ok, total, pre } = drawCart(); if (!items.length) return;
+  const date = $("#date").value, client = $("#client").value;
+  try {
+    const buf = await buildXlsx(items, pre, date, client);
+    descarga(buf, (pre ? "Pre_Order_Form_Telsnap_" : "Order_Form_Telsnap_") + new Date().toISOString().slice(0, 10) + ".xlsx");
+  } catch (e) { say("No se pudo generar el archivo. Usa «Copiar lista»."); return; }
+  // Se anota en el worker como borrador; "Marcar enviado" cuando salga el correo.
+  const j = await orderOp({ op: 'add', kind: pre ? 'preorder' : 'order', date, client, lines: items.map(({ r, q }) => ({ cat: r.cat, qty: q })) });
+  if (j) { carts[mode()] = {}; saveCart(); drawCart(); drawList(); }
+  say(pre ? "Pre-order Form descargado y anotado. Envíalo a distribution@subwax.es y márcalo como enviado."
+    : ok ? "Order Form descargado y anotado. Envíalo a distribution@subwax.es y márcalo como enviado."
+      : `Descargado y anotado, pero no cumple el mínimo (${fmt(total)}). Revisa las dos reglas antes de enviarlo.`);
+};
+</script>
+</body>
+</html>
