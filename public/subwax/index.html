@@ -45,6 +45,8 @@ header.top .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .btn.acc{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600}
 .btn.acc:hover{filter:brightness(.92)}
 .btn.sm{padding:5px 8px;font-size:12px}
+.btn.ya{color:var(--muted);font-size:11px;padding:4px 7px}
+.btn.ya:hover{color:var(--info);border-color:var(--info)}
 .btn[disabled]{opacity:.4;cursor:not-allowed}
 .frame{border-radius:8px;overflow:hidden;background:var(--panel);height:166px;display:grid;place-items:center}
 .frame.tall{height:300px}
@@ -195,6 +197,7 @@ select{max-width:200px}
       <label class="chk"><input type="checkbox" id="onlyCart"> Solo mi pedido</label>
       <label class="chk"><input type="checkbox" id="hideShop"> Ocultar los que ya tengo</label>
       <label class="chk"><input type="checkbox" id="onlyNew"> Solo nuevos</label>
+      <label class="chk"><input type="checkbox" id="hideOrdered"> Ocultar los ya pedidos</label>
       <button class="btn sm" id="fromTray" hidden title="Pone 2 copias de cada disco marcado como elegido en la bandeja del tab Pre-order">Traer elegidos de la bandeja</button>
     </div>
     <div class="note" id="preNote" hidden>Lista aparte del pedido normal. Al descargar el Pre-order Form, esos discos quedan como <b>elegidos</b> en la bandeja del tab Pre-order del admin, que es la que los sube a la tienda con su audio. Subwax solo acepta pre-orders de clientes que piden cada mes y como máximo una vez por semana: después del primero, solo las copias nuevas.</div>
@@ -363,12 +366,13 @@ function drawLabels() {
   if (labs.some(x => x[0] === cur)) $("#lab").value = cur;
 }
 function visible() {
-  const q = $("#q").value.trim().toLowerCase(), lab = $("#lab").value, only = $("#onlyCart").checked, hideShop = $("#hideShop").checked, onlyNew = $("#onlyNew").checked;
+  const q = $("#q").value.trim().toLowerCase(), lab = $("#lab").value, only = $("#onlyCart").checked, hideShop = $("#hideShop").checked, onlyNew = $("#onlyNew").checked, hideOrdered = $("#hideOrdered").checked;
   const src = tab === 3 ? GONE : DATA;
   return src.filter(r => {
     if (only) { if (!carts[mode()][r.id] || (mode() === "pre") !== isPre(r)) return false; } else if (tab !== 3 && !inTab(r)) return false;
     if (hideShop && r.shop) return false;
     if (onlyNew && !esNuevo(r)) return false;
+    if (hideOrdered && pedidoDe(r.cat)) return false;
     if (lab && r.label !== lab) return false;
     if (q && !(`${r.artist} ${r.title} ${r.label} ${r.cat}`.toLowerCase().includes(q))) return false;
     return true;
@@ -397,6 +401,7 @@ function drawList() {
       <div class="l1"><span class="cat">${esc(r.cat)}</span><span class="name">${esc(r.artist)} <em>— ${esc(r.title)}</em></span></div>
       <div class="l2"><span>${esc(r.label)}</span><span>${esc(r.format)}</span>${pills(r)}</div>
       <div class="ctl"><span class="price">${fmt(r.price)}</span>
+        ${isPre(r) && !pedidoDe(r.cat) ? `<button class="btn sm ya" data-ya="${r.id}" title="Anotarlo como pre-order ya enviado a Subwax (2 copias, hoy), sin descargar nada">ya pedido</button>` : ''}
         ${isGone(r) ? '' : `<div class="step${q ? " has" : ""}"><button data-d="-1" aria-label="Quitar una copia">−</button><output>${q}</output><button data-d="1" aria-label="Añadir una copia">+</button></div>`}
       </div></div>`;
   }).join("") || '<div class="cartempty" style="padding:20px 8px">Nada que mostrar con estos filtros.</div>';
@@ -508,6 +513,15 @@ document.addEventListener("click", async e => {
     if (del.dataset.armed) { await orderOp({ op: 'delete', id: del.dataset.del }); return; }
     del.dataset.armed = 1; del.textContent = '¿Borrar? pulsa otra vez'; setTimeout(() => { delete del.dataset.armed; del.textContent = 'Borrar'; }, 3000); return;
   }
+  const ya = e.target.closest("[data-ya]"); if (ya) {
+    const r = byId(+ya.dataset.ya); if (!r) return;
+    ya.disabled = true;
+    const j = await orderOp({ op: 'add', kind: 'preorder', date: hoy(), client: $("#client").value, lines: [{ cat: r.cat, qty: 2 }], note: 'anotado a mano desde el player' });
+    if (j && j.order) await orderOp({ op: 'status', id: j.order.id, status: 'sent' });
+    if (carts.pre[r.id]) { delete carts.pre[r.id]; saveCart(); drawCart(); }
+    say(j ? `${r.cat} anotado como pre-order ya enviado (2 copias).` : 'No se pudo anotar.');
+    return;
+  }
   const redo = e.target.closest("[data-redo]"); if (redo) {
     const o = ORDERS.find(x => x.id === redo.dataset.redo); if (!o) return;
     const cart = o.kind === 'preorder' ? carts.pre : carts.order; let n = 0;
@@ -527,7 +541,7 @@ document.addEventListener("click", async e => {
   select(id);
 });
 $("#q").addEventListener("input", drawList); $("#lab").addEventListener("change", drawList);
-$("#onlyCart").addEventListener("change", drawList); $("#hideShop").addEventListener("change", drawList); $("#onlyNew").addEventListener("change", drawList);
+$("#onlyCart").addEventListener("change", drawList); $("#hideShop").addEventListener("change", drawList); $("#onlyNew").addEventListener("change", drawList); $("#hideOrdered").addEventListener("change", drawList);
 $("#fromTray").onclick = () => {
   // Elegidos de la bandeja que aun no estan ni en el carrito ni en un pre-order anotado → 2 copias (lo estandar).
   let n = 0;
