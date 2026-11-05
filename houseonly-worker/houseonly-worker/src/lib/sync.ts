@@ -74,7 +74,7 @@ const WEIGHT_DOUBLE_LP = 900;
 // way. Deep Jungle (dj) is a direct-from-label order (2026-07 proforma).
 // The Discogs matcher uses catno/label/artist/title (not genre), so all
 // sources are matchable even though W&S lacks genre at import time.
-const ACCEPTED_SOURCE_TAGS = ['source:ws', 'source:kudos', 'source:dbh', 'source:mt', 'source:tv', 'source:rd', 'source:dj', 'source:subwax'];
+const ACCEPTED_SOURCE_TAGS = ['source:ws', 'source:kudos', 'source:dbh', 'source:mt', 'source:tv', 'source:rd', 'source:dj', 'source:subwax', 'source:phantom'];
 
 // Status values from Discogs we consider "firm sale" — we reduce Shopify
 // inventory when an order reaches one of these. Earlier states ("New Order",
