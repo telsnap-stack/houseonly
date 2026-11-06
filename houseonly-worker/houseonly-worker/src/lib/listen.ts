@@ -18,6 +18,8 @@
  *   listen:rel:<CLAVE>      el disco (CLAVE = claveCatno: dedupe por catno);
  *                           metadata = resumen para listar sin un get por clave
  *   listen:mail:<fichero>   email ya tratado entero (no se vuelve a abrir)
+ *   listen:desc:<CLAVE>     disco descartado (no pre-order o rechazado) en los
+ *                           ultimos 7 dias; todo en la metadata (listDescartes)
  *
  * R2 (houseonly-listen, compartido con staging): LISTEN_R2_PREFIX, por defecto
  * listen/ (prod); staging usa listen-staging/ para no pisar a prod.
@@ -72,6 +74,41 @@ const MODE_KEY = 'meta:listen_mode';
 const LAST_RUN_KEY = 'meta:listen_last_run';
 const REL_PREFIX = 'listen:rel:';
 const MAIL_PREFIX = 'listen:mail:';
+const DESC_PREFIX = 'listen:desc:';
+const DESC_TTL_S = 7 * 86400;
+
+/** Un descarte del historial: lo que la bandeja enseña y lo que reintentar necesita. */
+export interface ListenDescarte {
+  clave: string;
+  catno: string;
+  tipo: 'no_preorder' | 'rechazado';
+  motivo: string;
+  correo: string;   // fichero del email en EMAILS
+  pasada: string;   // ISO de la pasada que lo descarto
+}
+
+// El historial sobrevive a la pasada siguiente (el cron pisa meta:listen_last_run
+// cada hora). Un descarte por disco: si otra pasada lo vuelve a descartar, manda
+// la ultima. La metadata cabe de sobra en 1 KB con el nombre recortado.
+async function anotaDescarte(env: ListenEnv, d: Omit<ListenDescarte, 'clave'>, clave: string): Promise<void> {
+  const m = { c: d.catno.slice(0, 40), t: d.tipo, m: d.motivo.slice(0, 120), e: d.correo.slice(0, 400), f: d.pasada };
+  await env.SYNC_STATE.put(DESC_PREFIX + clave, '', { metadata: m, expirationTtl: DESC_TTL_S });
+}
+
+/** El historial de descartes de los ultimos 7 dias, lo mas reciente primero. */
+export async function listDescartes(env: ListenEnv): Promise<ListenDescarte[]> {
+  const out: ListenDescarte[] = [];
+  let cursor: string | undefined;
+  do {
+    const l: any = await env.SYNC_STATE.list({ prefix: DESC_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.metadata || {};
+      out.push({ clave: k.name.slice(DESC_PREFIX.length), catno: m.c || '', tipo: m.t, motivo: m.m || '', correo: m.e || '', pasada: m.f || '' });
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  return out.sort((a, b) => b.pasada.localeCompare(a.pasada) || a.clave.localeCompare(b.clave));
+}
 
 // Rubadub y Triple Vision (fase 1); DBH desde el 2026-11-03 (parseDbhEmail, el
 // ZIP es release_zip/<id> de su tienda); Subwax desde el 2026-11-04
@@ -741,7 +778,9 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       // La bandeja es de pre-orders: lo que ya se envia no entra.
       if (!row.forthcoming) {
         out.saltados.no_preorder++;
-        (out.no_preorder ||= []).push(`${row.catno}: ${motivoNoPreorder(email.prefix, row)}`);
+        const motivo = motivoNoPreorder(email.prefix, row);
+        (out.no_preorder ||= []).push(`${row.catno}: ${motivo}`);
+        await anotaDescarte(env, { catno: row.catno, tipo: 'no_preorder', motivo, correo: email.name, pasada: now.toISOString() }, clave);
         continue;
       }
       const rechazo = await env.SYNC_STATE.get(claveKV(row.catno));
@@ -749,7 +788,9 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
         out.saltados.rechazado++;
         let r: any = {};
         try { r = JSON.parse(rechazo); } catch { /* clave sin JSON: basta el catno */ }
-        (out.rechazados ||= []).push(`${row.catno} (${[r.tipo, r.fecha && `rechazado el ${String(r.fecha).slice(0, 10)}`].filter(Boolean).join(', ') || 'rechazado'})`);
+        const motivo = [r.tipo, r.fecha && `rechazado el ${String(r.fecha).slice(0, 10)}`].filter(Boolean).join(', ') || 'rechazado';
+        (out.rechazados ||= []).push(`${row.catno} (${motivo})`);
+        await anotaDescarte(env, { catno: row.catno, tipo: 'rechazado', motivo, correo: email.name, pasada: now.toISOString() }, clave);
         continue;
       }
       const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
@@ -775,6 +816,8 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
       if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
       await guardaRelease(env, rel);
+      // Entro (p. ej. tras reintentar con la regla ya arreglada): fuera del historial.
+      await env.SYNC_STATE.delete(DESC_PREFIX + clave);
       out.nuevos++;
       out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
     }
@@ -1126,7 +1169,33 @@ export async function handleListenList(request: Request, env: ListenEnv, autoriz
   const recs = await Promise.all(pagina.map(k => env.SYNC_STATE.get<ListenRelease>(k.name, 'json')));
   const items = await Promise.all(recs.filter(Boolean).map(r => conUrls(env, origin, r!)));
   const sig = desde + limit < deVista.length ? String(desde + limit) : null;
-  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, modo, promote, items, cursor: sig });
+  // El historial de descartes va con la primera pagina, no con cada "mas".
+  const descartes = desde === 0 ? await listDescartes(env) : undefined;
+  return json({ ok: true, vista, count: deVista.length, counts, expires_in: SIGNED_TTL_S, last_run: lastRun, modo, promote, items, cursor: sig, descartes });
+}
+
+/**
+ * POST ?action=listen-reintentar (Bearer) {clave} — borra la marca del correo de
+ * un descarte no_preorder para que la pasada siguiente lo vuelva a abrir (tras
+ * arreglar una regla, como el TBA de TV). Un rechazado no: lo que lo deja fuera
+ * es el rechazo, y eso se recupera en el tab Pre-order.
+ */
+export async function handleListenReintentar(request: Request, env: ListenEnv, autorizado: boolean, ahora = new Date()): Promise<Response> {
+  if (!autorizado) return json({ error: 'unauthorized' }, 401);
+  const body: any = await request.json().catch(() => null);
+  const clave = claveCatno(body?.clave);
+  if (!clave) return json({ error: 'clave required' }, 400);
+  const { metadata } = await env.SYNC_STATE.getWithMetadata<any>(DESC_PREFIX + clave);
+  if (!metadata) return json({ error: 'not found' }, 404);
+  if (metadata.t === 'rechazado') return json({ error: 'rechazado: recupéralo en el tab Pre-order' }, 409);
+  const correo = String(metadata.e || '');
+  await env.SYNC_STATE.delete(MAIL_PREFIX + correo);
+  await env.SYNC_STATE.delete(DESC_PREFIX + clave);
+  // El cron solo mira MAX_EMAIL_AGE_DAYS hacia atras; un correo mas viejo
+  // necesita una pasada manual con dias=.
+  const fecha = correo.match(/__(\d{4}-\d{2}-\d{2})\.html$/)?.[1] || '';
+  const limite = new Date(ahora.getTime() - MAX_EMAIL_AGE_DAYS * 86400e3).toISOString().slice(0, 10);
+  return json({ ok: true, clave, correo, fuera_de_ventana: !!fecha && fecha < limite });
 }
 
 // ── carga al Pre-order ─────────────────────────────────────────
