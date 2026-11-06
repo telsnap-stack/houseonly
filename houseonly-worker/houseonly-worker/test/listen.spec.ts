@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
+	handleListenPromote, handleListenUpload, handleListenReintentar, listDescartes, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
@@ -212,12 +212,15 @@ describe("listen: ingesta", () => {
 
 	it("sin JPG en el ZIP, la portada del email; rechazados y no pre-order no se bajan", async () => {
 		const f = redes(zipDe({ "a.mp3": 10, "Side A.png": 10 }));
-		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo" }));
+		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo", fecha: "2026-10-20T09:00:00Z" }));
 		await archiva("RD__X---Y-NOC001__2026-11-01.html", rdEmail("NOC001"));
 		await archiva("RD__X---Y-REJ001__2026-11-01.html", rdEmail("REJ001"));
 		await archiva("RD__X---Y-SHP001__2026-11-01.html", rdEmail("SHP001").replace("Please Pre-Order", "Shipping to you today"));
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
+		// El resumen dice cuales y por que, no solo cuantos.
+		expect(r.rechazados).toEqual(["REJ001 (definitivo, rechazado el 2026-10-20)"]);
+		expect(r.no_preorder).toEqual(["SHP001: digest de envíos"]);
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
 	});
@@ -228,8 +231,45 @@ describe("listen: ingesta", () => {
 		await archiva("TV__TVT003---Test-EP---Test-Artist-30-10-2026__2026-11-01.html", tvEmail("TVT003", "30-10-2026"), "2026-11-01", "TV");
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, saltados: { no_preorder: 1 } });
+		expect(r.no_preorder).toEqual(["TVT003: salida 2026-10-30, ya pasada"]);
 		expect(await rel("TVT002")).toMatchObject({ distribuidor: "TV", release: "", dealerPrice: 9.5 });
 		expect(await rel("TVT003")).toBeNull();
+	});
+
+	it("historial de descartes 7 dias: sobrevive a la pasada siguiente, reintentar reabre el correo, entrar lo quita", async () => {
+		redes(zipDe({ "a.mp3": 10 }));
+		await E.SYNC_STATE.put("preorder:rejected:REJ002", JSON.stringify({ catno: "REJ002", tipo: "temporal", fecha: "2026-10-30T09:00:00Z" }));
+		const tv = "TV__TVT004---Test-EP---Test-Artist-30-10-2026__2026-11-01.html";
+		await archiva(tv, tvEmail("TVT004", "30-10-2026"), "2026-11-01", "TV");
+		await archiva("RD__X---Y-REJ002__2026-11-01.html", rdEmail("REJ002"));
+		await runListenIngest(E, { now: NOW });
+		// La pasada siguiente no ve nada (correos cerrados) y pisa el resumen; el historial sigue.
+		const r2 = await runListenIngest(E, { now: new Date(NOW.getTime() + 3600e3) });
+		expect(r2.no_preorder).toBeUndefined();
+		expect(await listDescartes(E)).toEqual([
+			{ clave: "REJ002", catno: "REJ002", tipo: "rechazado", motivo: "temporal, rechazado el 2026-10-30", correo: "RD__X---Y-REJ002__2026-11-01.html", pasada: NOW.toISOString() },
+			{ clave: "TVT004", catno: "TVT004", tipo: "no_preorder", motivo: "salida 2026-10-30, ya pasada", correo: tv, pasada: NOW.toISOString() },
+		]);
+		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&vista=por_decidir"), E, true)).json();
+		expect(body.descartes.map((d: any) => d.clave)).toEqual(["REJ002", "TVT004"]);
+
+		const pide = (clave: string, ok = true) => handleListenReintentar(new Request("https://w/?action=listen-reintentar", { method: "POST", body: JSON.stringify({ clave }) }), E, ok, NOW);
+		expect((await pide("TVT004", false)).status).toBe(401);
+		expect((await pide("NADA01")).status).toBe(404);
+		expect((await pide("REJ002")).status).toBe(409);
+		expect(await (await pide("TVT004")).json()).toEqual({ ok: true, clave: "TVT004", correo: tv, fuera_de_ventana: false });
+		expect(await E.SYNC_STATE.get(`listen:mail:${tv}`)).toBeNull();
+
+		// Con la regla "arreglada" (aqui: el correo ahora trae TBA) la pasada siguiente lo mete y sale del historial.
+		await E.EMAILS.put(`msg:${tv}`, tvEmail("TVT004", "TBA"));
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1 });
+		expect((await listDescartes(E)).map(d => d.clave)).toEqual(["REJ002"]);
+	});
+
+	it("reintentar avisa si el correo ya queda fuera de la ventana del cron", async () => {
+		await E.SYNC_STATE.put("listen:desc:OLD002", "", { metadata: { c: "OLD002", t: "no_preorder", m: "x", e: "TV__OLD002---X__2026-10-20.html", f: NOW.toISOString() } });
+		const r = await handleListenReintentar(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "OLD002" }) }), E, true, NOW);
+		expect(await r.json()).toMatchObject({ ok: true, fuera_de_ventana: true });
 	});
 
 	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
@@ -267,6 +307,7 @@ describe("listen: ingesta", () => {
 		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter", dbhFicha(777, "DBH777")), "2026-11-02", "DBH");
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 2, saltados: { no_preorder: 1, duplicado: 1 } });
+		expect(r.no_preorder).toEqual(["OLD555: la ficha no dice Coming soon"]);
 		const d = await rel("DBH777");
 		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07",
 			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
