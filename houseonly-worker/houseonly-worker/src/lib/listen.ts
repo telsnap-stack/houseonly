@@ -83,6 +83,20 @@ export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Trip
 // de pista (MYD015, cosa de Rubadub) ni precio en libras.
 const POR_FICHAS = new Set(['DBH', 'SUBWAX']);
 
+/**
+ * Por que una ficha no cuenta como pre-order, en pocas palabras. A la vista en
+ * el resumen de la pasada: el TBA de TV (2026-11-06) salia como no_preorder y
+ * solo se vio porque Eduardo echo de menos dos discos.
+ */
+function motivoNoPreorder(prefix: string, row: any): string {
+  if (prefix === 'DBH') return 'la ficha no dice Coming soon';
+  if (row.source === 'tv') return row.release ? `salida ${row.release}, ya pasada` : 'sin fecha de salida reconocible';
+  const w = (row._warnings || []).join(' ');
+  if (/digest de envíos/.test(w)) return 'digest de envíos';
+  if (/ya se envía/.test(w)) return 'el correo dice que ya se envía';
+  return 'sin "Please Pre-Order"';
+}
+
 /** Las fichas de un email archivado, con el parser de su distribuidor. */
 function filasDelEmail(prefix: string, html: string, fecha: string): any[] {
   if (prefix === 'DBH') return parseDbhEmail(html);
@@ -176,6 +190,8 @@ export interface ListenRunResult {
   saltados: { duplicado: number; rechazado: number; no_preorder: number; en_tienda: number };
   en_tienda?: string[];          // "<catno> como <handle>"
   descartados_asunto?: string[]; // "<fichero> (<motivo>)": no se abren
+  no_preorder?: string[];        // "<catno>: <motivo>": abiertos, pero no son pre-order
+  rechazados?: string[];         // "<catno> (<tipo>, <fecha>)": rechazados antes en Pre-order
   tienda_error?: string;
   limpiados: { rechazados: number; sin_audio: number; fuera: number; cargados: number };
   portadas?: number;
@@ -723,8 +739,19 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       if (!clave || vistos.has(clave)) continue;
       vistos.add(clave);
       // La bandeja es de pre-orders: lo que ya se envia no entra.
-      if (!row.forthcoming) { out.saltados.no_preorder++; continue; }
-      if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
+      if (!row.forthcoming) {
+        out.saltados.no_preorder++;
+        (out.no_preorder ||= []).push(`${row.catno}: ${motivoNoPreorder(email.prefix, row)}`);
+        continue;
+      }
+      const rechazo = await env.SYNC_STATE.get(claveKV(row.catno));
+      if (rechazo) {
+        out.saltados.rechazado++;
+        let r: any = {};
+        try { r = JSON.parse(rechazo); } catch { /* clave sin JSON: basta el catno */ }
+        (out.rechazados ||= []).push(`${row.catno} (${[r.tipo, r.fecha && `rechazado el ${String(r.fecha).slice(0, 10)}`].filter(Boolean).join(', ') || 'rechazado'})`);
+        continue;
+      }
       const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
       if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
       if (!tienda) {

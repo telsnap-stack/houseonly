@@ -10384,6 +10384,15 @@ function ListenInbox({ onCargar, ultimaCarga }) {
               <summary style={{ cursor: 'pointer' }}>{lastRun.descartados_asunto.length} correos sin abrir por el asunto</summary>
               {lastRun.descartados_asunto.map(d => <div key={d} style={{ paddingLeft: 10 }}>{d.replace(/\.html \(/, ' (')}</div>)}
             </details>}
+            {/* Abiertos pero no pre-order, con el motivo: un fallo de regla (el TBA de TV, 2026-11-06) se ve aqui. */}
+            {lastRun?.no_preorder?.length > 0 && <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer' }}>{lastRun.no_preorder.length} discos fuera por no ser pre-order</summary>
+              {lastRun.no_preorder.map(d => <div key={d} style={{ paddingLeft: 10 }}>{d}</div>)}
+            </details>}
+            {lastRun?.rechazados?.length > 0 && <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer' }}>{lastRun.rechazados.length} discos fuera por rechazados en Pre-order</summary>
+              {lastRun.rechazados.map(d => <div key={d} style={{ paddingLeft: 10 }}>{d}</div>)}
+            </details>}
           </div>
           {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
 

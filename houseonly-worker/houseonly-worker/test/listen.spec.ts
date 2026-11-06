@@ -212,12 +212,15 @@ describe("listen: ingesta", () => {
 
 	it("sin JPG en el ZIP, la portada del email; rechazados y no pre-order no se bajan", async () => {
 		const f = redes(zipDe({ "a.mp3": 10, "Side A.png": 10 }));
-		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo" }));
+		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo", fecha: "2026-10-20T09:00:00Z" }));
 		await archiva("RD__X---Y-NOC001__2026-11-01.html", rdEmail("NOC001"));
 		await archiva("RD__X---Y-REJ001__2026-11-01.html", rdEmail("REJ001"));
 		await archiva("RD__X---Y-SHP001__2026-11-01.html", rdEmail("SHP001").replace("Please Pre-Order", "Shipping to you today"));
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
+		// El resumen dice cuales y por que, no solo cuantos.
+		expect(r.rechazados).toEqual(["REJ001 (definitivo, rechazado el 2026-10-20)"]);
+		expect(r.no_preorder).toEqual(["SHP001: digest de envíos"]);
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
 	});
@@ -228,6 +231,7 @@ describe("listen: ingesta", () => {
 		await archiva("TV__TVT003---Test-EP---Test-Artist-30-10-2026__2026-11-01.html", tvEmail("TVT003", "30-10-2026"), "2026-11-01", "TV");
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, saltados: { no_preorder: 1 } });
+		expect(r.no_preorder).toEqual(["TVT003: salida 2026-10-30, ya pasada"]);
 		expect(await rel("TVT002")).toMatchObject({ distribuidor: "TV", release: "", dealerPrice: 9.5 });
 		expect(await rel("TVT003")).toBeNull();
 	});
@@ -267,6 +271,7 @@ describe("listen: ingesta", () => {
 		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter", dbhFicha(777, "DBH777")), "2026-11-02", "DBH");
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 2, saltados: { no_preorder: 1, duplicado: 1 } });
+		expect(r.no_preorder).toEqual(["OLD555: la ficha no dice Coming soon"]);
 		const d = await rel("DBH777");
 		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07",
 			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
