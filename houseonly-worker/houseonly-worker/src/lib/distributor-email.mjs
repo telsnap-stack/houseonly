@@ -332,15 +332,21 @@ export function parseDistributorEmail(raw, { fx = RD_GBP_EUR, emailDate = new Da
 
     // TV trae la fecha como campo en dd-mm-yyyy; Rubadub en prosa inglesa.
     let release = ship.date;
-    if (esTV && b.fields.releasedate) {
+    // "Release date: TBA" (CNTRL01, KKYV11, 2026-11): TV anuncia un pre-order
+    // que aun no tiene fecha. Va sin fecha, y al cargarlo sigue la regla de
+    // forthcoming sin fecha (60 dias desde el alta).
+    const sinFechaTV = esTV && /^\s*(TBA|TBC|TBD|To\s+be\s+(announced|confirmed))\b/i.test(b.fields.releasedate || '');
+    if (sinFechaTV) release = '';
+    else if (esTV && b.fields.releasedate) {
       const d = b.fields.releasedate.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
       if (d) release = `${d[3]}-${d[2].padStart(2,'0')}-${d[1].padStart(2,'0')}`;
     }
 
     // TV no dice "Please Pre-Order": lo que manda es si la fecha de salida
-    // sigue por delante. Rubadub si lo dice, y ahi manda el marcador.
+    // sigue por delante, o que aun no la tenga (TBA). Rubadub si lo dice, y ahi
+    // manda el marcador.
     const esFuturo = release ? release > new Date(emailDate.getTime()).toISOString().slice(0,10) : false;
-    const forthcoming = esTV ? esFuturo : isPreorder;
+    const forthcoming = esTV ? (esFuturo || sinFechaTV) : isPreorder;
 
     // La descripcion importa para Shopify y cada uno la deja en otro sitio:
     // W&S en el SALESPAPER.pdf del ZIP, TV en un _promotext.txt dentro del ZIP,

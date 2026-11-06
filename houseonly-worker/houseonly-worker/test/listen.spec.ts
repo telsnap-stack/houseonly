@@ -25,6 +25,13 @@ const rdEmail = (cat: string, link = TRACKER) => `<html><body>
 <p>Artist: Test Artist<br>Title: Test EP<br>Label: Test Rec<br>Cat: ${cat}<br>Format: 12"<br>Price: £8.99</p>
 <p>A1. Uno <a href="${link}">Download Zip</a></p></body></html>`;
 
+// Anuncio de Triple Vision minimo: portada _front, ficha con "Catalog:" y
+// "Release date:", promopack por tracker (estructura real, sin datos reales).
+const tvEmail = (cat: string, fecha: string) => `<html><body>
+<img src="https://x.ams3.cdn.digitaloceanspaces.com/a/${cat}_front-U1.jpeg">
+<p>Artist: Test Artist<br>Title: Test EP<br>Catalog: ${cat}<br>Label: TEST REC<br>Genre: House<br>Release date: ${fecha}<br>Format: Vinyl 12inch<br>Price: €9.5<br>
+Promopack: <a href="${TRACKER}">Download</a></p><p>Tracklisting</p><p>A1 Uno</p></body></html>`;
+
 // Ficha de DBH con la estructura real de su tienda (sin datos reales).
 const dbhFicha = (id: number, cat: string, etiqueta = "Coming&nbsp;soon", genero = "Techno - Minimal") => `
 <table style="width: 100%;margin-top:30px;margin-bottom:30px;"><tr><td style="max-width:50%;width: 50%;">
@@ -95,6 +102,15 @@ describe("parseDbhEmail", () => {
 		expect(rows[0]._desc).toBe("OUT SOON: DBH-777 - Test\nProsa del disco.");
 		// La prosa es del disco que nombra; la ficha de "Back in Stock" no la hereda.
 		expect(rows[1]).toMatchObject({ catno: "OLD555", forthcoming: false, genre: "House - Deep House", _desc: "" });
+	});
+});
+
+describe("parseDistributorEmail: Triple Vision", () => {
+	it("Release date TBA es un pre-order sin fecha; con fecha manda si esta por delante (CNTRL01, KKYV11)", () => {
+		const fila = (fecha: string) => parseDistributorEmail(tvEmail("TVT001", fecha), { emailDate: new Date(2026, 10, 6) })[0];
+		for (const tba of ["TBA", "To be announced", "TBC"]) expect(fila(tba)).toMatchObject({ source: "tv", forthcoming: true, release: "", dealerPrice: 9.5 });
+		expect(fila("08-01-2027")).toMatchObject({ forthcoming: true, release: "2027-01-08" });
+		expect(fila("30-10-2026")).toMatchObject({ forthcoming: false, release: "2026-10-30" });
 	});
 });
 
@@ -204,6 +220,16 @@ describe("listen: ingesta", () => {
 		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+	});
+
+	it("TV con Release date TBA entra en la bandeja sin fecha; el que ya salio sigue fuera", async () => {
+		redes(zipDe({ "TVT002_A1.mp3": 10, "TVT002_front.jpg": 20 }));
+		await archiva("TV__TVT002---Test-EP---Test-Artist-TBA__2026-11-01.html", tvEmail("TVT002", "TBA"), "2026-11-01", "TV");
+		await archiva("TV__TVT003---Test-EP---Test-Artist-30-10-2026__2026-11-01.html", tvEmail("TVT003", "30-10-2026"), "2026-11-01", "TV");
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, saltados: { no_preorder: 1 } });
+		expect(await rel("TVT002")).toMatchObject({ distribuidor: "TV", release: "", dealerPrice: 9.5 });
+		expect(await rel("TVT003")).toBeNull();
 	});
 
 	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
