@@ -143,7 +143,7 @@ export function textoFicha(p) {
   if (artista) f += ` by ${artista}`;
   if (sello) f += ` on ${sello}`;
   if (cat) f += `, catalogue number ${cat}`;
-  if (p.forthcoming && /^\d{4}-\d{2}-\d{2}$/.test(p.releaseDate || '')) f += `, due ${p.releaseDate}`;
+  if (p.forthcoming && /^\d{4}-\d{2}-\d{2}$/.test(p.releaseDate || '')) f += `, release date ${p.releaseDate}`;
   else if (!p.forthcoming && p.year) f += `, released in ${p.year}`;
   frases.push(`${f}.`);
 
