@@ -35,8 +35,7 @@ test('slug: una sola regla para App, prerender y worker', () => {
 
 test('titulo: Artista – Titulo Vinyl (Sello) | House Only, sin catalogo', () => {
   const p = { artist: 'Shawn Ward', title: 'Forward Motions EP', label: 'Flat & Round', catalog: 'FAR04' };
-  // Con sello serian 65: se cae el sello.
-  assert.equal(tituloFicha(p), 'Shawn Ward – Forward Motions EP Vinyl | House Only');
+  assert.equal(tituloFicha(p), 'Shawn Ward – Forward Motions EP Vinyl (Flat & Round) | House Only');
   assert.equal(encabezadoFicha(p), 'Shawn Ward – Forward Motions EP');
   // El catalogo sigue en el H1.
   assert.equal(h1Ficha(p), 'Shawn Ward – Forward Motions EP (FAR04)');
@@ -51,23 +50,22 @@ test('titulo: sin sello', () => {
   assert.equal(tituloFicha({ artist: 'Omar S', title: "Can't Get", label: '', catalog: 'AOS-2023' }), "Omar S – Can't Get Vinyl | House Only");
 });
 
-test('titulo largo: fuera el sello, luego "| House Only"; nunca se corta el titulo', () => {
-  // 62 con sello → sin sello (49).
-  const conSello = { artist: 'Abyssy & Memoryman', title: 'Old Friends EP', label: 'HOTMIX Records' };
-  assert.equal(tituloFicha(conSello), 'Abyssy & Memoryman – Old Friends EP Vinyl | House Only');
-  // Sin sello sigue largo → sin "| House Only".
+test('titulo largo: por encima de 90 se quita el sello; "| House Only" nunca', () => {
+  // 71 con sello: se queda entero.
+  const medio = { artist: 'Abyssy & Memoryman', title: 'Old Friends EP', label: 'HOTMIX Records' };
+  assert.equal(tituloFicha(medio), 'Abyssy & Memoryman – Old Friends EP Vinyl (HOTMIX Records) | House Only');
+  // 101 con sello → sin sello (85).
   const largo = { artist: 'Ron Trent', title: '7th Heaven - Tribute to the Energy of Frankie Knuckles', label: 'Electric Blue' };
-  assert.equal(tituloFicha(largo), 'Ron Trent – 7th Heaven - Tribute to the Energy of Frankie Knuckles Vinyl');
-  // Cabe entero (60 o menos) → se queda el sello.
-  assert.equal(tituloFicha({ artist: 'Omar S', title: "Can't Get", label: 'AOS' }), "Omar S – Can't Get Vinyl (AOS) | House Only");
+  assert.equal(tituloFicha(largo), 'Ron Trent – 7th Heaven - Tribute to the Energy of Frankie Knuckles Vinyl | House Only');
+  // Aun sin sello pasa de 90: no se corta nada mas.
+  const enorme = { artist: 'Various Artists', title: 'A Very Long Compilation Title That Keeps Going And Going Forever', label: 'X' };
+  const t = tituloFicha(enorme);
+  assert.ok(t.length > 90 && t.endsWith(' Vinyl | House Only') && !t.includes('(X)'));
 });
 
 test('titulo: "Various Artists" como hasta ahora (va delante como artista)', () => {
-  // 63 sin sello: fuera tambien "| House Only".
   assert.equal(tituloFicha({ artist: 'Various Artists', title: 'As Below So Above EP Vol 2', label: 'Rockets Audio' }),
-    'Various Artists – As Below So Above EP Vol 2 Vinyl');
-  assert.equal(tituloFicha({ artist: 'Various Artists', title: 'Rare', label: 'Rockets Audio' }),
-    'Various Artists – Rare Vinyl (Rockets Audio) | House Only');
+    'Various Artists – As Below So Above EP Vol 2 Vinyl (Rockets Audio) | House Only');
 });
 
 test('tags: sello, año, pre-order y fecha', () => {
@@ -154,7 +152,7 @@ test('bloque HTML: escapado, enlaces con barra final y data-handle', () => {
 test('prerender: titulo, JSON-LD, ficha visible dentro de #root', () => {
   const [far] = productosDelCatalogo([nodo({ variants: { edges: [{ node: { sku: 'FAR04', barcode: '4251804189613', price: { amount: '20.99' }, quantityAvailable: 2 } }] } })]);
   const html = renderProductHtml(PLANTILLA, far, [{ slug: 'otra', handle: 'h', texto: 'Shawn Ward – Otra' }]);
-  assert.ok(html.includes('<title>Shawn Ward – Forward Motions EP Vinyl | House Only</title>'));
+  assert.ok(html.includes('<title>Shawn Ward – Forward Motions EP Vinyl (Flat &amp; Round) | House Only</title>'));
   assert.equal((html.match(/rel="canonical"/g) || []).length, 1);
   const ld = JSON.parse(html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)[1]);
   assert.equal(ld.name, 'Shawn Ward – Forward Motions EP');

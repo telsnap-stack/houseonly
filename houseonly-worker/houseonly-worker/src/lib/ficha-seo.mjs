@@ -71,26 +71,22 @@ export function h1Ficha({ artist, title, catalog }) {
   return encabezadoFicha({ artist, title }) + (cat ? ` (${cat})` : '');
 }
 
-/** Lo que Google suele ensenar de un <title> antes de cortarlo. */
-const MAX_TITULO = 60;
+/** Por encima de esto el titulo pierde el sello. */
+const MAX_TITULO = 90;
 
 /**
  * "Artista – Titulo Vinyl (Sello) | House Only". Sin catalogo: va en el H1,
- * en la frase visible y en el sku del JSON-LD. Si pasa de ~60 caracteres se
- * quita primero el sello y despues "| House Only"; el artista y el titulo no se
- * recortan nunca. "Vinyl" no se repite si el titulo ya lo dice
- * ("… (Orange Vinyl)").
+ * en la frase visible y en el sku del JSON-LD. Una sola regla: si pasa de 90
+ * caracteres, fuera el sello. "| House Only" no se quita nunca, ni el artista
+ * ni el titulo. "Vinyl" no se repite si el titulo ya lo dice ("… (Orange Vinyl)").
  */
 export function tituloFicha({ artist, title, label }) {
   const base = encabezadoFicha({ artist, title });
   const nucleo = /\bvinyl\b/i.test(base) ? base : `${base} Vinyl`;
   const sello = String(label || '').trim();
   const marca = ` | ${TIENDA}`;
-  const opciones = [
-    sello ? `${nucleo} (${sello})${marca}` : '',
-    `${nucleo}${marca}`,
-  ].filter(Boolean);
-  return opciones.find(t => t.length <= MAX_TITULO) || nucleo;
+  const conSello = sello ? `${nucleo} (${sello})${marca}` : '';
+  return conSello && conSello.length <= MAX_TITULO ? conSello : `${nucleo}${marca}`;
 }
 
 // ── Datos de Shopify ────────────────────────────────────────────
