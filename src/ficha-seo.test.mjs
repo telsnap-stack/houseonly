@@ -76,7 +76,7 @@ test('texto: solo frases con datos reales', () => {
     ['Untitled is a vinyl record by X, catalogue number C1.']);
   // Pre-order: "upcoming" y la fecha si la hay; nunca "released in".
   assert.deepEqual(textoFicha({ title: 'T', artist: 'A', year: 2026, forthcoming: true, releaseDate: '2026-12-04' }),
-    ['T is an upcoming vinyl record by A, due 2026-12-04.']);
+    ['T is an upcoming vinyl record by A, release date 2026-12-04.']);
   assert.deepEqual(textoFicha({ title: 'T', artist: 'A', year: 2026, forthcoming: true }),
     ['T is an upcoming vinyl record by A.']);
   // Sin reproductor, la lista del texto.
