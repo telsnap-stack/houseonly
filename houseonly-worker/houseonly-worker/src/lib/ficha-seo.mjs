@@ -65,16 +65,32 @@ export function encabezadoFicha({ artist, title }) {
   return a ? `${a} – ${t}` : t;
 }
 
+/** El H1 del HTML servido: "Artista – Titulo (Catalogo)". */
+export function h1Ficha({ artist, title, catalog }) {
+  const cat = String(catalog || '').trim();
+  return encabezadoFicha({ artist, title }) + (cat ? ` (${cat})` : '');
+}
+
+/** Lo que Google suele ensenar de un <title> antes de cortarlo. */
+const MAX_TITULO = 60;
+
 /**
- * "Artista – Titulo (Sello, Catalogo) Vinyl | House Only". El parentesis lleva
- * lo que haya de sello y catalogo; sin ninguno, no hay parentesis. "Vinyl" no
- * se repite si el titulo ya lo dice ("… (Orange Vinyl)").
+ * "Artista – Titulo Vinyl (Sello) | House Only". Sin catalogo: va en el H1,
+ * en la frase visible y en el sku del JSON-LD. Si pasa de ~60 caracteres se
+ * quita primero el sello y despues "| House Only"; el artista y el titulo no se
+ * recortan nunca. "Vinyl" no se repite si el titulo ya lo dice
+ * ("… (Orange Vinyl)").
  */
-export function tituloFicha({ artist, title, label, catalog }) {
-  const extra = [label, catalog].map(x => String(x || '').trim()).filter(Boolean).join(', ');
-  const base = encabezadoFicha({ artist, title }) + (extra ? ` (${extra})` : '');
-  const vinilo = /\bvinyl\b/i.test(base) ? '' : ' Vinyl';
-  return `${base}${vinilo} | ${TIENDA}`;
+export function tituloFicha({ artist, title, label }) {
+  const base = encabezadoFicha({ artist, title });
+  const nucleo = /\bvinyl\b/i.test(base) ? base : `${base} Vinyl`;
+  const sello = String(label || '').trim();
+  const marca = ` | ${TIENDA}`;
+  const opciones = [
+    sello ? `${nucleo} (${sello})${marca}` : '',
+    `${nucleo}${marca}`,
+  ].filter(Boolean);
+  return opciones.find(t => t.length <= MAX_TITULO) || nucleo;
 }
 
 // ── Datos de Shopify ────────────────────────────────────────────

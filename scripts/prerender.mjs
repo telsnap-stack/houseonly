@@ -17,7 +17,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { descripcionDeProducto, cortesDelJson } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
-import { makeSlug, artistaDeVendor, encabezadoFicha, tituloFicha, metaDeTags, gtinDe, relacionadas, bloqueFichaHtml } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
+import { makeSlug, artistaDeVendor, encabezadoFicha, h1Ficha, tituloFicha, metaDeTags, gtinDe, relacionadas, bloqueFichaHtml } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
 import { generoDeTags } from '../houseonly-worker/houseonly-worker/src/lib/genres.mjs';
 import { POLICY_PAGES, CONTACT_LINKS } from '../src/policies.mjs';
 import { GIFT_CARD, esTarjetaRegalo } from '../src/giftcard.mjs';
@@ -257,7 +257,7 @@ export function renderProductHtml(template, product, relacionados = []) {
   // (bloqueFichaHtml, lib/ficha-seo.mjs).
   const seoBody = `<main style="max-width:680px;margin:0 auto;padding:34px 20px;min-height:100vh;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif">
 ${product.image ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(encabezado)}" width="240" height="240" style="display:block;width:240px;height:240px;object-fit:cover" />` : ''}
-<h1 style="font-size:22px;margin:18px 0 6px">${escapeHtml(encabezado)}</h1>
+<h1 style="font-size:22px;margin:18px 0 6px">${escapeHtml(h1Ficha(product))}</h1>
 <p style="font-size:16px;font-weight:800;color:#c8ff00;margin:0 0 4px">€${product.price.toFixed(2)}</p>
 ${bloqueFichaHtml(product, relacionados)}
 </main>`;

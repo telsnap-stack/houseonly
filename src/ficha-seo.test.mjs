@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  slugify, makeSlug, artistaDeVendor, encabezadoFicha, tituloFicha, metaDeTags, gtinDe,
+  slugify, makeSlug, artistaDeVendor, encabezadoFicha, h1Ficha, tituloFicha, metaDeTags, gtinDe,
   textoFicha, relacionadas, consultasRelacionadas, bloqueFichaHtml,
 } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
 import { makeReleaseSlug } from '../houseonly-worker/houseonly-worker/src/lib/slug.ts';
@@ -33,15 +33,41 @@ test('slug: una sola regla para App, prerender y worker', () => {
   assert.equal(slugify('  --A&B--  '), 'a-and-b');
 });
 
-test('titulo: Artista – Titulo (Sello, Catalogo) Vinyl | House Only', () => {
+test('titulo: Artista – Titulo Vinyl (Sello) | House Only, sin catalogo', () => {
   const p = { artist: 'Shawn Ward', title: 'Forward Motions EP', label: 'Flat & Round', catalog: 'FAR04' };
-  assert.equal(tituloFicha(p), 'Shawn Ward – Forward Motions EP (Flat & Round, FAR04) Vinyl | House Only');
+  // Con sello serian 65: se cae el sello.
+  assert.equal(tituloFicha(p), 'Shawn Ward – Forward Motions EP Vinyl | House Only');
   assert.equal(encabezadoFicha(p), 'Shawn Ward – Forward Motions EP');
-  assert.equal(tituloFicha({ ...p, label: '' }), 'Shawn Ward – Forward Motions EP (FAR04) Vinyl | House Only');
-  assert.equal(tituloFicha({ ...p, label: '', catalog: '' }), 'Shawn Ward – Forward Motions EP Vinyl | House Only');
-  assert.equal(tituloFicha({ ...p, artist: 'House Only' }), 'Forward Motions EP (Flat & Round, FAR04) Vinyl | House Only');
+  // El catalogo sigue en el H1.
+  assert.equal(h1Ficha(p), 'Shawn Ward – Forward Motions EP (FAR04)');
+  assert.equal(h1Ficha({ ...p, catalog: '' }), 'Shawn Ward – Forward Motions EP');
+  // Sin artista: empieza por el titulo.
+  assert.equal(tituloFicha({ ...p, artist: 'House Only' }), 'Forward Motions EP Vinyl (Flat & Round) | House Only');
   // "Vinyl" no se repite.
-  assert.equal(tituloFicha({ ...p, title: 'Wind On Water (Orange Vinyl)' }), 'Shawn Ward – Wind On Water (Orange Vinyl) (Flat & Round, FAR04) | House Only');
+  assert.equal(tituloFicha({ ...p, title: 'Wind On Water (Orange Vinyl)', label: '' }), 'Shawn Ward – Wind On Water (Orange Vinyl) | House Only');
+});
+
+test('titulo: sin sello', () => {
+  assert.equal(tituloFicha({ artist: 'Omar S', title: "Can't Get", label: '', catalog: 'AOS-2023' }), "Omar S – Can't Get Vinyl | House Only");
+});
+
+test('titulo largo: fuera el sello, luego "| House Only"; nunca se corta el titulo', () => {
+  // 62 con sello → sin sello (49).
+  const conSello = { artist: 'Abyssy & Memoryman', title: 'Old Friends EP', label: 'HOTMIX Records' };
+  assert.equal(tituloFicha(conSello), 'Abyssy & Memoryman – Old Friends EP Vinyl | House Only');
+  // Sin sello sigue largo → sin "| House Only".
+  const largo = { artist: 'Ron Trent', title: '7th Heaven - Tribute to the Energy of Frankie Knuckles', label: 'Electric Blue' };
+  assert.equal(tituloFicha(largo), 'Ron Trent – 7th Heaven - Tribute to the Energy of Frankie Knuckles Vinyl');
+  // Cabe entero (60 o menos) → se queda el sello.
+  assert.equal(tituloFicha({ artist: 'Omar S', title: "Can't Get", label: 'AOS' }), "Omar S – Can't Get Vinyl (AOS) | House Only");
+});
+
+test('titulo: "Various Artists" como hasta ahora (va delante como artista)', () => {
+  // 63 sin sello: fuera tambien "| House Only".
+  assert.equal(tituloFicha({ artist: 'Various Artists', title: 'As Below So Above EP Vol 2', label: 'Rockets Audio' }),
+    'Various Artists – As Below So Above EP Vol 2 Vinyl');
+  assert.equal(tituloFicha({ artist: 'Various Artists', title: 'Rare', label: 'Rockets Audio' }),
+    'Various Artists – Rare Vinyl (Rockets Audio) | House Only');
 });
 
 test('tags: sello, año, pre-order y fecha', () => {
@@ -128,7 +154,7 @@ test('bloque HTML: escapado, enlaces con barra final y data-handle', () => {
 test('prerender: titulo, JSON-LD, ficha visible dentro de #root', () => {
   const [far] = productosDelCatalogo([nodo({ variants: { edges: [{ node: { sku: 'FAR04', barcode: '4251804189613', price: { amount: '20.99' }, quantityAvailable: 2 } }] } })]);
   const html = renderProductHtml(PLANTILLA, far, [{ slug: 'otra', handle: 'h', texto: 'Shawn Ward – Otra' }]);
-  assert.ok(html.includes('<title>Shawn Ward – Forward Motions EP (Flat &amp; Round, FAR04) Vinyl | House Only</title>'));
+  assert.ok(html.includes('<title>Shawn Ward – Forward Motions EP Vinyl | House Only</title>'));
   assert.equal((html.match(/rel="canonical"/g) || []).length, 1);
   const ld = JSON.parse(html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)[1]);
   assert.equal(ld.name, 'Shawn Ward – Forward Motions EP');
@@ -137,7 +163,7 @@ test('prerender: titulo, JSON-LD, ficha visible dentro de #root', () => {
   // Dentro de #root y sin esconder.
   assert.ok(/<div id="root"><main[^>]*>/.test(html));
   assert.ok(!html.includes('-9999px'));
-  assert.ok(html.includes('<h1 style="font-size:22px;margin:18px 0 6px">Shawn Ward – Forward Motions EP</h1>'));
+  assert.ok(html.includes('<h1 style="font-size:22px;margin:18px 0 6px">Shawn Ward – Forward Motions EP (FAR04)</h1>'));
   assert.ok(html.includes('Tracklist: Back To The Future · Holiday · Night Vibes.'));
   assert.ok(html.includes('Genre: House.'));
   assert.ok(html.includes('<a href="/products/otra/"'));
