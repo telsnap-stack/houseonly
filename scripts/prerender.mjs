@@ -16,7 +16,9 @@
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { htmlToText, descripcionDeProducto } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
+import { descripcionDeProducto, cortesDelJson } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
+import { makeSlug, artistaDeVendor, encabezadoFicha, h1Ficha, tituloFicha, metaDeTags, gtinDe, relacionadas, bloqueFichaHtml } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
+import { generoDeTags } from '../houseonly-worker/houseonly-worker/src/lib/genres.mjs';
 import { POLICY_PAGES, CONTACT_LINKS } from '../src/policies.mjs';
 import { GIFT_CARD, esTarjetaRegalo } from '../src/giftcard.mjs';
 import { pathToFileURL } from 'node:url';
@@ -45,22 +47,8 @@ const ENTITY_WORKER = process.env.VITE_WORKER_URL || 'https://houseonly-worker.e
 const MIN_DISCOS_INDEXABLE = 3;
 const esIndexable = e => (e.total || 0) >= MIN_DISCOS_INDEXABLE;
 
-// ── Slug helpers (mirror App.jsx exactly) ───────────────────────
-function slugify(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-function makeSlug(artist, title, catalog) {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = slugify(base);
-  if (s) return s;
-  return slugify(catalog) || 'release';
-}
+// El slug, el titulo y el bloque de texto de la ficha salen de
+// lib/ficha-seo.mjs, la misma copia que usan App.jsx y el worker.
 
 // ── HTML escaping ──────────────────────────────────────────────
 function escapeHtml(s) {
@@ -136,8 +124,8 @@ async function fetchAllProducts() {
         pageInfo { hasNextPage endCursor }
         edges {
           node {
-            id title vendor descriptionHtml tags handle isGiftCard productType
-            variants(first:1) { edges { node { sku price { amount currencyCode } quantityAvailable } } }
+            id title vendor descriptionHtml tags handle isGiftCard productType createdAt
+            variants(first:1) { edges { node { sku barcode price { amount currencyCode } quantityAvailable } } }
             images(first:1) { edges { node { url } } }
           }
         }
@@ -158,16 +146,22 @@ function parseProduct(node) {
   const tags = node.tags || [];
   // Las mismas reglas que la ficha: si no, el <meta> y la pagina dirian cosas
   // distintas del mismo disco.
-  const desc = descripcionDeProducto(node.descriptionHtml || '').texto;
-  const artist = node.vendor || '';
+  const limpia = descripcionDeProducto(node.descriptionHtml || '');
+  const desc = limpia.texto;
+  const artist = artistaDeVendor(node.vendor);
   const title = node.title || '';
   const catalog = v?.sku || '';
-  const label = (tags.find(t => t.toLowerCase().startsWith('label:')) || '').slice(6).trim();
-  const year = parseInt(tags.find(t => /^\d{4}$/.test(t)) || '0') || null;
+  const { label, year, forthcoming, releaseDate } = metaDeTags(tags);
   const price = parseFloat(v?.price?.amount || 0) || 0;
   const stock = v?.quantityAvailable ?? 0;
   return {
     title, artist, label, catalog, desc, price, stock, year,
+    genre: generoDeTags(tags)?.label || '',
+    tracks: cortesDelJson(node.descriptionHtml || ''),
+    descTracks: limpia.cortesDelTexto,
+    forthcoming, releaseDate,
+    gtin: gtinDe(v?.barcode),
+    createdAt: node.createdAt || '',
     image: img?.url || '',
     slug: makeSlug(artist, title, catalog),
     handle: node.handle || '',
@@ -194,11 +188,10 @@ function getIndexTemplate() {
   return readFileSync(path, 'utf8');
 }
 
-function renderProductHtml(template, product) {
+export function renderProductHtml(template, product, relacionados = []) {
   const url = `${SITE_URL}/products/${product.slug}/`;
-  const fullTitle = product.artist
-    ? `${product.title} — ${product.artist} | House Only`
-    : `${product.title} | House Only`;
+  const fullTitle = tituloFicha(product);
+  const encabezado = encabezadoFicha(product);
   const descShort = (product.desc || '').replace(/\s+/g, ' ').trim().slice(0, 155);
   /**
    * Muchas descripciones quedan vacias a proposito: su contenido era plantilla
@@ -219,9 +212,10 @@ function renderProductHtml(template, product) {
   const jsonLd = {
     '@context': 'https://schema.org',
     '@type': 'Product',
-    name: product.title,
+    name: encabezado,
     description: metaDesc,
     sku: product.catalog,
+    ...(product.gtin ? { [product.gtin.prop]: product.gtin.value } : {}),
     brand: product.label ? { '@type': 'Brand', name: product.label } : undefined,
     image: product.image || undefined,
     offers: {
@@ -229,6 +223,7 @@ function renderProductHtml(template, product) {
       url,
       priceCurrency: 'EUR',
       price: product.price.toFixed(2),
+      itemCondition: 'https://schema.org/NewCondition',
       availability: product.stock > 0
         ? 'https://schema.org/InStock'
         : 'https://schema.org/OutOfStock',
@@ -255,19 +250,17 @@ function renderProductHtml(template, product) {
     <script type="application/ld+json">${escapeJson(JSON.stringify(jsonLd))}</script>
   `;
 
-  // Body content visible to Googlebot before React hydrates.
-  // React mounts to #root and overwrites this on the client.
-  const seoBody = `
-    <div style="position:absolute;left:-9999px;top:0;">
-      <h1>${escapeHtml(product.title)}</h1>
-      ${product.artist ? `<p>by <strong>${escapeHtml(product.artist)}</strong></p>` : ''}
-      ${product.label ? `<p>Label: ${escapeHtml(product.label)}</p>` : ''}
-      ${product.catalog ? `<p>Catalog: ${escapeHtml(product.catalog)}</p>` : ''}
-      <p>Price: €${product.price.toFixed(2)}</p>
-      ${product.image ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.title)}" />` : ''}
-      ${product.desc ? `<p>${escapeHtml(product.desc.slice(0, 1000))}</p>` : ''}
-    </div>
-  `;
+  // La ficha en el HTML servido, visible y DENTRO de #root, como las paginas de
+  // politicas: la lee quien no ejecuta JavaScript y React la sustituye al
+  // montar. Antes iba fuera de #root y escondida a -9999px, que para un buscador
+  // es texto oculto. El bloque de texto y enlaces es el mismo que pinta el modal
+  // (bloqueFichaHtml, lib/ficha-seo.mjs).
+  const seoBody = `<main style="max-width:680px;margin:0 auto;padding:34px 20px;min-height:100vh;background:#080808;color:#efefef;font-family:Inter,system-ui,sans-serif">
+${product.image ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(encabezado)}" width="240" height="240" style="display:block;width:240px;height:240px;object-fit:cover" />` : ''}
+<h1 style="font-size:22px;margin:18px 0 6px">${escapeHtml(h1Ficha(product))}</h1>
+<p style="font-size:16px;font-weight:800;color:#c8ff00;margin:0 0 4px">€${product.price.toFixed(2)}</p>
+${bloqueFichaHtml(product, relacionados)}
+</main>`;
 
   // Replace the original <title>houseonly</title> and inject head + body content.
   // Also strip the static canonical that index.html carries (it points to the
@@ -280,7 +273,7 @@ function renderProductHtml(template, product) {
     .replace(/<title>[^<]*<\/title>/, '')
     .replace(/\s*<link\s+rel=["']canonical["'][^>]*>/i, '')
     .replace('</head>', `${seoHead}\n  </head>`)
-    .replace('<div id="root"></div>', `<div id="root"></div>${seoBody}`);
+    .replace('<div id="root"></div>', `<div id="root">${seoBody}</div>`);
 
   return html;
 }
@@ -390,9 +383,9 @@ ${contacto}
 // (Google Merchant Center comprueba que esten enlazadas) y desaparece al montar
 // la app, que pinta el suyo (createRoot sustituye el contenido de #root). Se
 // aplica lo ultimo, sobre el HTML ya terminado de cada pagina.
-function conPiePoliticas(html) {
+export function conPiePoliticas(html) {
   const enlaces = POLICY_PAGES
-    .map(pg => `<a href="${escapeHtml(pg.path)}" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(pg.label)}</a>`)
+    .map(pg => `<a href="${escapeHtml(pg.path)}/" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(pg.label)}</a>`)
     .join('');
   const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav></footer>`;
   // Al final del contenido de #root, haya algo dentro (paginas de politicas) o no.
@@ -448,8 +441,10 @@ export function renderSitemap(products, entities = [], policyPaths = [], { giftC
     // Solo si Shopify la sirve: mientras esta en borrador la pagina no ensena nada.
     ...(giftCard ? [`<url><loc>${SITE_URL}${GIFT_CARD.path}</loc><lastmod>${today}</lastmod><priority>0.5</priority></url>`] : []),
     ...policyPaths.map(p => `<url><loc>${SITE_URL}${p}/</loc><lastmod>${today}</lastmod><priority>0.3</priority></url>`),
-    ...products.map(p =>
-      `<url><loc>${SITE_URL}/products/${p.slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
+    // Una URL por slug: dos discos con el mismo artista y titulo comparten
+    // pagina (la del ultimo que se escribe) y salian dos veces.
+    ...[...new Set(products.map(p => p.slug))].map(slug =>
+      `<url><loc>${SITE_URL}/products/${slug}/</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
     ),
     // Solo las indexables: pedir que no se indexe y a la vez listarla en el
     // sitemap son dos ordenes contradictorias.
@@ -488,7 +483,7 @@ async function main() {
   for (const p of products) {
     const out = join(DIST_DIR, 'products', p.slug, 'index.html');
     mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, conPiePoliticas(renderProductHtml(template, p)));
+    writeFileSync(out, conPiePoliticas(renderProductHtml(template, p, relacionadas(p, products))));
     written++;
   }
   console.log(`[prerender] Wrote ${written} product pages`);
