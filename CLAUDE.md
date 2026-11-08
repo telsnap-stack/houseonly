@@ -112,4 +112,4 @@ páginas Y APIs). Receta que funciona (detalle: sesión 2026-07-23):
 
 ## Bitácora (jornadas)
 
-Ver `docs/sessions/`. Última: `docs/sessions/2026-11-05-subwax-player.md`.
+Ver `docs/sessions/`. Última: `docs/sessions/2026-11-08-google-feed-shipping-weight.md`.
