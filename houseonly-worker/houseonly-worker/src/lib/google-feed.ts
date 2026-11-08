@@ -12,8 +12,8 @@
 // diario de las 06:00 y, a mano, POST ?action=google-feed-rebuild.
 //
 // Decisiones (docs/sessions/2026-10-09-google-merchant.md):
-//   - g:link usa el SLUG del sitio (makeReleaseSlug con el vendor tal cual y el
-//     SKU de la primera variante, como scripts/prerender.mjs), NO el handle:
+//   - g:link usa el SLUG del sitio (makeReleaseSlug de lib/ficha-seo.mjs, la
+//     misma copia que scripts/prerender.mjs, con el SKU de la primera variante), NO el handle:
 //     /products/<handle>/ sirve la portada, no la ficha (comprobado en prod).
 //   - g:google_product_category 543523 = "Media > Music & Sound Recordings >
 //     Records & LPs" (taxonomia oficial de Google, version 2021-09-21; no hay
@@ -121,8 +121,8 @@ export function productoAItem(p: AdminProduct): FeedItem | { skip: SkipReason } 
   const titulo = (p.title || '').trim();
   const title = recorta(artista ? `${artista} – ${titulo}` : titulo, 150);
   const texto = descripcionDeProducto(p.descriptionHtml || '').texto;
-  // El slug de la pagina prerenderizada: vendor tal cual y SKU de la PRIMERA
-  // variante (scripts/prerender.mjs), no el de la variante con stock.
+  // El slug de la pagina prerenderizada: SKU de la PRIMERA variante
+  // (scripts/prerender.mjs), no el de la variante con stock.
   const slug = makeReleaseSlug(vendor, titulo, variantes[0]?.sku || sku);
 
   return {

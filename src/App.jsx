@@ -8,6 +8,7 @@ import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/h
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
+import { makeSlug, artistaDeVendor, tituloFicha, metaDeTags, relacionadas, consultasRelacionadas, bloqueFichaHtml } from "../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
@@ -44,21 +45,8 @@ const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House'
 const SKIP_TAGS  = ['vinyl','house','kudos',...GENRE_TAGS.map(g=>g.toLowerCase())];
 
 // ── SLUG (industry-standard SEO-friendly URLs: artist-title) ───
-function slugify(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip accents
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-function makeSlug(artist, title, catalog) {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = slugify(base);
-  if (s) return s;
-  return slugify(catalog) || 'release';
-}
+// makeSlug vive en lib/ficha-seo.mjs: la misma copia que usan
+// scripts/prerender.mjs y el worker.
 
 // Extract genre/year/label from a product's Shopify tags. Used by both the
 // full product parser (for cards) and the lite metadata parser (for filter
@@ -105,11 +93,10 @@ function parseProduct({ node }) {
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
   // as an artist. Treat it as no-artist (blank) so it can be corrected in
-  // Shopify; never display the store name.
-  const vendorIsStoreDefault = (node.vendor || '').trim() === 'House Only';
-  const artist = vendorIsStoreDefault
-    ? (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '')
-    : (node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : ''));
+  // Shopify; never display the store name. La regla es la de ficha-seo.mjs:
+  // antes, aqui se sacaba un artista de la descripcion y el slug de la tarjeta
+  // dejaba de casar con la pagina prerenderizada.
+  const artist = artistaDeVendor(node.vendor);
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
@@ -145,6 +132,10 @@ function parseProduct({ node }) {
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, descTracks, desc, g:'135deg,#1a1a2e,#16213e',
     tags, releaseDate,
+    // Solo el tag: lo usa el texto de la ficha (lib/ficha-seo.mjs), que tiene
+    // que decir lo mismo que el prerender. La UI de pre-order va por
+    // isForthcoming(), que ademas mira las fases.
+    forthcoming: metaDeTags(tags).forthcoming,
     isGiftCard: esTarjetaRegalo(node),
     // Alta en Shopify (ISO DateTime). Solo lo usa forthcomingPhase() para
     // caducar los pre-orders que no traen fecha de salida.
@@ -339,6 +330,24 @@ async function fetchShopifyProductByHandle(handle) {
     }`, { h: handle });
   if (!data.product) return null;
   return parseProduct({ node: data.product });
+}
+
+// Los candidatos para "More from …" del modal: los mas recientes del artista y
+// del sello, en una sola peticion. relacionadas() (lib/ficha-seo.mjs) hace el
+// filtro exacto y el orden, igual que en el HTML prerenderizado.
+async function fetchRelacionadas(r) {
+  const { artista, sello } = consultasRelacionadas(r);
+  if (!artista && !sello) return [];
+  const campos = `edges { node { id handle title vendor descriptionHtml tags createdAt
+        variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
+        images(first:1) { edges { node { url } } } } }`;
+  const data = await shopifyQuery(`
+    query($a: String!, $s: String!, $conA: Boolean!, $conS: Boolean!) {
+      a: products(first: 50, query: $a, sortKey: CREATED_AT, reverse: true) @include(if: $conA) { ${campos} }
+      s: products(first: 50, query: $s, sortKey: CREATED_AT, reverse: true) @include(if: $conS) { ${campos} }
+    }`, { a: artista, s: sello, conA: !!artista, conS: !!sello });
+  const nodos = [...(data.a?.edges || []), ...(data.s?.edges || [])].map(e => e.node);
+  return nodos.filter(n => !esTarjetaRegalo(n)).map(n => parseProduct({ node: n }));
 }
 
 // La tarjeta regalo (src/giftcard.mjs). Consulta propia: sus variantes son
@@ -2263,12 +2272,46 @@ function TrackPlayer({ tracks, release }) {
   );
 }
 
-function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth, onSignIn, followSlugs, onFollowChange }) {
+function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, onOpenRecord, auth, onSignIn, followSlugs, onFollowChange }) {
   // Variant choice (Deep Jungle colour editions: Black / Coloured). Hook must
   // run unconditionally, so it sits before the null guard. When the selected
   // id belongs to a previously-opened product we fall back to the first
   // variant, so no reset-on-open effect is needed.
   const [variantId, setVariantId] = useState(null);
+  const disco = r && !r.isGiftCard ? r : null;
+  // El titulo de la ficha mientras esta abierta, el mismo que lleva el HTML
+  // prerenderizado (tituloFicha, lib/ficha-seo.mjs).
+  useEffect(()=>{
+    if (!disco) return;
+    const antes = document.title;
+    document.title = tituloFicha(disco);
+    return () => { document.title = antes; };
+  },[disco]);
+  // "More from …": los mismos enlaces que el HTML prerenderizado. Se guardan
+  // con el slug de su disco para no pintar los del anterior mientras llegan.
+  const [rel, setRel] = useState({ slug: null, items: [] });
+  useEffect(()=>{
+    if (!disco) return;
+    let vivo = true;
+    fetchRelacionadas(disco)
+      .then(cands => { if (vivo) setRel({ slug: disco.slug, items: relacionadas(disco, cands) }); })
+      .catch(() => { /* sin enlaces: la ficha sigue igual */ });
+    return () => { vivo = false; };
+  },[disco]);
+  const bloqueSeo = useMemo(
+    () => disco ? bloqueFichaHtml(disco, rel.slug === disco.slug ? rel.items : [], S) : '',
+    [disco, rel]);
+  // Los enlaces del bloque son <a href> de verdad; el clic normal abre la ficha
+  // sin recargar, con el handle que lleva cada enlace.
+  const clicBloque = e => {
+    const a = e.target.closest && e.target.closest('a[data-handle]');
+    if (!a || !onOpenRecord) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const handle = a.getAttribute('data-handle');
+    if (!handle) return;
+    e.preventDefault();
+    fetchShopifyProductByHandle(handle).then(p => { if (p) onOpenRecord(p); }).catch(() => { window.location.href = a.href; });
+  };
   if (!r) return null;
   const variants = r.variants || [];
   const hasChoice = variants.length > 1;
@@ -2453,6 +2496,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             </>)}
           </div>
         </div>
+        {bloqueSeo && <div onClick={clicBloque} dangerouslySetInnerHTML={{ __html: bloqueSeo }} />}
       </div>
     </div>
   );
@@ -4865,10 +4909,10 @@ function RubadubImporter() {
         // añadiria una tercera convencion a las dos que ya conviven en la
         // tienda. Antes de "arreglarlo", tres cosas que no son obvias:
         //   1. Las URLs NO salen del handle. El slug de routing se recalcula en
-        //      parseProduct() con makeSlug(artist, title, catalog), duplicado
-        //      literalmente en scripts/prerender.mjs, que escribe las paginas
-        //      estaticas. Cambiar handles no rompe URLs; tocar makeSlug si, y
-        //      hay que tocarlo en los dos sitios a la vez.
+        //      parseProduct() con makeSlug(artist, title, catalog), de
+        //      lib/ficha-seo.mjs, la misma que usa scripts/prerender.mjs para
+        //      las paginas estaticas. Cambiar handles no rompe URLs; tocar
+        //      makeSlug si.
         //   2. fetchShopifyProductByHandle() (carrito/wishlist) busca por el
         //      handle REAL del producto. Cada producto conserva el handle con el
         //      que nacio, asi que cambiar la convencion no rompe los vivos —
@@ -16075,13 +16119,13 @@ export default function App() {
             <ILink to={GIFT_CARD.path} onNavigate={openGiftCard} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{GIFT_CARD.label}</ILink>
           )}
           {POLICY_PAGES.map(pg=>(
-            <ILink key={pg.path} to={pg.path} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
+            <ILink key={pg.path} to={`${pg.path}/`} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
           ))}
         </nav>
       </footer>
 
 
-      <Modal onNavigate={navigate} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
+      <Modal onNavigate={navigate} onOpenRecord={openProduct} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
         onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
         r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />

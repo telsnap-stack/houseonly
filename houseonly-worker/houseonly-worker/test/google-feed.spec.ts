@@ -154,7 +154,8 @@ describe("productoAItem", () => {
 	it("vendor 'House Only' no es artista en el titulo; el enlace sigue al prerender", () => {
 		const it = esItem(productoAItem(producto({ vendor: "House Only" })));
 		expect(it.title).toBe("Black Magic EP (2026 Re-release)");
-		expect(it.link).toBe("https://houseonly.store/products/house-only-black-magic-ep-2026-re-release/");
+		// lib/ficha-seo.mjs: la misma regla en el slug que en el titulo, aqui y en el prerender.
+		expect(it.link).toBe("https://houseonly.store/products/black-magic-ep-2026-re-release/");
 	});
 
 	it("titulo a 150 y descripcion a 5000 como mucho", () => {

@@ -6,25 +6,9 @@
  * enlaces, el sitemap y las paginas prerenderizadas. Un enlace construido con el
  * handle cae en la home.
  *
- * MUST mirror `makeSlug()` de src/App.jsx y de scripts/prerender.mjs. Las tres
- * copias tienen que dar exactamente lo mismo o los enlaces dejan de casar con
- * las paginas generadas; esta es la del worker, y la comparten el newsletter,
- * el feed y el portal.
+ * La regla vive en ./ficha-seo.mjs, la misma copia que importan src/App.jsx y
+ * scripts/prerender.mjs; aqui solo se le da el nombre que usa el worker
+ * (newsletter, feed y portal).
  */
 
-export function slugifyRelease(str: string): string {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-
-export function makeReleaseSlug(artist: string, title: string, catalog: string): string {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = slugifyRelease(base);
-  if (s) return s;
-  return slugifyRelease(catalog) || 'release';
-}
+export { slugify as slugifyRelease, makeSlug as makeReleaseSlug } from './ficha-seo.mjs';
