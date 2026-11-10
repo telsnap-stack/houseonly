@@ -44,6 +44,9 @@
  *   guarda tambien, para la descripcion del producto.
  */
 import { unzipSync } from 'fflate';
+import { base, esMp3, eligeFicheros, TEXTO_MAX_BYTES, PARTE_MAX_BYTES } from './listen-ficheros.mjs';
+import { bajaZipAR2, indiceZipR2, ficheroZipR2, ZipDemasiado } from './zip-r2';
+export { eligeFicheros };
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { ENLACE_DE_SUSCRIPCION } from './distributor-email.mjs';
 import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaMismaEdicion } from './preorder-rechazos.mjs';
@@ -51,6 +54,8 @@ import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
 export interface ListenEnv {
+  // Solo tests: por encima de esto el promopack va a R2 (por defecto ZIP_MAX_BYTES).
+  LISTEN_ZIP_MEMORIA_BYTES?: string;
   SYNC_STATE: KVNamespace;
   EMAILS: KVNamespace;
   LISTEN_R2: R2Bucket;            // houseonly-listen, privado
@@ -117,6 +122,9 @@ const esLista = (e: IdxEntry) => !!LISTAS[e.prefix]?.test(e.subject);
 // Tope del ZIP. Se lee en memoria (128 MB por isolate) y se descomprime fichero
 // a fichero, asi que el pico es el ZIP mas un MP3. Por encima: descarga manual.
 export const ZIP_MAX_BYTES = 50 * 1024 * 1024;
+// Por encima de ZIP_MAX_BYTES el promopack no se lee en memoria: baja a R2 por
+// partes y se extrae por rangos (zip-r2.ts). Hasta este tope (HG001: 103 MB).
+export const ZIP_GRANDE_MAX_BYTES = 400 * 1024 * 1024;
 const COVER_MAX_BYTES = 10 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 60_000;
 // Caducidad de las URLs firmadas que da listen-list.
@@ -148,8 +156,6 @@ const PARA_PEDIR: ListenDecision[] = ['pedir', 'pedido'];
 export const CANTIDAD_DEF = 2;
 const PROMOTE_KEY = 'meta:listen_promote';
 export const DIAS_CARGADO = 7;
-const TEXTO_MAX_BYTES = 256 * 1024;
-const PDF_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface ListenTrack { name: string; key: string; bytes: number }
 
@@ -468,15 +474,48 @@ async function leeConTope(res: Response, tope: number): Promise<Uint8Array> {
   return out;
 }
 
+/**
+ * El promopack: en memoria si cabe en `enMemoria`; si no, lo leido y el resto a
+ * R2 en `tmpKey` (hasta ZIP_GRANDE_MAX_BYTES). Quien llama borra `tmpKey`.
+ */
+async function leeZip(res: Response, env: ListenEnv, tmpKey: string, enMemoria = ZIP_MAX_BYTES): Promise<{ zip: Uint8Array } | { r2: string; bytes: number }> {
+  // Si dice de antemano que no cabe, ni se baja.
+  const declarado = Number(res.headers.get('content-length') || 0);
+  if (declarado > ZIP_GRANDE_MAX_BYTES) {
+    await res.body?.cancel();
+    throw new ZipDemasiado(`${Math.round(declarado / 1048576)} MB; el máximo es ${ZIP_GRANDE_MAX_BYTES / 1048576} MB`);
+  }
+  const reader = res.body!.getReader();
+  const trozos: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    trozos.push(value);
+    if (total > enMemoria) {
+      const bytes = await bajaZipAR2(reader, env.LISTEN_R2, tmpKey, ZIP_GRANDE_MAX_BYTES, trozos);
+      return { r2: tmpKey, bytes };
+    }
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const t of trozos) { out.set(t, o); o += t.byteLength; }
+  return { zip: out };
+}
+
+type LeeFichero = (name: string) => Promise<Uint8Array>;
+
+/** Lista y lector de un ZIP, en memoria o en R2. */
+async function abreZip(env: ListenEnv, z: { zip: Uint8Array } | { r2: string; bytes: number }): Promise<{ lista: Array<{ name: string; size: number }>; lee: LeeFichero }> {
+  if ('zip' in z) return { lista: contenidoZip(z.zip), lee: async n => unFichero(z.zip, n) };
+  const entradas = await indiceZipR2(env.LISTEN_R2, z.r2);
+  const porNombre = new Map(entradas.map(e => [e.name, e]));
+  return { lista: entradas.map(e => ({ name: e.name, size: e.size })), lee: n => ficheroZipR2(env.LISTEN_R2, z.r2, porNombre.get(n)!) };
+}
+
 // ── el ZIP ─────────────────────────────────────────────────────
 
-const base = (n: string) => n.split('/').pop() || n;
-const esBasura = (n: string) => /(^|\/)__MACOSX\//.test(n) || base(n).startsWith('._');
-const esMp3 = (n: string) => /\.mp3$/i.test(n) && !esBasura(n);
-// Solo JPG: los PNG de los promopacks son las galletas (LN-017), no la funda.
-const esJpg = (n: string) => /\.jpe?g$/i.test(n) && !esBasura(n);
-
-const orden = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
 /** Nombres y tamaños del ZIP, sin descomprimir nada. */
 export function contenidoZip(zip: Uint8Array): Array<{ name: string; size: number }> {
@@ -488,26 +527,6 @@ export function contenidoZip(zip: Uint8Array): Array<{ name: string; size: numbe
 /** Un fichero del ZIP. De uno en uno, para no tener todo descomprimido a la vez. */
 function unFichero(zip: Uint8Array, name: string): Uint8Array {
   return unzipSync(zip, { filter: f => f.name === name })[name];
-}
-
-/** Lo que se guarda de un promopack: MP3 en orden natural y la portada mejor candidata. */
-export function eligeFicheros(lista: Array<{ name: string; size: number }>): { mp3: string[]; portada: string | null; promotext: string | null; salespaper: string | null } {
-  const mp3 = lista.filter(f => esMp3(f.name)).map(f => f.name).sort(orden.compare);
-  const jpgs = lista.filter(f => esJpg(f.name));
-  // La trasera nunca es la portada (DBH trae {CATNO}_cover.jpg y {CATNO}_cover_back.jpg).
-  const trasera = (f: { name: string }) => /back/i.test(base(f.name));
-  // Subwax: {CATNO}_A / _B y {CATNO}_1_Front / _2_Back; la A (o la 1) es la frontal.
-  const frontal = (f: { name: string }) => /front|cover|sleeve/i.test(base(f.name)) || /[_\s-](A|1)(?=[_\s.-])/.test(base(f.name));
-  const preferida = jpgs.find(f => frontal(f) && !trasera(f));
-  const portada = preferida?.name || jpgs.sort((a, b) => Number(trasera(a)) - Number(trasera(b)) || b.size - a.size)[0]?.name || null;
-  // Los mismos que lee el Process del tab: TV {CATNO}_promotext.txt, DBH {CATNO}_info.txt (o un .txt),
-  // W&S/Rubadub SALESPAPER.pdf (o un .pdf). Si pesan demasiado, no.
-  const txts = lista.filter(f => /\.txt$/i.test(f.name) && !esBasura(f.name) && f.size <= TEXTO_MAX_BYTES);
-  const pdfs = lista.filter(f => /\.pdf$/i.test(f.name) && !esBasura(f.name) && f.size <= PDF_MAX_BYTES);
-  // Subwax: "{CATNO} info.txt", con espacio.
-  const promotext = (txts.find(f => /[_\s](promotext|info)\.txt$/i.test(f.name)) || txts[0])?.name || null;
-  const salespaper = (pdfs.find(f => /SALESPAPER\.pdf$/i.test(f.name)) || pdfs[0])?.name || null;
-  return { mp3, portada, promotext, salespaper };
 }
 
 const slug = (s: string) => s.replace(/\.[^.]+$/, '').normalize('NFKD').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'pista';
@@ -576,23 +595,30 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
       await res.body?.cancel();
       return caducado || { ...rel, estado: fallo, detalle: 'el enlace devuelve una página, no un ZIP (¿caducado?)', zip_link: url };
     }
-    let zip: Uint8Array;
-    try { zip = await leeConTope(res, ZIP_MAX_BYTES); }
+    // Grande (HG001, 103 MB): a R2 por partes y extraido por rangos, no descartado.
+    const tmpKey = `${dir}tmp-promopack.zip`;
+    let z: Awaited<ReturnType<typeof leeZip>>;
+    try { z = await leeZip(res, env, tmpKey, Number(env.LISTEN_ZIP_MEMORIA_BYTES) || ZIP_MAX_BYTES); }
     catch (e) {
-      if (e instanceof Demasiado) return { ...rel, estado: 'descarga_manual', detalle: `ZIP demasiado grande (${e.message})`, zip_link: url };
+      await env.LISTEN_R2.delete(tmpKey).catch(() => {});
+      if (e instanceof ZipDemasiado) return { ...rel, estado: 'descarga_manual', detalle: `ZIP demasiado grande (${e.message})`, zip_link: url };
       throw e;
     }
+    try {
+      const { lista, lee } = await abreZip(env, z);
+      const { mp3, portada, promotext, salespaper } = eligeFicheros(lista);
+      if (viaPista && !esElPromopack(clave, nombreDeDescarga(res), lista, mp3.length, cuentaPistas(html!)))
+        return { ...rel, estado: 'descarga_manual', detalle: 'el enlace de la pista no baja el promopack del disco', zip_link: url };
+      if (!mp3.length) return { ...rel, estado: viaPista ? 'descarga_manual' : 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
+      if (viaPista) rel.detalle = 'promopack del enlace de la pista (sin botón Download Zip)';
+      if ('r2' in z) rel.detalle = [rel.detalle, `ZIP de ${Math.round(z.bytes / 1048576)} MB extraído desde R2`].filter(Boolean).join('; ');
 
-    const lista = contenidoZip(zip);
-    const { mp3, portada, promotext, salespaper } = eligeFicheros(lista);
-    if (viaPista && !esElPromopack(clave, nombreDeDescarga(res), lista, mp3.length, cuentaPistas(html!)))
-      return { ...rel, estado: 'descarga_manual', detalle: 'el enlace de la pista no baja el promopack del disco', zip_link: url };
-    if (!mp3.length) return { ...rel, estado: viaPista ? 'descarga_manual' : 'sin_audio', detalle: 'el ZIP no trae MP3', zip_link: url };
-    if (viaPista) rel.detalle = 'promopack del enlace de la pista (sin botón Download Zip)';
-
-    await guardaDelZip(env, rel, zip, { mp3, portada, promotext, salespaper }, dir, subidas);
-    if (!portada && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, dir, subidas);
-    return rel;
+      await guardaDelZip(env, rel, lee, { mp3, portada, promotext, salespaper }, dir, subidas);
+      if (!portada && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, dir, subidas);
+      return rel;
+    } finally {
+      if ('r2' in z) await env.LISTEN_R2.delete(tmpKey).catch(() => {});
+    }
   } catch (e: any) {
     // A medias no sirve: lo subido se borra para que el reintento empiece limpio.
     if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
@@ -619,10 +645,10 @@ async function guardaPistasSueltas(env: ListenEnv, rel: ListenRelease, sueltas: 
 }
 
 /** Pistas, textos y portada (si el ZIP la trae) a la bandeja. Anota cada clave en `subidas`. */
-async function guardaDelZip(env: ListenEnv, rel: ListenRelease, zip: Uint8Array,
+async function guardaDelZip(env: ListenEnv, rel: ListenRelease, lee: LeeFichero,
   f: { mp3: string[]; portada: string | null; promotext: string | null; salespaper: string | null }, dir: string, subidas: string[]): Promise<void> {
   for (let i = 0; i < f.mp3.length; i++) {
-    const data = unFichero(zip, f.mp3[i]);
+    const data = await lee(f.mp3[i]);
     const key = `${dir}${String(i + 1).padStart(2, '0')}-${slug(base(f.mp3[i]))}.mp3`;
     await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'audio/mpeg' } });
     subidas.push(key);
@@ -634,7 +660,7 @@ async function guardaDelZip(env: ListenEnv, rel: ListenRelease, zip: Uint8Array,
     ['salespaper', f.salespaper, 'salespaper.pdf', 'application/pdf'],
   ] as const) {
     if (!nombre) continue;
-    const data = unFichero(zip, nombre);
+    const data = await lee(nombre);
     const key = `${dir}${destino}`;
     await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: tipo } });
     subidas.push(key);
@@ -642,7 +668,7 @@ async function guardaDelZip(env: ListenEnv, rel: ListenRelease, zip: Uint8Array,
     rel.bytes += data.byteLength;
   }
   if (f.portada) {
-    const data = unFichero(zip, f.portada);
+    const data = await lee(f.portada);
     const key = `${dir}cover.jpg`;
     await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: 'image/jpeg' } });
     subidas.push(key);
@@ -1247,45 +1273,143 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
 }
 
 /**
- * POST ?action=listen-upload&clave=CLAVE (Bearer), cuerpo = ZIP (application/zip)
- * "Descarga manual": el audio de un disco que llego sin promopack (o con uno que
- * no servia) conseguido por otra via. Mismo tratamiento que el ZIP de la
- * ingesta: MP3, textos y portada si la trae (si no, se queda la del correo).
- * Sustituye el audio que hubiera. Tope: ZIP_MAX_BYTES.
+ * POST ?action=listen-upload&clave=CLAVE (Bearer) — "Descarga manual": el audio
+ * de un disco que llego sin promopack (o con uno que no servia) conseguido por
+ * otra via. Sustituye el audio que hubiera. Dos formas:
+ *
+ * - Cuerpo = ZIP (application/zip), hasta ZIP_MAX_BYTES: mismo tratamiento que
+ *   el ZIP de la ingesta (MP3, textos y portada si la trae).
+ * - Por partes (el admin, desde el 10-11): Cloudflare corta toda peticion de mas
+ *   de 100 MB, y HG001 (103 MB) no entraba. El admin abre el ZIP en el
+ *   navegador, elige con las mismas reglas (listen-ficheros.mjs) y sube cada
+ *   fichero aparte a `manual-<lote>/`:
+ *     &parte=fichero&lote=L&tipo=pista|portada|promotext|salespaper&n=N&nombre=…
+ *       cuerpo = el fichero, hasta PARTE_MAX_BYTES (413 si pasa, con el tamaño)
+ *     &parte=fin&lote=L      el lote pasa a ser el audio del disco; lo de antes se
+ *                            borra solo ahora, asi que una subida a medias no lo pierde
+ *     &parte=cancelar&lote=L borra el lote (si algo fallo por el camino)
  */
 export async function handleListenUpload(request: Request, env: ListenEnv, autorizado: boolean, ahora = Date.now()): Promise<Response> {
   if (!autorizado) return json({ error: 'unauthorized' }, 401);
-  const clave = claveCatno(new URL(request.url).searchParams.get('clave'));
+  const q = new URL(request.url).searchParams;
+  const clave = claveCatno(q.get('clave'));
   if (!clave) return json({ error: 'clave required' }, 400);
   const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
   if (!r) return json({ error: 'not found' }, 404);
+  const dir = `${prefijo(env)}${clave}/`;
+  const parte = q.get('parte');
+  if (parte) {
+    const lote = q.get('lote') || '';
+    if (!/^[a-z0-9]{6,32}$/.test(lote)) return json({ error: 'lote invalido' }, 400);
+    const dirLote = `${dir}manual-${lote}/`;
+    if (parte === 'fichero') return subeFicheroDeLote(request, env, q, dirLote);
+    if (parte === 'cancelar') { await borraPrefijo(env, dirLote); return json({ ok: true }); }
+    if (parte === 'fin') return cierraLote(request, env, r, dirLote, ahora);
+    return json({ error: 'parte debe ser fichero, fin o cancelar' }, 400);
+  }
+
   if (!request.body) return json({ error: 'falta el ZIP' }, 400);
   let zip: Uint8Array;
   try { zip = await leeConTope(request as unknown as Response, ZIP_MAX_BYTES); }
-  catch (e) { if (e instanceof Demasiado) return json({ error: `ZIP demasiado grande (${e.message})` }, 413); throw e; }
+  catch (e) { if (e instanceof Demasiado) return json({ error: `ZIP demasiado grande (${e.message}); súbelo por partes` }, 413); throw e; }
   let lista: Array<{ name: string; size: number }>;
   try { lista = contenidoZip(zip); } catch { return json({ error: 'no es un ZIP valido' }, 400); }
   const f = eligeFicheros(lista);
   if (!f.mp3.length) return json({ error: 'el ZIP no trae MP3' }, 400);
 
-  // Fuera el audio y los textos anteriores; la portada solo si el ZIP trae otra.
-  const viejas = [...r.tracks.map(t => t.key), ...Object.values(r.textos || {}).filter(Boolean) as string[],
-    ...(f.portada && r.cover ? [r.cover.key] : [])].filter(k => k.startsWith(prefijo(env)));
-  if (viejas.length) await env.LISTEN_R2.delete(viejas);
-  const cover = f.portada ? undefined : r.cover;
-  const coverBytes = cover ? Math.max(0, r.bytes - r.tracks.reduce((s, t) => s + t.bytes, 0)) : 0;
-  const nuevo: ListenRelease = { ...r, tracks: [], textos: undefined, cover, bytes: coverBytes, estado: 'listo',
-    detalle: `audio subido a mano el ${new Date(ahora).toISOString().slice(0, 10)}`, subido_a_mano_at: new Date(ahora).toISOString() };
-  delete nuevo.audio_limpiado_at;
+  const nuevo = sinAudioAnterior(env, r, !!f.portada, ahora);
+  await env.LISTEN_R2.delete(nuevo.viejas);
   const subidas: string[] = [];
   try {
-    await guardaDelZip(env, nuevo, zip, f, `${prefijo(env)}${clave}/`, subidas);
+    await guardaDelZip(env, nuevo.rel, async n => unFichero(zip, n), f, dir, subidas);
   } catch (e: any) {
     if (subidas.length) await env.LISTEN_R2.delete(subidas).catch(() => {});
     return json({ error: e?.message || String(e) }, 500);
   }
-  await guardaRelease(env, nuevo);
-  return json({ ok: true, item: await conUrls(env, new URL(request.url).origin, nuevo) });
+  await guardaRelease(env, nuevo.rel);
+  return json({ ok: true, item: await conUrls(env, new URL(request.url).origin, nuevo.rel) });
+}
+
+const TIPOS_LOTE: Record<string, { fichero: (n: number, nombre: string) => string; tipo: string }> = {
+  pista: { fichero: (n, nombre) => `${String(n).padStart(2, '0')}-${slug(base(nombre))}.mp3`, tipo: 'audio/mpeg' },
+  portada: { fichero: () => 'cover.jpg', tipo: 'image/jpeg' },
+  promotext: { fichero: () => 'promotext.txt', tipo: 'text/plain; charset=utf-8' },
+  salespaper: { fichero: () => 'salespaper.pdf', tipo: 'application/pdf' },
+};
+
+async function subeFicheroDeLote(request: Request, env: ListenEnv, q: URLSearchParams, dirLote: string): Promise<Response> {
+  const t = TIPOS_LOTE[q.get('tipo') || ''];
+  if (!t) return json({ error: `tipo debe ser ${Object.keys(TIPOS_LOTE).join(', ')}` }, 400);
+  const nombre = String(q.get('nombre') || '').slice(0, 300);
+  const n = Number(q.get('n'));
+  if (q.get('tipo') === 'pista' && (!Number.isInteger(n) || n < 1 || n > 99 || !nombre)) return json({ error: 'pista: n (1-99) y nombre' }, 400);
+  if (!request.body) return json({ error: 'falta el fichero' }, 400);
+  let data: Uint8Array;
+  try { data = await leeConTope(request as unknown as Response, PARTE_MAX_BYTES); }
+  catch (e) {
+    if (e instanceof Demasiado) return json({ error: `${nombre || q.get('tipo')}: ${e.message}; el máximo por fichero es ${PARTE_MAX_BYTES / 1048576} MB` }, 413);
+    throw e;
+  }
+  if (!data.byteLength) return json({ error: `${nombre || q.get('tipo')}: vacío` }, 400);
+  const key = `${dirLote}${t.fichero(n, nombre)}`;
+  await env.LISTEN_R2.put(key, data, { httpMetadata: { contentType: t.tipo }, customMetadata: nombre ? { nombre } : undefined });
+  return json({ ok: true, key, bytes: data.byteLength });
+}
+
+async function borraPrefijo(env: ListenEnv, pre: string): Promise<number> {
+  let n = 0, cursor: string | undefined;
+  do {
+    const l = await env.LISTEN_R2.list({ prefix: pre, cursor });
+    const keys = l.objects.map(o => o.key).filter(k => k.startsWith(prefijo(env)) && !k.includes('..'));
+    if (keys.length) { await env.LISTEN_R2.delete(keys); n += keys.length; }
+    cursor = l.truncated ? l.cursor : undefined;
+  } while (cursor);
+  return n;
+}
+
+/** El disco sin el audio y los textos de antes (y sin la portada si llega otra): las claves a borrar. */
+function sinAudioAnterior(env: ListenEnv, r: ListenRelease, portadaNueva: boolean, ahora: number): { rel: ListenRelease; viejas: string[] } {
+  const viejas = [...r.tracks.map(t => t.key), ...Object.values(r.textos || {}).filter(Boolean) as string[],
+    ...(portadaNueva && r.cover ? [r.cover.key] : [])].filter(k => k.startsWith(prefijo(env)));
+  const cover = portadaNueva ? undefined : r.cover;
+  const coverBytes = cover ? Math.max(0, r.bytes - r.tracks.reduce((s, t) => s + t.bytes, 0)) : 0;
+  const rel: ListenRelease = { ...r, tracks: [], textos: undefined, cover, bytes: coverBytes, estado: 'listo',
+    detalle: `audio subido a mano el ${new Date(ahora).toISOString().slice(0, 10)}`, subido_a_mano_at: new Date(ahora).toISOString() };
+  delete rel.audio_limpiado_at;
+  return { rel, viejas };
+}
+
+async function cierraLote(request: Request, env: ListenEnv, r: ListenRelease, dirLote: string, ahora: number): Promise<Response> {
+  const objetos: R2Object[] = [];
+  let cursor: string | undefined;
+  do {
+    const l = await env.LISTEN_R2.list({ prefix: dirLote, cursor, include: ['customMetadata'] });
+    objetos.push(...l.objects);
+    cursor = l.truncated ? l.cursor : undefined;
+  } while (cursor);
+  const pistas = objetos.filter(o => /\/\d{2}-[^/]*\.mp3$/.test(o.key)).sort((a, b) => a.key.localeCompare(b.key));
+  if (!pistas.length) return json({ error: 'no llegó ninguna pista: vuelve a subir' }, 400);
+  const de = (f: string) => objetos.find(o => o.key === `${dirLote}${f}`);
+  const portada = de('cover.jpg');
+  const nuevo = sinAudioAnterior(env, r, !!portada, ahora);
+  for (const o of pistas) {
+    nuevo.rel.tracks.push({ name: (o.customMetadata?.nombre ? base(o.customMetadata.nombre) : base(o.key).replace(/^\d{2}-/, '')).replace(/\.mp3$/i, ''), key: o.key, bytes: o.size });
+    nuevo.rel.bytes += o.size;
+  }
+  for (const [campo, f] of [['promotext', 'promotext.txt'], ['salespaper', 'salespaper.pdf']] as const) {
+    const o = de(f);
+    if (o) { nuevo.rel.textos = { ...nuevo.rel.textos, [campo]: o.key }; nuevo.rel.bytes += o.size; }
+  }
+  if (portada) { nuevo.rel.cover = { key: portada.key, from: 'zip' }; nuevo.rel.bytes += portada.size; }
+  // Lo de antes fuera, menos lo de este lote; y los lotes viejos que quedaran a medias.
+  const viejas = nuevo.viejas.filter(k => !k.startsWith(dirLote));
+  if (viejas.length) await env.LISTEN_R2.delete(viejas);
+  const dir = dirLote.replace(/manual-[a-z0-9]+\/$/, '');
+  const restos = await env.LISTEN_R2.list({ prefix: `${dir}manual-` });
+  const otros = restos.objects.map(o => o.key).filter(k => !k.startsWith(dirLote));
+  if (otros.length) await env.LISTEN_R2.delete(otros);
+  await guardaRelease(env, nuevo.rel);
+  return json({ ok: true, item: await conUrls(env, new URL(request.url).origin, nuevo.rel) });
 }
 
 // ── reparacion de los "sin ZIP" ────────────────────────────────

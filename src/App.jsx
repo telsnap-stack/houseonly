@@ -8,6 +8,8 @@ import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/h
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
+// Las mismas reglas que el worker para elegir que se sube de un promopack (descarga manual).
+import { eligeFicheros, PARTE_MAX_BYTES, base as baseFichero } from "../houseonly-worker/houseonly-worker/src/lib/listen-ficheros.mjs";
 import { makeSlug, artistaDeVendor, tituloFicha, metaDeTags, relacionadas, consultasRelacionadas, bloqueFichaHtml } from "../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
@@ -10070,6 +10072,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   const [abierta, setAbierta] = useState(false);
   const [cargandoPre, setCargandoPre] = useState(false);
   const [subiendo, setSubiendo] = useState('');      // clave con una subida de audio en vuelo
+  const [subida, setSubida] = useState({});          // clave -> { txt } (progreso) | { error }, junto al boton
   const toastRef = useRef(0);
   const audioRef = useRef(null);
   const cacheRef = useRef(new Map());
@@ -10434,31 +10437,68 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   }, [ultimaCarga]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // "Descarga manual": un ZIP, o MP3 sueltos (se empaquetan aqui), al worker.
+  // "Descarga manual": fichero a fichero, no en un ZIP. Cloudflare corta toda
+  // peticion de mas de 100 MB sin cabeceras CORS (HG001, 103 MB: el boton no
+  // hacia nada). El ZIP se abre aqui, se elige con las reglas del worker y cada
+  // fichero va aparte (listen-upload &parte=fichero); el audio de antes solo se
+  // sustituye al cerrar (&parte=fin).
   const subirAudio = async (it, files) => {
     const fs = [...(files || [])];
     if (!fs.length) return;
-    setSubiendo(it.clave); setErr('');
+    const pon = (x) => setSubida(s => { const n = { ...s }; if (x) n[it.clave] = x; else delete n[it.clave]; return n; });
+    const mb = (n) => `${(n / 1048576).toFixed(1).replace('.', ',')} MB`;
+    const lote = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const url = (qs) => `${WORKER_URL}?action=listen-upload&clave=${encodeURIComponent(it.clave)}&lote=${lote}&${qs}`;
+    const cab = { 'Authorization': `Bearer ${secret}` };
+    let empezado = false;
+    setSubiendo(it.clave); setErr(''); pon({ txt: 'Preparando…' });
     try {
-      let cuerpo;
-      if (fs.length === 1 && /\.zip$/i.test(fs[0].name)) cuerpo = fs[0];
-      else {
+      let piezas;
+      if (fs.length === 1 && /\.zip$/i.test(fs[0].name)) {
+        pon({ txt: `Abriendo ${fs[0].name} (${mb(fs[0].size)})…` });
+        const JSZip = await loadJSZip();
+        let z;
+        try { z = await JSZip.loadAsync(fs[0]); } catch (e) { throw new Error(`${fs[0].name} no es un ZIP válido (${e.message})`); }
+        const lista = Object.values(z.files).filter(f => !f.dir).map(f => ({ name: f.name, size: f._data?.uncompressedSize ?? 0 }));
+        const el = eligeFicheros(lista);
+        if (!el.mp3.length) throw new Error(`${fs[0].name} no trae MP3`);
+        const pieza = (tipo, name, n) => ({ tipo, n, nombre: baseFichero(name), tam: lista.find(x => x.name === name)?.size || 0, datos: () => z.file(name).async('blob') });
+        piezas = [...el.mp3.map((n, i) => pieza('pista', n, i + 1)),
+          ...[['portada', el.portada], ['promotext', el.promotext], ['salespaper', el.salespaper]].filter(([, n]) => n).map(([t, n]) => pieza(t, n))];
+      } else {
         const mp3 = fs.filter(f => /\.mp3$/i.test(f.name));
         if (!mp3.length) throw new Error('elige un ZIP o MP3');
-        const JSZip = await loadJSZip();
-        const z = new JSZip();
-        for (const f of mp3) z.file(f.name, f);
-        cuerpo = await z.generateAsync({ type: 'blob', compression: 'STORE' });
+        piezas = eligeFicheros(mp3.map(f => ({ name: f.name, size: f.size }))).mp3
+          .map((name, i) => { const f = mp3.find(x => x.name === name); return { tipo: 'pista', n: i + 1, nombre: name, tam: f.size, datos: async () => f }; });
       }
-      const r = await fetch(`${WORKER_URL}?action=listen-upload&clave=${encodeURIComponent(it.clave)}`, {
-        method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/zip' }, body: cuerpo,
-      });
+      const grande = piezas.find(p => p.tam > PARTE_MAX_BYTES);
+      if (grande) throw new Error(`${grande.nombre} pesa ${mb(grande.tam)}; el máximo por fichero es ${PARTE_MAX_BYTES / 1048576} MB`);
+      empezado = true;
+      for (const [i, p] of piezas.entries()) {
+        pon({ txt: `Subiendo ${i + 1}/${piezas.length}: ${p.nombre} (${mb(p.tam)})` });
+        const blob = await p.datos();
+        let r;
+        try {
+          r = await fetch(url(`parte=fichero&tipo=${p.tipo}&nombre=${encodeURIComponent(p.nombre)}${p.n ? `&n=${p.n}` : ''}`),
+            { method: 'POST', headers: { ...cab, 'Content-Type': 'application/octet-stream' }, body: blob });
+        } catch (e) { throw new Error(`${p.nombre} (${mb(blob.size)}): se cortó la conexión (${e.message})`); }
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `${p.nombre} (${mb(blob.size)}): HTTP ${r.status}`);
+      }
+      pon({ txt: 'Cerrando…' });
+      const r = await fetch(url('parte=fin'), { method: 'POST', headers: cab });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      if (!r.ok) throw new Error(d.error || `al cerrar: HTTP ${r.status}`);
       mantener();
       guarda([d.item], 3600);
+      pon(null);
       avisa(`${it.catno}: ${d.item.tracks.length} pista${d.item.tracks.length === 1 ? '' : 's'} subida${d.item.tracks.length === 1 ? '' : 's'}`);
     } catch (e) {
-      setErr(`No se pudo subir el audio de ${it.catno}: ${e.message}`);
+      const msg = `No se pudo subir el audio de ${it.catno}: ${e.message}`;
+      setErr(msg);
+      pon({ error: msg });
+      // Lo que llego a subirse de este intento, fuera; el audio de antes sigue.
+      if (empezado) fetch(url('parte=cancelar'), { method: 'POST', headers: cab }).catch(() => {});
     } finally { setSubiendo(''); }
   };
 
@@ -10579,6 +10619,8 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                         onChange={e => { subirAudio(it, e.target.files); e.target.value = ''; }} />
                     </label>
                   )}
+                  {subida[it.clave] && <div style={{ fontSize: 9, marginTop: 3, lineHeight: 1.4, color: subida[it.clave].error ? S.danger : '#ff8800' }}>
+                    {subida[it.clave].error || subida[it.clave].txt}</div>}
                   {it.estado === 'listo' && it.detalle && <div style={{ fontSize: 8, color: S.muted, marginTop: 2 }}>{it.detalle}</div>}
                   {it.tracks?.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
                     {it.tracks.map((t, idx) => {
