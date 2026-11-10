@@ -8,6 +8,7 @@ import {
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
+import { indiceTienda, buscaEnTienda, buscaMismaEdicion } from "../src/lib/preorder-rechazos.mjs";
 import { SUBWAX_SEMANA45 } from "./fixtures/subwax";
 import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
@@ -239,18 +240,39 @@ describe("listen: ingesta", () => {
 		expect(await rel("TVT003")).toBeNull();
 	});
 
-	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
+	it("lo que ya esta en la tienda no entra (handle o SKU, misma edicion); archivado si", async () => {
 		const f = redes(zipDe({ "a.mp3": 10 }));
-		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
+		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("log-88", "LOG88"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
 		await archiva("RD__X---Y-MSLP022LTD__2026-11-01.html", rdEmail("MSLP022LTD"));
+		await archiva("RD__X---Y-LOG088__2026-11-01.html", rdEmail("LOG088"));
 		await archiva("RD__X---Y-UR025__2026-11-01.html", rdEmail("UR-025"));
 		await archiva("RD__X---Y-OLD001__2026-11-01.html", rdEmail("OLD001"));
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, emails_cerrados: 3, saltados: { en_tienda: 2 } });
-		expect(r.en_tienda).toEqual(["MSLP022LTD como mslp022ltd", "UR-025 como otra-cosa"]);
+		// UR-025A es otra edicion: UR-025 entra. Los ceros a la izquierda si son el mismo disco.
+		expect(r).toMatchObject({ nuevos: 2, emails_cerrados: 4, saltados: { en_tienda: 2 } });
+		expect(r.en_tienda).toEqual(["LOG088 como log-88", "MSLP022LTD como mslp022ltd"]);
 		expect(await rel("MSLP022LTD")).toBeNull();
+		expect(await rel("UR025")).toMatchObject({ catno: "UR-025", estado: "listo" });
 		expect(await rel("OLD001")).toMatchObject({ estado: "listo" });
-		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(2);
+	});
+
+	it("un sufijo de edicion es otro disco: ni ya en tienda ni duplicado (Communique011P, RAWAX036.1Y)", async () => {
+		const zip = zipDe({ "a.mp3": 10 });
+		redes(zip, { "https://dbh-music.com/shop/release_zip/": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }) });
+		tiendaCon([producto("communique011", "Communique011"), producto("rawax036-1", "RAWAX036.1")]);
+		await archiva("DBH__DBH-Music---Newsletter-KW46-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter",
+			dbhFicha(11, "Communique011", "New&nbsp;this&nbsp;week"), dbhFicha(12, "Communique011P", "New&nbsp;this&nbsp;week"),
+			dbhFicha(36, "RAWAX036.1", "New&nbsp;this&nbsp;week"), dbhFicha(37, "RAWAX036.1Y", "New&nbsp;this&nbsp;week")), "2026-11-02", "DBH");
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 2, saltados: { en_tienda: 2, duplicado: 0 } });
+		expect(r.en_tienda).toEqual(["Communique011 como communique011", "RAWAX036.1 como rawax036-1"]);
+		expect(await rel("COMMUNIQUE011P")).toMatchObject({ catno: "Communique011P", preorder: false });
+		expect(await rel("RAWAX0361Y")).toMatchObject({ catno: "RAWAX036.1Y", preorder: false });
+		// El Pre-order (buscaEnTienda) no cambia: alli siguen encajando.
+		const idx = indiceTienda(["Communique011", "RAWAX036.1"]);
+		expect(buscaEnTienda(idx, "Communique011P")).toBe("COMMUNIQUE011");
+		expect(buscaMismaEdicion(idx, "Communique011P")).toBeNull();
 	});
 
 	it("si no se puede leer la tienda no entra nada y el email queda abierto para la hora siguiente", async () => {
