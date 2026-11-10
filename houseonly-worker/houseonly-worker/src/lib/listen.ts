@@ -46,7 +46,7 @@
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { ENLACE_DE_SUSCRIPCION } from './distributor-email.mjs';
-import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
+import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaMismaEdicion } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
@@ -688,9 +688,8 @@ export interface Tienda { indice: ReturnType<typeof indiceTienda>; handleDe: Map
 
 /**
  * Lo que ya existe en Shopify no entra a la bandeja (2026-11-03: MSLP022LTD
- * salio en "Por decidir" estando activo). Las mismas reglas que "Cargar
- * elegidos" en el tab (indiceTienda + buscaEnTienda sobre handle y SKU), pero
- * con TODOS los productos menos los archivados: un borrador o un unlisted
+ * salio en "Por decidir" estando activo). Sobre handle y SKU, con TODOS los
+ * productos menos los archivados: un borrador o un unlisted
  * tambien estan ya dados de alta. Admin API leyendo productos (no el indice de
  * busqueda): ~1600 productos = 7 paginas de 250 (coste pedido ~500 cada una).
  */
@@ -782,7 +781,8 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
           try { tienda = await leeTienda(env); }
           catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
         }
-        const como = buscaEnTienda(tienda.indice, row.catno);
+        // Un sufijo de edicion es otro disco (P, Y, A...): no basta con el nucleo.
+        const como = buscaMismaEdicion(tienda.indice, row.catno);
         if (como) {
           out.saltados.en_tienda++;
           (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
