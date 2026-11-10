@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, handleListenReintentar, listDescartes, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
+	handleListenPromote, handleListenUpload, handleListenRun, handleListenReintentar, listDescartes, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
@@ -382,6 +382,26 @@ describe("listen: ingesta", () => {
 		// 3: las 6 que quedan, y la lista se cierra.
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: false, emails_cerrados: 1 });
 		expect(await deLista()).toHaveLength(25);
+	});
+
+	it("listen-run &tope=N: como mucho N discos entre las dos fases, para responder antes del corte de 60 s", async () => {
+		redes(zipDe({ "A1.mp3": 10 }));
+		const lista = `<html><body><p>New Releases Shipping This Week</p>${["TOP101", "TOP102", "TOP103"].map(c => `
+<p>Artist: Test Artist<br>Title: Test ${c}<br>Label: Test Rec<br>Cat: ${c}<br>Format: 12"<br>Price: £8.99</p>
+<p>A1. Uno <a href="${TRACKER}">Download Zip</a></p>`).join("")}</body></html>`;
+		// listen-run usa el reloj real: correos de hoy y ayer.
+		const dia = (n: number) => new Date(Date.now() - n * 86400e3).toISOString().slice(0, 10);
+		await archiva(`RD__Rubadub-New-Releases-Shipping-This-Week__${dia(1)}.html`, lista, dia(1));
+		for (let i = 1; i <= 4; i++) await archiva(`RD__X---Y-TOP00${i}__${dia(0)}.html`, rdEmail(`TOP00${i}`), dia(0));
+		const corre = async (tope: string) => (await (await handleListenRun(E, true, new Request(`https://w/?action=listen-run&tope=${tope}`, { method: "POST" }))).json()) as any;
+		expect(await corre("3")).toMatchObject({ nuevos: 3, quedan: true });
+		expect(await rel("TOP101")).toBeNull();
+		// Queda 1 anuncio; con tope 2, el hueco que sobra es para la lista.
+		expect(await corre("2")).toMatchObject({ nuevos: 2, quedan: true });
+		expect(await rel("TOP004")).not.toBeNull();
+		expect(await rel("TOP101")).not.toBeNull();
+		// Sin tope, lo que queda de la lista y se cierra.
+		expect(await runListenIngest(E, { force: true })).toMatchObject({ nuevos: 2, quedan: false });
 	});
 
 	it("RD: los represses (asunto de digest) se abren; fuera solo las listas masivas, y el resumen las nombra", async () => {

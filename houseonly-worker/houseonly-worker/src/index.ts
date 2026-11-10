@@ -1948,7 +1948,7 @@ export default {
 
     // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
     //   GET  ?action=listen-list   Bearer  discos + URLs firmadas (1 h)
-    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano (&dias=1-14 &fuente=DBH)
+    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano (&dias=1-14 &fuente=DBH &tope=1-50 discos)
     //   GET  ?action=listen-file   firma   el MP3/portada, con Range
     //   POST ?action=listen-decide Bearer  preorder | pendiente | rechazado | null
     if (action === 'listen-list' && request.method === 'GET') {

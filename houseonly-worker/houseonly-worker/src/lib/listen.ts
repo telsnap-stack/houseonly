@@ -777,7 +777,7 @@ export async function leeTienda(env: ListenEnv): Promise<Tienda> {
   throw new Error('Shopify products: demasiadas paginas');
 }
 
-export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date; dias?: number; fuente?: string } = {}): Promise<ListenRunResult> {
+export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; now?: Date; dias?: number; fuente?: string; tope?: number } = {}): Promise<ListenRunResult> {
   const now = opts.now || new Date();
   const mode = (await env.SYNC_STATE.get(MODE_KEY)) || 'off';
   const out: ListenRunResult = {
@@ -799,12 +799,17 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
     { emails: candidatos.filter(e => !esLista(e)), tope: PER_RUN },
     { emails: candidatos.filter(esLista), tope: PER_RUN_LISTAS },
   ];
+  // tope (pasada manual): discos como mucho entre las dos fases, para que la
+  // llamada responda antes del corte de 60 s del cliente.
+  let hechos = 0;
   ingesta: for (const [n, fase] of fases.entries()) {
     if (n > 0 && out.quedan) break;
+    const tope = opts.tope ? Math.min(fase.tope, opts.tope - hechos) : fase.tope;
+    if (tope <= 0) { out.quedan = fase.emails.length > 0 || out.quedan; break; }
     let intentos = 0;
     for (const email of fase.emails) {
       if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
-      if (intentos >= fase.tope) { out.quedan = true; break; }
+      if (intentos >= tope) { out.quedan = true; break; }
       out.emails_vistos++;
       const html = await env.EMAILS.get(`msg:${email.name}`);
       if (!html) continue;
@@ -855,8 +860,9 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
           (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
           continue;
         }
-        if (intentos >= fase.tope) { completo = false; out.quedan = true; break; }
+        if (intentos >= tope) { completo = false; out.quedan = true; break; }
         intentos++;
+        hechos++;
         const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
         // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
         // portada y la prosa del correo, para decidir y, si se consigue el audio
@@ -1467,5 +1473,6 @@ export async function handleListenRun(env: ListenEnv, autorizado: boolean, reque
   const dias = q.has('dias') ? Math.min(14, Math.max(1, Math.floor(Number(q.get('dias')) || 0))) : undefined;
   const fuente = (q.get('fuente') || '').toUpperCase();
   if (fuente && !LISTEN_SOURCES[fuente]) return json({ error: `fuente desconocida: ${fuente}` }, 400);
-  return json({ ok: true, ...(await runListenIngest(env, { force: true, dias, fuente })) });
+  const tope = q.has('tope') ? Math.min(50, Math.max(1, Math.floor(Number(q.get('tope')) || 0))) : undefined;
+  return json({ ok: true, ...(await runListenIngest(env, { force: true, dias, fuente, tope })) });
 }
