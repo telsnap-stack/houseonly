@@ -3,12 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
-	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
+	ZIP_MAX_BYTES, ZIP_GRANDE_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
 	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
 import { indiceTienda, buscaEnTienda, buscaMismaEdicion } from "../src/lib/preorder-rechazos.mjs";
+import { PARTE_MAX_BYTES } from "../src/lib/listen-ficheros.mjs";
 import { SUBWAX_SEMANA45 } from "./fixtures/subwax";
 import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
@@ -568,10 +569,10 @@ describe("listen: ingesta", () => {
 		expect(parseDistributorEmail(html, { fx: 1.15, emailDate: new Date(2026, 10, 1) })[0]._enlacesFicha.some((u: string) => /unsubscribe/.test(u))).toBe(false);
 	});
 
-	it("ZIP por encima del tope: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
+	it("ZIP por encima del tope grande: descarga manual con el enlace, sin nada en R2, y sigue con el resto", async () => {
 		redes(zipDe({ "a.mp3": 10 }), {
 			"https://us.list-manage.com/track/click?u=big": () => new Response(null, { status: 302, headers: { location: "https://www.dropbox.com/scl/fo/big/X?rlkey=k&dl=0" } }),
-			"https://www.dropbox.com/scl/fo/big/": () => new Response("x", { headers: { "content-length": String(ZIP_MAX_BYTES + 1), "content-type": "application/zip" } }),
+			"https://www.dropbox.com/scl/fo/big/": () => new Response("x", { headers: { "content-length": String(ZIP_GRANDE_MAX_BYTES + 1), "content-type": "application/zip" } }),
 		});
 		await archiva("RD__X---Y-BIG001__2026-11-01.html", rdEmail("BIG001", "https://us.list-manage.com/track/click?u=big"));
 		await archiva("RD__X---Y-OKK001__2026-11-01.html", rdEmail("OKK001"));
@@ -943,6 +944,63 @@ describe("listen: decisiones y limpieza", () => {
 		expect(d2.cover).toEqual({ key: "listen/SIN001/cover.jpg", from: "zip" });
 		expect((await E.LISTEN_R2.list({ prefix: "listen/SIN001/" })).objects.map((o: any) => o.key).sort())
 			.toEqual(["listen/SIN001/01-Otra.mp3", "listen/SIN001/cover.jpg"]);
+	});
+
+	it("promopack por encima del tope en memoria: baja a R2 y se extrae por rangos, no se descarta", async () => {
+		E.LISTEN_ZIP_MEMORIA_BYTES = "2048";
+		try {
+			const zip = zipSync({ "HG001/A1 Uno.mp3": [new Uint8Array(6000).fill(1), { level: 0 }], "HG001/B1 Dos.mp3": new Uint8Array(5000).fill(2),
+				"HG001/HG001_front.jpg": new Uint8Array(300).fill(3), "HG001/HG001_info.txt": new TextEncoder().encode("texto") });
+			expect(zip.length).toBeGreaterThan(2048);
+			redes(zip);
+			await archiva("RD__X---Y-HG001__2026-11-01.html", rdEmail("HG001"));
+			expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, por_estado: { listo: 1 } });
+			const d = await rel("HG001");
+			expect(d.tracks.map((t: any) => [t.name, t.bytes])).toEqual([["A1 Uno", 6000], ["B1 Dos", 5000]]);
+			expect(d).toMatchObject({ cover: { key: "listen/HG001/cover.jpg", from: "zip" }, textos: { promotext: "listen/HG001/promotext.txt" } });
+			expect(d.detalle).toMatch(/extraído desde R2/);
+			expect(await E.LISTEN_R2.head("listen/HG001/tmp-promopack.zip")).toBeNull();   // el temporal se borra
+			expect(new TextDecoder().decode(await (await E.LISTEN_R2.get("listen/HG001/promotext.txt")).arrayBuffer())).toBe("texto");
+		} finally { delete E.LISTEN_ZIP_MEMORIA_BYTES; }
+	});
+
+	it("listen-upload por partes: fichero a fichero, el audio de antes se va solo al cerrar; 413 claro si un fichero pasa del tope", async () => {
+		redes(zipDe({}));
+		await archiva("RD__X---Y-GP01__2026-11-01.html", rdEmail("GP01", "https://example.com/no-es-un-zip"));
+		await runListenIngest(E, { now: NOW });
+		const sube = (qs: string, body?: any) =>
+			handleListenUpload(new Request(`https://w/?action=listen-upload&clave=GP01&${qs}`, { method: "POST", body }), E, true, NOW.getTime());
+		// Un audio anterior que debe seguir hasta el cierre.
+		await sube("", zipDe({ "Viejo.mp3": 5 }));
+		expect((await rel("GP01")).tracks.map((t: any) => t.key)).toEqual(["listen/GP01/01-Viejo.mp3"]);
+
+		expect((await sube("parte=fichero&lote=x&tipo=pista&n=1&nombre=a.mp3", new Uint8Array(3))).status).toBe(400);   // lote invalido
+		expect((await sube("parte=fin&lote=abc123")).status).toBe(400);                                                  // sin pistas
+		expect((await sube("parte=fichero&lote=abc123&tipo=raro", new Uint8Array(3))).status).toBe(400);
+		const lote = "lote20261110";
+		expect((await sube(`parte=fichero&lote=${lote}&tipo=pista&n=2&nombre=${encodeURIComponent("GP01 B1 Dos.mp3")}`, new Uint8Array(20).fill(2))).status).toBe(200);
+		expect((await sube(`parte=fichero&lote=${lote}&tipo=pista&n=1&nombre=${encodeURIComponent("GP01 A1 Uno.mp3")}`, new Uint8Array(10).fill(1))).status).toBe(200);
+		expect((await sube(`parte=fichero&lote=${lote}&tipo=portada&nombre=front.jpg`, new Uint8Array(4))).status).toBe(200);
+		expect((await sube(`parte=fichero&lote=${lote}&tipo=promotext&nombre=info.txt`, new TextEncoder().encode("hola"))).status).toBe(200);
+		// Hasta el cierre, el disco sigue con su audio.
+		expect((await rel("GP01")).tracks.map((t: any) => t.key)).toEqual(["listen/GP01/01-Viejo.mp3"]);
+
+		const fin: any = await (await sube(`parte=fin&lote=${lote}`)).json();
+		expect(fin.item.tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
+		const d = await rel("GP01");
+		expect(d).toMatchObject({ estado: "listo", subido_a_mano_at: NOW.toISOString(), cover: { key: `listen/GP01/manual-${lote}/cover.jpg`, from: "zip" },
+			textos: { promotext: `listen/GP01/manual-${lote}/promotext.txt` } });
+		expect(d.bytes).toBe(10 + 20 + 4 + 4);
+		expect(await E.LISTEN_R2.head("listen/GP01/01-Viejo.mp3")).toBeNull();
+
+		// Un fichero por encima del tope: 413 con el nombre, el tamaño y el maximo.
+		const r413 = await sube(`parte=fichero&lote=otro12345&tipo=pista&n=1&nombre=enorme.mp3`, new Uint8Array(PARTE_MAX_BYTES + 1));
+		expect(r413.status).toBe(413);
+		expect(((await r413.json()) as any).error).toMatch(/enorme\.mp3: .*45 MB/);
+		// Cancelar borra lo que se subio de ese lote.
+		await sube(`parte=fichero&lote=otro12345&tipo=pista&n=1&nombre=a.mp3`, new Uint8Array(3));
+		await sube("parte=cancelar&lote=otro12345");
+		expect((await E.LISTEN_R2.list({ prefix: "listen/GP01/manual-otro12345/" })).objects).toHaveLength(0);
 	});
 
 	it("los sin audio que entraron sin portada la recuperan de su correo, una sola vez", async () => {
