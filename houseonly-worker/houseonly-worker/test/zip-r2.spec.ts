@@ -42,6 +42,20 @@ describe("zip-r2: ZIP grandes por partes y por rangos", () => {
 		expect(Array.from(await ficheroZipR2(E.LISTEN_R2, "listen/T/tmp.zip", idx[1]))).toEqual(Array(3000).fill(9));
 	});
 
+	it("el R2 de los tests rechaza partes de distinto tamaño, como el real (10048)", async () => {
+		const u = await E.LISTEN_R2.createMultipartUpload("listen/T/mal.zip");
+		const p1 = await u.uploadPart(1, new Uint8Array(PARTE_R2_BYTES + 5));
+		const p2 = await u.uploadPart(2, new Uint8Array(PARTE_R2_BYTES));
+		const p3 = await u.uploadPart(3, new Uint8Array(10));
+		await expect(u.complete([p1, p2, p3])).rejects.toThrow(/10048/);
+		await u.abort();
+		const v = await E.LISTEN_R2.createMultipartUpload("listen/T/peq.zip");
+		const q1 = await v.uploadPart(1, new Uint8Array(1024));
+		const q2 = await v.uploadPart(2, new Uint8Array(10));
+		await expect(v.complete([q1, q2])).rejects.toThrow(/10011/);
+		await v.abort();
+	});
+
 	it("corta en el tope y no deja nada en R2", async () => {
 		const zip = zipSync({ "a.mp3": [new Uint8Array(3 * 1024 * 1024).fill(1), { level: 0 }] });
 		await expect(bajaZipAR2(flujo(zip).getReader(), E.LISTEN_R2, "listen/T/x.zip", 1024 * 1024)).rejects.toBeInstanceOf(ZipDemasiado);
