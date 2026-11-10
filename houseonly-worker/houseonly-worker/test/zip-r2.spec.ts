@@ -17,11 +17,21 @@ describe("zip-r2: ZIP grandes por partes y por rangos", () => {
 			"pack/": new Uint8Array(0),
 			"pack/front.jpg": new Uint8Array(100).fill(3),
 		});
-		const reader = flujo(zip).getReader();
+		// Trozos de tamaño irregular, como llegan de la red.
+		const reader = flujo(zip, 1000003).getReader();
 		const primero = await reader.read();
+		// R2 exige partes iguales salvo la ultima (miniflare no lo comprueba): se apuntan.
+		const tamanos: number[] = [];
+		const bucket = { createMultipartUpload: async (k: string, o: any) => {
+			const s = await E.LISTEN_R2.createMultipartUpload(k, o);
+			return { uploadPart: (n: number, d: Uint8Array) => { tamanos.push(d.byteLength); return s.uploadPart(n, d); }, complete: (p: any) => s.complete(p), abort: () => s.abort() };
+		} } as any;
 		// Lo ya leido (en memoria) va primero y el resto sigue del lector.
-		const bytes = await bajaZipAR2(reader, E.LISTEN_R2, "listen/T/tmp.zip", 50 * 1024 * 1024, [primero.value!]);
+		const bytes = await bajaZipAR2(reader, bucket, "listen/T/tmp.zip", 50 * 1024 * 1024, [primero.value!]);
 		expect(bytes).toBe(zip.length);
+		expect(tamanos.length).toBe(2);
+		expect(tamanos[0]).toBe(PARTE_R2_BYTES);
+		expect(tamanos[1]).toBe(zip.length - PARTE_R2_BYTES);
 		expect((await E.LISTEN_R2.head("listen/T/tmp.zip")).size).toBe(zip.length);
 
 		const idx = await indiceZipR2(E.LISTEN_R2, "listen/T/tmp.zip");
