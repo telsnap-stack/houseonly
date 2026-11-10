@@ -85,9 +85,11 @@ const POR_FICHAS = new Set(['DBH', 'SUBWAX']);
 
 // Fuentes de las que se oye todo lo que no esta en la tienda, sea pre-order,
 // novedad, repress o back in stock (Eduardo, 2026-11-10). El disco que ya se
-// envia entra con preorder: false; que se hace al elegirlo no esta decidido
-// (no es un pre-order: ni stock 0 ni forthcoming), y Cargar elegidos lo deja fuera.
-const TODO_TIPO = new Set(['DBH']);
+// envia entra con preorder: false: no es un pre-order (ni stock 0 ni
+// forthcoming), asi que no se elige para el Pre-order sino para pedir
+// (decision 'pedir' → 'pedido'), y llega a la tienda con la factura.
+// RD: lo que no dice "Please pre-order" entra como disponible.
+const TODO_TIPO = new Set(['DBH', 'RD']);
 
 /** Las fichas de un email archivado, con el parser de su distribuidor. */
 function filasDelEmail(prefix: string, html: string, fecha: string): any[] {
@@ -115,6 +117,8 @@ export const SIGNED_TTL_S = 3600;
 // Limpieza (fase 2).
 export const DIAS_RECHAZADO = 7;
 export const DIAS_SIN_DECIDIR = 30;
+// pedir / pedido: un pedido tarda mas que una decision.
+export const DIAS_PEDIDO = 60;
 const DIA_MS = 86400000;
 
 const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
@@ -126,9 +130,15 @@ const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-a
 
 // caducado: el Dropbox del promopack ya no baja (pedir el promo).
 export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'caducado' | 'error';
-export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado';
+// pedir / pedido: discos ya disponibles (preorder: false). 'pedir' esta en la
+// lista "Para pedir"; 'pedido' es que el pedido ya se hizo. Llegan a la tienda
+// con la factura del distribuidor (su importer copia el audio de la bandeja).
+export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado' | 'pedir' | 'pedido';
 // Las que se pueden poner a mano; 'cargado' solo lo pone listen-promote.
-export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado'];
+export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado', 'pedir', 'pedido'];
+const PARA_PEDIR: ListenDecision[] = ['pedir', 'pedido'];
+// Unidades por defecto de un disco que se pide.
+export const CANTIDAD_DEF = 2;
 const PROMOTE_KEY = 'meta:listen_promote';
 export const DIAS_CARGADO = 7;
 const TEXTO_MAX_BYTES = 256 * 1024;
@@ -174,6 +184,10 @@ export interface ListenRelease {
   // false = ya se envia (DBH New this week / New last week / Back in Stock):
   // no es un pre-order. Sin el campo (registros anteriores al 10-11), pre-order.
   preorder?: boolean;
+  cantidad?: number;             // pedir / pedido: unidades (CANTIDAD_DEF por defecto)
+  pedido_at?: string;            // cuando se marco pedido
+  cargado_desde?: ListenDecision; // la decision que tenia al cargarse; deshacer vuelve a ella
+  ficha_url?: string;            // DBH: la ficha de su tienda (release_view), para pedir
 }
 
 export interface ListenRunResult {
@@ -215,12 +229,13 @@ async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
 
 interface IdxEntry { name: string; prefix: string; subject: string; date: string }
 
-// Rubadub: fuera solo sus listas masivas conocidas, de ~150-200 fichas y
-// ninguna de pre-order. Lo demas se abre aunque el asunto suene a digest: el
-// parser ya descarta lo que no es "Please pre-order". Con MAIL_DIGEST (que es
-// del tab) se quedaron fuera los represses de Theo Parrish y de Short Span
-// (2026-11-04); asi un asunto nuevo no vuelve a dejar discos fuera.
-const RD_MASIVAS = [/Imports-Shipping-Today/i, /New-Releases-Shipping/i, /All-Rubadub-Pre-sales/i];
+// Rubadub: fuera solo sus listas masivas que aun no se oyen. Lo demas se abre
+// aunque el asunto suene a digest. Con MAIL_DIGEST (que es del tab) se quedaron
+// fuera los represses de Theo Parrish y de Short Span (2026-11-04); asi un
+// asunto nuevo no vuelve a dejar discos fuera. Desde el 10-11 (por etapas) se
+// abren "New Releases Shipping This/Next Week": sus discos entran como
+// disponibles. "Imports Shipping Today" sigue fuera por ahora.
+const RD_MASIVAS = [/Imports-Shipping-Today/i, /All-Rubadub-Pre-sales/i];
 
 /** Por que no se abre un email, o null si se abre. */
 function motivoDescarte(e: IdxEntry): string | null {
@@ -503,6 +518,8 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     email: email.name, email_date: email.date,
     estado: 'listo', tracks: [], bytes: 0, ingested_at: ahora,
     preorder: !!row.forthcoming,
+    ...(String(row.zipUrl || '').match(/^https:\/\/dbh-music\.com\/shop\/release_zip\/(\d+)$/)
+      ? { ficha_url: `https://dbh-music.com/shop/release_view/${row.zipUrl.match(/(\d+)$/)[1]}` } : {}),
   };
   const dir = `${prefijo(env)}${clave}/`;
   const subidas: string[] = [];
@@ -845,8 +862,11 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
       const rechazadoViejo = m.x === 'rechazado' && t - Date.parse(m.dt) >= DIAS_RECHAZADO * DIA_MS;
       const cargadoViejo = m.x === 'cargado' && t - Date.parse(m.dt) >= DIAS_CARGADO * DIA_MS;
       const noElegido = !m.x || m.x === 'pendiente';
-      const sinDecidirViejo = noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
-      const sinAudioViejo = noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS;
+      const paraPedir = PARA_PEDIR.includes(m.x);
+      const sinDecidirViejo = (noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS)
+        || (paraPedir && m.n > 0 && t - Date.parse(m.dt) >= DIAS_PEDIDO * DIA_MS);
+      const sinAudioViejo = (noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS)
+        || (paraPedir && !!m.al && t - Date.parse(m.al) >= DIAS_PEDIDO * DIA_MS);
       if (!rechazadoViejo && !sinDecidirViejo && !sinAudioViejo && !cargadoViejo) continue;
       const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
       if (!r) continue;
@@ -907,7 +927,17 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   if (decision !== null && !DECISIONES.includes(decision) && !cargadoEnTienda) return json({ error: `decision must be ${DECISIONES.join(', ')} or null` }, 400);
   const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
   if (!r) return json({ error: 'not found' }, 404);
-  if (cargadoEnTienda && r.decision !== 'preorder') return json({ error: 'solo un elegido para pre-order pasa a cargado por estar en tienda' }, 409);
+  // Tambien lo pedido que llega en una factura y ya estaba en la tienda (Add stock).
+  if (cargadoEnTienda && r.decision !== 'preorder' && !PARA_PEDIR.includes(r.decision as ListenDecision)) return json({ error: 'solo un elegido (pre-order o para pedir) pasa a cargado por estar en tienda' }, 409);
+  // Un disco disponible no es un pre-order, y un pre-order no se pide aparte.
+  const disponible = r.preorder === false;
+  if (decision === 'preorder' && disponible) return json({ error: 'ya disponible: no es un pre-order, se pide (pedir)' }, 409);
+  if (PARA_PEDIR.includes(decision) && !disponible) return json({ error: 'solo se piden los discos ya disponibles; este es un pre-order' }, 409);
+  let cantidad: number | undefined;
+  if (body?.cantidad != null) {
+    cantidad = Number(body.cantidad);
+    if (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 99) return json({ error: 'cantidad: entero de 1 a 99' }, 400);
+  }
 
   // Deshacer una carga: vuelve a Elegidos. Lo copiado a audio/ y covers/ se
   // borra SOLO si ningun producto de la tienda lo usa (su handle no existe); si
@@ -923,7 +953,7 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
       if (existe === false) { await env.R2.delete(mias); copias = { borradas: mias.length }; }
       else copias = { borradas: 0, conservadas: existe ? `el producto ${r.handle} existe en la tienda` : 'no se pudo comprobar la tienda' };
     }
-    delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como;
+    delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como; delete r.cargado_desde;
   }
   if (decision === 'rechazado') {
     const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
@@ -934,12 +964,21 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
     if (r.decision === 'rechazado') await env.SYNC_STATE.delete(claveKV(r.catno));
     delete r.rechazo;
   }
-  if (decision) { r.decision = decision; r.decided_at = new Date(ahora).toISOString(); }
+  const decisionAntes = r.decision;
+  // Cambiar solo la cantidad de un disco de la lista no mueve su fecha.
+  const mismaDecision = decision && decision === r.decision;
+  if (decision) { r.decision = decision; if (!mismaDecision) r.decided_at = new Date(ahora).toISOString(); }
   else { delete r.decision; delete r.decided_at; }
-  if (cargadoEnTienda) { r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
+  if (cargadoEnTienda) { r.cargado_desde = decisionAntes; r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
+  if (PARA_PEDIR.includes(decision)) {
+    r.cantidad = cantidad ?? r.cantidad ?? CANTIDAD_DEF;
+    if (decision === 'pedido' && !mismaDecision) r.pedido_at = r.decided_at;
+    if (decision === 'pedir') delete r.pedido_at;
+  } else if (decision !== 'cargado') { delete r.cantidad; delete r.pedido_at; }
   await guardaRelease(env, r);
   return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null,
-    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null }, ...(copias ? { copias } : {}) });
+    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null,
+    cantidad: r.cantidad ?? null, pedido_at: r.pedido_at ?? null }, ...(copias ? { copias } : {}) });
 }
 
 // ── Puente con el player de Subwax (src/lib/subwax.ts) ─────────
@@ -1044,6 +1083,7 @@ export const VISTAS: Record<string, (x?: string) => boolean> = {
   elegidos: x => x === 'preorder',
   rechazados: x => x === 'rechazado',
   cargados: x => x === 'cargado',
+  para_pedir: x => x === 'pedir' || x === 'pedido',
 };
 const LIMIT_DEF = 30;
 const LIMIT_MAX = 100;
@@ -1157,7 +1197,8 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
       coverUrl: r.promovidos[n] ? `${publicBase}/${r.promovidos[n]}` : '',
     });
   }
-  if (r.decision !== 'preorder') return json({ error: 'solo se cargan los elegidos para pre-order' }, 409);
+  // Pre-orders (List pre-orders) y lo pedido (importer de la factura).
+  if (r.decision !== 'preorder' && !PARA_PEDIR.includes(r.decision as ListenDecision)) return json({ error: 'solo se cargan los elegidos para pre-order o para pedir' }, 409);
   if (!r.tracks.length) return json({ error: 'sin audio en la bandeja' }, 409);
 
   const audioPre = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/';
@@ -1179,7 +1220,7 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
     coverUrl = `${publicBase}/${destino}`;
   }
   const at = new Date(ahora).toISOString();
-  Object.assign(r, { decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
+  Object.assign(r, { cargado_desde: r.decision, decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
   await guardaRelease(env, r);
   return json({ ok: true, clave, tracks, coverUrl, cover_from: r.cover?.from || null, cargado_at: at });
 }
