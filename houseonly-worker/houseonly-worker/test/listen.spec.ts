@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, ZIP_GRANDE_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
+	handleListenPromote, handleListenUpload, reintentaGrandes, cronGrandes, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
@@ -1029,5 +1029,57 @@ describe("listen: decisiones y limpieza", () => {
 		expect(await productoEnTienda(E, "x")).toBeNull();
 		q.mockRejectedValueOnce(new Error("sin red"));
 		expect(await productoEnTienda(E, "x")).toBeNull();
+	});
+});
+
+describe("listen: reintento de los ZIP grandes (descarga_manual de antes del 10-11)", () => {
+	// Como quedaban: la ingesta de antes los dejaba en descarga_manual sin audio.
+	async function viejoGrande(cat: string, decision?: string, detalle = "ZIP demasiado grande (103538397 bytes)") {
+		const f = redes(zipDe({}), { "https://www.dropbox.com/": () => new Response("x", { status: 500 }) });
+		await archiva(`RD__X---Y-${cat}__2026-11-01.html`, rdEmail(cat));
+		await runListenIngest(E, { now: NOW });
+		f.mockRestore();
+		const r = { ...(await rel(cat)), estado: "descarga_manual", detalle, tracks: [], ...(decision ? { decision } : {}) };
+		await E.SYNC_STATE.put(`listen:rel:${cat}`, JSON.stringify(r), { metadata: { c: cat, d: "RD", e: "descarga_manual", x: decision, n: 0 } });
+	}
+
+	it("entra con su audio y conserva la decision; una sola vez; rechazados y otros descarga_manual no se tocan", async () => {
+		await viejoGrande("BIG001", "pendiente");
+		await viejoGrande("BIG002", "rechazado");
+		await viejoGrande("OTR001", undefined, "el enlace de la pista no baja el promopack del disco");
+		redes(zipDe({ "A1 Uno.mp3": 10, "B1 Dos.mp3": 20, "front.jpg": 5 }));
+		const r = await reintentaGrandes(E, NOW);
+		expect(r).toMatchObject({ intentados: 1, listos: ["BIG001"], fallidos: [], quedan: false });
+		const d = await rel("BIG001");
+		expect(d).toMatchObject({ estado: "listo", decision: "pendiente", grande_reintentado_at: NOW.toISOString() });
+		expect(d.tracks.map((t: any) => t.name)).toEqual(["A1 Uno", "B1 Dos"]);
+		expect(await rel("BIG002")).toMatchObject({ estado: "descarga_manual", tracks: [] });
+		expect((await rel("BIG002")).grande_reintentado_at).toBeUndefined();
+		expect((await rel("OTR001")).grande_reintentado_at).toBeUndefined();
+		expect(await reintentaGrandes(E, NOW)).toMatchObject({ intentados: 0 });
+	});
+
+	it("si falla, se marca con el motivo en el detalle y no se repite", async () => {
+		await viejoGrande("BIG003");
+		redes(zipDe({}), { "https://www.dropbox.com/": () => new Response("caido", { status: 503 }) });
+		expect(await reintentaGrandes(E, NOW)).toMatchObject({ intentados: 1, listos: [], fallidos: ["BIG003: error: promopack: HTTP 503"] });
+		const d = await rel("BIG003");
+		expect(d).toMatchObject({ estado: "descarga_manual", tracks: [], grande_reintentado_at: NOW.toISOString() });
+		expect(d.detalle).toBe("reintento del 2026-11-02 sin éxito: error: promopack: HTTP 503 (antes: ZIP demasiado grande (103538397 bytes))");
+		expect(await reintentaGrandes(E, NOW)).toMatchObject({ intentados: 0 });
+	});
+
+	it("pocos por pasada; el cron solo con la bandeja en live y deja el resumen", async () => {
+		for (const c of ["BIG004", "BIG005", "BIG006"]) await viejoGrande(c);
+		redes(zipDe({ "A1.mp3": 10 }));
+		await E.SYNC_STATE.put("meta:listen_mode", "off");
+		await cronGrandes(E, NOW);
+		expect(await E.SYNC_STATE.get("meta:listen_grandes_last")).toBeNull();
+		await E.SYNC_STATE.put("meta:listen_mode", "live");
+		await cronGrandes(E, NOW);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:listen_grandes_last"))).toMatchObject({ intentados: 2, quedan: true });
+		await cronGrandes(E, NOW);
+		expect(JSON.parse(await E.SYNC_STATE.get("meta:listen_grandes_last"))).toMatchObject({ intentados: 1, quedan: false });
+		for (const c of ["BIG004", "BIG005", "BIG006"]) expect(await rel(c)).toMatchObject({ estado: "listo" });
 	});
 });
