@@ -107,6 +107,12 @@ const MAX_EMAIL_AGE_DAYS = 7;
 // Discos intentados por pasada. A ~10 MB por promopack y una pasada por hora,
 // sobra para los ~6 anuncios diarios de octubre.
 const PER_RUN = 6;
+// Las fichas de las listas de RD (New Releases Shipping, ~150-200 por correo)
+// van despues, con su propio tope, y solo si los correos de un disco ya estan
+// al dia: nunca les quitan sitio (Eduardo, 2026-11-10).
+export const PER_RUN_LISTAS = 20;
+const RD_LISTAS = /New-Releases-Shipping/i;
+const esLista = (e: IdxEntry) => e.prefix === 'RD' && RD_LISTAS.test(e.subject);
 // Tope del ZIP. Se lee en memoria (128 MB por isolate) y se descomprime fichero
 // a fichero, asi que el pico es el ZIP mas un MP3. Por encima: descarga manual.
 export const ZIP_MAX_BYTES = 50 * 1024 * 1024;
@@ -671,7 +677,8 @@ async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: s
 // ── la pasada ──────────────────────────────────────────────────
 
 // Un disco ya ingerido no se repite; uno que no se pudo bajar se reintenta si
-// otro email (una revision, por ejemplo) lo vuelve a anunciar.
+// otro email (una revision, por ejemplo) lo vuelve a anunciar. El mismo email,
+// no: sigue abierto mientras le queden fichas y las repetiria cada pasada.
 const REINTENTABLE: ListenEstado[] = ['sin_zip', 'error'];
 
 // ── ya en tienda ───────────────────────────────────────────
@@ -728,63 +735,76 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
   const idx: IdxEntry[] = JSON.parse((await env.EMAILS.get('idx')) || '[]');
-  let intentos = 0;
   // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
   let tienda: Tienda | null = null;
   const { candidatos, descartados } = triaEmails(idx, now, opts.dias, opts.fuente);
   // A la vista en el resumen: si algo se queda fuera por el asunto, se ve.
   if (descartados.length) out.descartados_asunto = descartados.map(d => `${d.email.name} (${d.motivo})`);
-  ingesta: for (const email of candidatos) {
-    if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
-    if (intentos >= PER_RUN) { out.quedan = true; break; }
-    out.emails_vistos++;
-    const html = await env.EMAILS.get(`msg:${email.name}`);
-    if (!html) continue;
-    const rows = filasDelEmail(email.prefix, html, email.date);
+  // Primero los correos de un disco (anuncios, newsletters de DBH...), luego
+  // las listas de RD con lo que sobre: si quedan correos de la primera fase,
+  // las listas esperan a la pasada siguiente.
+  const fases = [
+    { emails: candidatos.filter(e => !esLista(e)), tope: PER_RUN },
+    { emails: candidatos.filter(esLista), tope: PER_RUN_LISTAS },
+  ];
+  ingesta: for (const [n, fase] of fases.entries()) {
+    if (n > 0 && out.quedan) break;
+    let intentos = 0;
+    for (const email of fase.emails) {
+      if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
+      if (intentos >= fase.tope) { out.quedan = true; break; }
+      out.emails_vistos++;
+      const html = await env.EMAILS.get(`msg:${email.name}`);
+      if (!html) continue;
+      const rows = filasDelEmail(email.prefix, html, email.date);
 
-    let completo = true;
-    const vistos = new Set<string>();
-    // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
-    const unDisco = !POR_FICHAS.has(email.prefix) && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
-    for (const row of rows) {
-      const clave = claveCatno(row.catno);
-      if (!clave || vistos.has(clave)) continue;
-      vistos.add(clave);
-      // Lo que ya se envia solo entra de las fuentes de TODO_TIPO, marcado
-      // preorder: false. Del resto, la bandeja sigue siendo de pre-orders.
-      if (!row.forthcoming && !TODO_TIPO.has(email.prefix)) { out.saltados.no_preorder++; continue; }
-      if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
-      const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
-      if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
-      if (!tienda) {
-        // Sin saber que hay en la tienda no entra nada: el email queda abierto
-        // y la pasada de la hora siguiente lo reintenta.
-        try { tienda = await leeTienda(env); }
-        catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+      let completo = true;
+      const vistos = new Set<string>();
+      // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
+      const unDisco = !POR_FICHAS.has(email.prefix) && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
+      for (const row of rows) {
+        const clave = claveCatno(row.catno);
+        if (!clave || vistos.has(clave)) continue;
+        vistos.add(clave);
+        // Lo que ya se envia solo entra de las fuentes de TODO_TIPO, marcado
+        // preorder: false. Del resto, la bandeja sigue siendo de pre-orders.
+        if (!row.forthcoming && !TODO_TIPO.has(email.prefix)) { out.saltados.no_preorder++; continue; }
+        if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
+        const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
+        // Reintentable, pero no desde el mismo correo: una lista grande que sigue
+        // abierta volveria a gastar el tope en sus fichas sin promopack cada pasada.
+        const deEsteEmail = (() => { try { return JSON.parse(previo.value || '{}').email === email.name; } catch { return false; } })();
+        if (previo.value && (!REINTENTABLE.includes(previo.metadata?.e as ListenEstado) || deEsteEmail)) { out.saltados.duplicado++; continue; }
+        if (!tienda) {
+          // Sin saber que hay en la tienda no entra nada: el email queda abierto
+          // y la pasada de la hora siguiente lo reintenta.
+          try { tienda = await leeTienda(env); }
+          catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+        }
+        const como = buscaEnTienda(tienda.indice, row.catno);
+        if (como) {
+          out.saltados.en_tienda++;
+          (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
+          continue;
+        }
+        if (intentos >= fase.tope) { completo = false; out.quedan = true; break; }
+        intentos++;
+        const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
+        // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
+        // portada y la prosa del correo, para decidir y, si se consigue el audio
+        // por otra via, subirlo a mano (listen-upload).
+        if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
+        if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
+        await guardaRelease(env, rel);
+        out.nuevos++;
+        out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
       }
-      const como = buscaEnTienda(tienda.indice, row.catno);
-      if (como) {
-        out.saltados.en_tienda++;
-        (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
-        continue;
+      if (completo) {
+        // Caduca sola cuando el email ya no puede volver a ser candidato.
+        await env.SYNC_STATE.put(MAIL_PREFIX + email.name, JSON.stringify({ at: now.toISOString(), discos: vistos.size }),
+          { expirationTtl: (MAX_EMAIL_AGE_DAYS + 2) * 86400 });
+        out.emails_cerrados++;
       }
-      if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
-      intentos++;
-      const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
-      // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
-      // portada y la prosa del correo, para decidir y, si se consigue el audio
-      // por otra via, subirlo a mano (listen-upload).
-      if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
-      if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
-      await guardaRelease(env, rel);
-      out.nuevos++;
-      out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
-    }
-    if (completo) {
-      // Caduca sola cuando el email ya no puede volver a ser candidato.
-      await env.SYNC_STATE.put(MAIL_PREFIX + email.name, JSON.stringify({ at: now.toISOString(), discos: vistos.size }),
-        { expirationTtl: (MAX_EMAIL_AGE_DAYS + 2) * 86400 });
-      out.emails_cerrados++;
     }
   }
   out.limpiados = await limpiaBandeja(env, now);
