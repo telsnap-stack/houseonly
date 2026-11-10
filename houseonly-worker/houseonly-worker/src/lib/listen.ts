@@ -83,6 +83,12 @@ export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Trip
 // de pista (MYD015, cosa de Rubadub) ni precio en libras.
 const POR_FICHAS = new Set(['DBH', 'SUBWAX']);
 
+// Fuentes de las que se oye todo lo que no esta en la tienda, sea pre-order,
+// novedad, repress o back in stock (Eduardo, 2026-11-10). El disco que ya se
+// envia entra con preorder: false; que se hace al elegirlo no esta decidido
+// (no es un pre-order: ni stock 0 ni forthcoming), y Cargar elegidos lo deja fuera.
+const TODO_TIPO = new Set(['DBH']);
+
 /** Las fichas de un email archivado, con el parser de su distribuidor. */
 function filasDelEmail(prefix: string, html: string, fecha: string): any[] {
   if (prefix === 'DBH') return parseDbhEmail(html);
@@ -165,6 +171,9 @@ export interface ListenRelease {
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
   reparado_at?: string;          // listen-repair ya lo reintento (sin_zip)
   reparado_v?: number;           // con que version de listen-repair (REPARA_VERSION)
+  // false = ya se envia (DBH New this week / New last week / Back in Stock):
+  // no es un pre-order. Sin el campo (registros anteriores al 10-11), pre-order.
+  preorder?: boolean;
 }
 
 export interface ListenRunResult {
@@ -216,7 +225,8 @@ const RD_MASIVAS = [/Imports-Shipping-Today/i, /New-Releases-Shipping/i, /All-Ru
 /** Por que no se abre un email, o null si se abre. */
 function motivoDescarte(e: IdxEntry): string | null {
   if (MAIL_ORDER.test(e.subject)) return 'pedido';
-  // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
+  // DBH se abre siempre: newsletters, OUT THIS WEEK, RE-PRESS LANDED... Todas
+  // sus fichas entran, sean pre-order o no (TODO_TIPO).
   if (e.prefix === 'DBH') return null;
   if (e.prefix === 'RD') return RD_MASIVAS.some(re => re.test(e.subject)) ? 'lista masiva' : null;
   return MAIL_DIGEST.some(re => re.test(e.subject)) ? 'digest' : null;
@@ -492,6 +502,7 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     ...(row._gbp != null ? { gbp: row._gbp, fx: RD_GBP_EUR } : {}),
     email: email.name, email_date: email.date,
     estado: 'listo', tracks: [], bytes: 0, ingested_at: ahora,
+    preorder: !!row.forthcoming,
   };
   const dir = `${prefijo(env)}${clave}/`;
   const subidas: string[] = [];
@@ -722,8 +733,9 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
       const clave = claveCatno(row.catno);
       if (!clave || vistos.has(clave)) continue;
       vistos.add(clave);
-      // La bandeja es de pre-orders: lo que ya se envia no entra.
-      if (!row.forthcoming) { out.saltados.no_preorder++; continue; }
+      // Lo que ya se envia solo entra de las fuentes de TODO_TIPO, marcado
+      // preorder: false. Del resto, la bandeja sigue siendo de pre-orders.
+      if (!row.forthcoming && !TODO_TIPO.has(email.prefix)) { out.saltados.no_preorder++; continue; }
       if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
       const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
       if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
