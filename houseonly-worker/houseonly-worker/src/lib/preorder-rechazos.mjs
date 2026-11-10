@@ -71,6 +71,23 @@ export function buscaEnTienda(indice, catno) {
 }
 
 /**
+ * Como buscaEnTienda, pero un sufijo de edicion es otro disco (Eduardo,
+ * 2026-11-10): Communique011P no es Communique011, ni RAWAX036.1Y es
+ * RAWAX036.1, ni UR-025 es UR-025A. Solo encaja lo igual o lo que cambia en
+ * ceros a la izquierda con el MISMO sufijo (LOG88 = LOG088). Para la bandeja de
+ * escucha; el Pre-order sigue con buscaEnTienda.
+ */
+export function buscaMismaEdicion(indice, catno) {
+  const k = claveCatno(catno);
+  if (!k || !indice) return null;
+  if (indice.exactas.has(k)) return k;
+  const { nucleo, sufijo } = partes(k);
+  if (!/\d/.test(nucleo)) return null;
+  const cand = (indice.porNucleo.get(nucleo) || []).filter(x => x.sufijo === sufijo);
+  return cand.length ? cand[0].clave : null;
+}
+
+/**
  * 'definitivo' | 'oculto' (temporal vigente) | 'caducado' (temporal de hace
  * 90 dias o mas) | null (sin rechazo).
  */

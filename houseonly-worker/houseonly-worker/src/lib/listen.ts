@@ -46,7 +46,7 @@
 import { unzipSync } from 'fflate';
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, MAIL_DIGEST, MAIL_ORDER, RD_GBP_EUR } from './distributor-email.mjs';
 import { ENLACE_DE_SUSCRIPCION } from './distributor-email.mjs';
-import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaEnTienda } from './preorder-rechazos.mjs';
+import { claveCatno, claveKV, nuevoRechazo, indiceTienda, buscaMismaEdicion } from './preorder-rechazos.mjs';
 import { nombreDePista } from './track-names.mjs';
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 
@@ -83,6 +83,14 @@ export const LISTEN_SOURCES: Record<string, string> = { RD: 'Rubadub', TV: 'Trip
 // de pista (MYD015, cosa de Rubadub) ni precio en libras.
 const POR_FICHAS = new Set(['DBH', 'SUBWAX']);
 
+// Fuentes de las que se oye todo lo que no esta en la tienda, sea pre-order,
+// novedad, repress o back in stock (Eduardo, 2026-11-10). El disco que ya se
+// envia entra con preorder: false: no es un pre-order (ni stock 0 ni
+// forthcoming), asi que no se elige para el Pre-order sino para pedir
+// (decision 'pedir' → 'pedido'), y llega a la tienda con la factura.
+// RD: lo que no dice "Please pre-order" entra como disponible.
+const TODO_TIPO = new Set(['DBH', 'RD']);
+
 /** Las fichas de un email archivado, con el parser de su distribuidor. */
 function filasDelEmail(prefix: string, html: string, fecha: string): any[] {
   if (prefix === 'DBH') return parseDbhEmail(html);
@@ -99,6 +107,13 @@ const MAX_EMAIL_AGE_DAYS = 7;
 // Discos intentados por pasada. A ~10 MB por promopack y una pasada por hora,
 // sobra para los ~6 anuncios diarios de octubre.
 const PER_RUN = 6;
+// Las fichas de las listas (RD New Releases Shipping, ~150-200 por correo; las
+// newsletters semanales de DBH, ~25-90) van despues, con su propio tope, y solo
+// si los correos de un disco ya estan al dia: nunca les quitan sitio
+// (Eduardo, 2026-11-10).
+export const PER_RUN_LISTAS = 20;
+const LISTAS: Record<string, RegExp> = { RD: /New-Releases-Shipping/i, DBH: /Newsletter/i };
+const esLista = (e: IdxEntry) => !!LISTAS[e.prefix]?.test(e.subject);
 // Tope del ZIP. Se lee en memoria (128 MB por isolate) y se descomprime fichero
 // a fichero, asi que el pico es el ZIP mas un MP3. Por encima: descarga manual.
 export const ZIP_MAX_BYTES = 50 * 1024 * 1024;
@@ -109,6 +124,8 @@ export const SIGNED_TTL_S = 3600;
 // Limpieza (fase 2).
 export const DIAS_RECHAZADO = 7;
 export const DIAS_SIN_DECIDIR = 30;
+// pedir / pedido: un pedido tarda mas que una decision.
+export const DIAS_PEDIDO = 60;
 const DIA_MS = 86400000;
 
 const TRACKER = /^https:\/\/([a-z0-9.-]*\.)?(list-manage\.com|mailchi\.mp)\//i;
@@ -120,9 +137,15 @@ const COVER_HOSTS = /^(mcusercontent\.com|.*\.mcusercontent\.com|triple-vision-a
 
 // caducado: el Dropbox del promopack ya no baja (pedir el promo).
 export type ListenEstado = 'listo' | 'descarga_manual' | 'sin_zip' | 'sin_audio' | 'caducado' | 'error';
-export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado';
+// pedir / pedido: discos ya disponibles (preorder: false). 'pedir' esta en la
+// lista "Para pedir"; 'pedido' es que el pedido ya se hizo. Llegan a la tienda
+// con la factura del distribuidor (su importer copia el audio de la bandeja).
+export type ListenDecision = 'preorder' | 'pendiente' | 'rechazado' | 'cargado' | 'pedir' | 'pedido';
 // Las que se pueden poner a mano; 'cargado' solo lo pone listen-promote.
-export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado'];
+export const DECISIONES: ListenDecision[] = ['preorder', 'pendiente', 'rechazado', 'pedir', 'pedido'];
+const PARA_PEDIR: ListenDecision[] = ['pedir', 'pedido'];
+// Unidades por defecto de un disco que se pide.
+export const CANTIDAD_DEF = 2;
 const PROMOTE_KEY = 'meta:listen_promote';
 export const DIAS_CARGADO = 7;
 const TEXTO_MAX_BYTES = 256 * 1024;
@@ -165,6 +188,13 @@ export interface ListenRelease {
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
   reparado_at?: string;          // listen-repair ya lo reintento (sin_zip)
   reparado_v?: number;           // con que version de listen-repair (REPARA_VERSION)
+  // false = ya se envia (DBH New this week / New last week / Back in Stock):
+  // no es un pre-order. Sin el campo (registros anteriores al 10-11), pre-order.
+  preorder?: boolean;
+  cantidad?: number;             // pedir / pedido: unidades (CANTIDAD_DEF por defecto)
+  pedido_at?: string;            // cuando se marco pedido
+  cargado_desde?: ListenDecision; // la decision que tenia al cargarse; deshacer vuelve a ella
+  ficha_url?: string;            // DBH: la ficha de su tienda (release_view), para pedir
 }
 
 export interface ListenRunResult {
@@ -206,17 +236,19 @@ async function guardaRelease(env: ListenEnv, r: ListenRelease): Promise<void> {
 
 interface IdxEntry { name: string; prefix: string; subject: string; date: string }
 
-// Rubadub: fuera solo sus listas masivas conocidas, de ~150-200 fichas y
-// ninguna de pre-order. Lo demas se abre aunque el asunto suene a digest: el
-// parser ya descarta lo que no es "Please pre-order". Con MAIL_DIGEST (que es
-// del tab) se quedaron fuera los represses de Theo Parrish y de Short Span
-// (2026-11-04); asi un asunto nuevo no vuelve a dejar discos fuera.
-const RD_MASIVAS = [/Imports-Shipping-Today/i, /New-Releases-Shipping/i, /All-Rubadub-Pre-sales/i];
+// Rubadub: fuera solo sus listas masivas que aun no se oyen. Lo demas se abre
+// aunque el asunto suene a digest. Con MAIL_DIGEST (que es del tab) se quedaron
+// fuera los represses de Theo Parrish y de Short Span (2026-11-04); asi un
+// asunto nuevo no vuelve a dejar discos fuera. Desde el 10-11 (por etapas) se
+// abren "New Releases Shipping This/Next Week": sus discos entran como
+// disponibles. "Imports Shipping Today" sigue fuera por ahora.
+const RD_MASIVAS = [/Imports-Shipping-Today/i, /All-Rubadub-Pre-sales/i];
 
 /** Por que no se abre un email, o null si se abre. */
 function motivoDescarte(e: IdxEntry): string | null {
   if (MAIL_ORDER.test(e.subject)) return 'pedido';
-  // Las newsletters de DBH si: traen fichas "Coming soon" (2026-11-03: 7 de 86).
+  // DBH se abre siempre: newsletters, OUT THIS WEEK, RE-PRESS LANDED... Todas
+  // sus fichas entran, sean pre-order o no (TODO_TIPO).
   if (e.prefix === 'DBH') return null;
   if (e.prefix === 'RD') return RD_MASIVAS.some(re => re.test(e.subject)) ? 'lista masiva' : null;
   return MAIL_DIGEST.some(re => re.test(e.subject)) ? 'digest' : null;
@@ -492,6 +524,9 @@ async function ingiereDisco(env: ListenEnv, row: any, email: IdxEntry, ahora: st
     ...(row._gbp != null ? { gbp: row._gbp, fx: RD_GBP_EUR } : {}),
     email: email.name, email_date: email.date,
     estado: 'listo', tracks: [], bytes: 0, ingested_at: ahora,
+    preorder: !!row.forthcoming,
+    ...(String(row.zipUrl || '').match(/^https:\/\/dbh-music\.com\/shop\/release_zip\/(\d+)$/)
+      ? { ficha_url: `https://dbh-music.com/shop/release_view/${row.zipUrl.match(/(\d+)$/)[1]}` } : {}),
   };
   const dir = `${prefijo(env)}${clave}/`;
   const subidas: string[] = [];
@@ -643,7 +678,8 @@ async function portadaDelEmail(url: string): Promise<{ data: Uint8Array; type: s
 // ── la pasada ──────────────────────────────────────────────────
 
 // Un disco ya ingerido no se repite; uno que no se pudo bajar se reintenta si
-// otro email (una revision, por ejemplo) lo vuelve a anunciar.
+// otro email (una revision, por ejemplo) lo vuelve a anunciar. El mismo email,
+// no: sigue abierto mientras le queden fichas y las repetiria cada pasada.
 const REINTENTABLE: ListenEstado[] = ['sin_zip', 'error'];
 
 // ── ya en tienda ───────────────────────────────────────────
@@ -652,9 +688,8 @@ export interface Tienda { indice: ReturnType<typeof indiceTienda>; handleDe: Map
 
 /**
  * Lo que ya existe en Shopify no entra a la bandeja (2026-11-03: MSLP022LTD
- * salio en "Por decidir" estando activo). Las mismas reglas que "Cargar
- * elegidos" en el tab (indiceTienda + buscaEnTienda sobre handle y SKU), pero
- * con TODOS los productos menos los archivados: un borrador o un unlisted
+ * salio en "Por decidir" estando activo). Sobre handle y SKU, con TODOS los
+ * productos menos los archivados: un borrador o un unlisted
  * tambien estan ya dados de alta. Admin API leyendo productos (no el indice de
  * busqueda): ~1600 productos = 7 paginas de 250 (coste pedido ~500 cada una).
  */
@@ -700,62 +735,77 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   if (mode !== 'live' && !opts.force) return { ...out, finished_at: new Date().toISOString() };
 
   const idx: IdxEntry[] = JSON.parse((await env.EMAILS.get('idx')) || '[]');
-  let intentos = 0;
   // La tienda se lee una vez por pasada, y solo si hay algun disco que bajar.
   let tienda: Tienda | null = null;
   const { candidatos, descartados } = triaEmails(idx, now, opts.dias, opts.fuente);
   // A la vista en el resumen: si algo se queda fuera por el asunto, se ve.
   if (descartados.length) out.descartados_asunto = descartados.map(d => `${d.email.name} (${d.motivo})`);
-  ingesta: for (const email of candidatos) {
-    if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
-    if (intentos >= PER_RUN) { out.quedan = true; break; }
-    out.emails_vistos++;
-    const html = await env.EMAILS.get(`msg:${email.name}`);
-    if (!html) continue;
-    const rows = filasDelEmail(email.prefix, html, email.date);
+  // Primero los correos de un disco (anuncios, OUT SOON...), luego las listas
+  // (RD y newsletters de DBH) con lo que sobre: si quedan correos de la primera
+  // fase, las listas esperan a la pasada siguiente.
+  const fases = [
+    { emails: candidatos.filter(e => !esLista(e)), tope: PER_RUN },
+    { emails: candidatos.filter(esLista), tope: PER_RUN_LISTAS },
+  ];
+  ingesta: for (const [n, fase] of fases.entries()) {
+    if (n > 0 && out.quedan) break;
+    let intentos = 0;
+    for (const email of fase.emails) {
+      if (await env.SYNC_STATE.get(MAIL_PREFIX + email.name)) continue;
+      if (intentos >= fase.tope) { out.quedan = true; break; }
+      out.emails_vistos++;
+      const html = await env.EMAILS.get(`msg:${email.name}`);
+      if (!html) continue;
+      const rows = filasDelEmail(email.prefix, html, email.date);
 
-    let completo = true;
-    const vistos = new Set<string>();
-    // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
-    const unDisco = !POR_FICHAS.has(email.prefix) && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
-    for (const row of rows) {
-      const clave = claveCatno(row.catno);
-      if (!clave || vistos.has(clave)) continue;
-      vistos.add(clave);
-      // La bandeja es de pre-orders: lo que ya se envia no entra.
-      if (!row.forthcoming) { out.saltados.no_preorder++; continue; }
-      if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
-      const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
-      if (previo.value && !REINTENTABLE.includes(previo.metadata?.e as ListenEstado)) { out.saltados.duplicado++; continue; }
-      if (!tienda) {
-        // Sin saber que hay en la tienda no entra nada: el email queda abierto
-        // y la pasada de la hora siguiente lo reintenta.
-        try { tienda = await leeTienda(env); }
-        catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+      let completo = true;
+      const vistos = new Set<string>();
+      // El enlace de pista (MYD015) es cosa de Rubadub; DBH siempre trae su ZIP.
+      const unDisco = !POR_FICHAS.has(email.prefix) && new Set(rows.map((r: any) => claveCatno(r.catno)).filter(Boolean)).size === 1;
+      for (const row of rows) {
+        const clave = claveCatno(row.catno);
+        if (!clave || vistos.has(clave)) continue;
+        vistos.add(clave);
+        // Lo que ya se envia solo entra de las fuentes de TODO_TIPO, marcado
+        // preorder: false. Del resto, la bandeja sigue siendo de pre-orders.
+        if (!row.forthcoming && !TODO_TIPO.has(email.prefix)) { out.saltados.no_preorder++; continue; }
+        if (await env.SYNC_STATE.get(claveKV(row.catno))) { out.saltados.rechazado++; continue; }
+        const previo = await env.SYNC_STATE.getWithMetadata<{ e: ListenEstado }>(REL_PREFIX + clave);
+        // Reintentable, pero no desde el mismo correo: una lista grande que sigue
+        // abierta volveria a gastar el tope en sus fichas sin promopack cada pasada.
+        const deEsteEmail = (() => { try { return JSON.parse(previo.value || '{}').email === email.name; } catch { return false; } })();
+        if (previo.value && (!REINTENTABLE.includes(previo.metadata?.e as ListenEstado) || deEsteEmail)) { out.saltados.duplicado++; continue; }
+        if (!tienda) {
+          // Sin saber que hay en la tienda no entra nada: el email queda abierto
+          // y la pasada de la hora siguiente lo reintenta.
+          try { tienda = await leeTienda(env); }
+          catch (e: any) { out.tienda_error = String(e?.message || e).slice(0, 300); out.quedan = true; break ingesta; }
+        }
+        // Un sufijo de edicion es otro disco (P, Y, A...): no basta con el nucleo.
+        const como = buscaMismaEdicion(tienda.indice, row.catno);
+        if (como) {
+          out.saltados.en_tienda++;
+          (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
+          continue;
+        }
+        if (intentos >= fase.tope) { completo = false; out.quedan = true; break; }
+        intentos++;
+        const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
+        // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
+        // portada y la prosa del correo, para decidir y, si se consigue el audio
+        // por otra via, subirlo a mano (listen-upload).
+        if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
+        if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
+        await guardaRelease(env, rel);
+        out.nuevos++;
+        out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
       }
-      const como = buscaEnTienda(tienda.indice, row.catno);
-      if (como) {
-        out.saltados.en_tienda++;
-        (out.en_tienda ||= []).push(`${row.catno} como ${tienda.handleDe.get(como) || como}`);
-        continue;
+      if (completo) {
+        // Caduca sola cuando el email ya no puede volver a ser candidato.
+        await env.SYNC_STATE.put(MAIL_PREFIX + email.name, JSON.stringify({ at: now.toISOString(), discos: vistos.size }),
+          { expirationTtl: (MAX_EMAIL_AGE_DAYS + 2) * 86400 });
+        out.emails_cerrados++;
       }
-      if (intentos >= PER_RUN) { completo = false; out.quedan = true; break; }
-      intentos++;
-      const rel = await ingiereDisco(env, row, email, now.toISOString(), unDisco ? html : undefined);
-      // Sin audio (sin ZIP, descarga manual, error) el disco se ve igual: con la
-      // portada y la prosa del correo, para decidir y, si se consigue el audio
-      // por otra via, subirlo a mano (listen-upload).
-      if (row._desc) rel.resumen = String(row._desc).replace(/\s+/g, ' ').trim().slice(0, 600);
-      if (!rel.cover && row.coverUrl) await guardaPortadaDelCorreo(env, rel, row.coverUrl, `${prefijo(env)}${rel.clave}/`).catch(() => {});
-      await guardaRelease(env, rel);
-      out.nuevos++;
-      out.por_estado[rel.estado] = (out.por_estado[rel.estado] || 0) + 1;
-    }
-    if (completo) {
-      // Caduca sola cuando el email ya no puede volver a ser candidato.
-      await env.SYNC_STATE.put(MAIL_PREFIX + email.name, JSON.stringify({ at: now.toISOString(), discos: vistos.size }),
-        { expirationTtl: (MAX_EMAIL_AGE_DAYS + 2) * 86400 });
-      out.emails_cerrados++;
     }
   }
   out.limpiados = await limpiaBandeja(env, now);
@@ -833,8 +883,11 @@ export async function limpiaBandeja(env: ListenEnv, now: Date): Promise<{ rechaz
       const rechazadoViejo = m.x === 'rechazado' && t - Date.parse(m.dt) >= DIAS_RECHAZADO * DIA_MS;
       const cargadoViejo = m.x === 'cargado' && t - Date.parse(m.dt) >= DIAS_CARGADO * DIA_MS;
       const noElegido = !m.x || m.x === 'pendiente';
-      const sinDecidirViejo = noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS;
-      const sinAudioViejo = noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS;
+      const paraPedir = PARA_PEDIR.includes(m.x);
+      const sinDecidirViejo = (noElegido && m.n > 0 && t - Date.parse(m.at) >= DIAS_SIN_DECIDIR * DIA_MS)
+        || (paraPedir && m.n > 0 && t - Date.parse(m.dt) >= DIAS_PEDIDO * DIA_MS);
+      const sinAudioViejo = (noElegido && !!m.al && t - Date.parse(m.al) >= DIAS_SIN_DECIDIR * DIA_MS)
+        || (paraPedir && !!m.al && t - Date.parse(m.al) >= DIAS_PEDIDO * DIA_MS);
       if (!rechazadoViejo && !sinDecidirViejo && !sinAudioViejo && !cargadoViejo) continue;
       const r = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
       if (!r) continue;
@@ -895,7 +948,17 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
   if (decision !== null && !DECISIONES.includes(decision) && !cargadoEnTienda) return json({ error: `decision must be ${DECISIONES.join(', ')} or null` }, 400);
   const r = await env.SYNC_STATE.get<ListenRelease>(REL_PREFIX + clave, 'json');
   if (!r) return json({ error: 'not found' }, 404);
-  if (cargadoEnTienda && r.decision !== 'preorder') return json({ error: 'solo un elegido para pre-order pasa a cargado por estar en tienda' }, 409);
+  // Tambien lo pedido que llega en una factura y ya estaba en la tienda (Add stock).
+  if (cargadoEnTienda && r.decision !== 'preorder' && !PARA_PEDIR.includes(r.decision as ListenDecision)) return json({ error: 'solo un elegido (pre-order o para pedir) pasa a cargado por estar en tienda' }, 409);
+  // Un disco disponible no es un pre-order, y un pre-order no se pide aparte.
+  const disponible = r.preorder === false;
+  if (decision === 'preorder' && disponible) return json({ error: 'ya disponible: no es un pre-order, se pide (pedir)' }, 409);
+  if (PARA_PEDIR.includes(decision) && !disponible) return json({ error: 'solo se piden los discos ya disponibles; este es un pre-order' }, 409);
+  let cantidad: number | undefined;
+  if (body?.cantidad != null) {
+    cantidad = Number(body.cantidad);
+    if (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 99) return json({ error: 'cantidad: entero de 1 a 99' }, 400);
+  }
 
   // Deshacer una carga: vuelve a Elegidos. Lo copiado a audio/ y covers/ se
   // borra SOLO si ningun producto de la tienda lo usa (su handle no existe); si
@@ -911,7 +974,7 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
       if (existe === false) { await env.R2.delete(mias); copias = { borradas: mias.length }; }
       else copias = { borradas: 0, conservadas: existe ? `el producto ${r.handle} existe en la tienda` : 'no se pudo comprobar la tienda' };
     }
-    delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como;
+    delete r.cargado_at; delete r.handle; delete r.promovidos; delete r.en_tienda_como; delete r.cargado_desde;
   }
   if (decision === 'rechazado') {
     const rec = nuevoRechazo({ catno: r.catno, tipo: body?.tipo, distribuidor: r.distribuidor.toLowerCase(), artist: r.artist, title: r.title }, ahora);
@@ -922,12 +985,21 @@ export async function handleListenDecide(request: Request, env: ListenEnv, autor
     if (r.decision === 'rechazado') await env.SYNC_STATE.delete(claveKV(r.catno));
     delete r.rechazo;
   }
-  if (decision) { r.decision = decision; r.decided_at = new Date(ahora).toISOString(); }
+  const decisionAntes = r.decision;
+  // Cambiar solo la cantidad de un disco de la lista no mueve su fecha.
+  const mismaDecision = decision && decision === r.decision;
+  if (decision) { r.decision = decision; if (!mismaDecision) r.decided_at = new Date(ahora).toISOString(); }
   else { delete r.decision; delete r.decided_at; }
-  if (cargadoEnTienda) { r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
+  if (cargadoEnTienda) { r.cargado_desde = decisionAntes; r.cargado_at = r.decided_at; r.en_tienda_como = enTienda; }
+  if (PARA_PEDIR.includes(decision)) {
+    r.cantidad = cantidad ?? r.cantidad ?? CANTIDAD_DEF;
+    if (decision === 'pedido' && !mismaDecision) r.pedido_at = r.decided_at;
+    if (decision === 'pedir') delete r.pedido_at;
+  } else if (decision !== 'cargado') { delete r.cantidad; delete r.pedido_at; }
   await guardaRelease(env, r);
   return json({ ok: true, item: { clave, decision: r.decision ?? null, decided_at: r.decided_at ?? null, rechazo: r.rechazo ?? null,
-    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null }, ...(copias ? { copias } : {}) });
+    cargado_at: r.cargado_at ?? null, en_tienda_como: r.en_tienda_como ?? null,
+    cantidad: r.cantidad ?? null, pedido_at: r.pedido_at ?? null }, ...(copias ? { copias } : {}) });
 }
 
 // ── Puente con el player de Subwax (src/lib/subwax.ts) ─────────
@@ -1032,6 +1104,7 @@ export const VISTAS: Record<string, (x?: string) => boolean> = {
   elegidos: x => x === 'preorder',
   rechazados: x => x === 'rechazado',
   cargados: x => x === 'cargado',
+  para_pedir: x => x === 'pedir' || x === 'pedido',
 };
 const LIMIT_DEF = 30;
 const LIMIT_MAX = 100;
@@ -1145,7 +1218,8 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
       coverUrl: r.promovidos[n] ? `${publicBase}/${r.promovidos[n]}` : '',
     });
   }
-  if (r.decision !== 'preorder') return json({ error: 'solo se cargan los elegidos para pre-order' }, 409);
+  // Pre-orders (List pre-orders) y lo pedido (importer de la factura).
+  if (r.decision !== 'preorder' && !PARA_PEDIR.includes(r.decision as ListenDecision)) return json({ error: 'solo se cargan los elegidos para pre-order o para pedir' }, 409);
   if (!r.tracks.length) return json({ error: 'sin audio en la bandeja' }, 409);
 
   const audioPre = env.LISTEN_PROMOTE_AUDIO_PREFIX || 'audio/';
@@ -1167,7 +1241,7 @@ export async function handleListenPromote(request: Request, env: ListenEnv, auto
     coverUrl = `${publicBase}/${destino}`;
   }
   const at = new Date(ahora).toISOString();
-  Object.assign(r, { decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
+  Object.assign(r, { cargado_desde: r.decision, decision: 'cargado', decided_at: at, cargado_at: at, handle, promovidos });
   await guardaRelease(env, r);
   return json({ ok: true, clave, tracks, coverUrl, cover_from: r.cover?.from || null, cargado_at: at });
 }

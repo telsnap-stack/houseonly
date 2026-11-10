@@ -8,6 +8,7 @@ import {
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
+import { indiceTienda, buscaEnTienda, buscaMismaEdicion } from "../src/lib/preorder-rechazos.mjs";
 import { SUBWAX_SEMANA45 } from "./fixtures/subwax";
 import { RD_THEO_PARRISH, RD_SHORT_SPAN } from "./fixtures/rd-represses";
 
@@ -142,6 +143,10 @@ describe("listen: qué emails y qué ficheros", () => {
 			e("RD", "Older-CAT005", "2026-10-25"),
 			e("RD", "New-Theo-Parrish-Sound-Signature-Represses", "2026-10-30"), e("RD", "Imports-Shipping-Today-X", "2026-10-30"),
 		];
+		// RD por etapas (10-11): "New Releases Shipping This/Next Week" se abre; "Imports Shipping Today", no.
+		const rdListas = [e("RD", "Rubadub-New-Releases-Shipping-This-Week", "2026-11-02"), e("RD", "Rubadub-New-Releases-Shipping-Next-Week", "2026-11-02")];
+		expect(emailsCandidatos([...rdListas, e("RD", "Imports-Shipping-Today-Y", "2026-11-02")], NOW).map(x => x.subject))
+			.toEqual(["Rubadub-New-Releases-Shipping-Next-Week", "Rubadub-New-Releases-Shipping-This-Week"]);
 		// listen-run a mano: ventana mas larga y una sola fuente.
 		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Older-CAT005", "Old-CAT004", "New-Theo-Parrish-Sound-Signature-Represses", "Artist---Title-CAT001"]);
 		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
@@ -210,16 +215,19 @@ describe("listen: ingesta", () => {
 		expect(body.items[0].textos.promotext).toMatch(/k=listen%2FTXT001%2Fpromotext\.txt&exp=\d+&sig=/);
 	});
 
-	it("sin JPG en el ZIP, la portada del email; rechazados y no pre-order no se bajan", async () => {
+	it("sin JPG en el ZIP, la portada del email; rechazados no se bajan; RD que ya se envia entra como disponible", async () => {
 		const f = redes(zipDe({ "a.mp3": 10, "Side A.png": 10 }));
 		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo" }));
 		await archiva("RD__X---Y-NOC001__2026-11-01.html", rdEmail("NOC001"));
 		await archiva("RD__X---Y-REJ001__2026-11-01.html", rdEmail("REJ001"));
 		await archiva("RD__X---Y-SHP001__2026-11-01.html", rdEmail("SHP001").replace("Please Pre-Order", "Shipping to you today"));
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
+		expect(r).toMatchObject({ nuevos: 2, saltados: { rechazado: 1, no_preorder: 0 } });
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
-		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+		expect(await rel("NOC001")).toMatchObject({ preorder: true });
+		// Sin "Please Pre-Order": ya se envia, entra para pedir, no como pre-order.
+		expect(await rel("SHP001")).toMatchObject({ preorder: false, estado: "listo" });
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(2);
 	});
 
 	it("TV con Release date TBA entra en la bandeja sin fecha; el que ya salio sigue fuera", async () => {
@@ -232,18 +240,39 @@ describe("listen: ingesta", () => {
 		expect(await rel("TVT003")).toBeNull();
 	});
 
-	it("lo que ya esta en la tienda no entra (handle o SKU, con las reglas de Cargar elegidos); archivado si", async () => {
+	it("lo que ya esta en la tienda no entra (handle o SKU, misma edicion); archivado si", async () => {
 		const f = redes(zipDe({ "a.mp3": 10 }));
-		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
+		tiendaCon([producto("mslp022ltd", "MSLP-022LTD"), producto("log-88", "LOG88"), producto("otra-cosa", "UR-025A"), producto("viejo", "OLD001", "ARCHIVED")]);
 		await archiva("RD__X---Y-MSLP022LTD__2026-11-01.html", rdEmail("MSLP022LTD"));
+		await archiva("RD__X---Y-LOG088__2026-11-01.html", rdEmail("LOG088"));
 		await archiva("RD__X---Y-UR025__2026-11-01.html", rdEmail("UR-025"));
 		await archiva("RD__X---Y-OLD001__2026-11-01.html", rdEmail("OLD001"));
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, emails_cerrados: 3, saltados: { en_tienda: 2 } });
-		expect(r.en_tienda).toEqual(["MSLP022LTD como mslp022ltd", "UR-025 como otra-cosa"]);
+		// UR-025A es otra edicion: UR-025 entra. Los ceros a la izquierda si son el mismo disco.
+		expect(r).toMatchObject({ nuevos: 2, emails_cerrados: 4, saltados: { en_tienda: 2 } });
+		expect(r.en_tienda).toEqual(["LOG088 como log-88", "MSLP022LTD como mslp022ltd"]);
 		expect(await rel("MSLP022LTD")).toBeNull();
+		expect(await rel("UR025")).toMatchObject({ catno: "UR-025", estado: "listo" });
 		expect(await rel("OLD001")).toMatchObject({ estado: "listo" });
-		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(2);
+	});
+
+	it("un sufijo de edicion es otro disco: ni ya en tienda ni duplicado (Communique011P, RAWAX036.1Y)", async () => {
+		const zip = zipDe({ "a.mp3": 10 });
+		redes(zip, { "https://dbh-music.com/shop/release_zip/": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }) });
+		tiendaCon([producto("communique011", "Communique011"), producto("rawax036-1", "RAWAX036.1")]);
+		await archiva("DBH__DBH-Music---Newsletter-KW46-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter",
+			dbhFicha(11, "Communique011", "New&nbsp;this&nbsp;week"), dbhFicha(12, "Communique011P", "New&nbsp;this&nbsp;week"),
+			dbhFicha(36, "RAWAX036.1", "New&nbsp;this&nbsp;week"), dbhFicha(37, "RAWAX036.1Y", "New&nbsp;this&nbsp;week")), "2026-11-02", "DBH");
+		const r = await runListenIngest(E, { now: NOW });
+		expect(r).toMatchObject({ nuevos: 2, saltados: { en_tienda: 2, duplicado: 0 } });
+		expect(r.en_tienda).toEqual(["Communique011 como communique011", "RAWAX036.1 como rawax036-1"]);
+		expect(await rel("COMMUNIQUE011P")).toMatchObject({ catno: "Communique011P", preorder: false });
+		expect(await rel("RAWAX0361Y")).toMatchObject({ catno: "RAWAX036.1Y", preorder: false });
+		// El Pre-order (buscaEnTienda) no cambia: alli siguen encajando.
+		const idx = indiceTienda(["Communique011", "RAWAX036.1"]);
+		expect(buscaEnTienda(idx, "Communique011P")).toBe("COMMUNIQUE011");
+		expect(buscaMismaEdicion(idx, "Communique011P")).toBeNull();
 	});
 
 	it("si no se puede leer la tienda no entra nada y el email queda abierto para la hora siguiente", async () => {
@@ -257,24 +286,62 @@ describe("listen: ingesta", () => {
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, emails_cerrados: 1 });
 	});
 
-	it("DBH: solo las fichas Coming soon; ZIP de release_zip, portada sin trasera, _info.txt como texto", async () => {
+	it("DBH: entran todas las fichas, el Back in Stock con preorder false; ZIP de release_zip, portada sin trasera, _info.txt como texto", async () => {
 		const zip = zipDe({ "DBH777_info.txt": 40, "DBH777_cover_back.jpg": 900, "DBH777_cover.jpg": 100,
 			"DBH777 - 1. Test Artist - A1. Uno.mp3": 30, "DBH777 - 2. Test Artist - B1. Dos.mp3": 20 });
-		const f = redes(zip, { "https://dbh-music.com/shop/release_zip/777": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }) });
+		const zip555 = zipDe({ "OLD555 - 1. Test Artist - A1. Viejo.mp3": 30 });
+		const f = redes(zip, {
+			"https://dbh-music.com/shop/release_zip/777": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }),
+			"https://dbh-music.com/shop/release_zip/555": () => new Response(zip555, { headers: { "content-type": "application/x-zip" } }),
+		});
 		await archiva("DBH__DBH-Music---OUT-SOON-DBH777---Test__2026-11-01.html",
 			dbhEmail("OUT SOON: DBH-777 - Test Artist - Test EP<br />Muy recomendado.", dbhFicha(777, "DBH-777"), dbhFicha(555, "OLD555", "Back in Stock")), "2026-11-01", "DBH");
 		// La newsletter vuelve a traer el mismo disco: entra una sola vez.
 		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter", dbhFicha(777, "DBH777")), "2026-11-02", "DBH");
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 2, saltados: { no_preorder: 1, duplicado: 1 } });
+		expect(r).toMatchObject({ nuevos: 2, por_estado: { listo: 2 }, emails_cerrados: 2, saltados: { no_preorder: 0, duplicado: 1 } });
 		const d = await rel("DBH777");
-		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07",
+		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07", preorder: true,
 			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
 		expect(d.gbp).toBeUndefined();
+		// Back in Stock: ya se envia, entra marcado como no pre-order.
+		expect(await rel("OLD555")).toMatchObject({ catno: "OLD555", distribuidor: "DBH", preorder: false, estado: "listo",
+			ficha_url: "https://dbh-music.com/shop/release_view/555" });
 		expect((await E.LISTEN_R2.head("listen/DBH777/cover.jpg")).size).toBe(100);
-		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(1);
+		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(2);
 		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=DBH777"), E, true)).json();
 		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
+	});
+
+	it("las listas (RD New Releases Shipping, newsletters de DBH) van despues de los correos de un disco, con tope propio de 20", async () => {
+		redes(zipDe({ "A1.mp3": 10, "cover.jpg": 20 }));
+		const lista = (cats: string[]) => `<html><body><p>New Releases Shipping This Week</p>${cats.map(c => `
+<img src="https://mcusercontent.com/x/images/${c}.jpg">
+<p>Artist: Test Artist<br>Title: Test ${c}<br>Label: Test Rec<br>Cat: ${c}<br>Format: 12"<br>Price: £8.99</p>
+<p>A1. Uno <a href="${TRACKER}">Download Zip</a></p>`).join("")}</body></html>`;
+		const enLista = Array.from({ length: 25 }, (_, i) => `LST${String(i + 1).padStart(3, "0")}`);
+		// La lista es el correo mas antiguo: aun asi va despues.
+		await archiva("RD__Rubadub-New-Releases-Shipping-This-Week__2026-11-01.html", lista(enLista), "2026-11-01");
+		// La newsletter de DBH tambien es una lista: segunda fase, con la de RD.
+		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-01.html", dbhEmail("here's our newest Newsletter", dbhFicha(901, "NWS901", "New&nbsp;this&nbsp;week")), "2026-11-01", "DBH");
+		for (let i = 1; i <= 7; i++) await archiva(`RD__X---Y-UNO00${i}__2026-11-02.html`, rdEmail(`UNO00${i}`), "2026-11-02");
+		const deLista = async () => (await Promise.all(enLista.map(c => rel(c)))).filter(Boolean);
+
+		// 1: seis anuncios (tope 6) y quedan; la lista espera entera.
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: true });
+		expect(await deLista()).toHaveLength(0);
+		expect(await rel("NWS901")).toBeNull();
+		// 2: el anuncio que faltaba y, con lo que sobra, 20 fichas de listas: la
+		// newsletter (mismo dia, va antes por nombre) y 19 de la lista de RD.
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 21, quedan: true });
+		expect(await rel("UNO007")).toMatchObject({ preorder: true });
+		expect(await rel("NWS901")).toMatchObject({ preorder: false, distribuidor: "DBH" });
+		const diecinueve = await deLista();
+		expect(diecinueve).toHaveLength(19);
+		expect(diecinueve.every((r: any) => r.preorder === false)).toBe(true);   // ya se envian: para pedir
+		// 3: las 6 que quedan, y la lista se cierra.
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: false, emails_cerrados: 1 });
+		expect(await deLista()).toHaveLength(25);
 	});
 
 	it("RD: los represses (asunto de digest) se abren; fuera solo las listas masivas, y el resumen las nombra", async () => {
@@ -685,7 +752,7 @@ describe("listen: decisiones y limpieza", () => {
 		const pide = async (qs: string) => (await handleListenList(new Request(`https://w/?action=listen-list&${qs}`), E, true)).json() as any;
 
 		const p1 = await pide("vista=por_decidir&limit=2");
-		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0 });
+		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0, para_pedir: 0 });
 		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
 		expect(p1).toMatchObject({ count: 5, cursor: "2" });
 		expect(p1.promote).toEqual({ activo: false, audio: "audio/", covers: "covers/", pruebas: false });
@@ -703,6 +770,61 @@ describe("listen: decisiones y limpieza", () => {
 		const sueltas = await pide("claves=PAG003,ele-001,NOPE99");
 		expect(sueltas.items.map((x: any) => x.clave).sort()).toEqual(["ELE001", "PAG003"]);
 		expect(sueltas.items[0].tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
+	});
+
+	it("pedir / pedido: solo los disponibles, cantidad 2 por defecto y editable, vista Para pedir", async () => {
+		await pon(base("DIS001", { distribuidor: "DBH", preorder: false }));
+		await pon(base("PRE001", { preorder: true }));
+		await pon(base("VIE001"));                                           // registro anterior: pre-order
+		// Un disponible no es un pre-order, y un pre-order no se pide.
+		expect((await decide({ clave: "DIS001", decision: "preorder" })).status).toBe(409);
+		expect((await decide({ clave: "PRE001", decision: "pedir" })).status).toBe(409);
+		expect((await decide({ clave: "VIE001", decision: "pedido" })).status).toBe(409);
+		expect((await decide({ clave: "DIS001", decision: "pedir", cantidad: 0 })).status).toBe(400);
+
+		const d1: any = await (await decide({ clave: "DIS001", decision: "pedir" })).json();
+		expect(d1.item).toMatchObject({ decision: "pedir", cantidad: 2, pedido_at: null, decided_at: NOW.toISOString() });
+		// Cambiar la cantidad no mueve la fecha.
+		const despues = NOW.getTime() + 3600_000;
+		const cambia = (body: any) => handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify(body) }), E, true, despues);
+		expect(((await (await cambia({ clave: "DIS001", decision: "pedir", cantidad: 3 })).json()) as any).item)
+			.toMatchObject({ cantidad: 3, decided_at: NOW.toISOString() });
+		const d2: any = await (await cambia({ clave: "DIS001", decision: "pedido" })).json();
+		expect(d2.item).toMatchObject({ decision: "pedido", cantidad: 3, pedido_at: new Date(despues).toISOString() });
+
+		const vista: any = await (await handleListenList(new Request("https://w/?action=listen-list&vista=para_pedir"), E, true)).json();
+		expect(vista.items.map((x: any) => [x.clave, x.decision, x.cantidad])).toEqual([["DIS001", "pedido", 3]]);
+		expect(vista.counts).toMatchObject({ para_pedir: 1, elegidos: 0 });
+		// Fuera de la lista se olvida la cantidad.
+		expect(((await (await decide({ clave: "DIS001", decision: "pendiente" })).json()) as any).item).toMatchObject({ cantidad: null, pedido_at: null });
+	});
+
+	it("listen-promote desde un pedido: marca cargado, recuerda de donde viene y deshacer vuelve a pedido", async () => {
+		await pon(base("PED001", { distribuidor: "DBH", preorder: false, decision: "pedido", decided_at: NOW.toISOString(), cantidad: 2, pedido_at: NOW.toISOString() }));
+		await E.SYNC_STATE.put("meta:listen_promote", "on");
+		const promo = handleListenPromote(new Request("https://w/?action=listen-promote", { method: "POST", body: JSON.stringify({ clave: "PED001", safeKey: "PED001", handle: "ped001" }) }), E, true, "https://pub.example", NOW.getTime());
+		const r: any = await (await promo).json();
+		expect(r).toMatchObject({ ok: true, coverUrl: "https://pub.example/covers/PED001.jpg" });
+		expect(await rel("PED001")).toMatchObject({ decision: "cargado", cargado_desde: "pedido", handle: "ped001" });
+		const d: any = await (await handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "PED001", decision: "pedido" }) }),
+			E, true, NOW.getTime(), async () => true)).json();
+		expect(d.item).toMatchObject({ decision: "pedido", cantidad: 2 });
+		expect((await rel("PED001")).cargado_desde).toBeUndefined();
+		// Llega en la factura pero ya estaba en la tienda: cargado sin copiar, y deshacer vuelve a pedido.
+		const enTienda: any = await (await decide({ clave: "PED001", decision: "cargado", en_tienda: "ped001" })).json();
+		expect(enTienda.item).toMatchObject({ decision: "cargado", en_tienda_como: "ped001" });
+		expect((await rel("PED001")).cargado_desde).toBe("pedido");
+	});
+
+	it("limpieza de pedir / pedido a 60 dias, no a 30", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		await pon(base("PIR040", { preorder: false, decision: "pedir", decided_at: hace(40), ingested_at: hace(40) }));
+		await pon(base("PDO061", { preorder: false, decision: "pedido", decided_at: hace(61), ingested_at: hace(61) }));
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 1, fuera: 0, cargados: 0 });
+		expect((await rel("PIR040")).tracks).toHaveLength(1);
+		expect(await rel("PDO061")).toMatchObject({ decision: "pedido", tracks: [] });
+		// 60 dias mas sin audio: fuera.
+		expect((await limpiaBandeja(E, new Date(NOW.getTime() + 61 * 86400000))).fuera).toBe(1);
 	});
 
 	it("listen-promote: apagado no hace nada; encendido COPIA a los prefijos del entorno, marca cargado y no repite", async () => {
