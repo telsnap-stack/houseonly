@@ -12,15 +12,18 @@
 // diario de las 06:00 y, a mano, POST ?action=google-feed-rebuild.
 //
 // Decisiones (docs/sessions/2026-10-09-google-merchant.md):
-//   - g:link usa el SLUG del sitio (makeReleaseSlug con el vendor tal cual y el
-//     SKU de la primera variante, como scripts/prerender.mjs), NO el handle:
+//   - g:link usa el SLUG del sitio (makeReleaseSlug de lib/ficha-seo.mjs, la
+//     misma copia que scripts/prerender.mjs, con el SKU de la primera variante), NO el handle:
 //     /products/<handle>/ sirve la portada, no la ficha (comprobado en prod).
 //   - g:google_product_category 543523 = "Media > Music & Sound Recordings >
 //     Records & LPs" (taxonomia oficial de Google, version 2021-09-21; no hay
 //     una hoja "Vinyl").
 //   - g:identifier_exists = no solo si no hay GTIN ni marca: con marca + MPN
 //     Google pide omitirlo.
-//   - Sin g:shipping_weight: el peso en Shopify es un 0,5 kg generico.
+//   - g:shipping_weight = el peso de la variante en Shopify (inventoryItem.measurement,
+//     ya incluye el embalaje: 450 g un LP, 900 g un 2LP...). Google lo exige cuando
+//     el envio se calcula por peso, y sin el los productos salen "Not approved"
+//     (nov 2026: 1.265 de 1.265). Si una variante no tiene peso, se omite la etiqueta.
 
 import { shopifyAdminGraphQL, type ShopifyAdminEnv } from './shopify-admin';
 import { makeReleaseSlug } from './slug';
@@ -43,7 +46,10 @@ export interface AdminProduct {
   tags: string[];
   descriptionHtml: string;
   featuredMedia?: { preview?: { image?: { url?: string } | null } | null } | null;
-  variants: { nodes: Array<{ sku: string | null; barcode: string | null; price: string; inventoryQuantity: number | null }> };
+  variants: { nodes: Array<{
+    sku: string | null; barcode: string | null; price: string; inventoryQuantity: number | null;
+    inventoryItem?: { measurement?: { weight?: { value: number; unit: string } | null } | null } | null;
+  }> };
 }
 
 export interface FeedItem {
@@ -56,6 +62,8 @@ export interface FeedItem {
   brand: string;
   mpn: string;
   gtin: string;
+  /** "450 g"; '' si la variante no tiene peso en Shopify. */
+  shipping_weight: string;
 }
 
 export type SkipReason = 'forthcoming' | 'sin_stock' | 'sin_sku' | 'sin_imagen' | 'no_activo';
@@ -75,6 +83,17 @@ export function gtinValido(raw: string | null | undefined): string {
   let sum = 0;
   for (let i = digits.length - 1, w = 3; i >= 0; i--, w = w === 3 ? 1 : 3) sum += digits[i] * w;
   return (10 - (sum % 10)) % 10 === check ? code : '';
+}
+
+/** Peso de Shopify (value + WeightUnit) → "450 g" para Google; '' si no hay peso util. */
+export function pesoParaGoogle(w: { value: number; unit: string } | null | undefined): string {
+  const v = Number(w?.value);
+  if (!w || !Number.isFinite(v) || v <= 0) return '';
+  const gramos: Record<string, number> = { GRAMS: 1, KILOGRAMS: 1000, OUNCES: 28.349523125, POUNDS: 453.59237 };
+  const f = gramos[w.unit];
+  if (!f) return '';
+  const g = Math.round(v * f);
+  return g > 0 ? `${g} g` : '';
 }
 
 const recorta = (s: string, max: number) => (s.length <= max ? s : s.slice(0, max - 1).trimEnd() + '…');
@@ -102,8 +121,8 @@ export function productoAItem(p: AdminProduct): FeedItem | { skip: SkipReason } 
   const titulo = (p.title || '').trim();
   const title = recorta(artista ? `${artista} – ${titulo}` : titulo, 150);
   const texto = descripcionDeProducto(p.descriptionHtml || '').texto;
-  // El slug de la pagina prerenderizada: vendor tal cual y SKU de la PRIMERA
-  // variante (scripts/prerender.mjs), no el de la variante con stock.
+  // El slug de la pagina prerenderizada: SKU de la PRIMERA variante
+  // (scripts/prerender.mjs), no el de la variante con stock.
   const slug = makeReleaseSlug(vendor, titulo, variantes[0]?.sku || sku);
 
   return {
@@ -116,6 +135,7 @@ export function productoAItem(p: AdminProduct): FeedItem | { skip: SkipReason } 
     brand: selloDeTags(p.tags),
     mpn: sku,
     gtin: gtinValido(conStock.barcode),
+    shipping_weight: pesoParaGoogle(conStock.inventoryItem?.measurement?.weight),
   };
 }
 
@@ -151,6 +171,7 @@ function itemXml(it: FeedItem): string {
     ...(!it.gtin && !(it.brand && it.mpn) ? [campo('identifier_exists', 'no')] : []),
     campo('google_product_category', GOOGLE_PRODUCT_CATEGORY),
     campo('product_type', 'Vinyl'),
+    ...(it.shipping_weight ? [campo('shipping_weight', it.shipping_weight)] : []),
   ];
   return `    <item>\n${lineas.join('\n')}\n    </item>`;
 }
@@ -177,7 +198,7 @@ const PRODUCTS_QUERY = `
       nodes {
         handle title vendor status tags descriptionHtml
         featuredMedia { preview { image { url } } }
-        variants(first: 5) { nodes { sku barcode price inventoryQuantity } }
+        variants(first: 5) { nodes { sku barcode price inventoryQuantity inventoryItem { measurement { weight { value unit } } } } }
       }
     }
   }

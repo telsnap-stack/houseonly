@@ -8,6 +8,7 @@ import { normalizeLigatures, suspectLigatureDamage } from "../houseonly-worker/h
 import { htmlToText, descripcionDeProducto } from "../houseonly-worker/houseonly-worker/src/lib/html-text.mjs";
 import { gramosDesdeFormato } from "../houseonly-worker/houseonly-worker/src/lib/vinyl-weight.mjs";
 import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/lib/track-names.mjs";
+import { makeSlug, artistaDeVendor, tituloFicha, metaDeTags, relacionadas, consultasRelacionadas, bloqueFichaHtml } from "../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs";
 import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
@@ -44,21 +45,8 @@ const GENRE_TAGS = ['Detroit House','Chicago House','Afro House','Soulful House'
 const SKIP_TAGS  = ['vinyl','house','kudos',...GENRE_TAGS.map(g=>g.toLowerCase())];
 
 // ── SLUG (industry-standard SEO-friendly URLs: artist-title) ───
-function slugify(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip accents
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-+/g, '-');
-}
-function makeSlug(artist, title, catalog) {
-  const base = [artist, title].filter(Boolean).join(' ');
-  const s = slugify(base);
-  if (s) return s;
-  return slugify(catalog) || 'release';
-}
+// makeSlug vive en lib/ficha-seo.mjs: la misma copia que usan
+// scripts/prerender.mjs y el worker.
 
 // Extract genre/year/label from a product's Shopify tags. Used by both the
 // full product parser (for cards) and the lite metadata parser (for filter
@@ -105,11 +93,10 @@ function parseProduct({ node }) {
   // Vendor holds the artist. Blank-artist imports get Shopify's default (the
   // shop name "House Only") — that exact value is the bug and must never show
   // as an artist. Treat it as no-artist (blank) so it can be corrected in
-  // Shopify; never display the store name.
-  const vendorIsStoreDefault = (node.vendor || '').trim() === 'House Only';
-  const artist = vendorIsStoreDefault
-    ? (desc.includes(' — ') ? desc.split(' — ')[0].trim() : '')
-    : (node.vendor || (desc.includes(' — ') ? desc.split(' — ')[0].trim() : ''));
+  // Shopify; never display the store name. La regla es la de ficha-seo.mjs:
+  // antes, aqui se sacaba un artista de la descripcion y el slug de la tarjeta
+  // dejaba de casar con la pagina prerenderizada.
+  const artist = artistaDeVendor(node.vendor);
   let tracks = [];
   const tracksMatch = bodyHtml.match(/<script[^>]+id="tracks"[^>]*>([\s\S]*?)<\/script>/);
   if (tracksMatch) { try { tracks = JSON.parse(tracksMatch[1]); } catch {} }
@@ -145,6 +132,10 @@ function parseProduct({ node }) {
     stock: v?.quantityAvailable??10,
     coverUrl: img?.url||null, tracks, descTracks, desc, g:'135deg,#1a1a2e,#16213e',
     tags, releaseDate,
+    // Solo el tag: lo usa el texto de la ficha (lib/ficha-seo.mjs), que tiene
+    // que decir lo mismo que el prerender. La UI de pre-order va por
+    // isForthcoming(), que ademas mira las fases.
+    forthcoming: metaDeTags(tags).forthcoming,
     isGiftCard: esTarjetaRegalo(node),
     // Alta en Shopify (ISO DateTime). Solo lo usa forthcomingPhase() para
     // caducar los pre-orders que no traen fecha de salida.
@@ -339,6 +330,24 @@ async function fetchShopifyProductByHandle(handle) {
     }`, { h: handle });
   if (!data.product) return null;
   return parseProduct({ node: data.product });
+}
+
+// Los candidatos para "More from …" del modal: los mas recientes del artista y
+// del sello, en una sola peticion. relacionadas() (lib/ficha-seo.mjs) hace el
+// filtro exacto y el orden, igual que en el HTML prerenderizado.
+async function fetchRelacionadas(r) {
+  const { artista, sello } = consultasRelacionadas(r);
+  if (!artista && !sello) return [];
+  const campos = `edges { node { id handle title vendor descriptionHtml tags createdAt
+        variants(first:5) { edges { node { id title sku price { amount currencyCode } quantityAvailable } } }
+        images(first:1) { edges { node { url } } } } }`;
+  const data = await shopifyQuery(`
+    query($a: String!, $s: String!, $conA: Boolean!, $conS: Boolean!) {
+      a: products(first: 50, query: $a, sortKey: CREATED_AT, reverse: true) @include(if: $conA) { ${campos} }
+      s: products(first: 50, query: $s, sortKey: CREATED_AT, reverse: true) @include(if: $conS) { ${campos} }
+    }`, { a: artista, s: sello, conA: !!artista, conS: !!sello });
+  const nodos = [...(data.a?.edges || []), ...(data.s?.edges || [])].map(e => e.node);
+  return nodos.filter(n => !esTarjetaRegalo(n)).map(n => parseProduct({ node: n }));
 }
 
 // La tarjeta regalo (src/giftcard.mjs). Consulta propia: sus variantes son
@@ -2263,12 +2272,46 @@ function TrackPlayer({ tracks, release }) {
   );
 }
 
-function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth, onSignIn, followSlugs, onFollowChange }) {
+function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, onOpenRecord, auth, onSignIn, followSlugs, onFollowChange }) {
   // Variant choice (Deep Jungle colour editions: Black / Coloured). Hook must
   // run unconditionally, so it sits before the null guard. When the selected
   // id belongs to a previously-opened product we fall back to the first
   // variant, so no reset-on-open effect is needed.
   const [variantId, setVariantId] = useState(null);
+  const disco = r && !r.isGiftCard ? r : null;
+  // El titulo de la ficha mientras esta abierta, el mismo que lleva el HTML
+  // prerenderizado (tituloFicha, lib/ficha-seo.mjs).
+  useEffect(()=>{
+    if (!disco) return;
+    const antes = document.title;
+    document.title = tituloFicha(disco);
+    return () => { document.title = antes; };
+  },[disco]);
+  // "More from …": los mismos enlaces que el HTML prerenderizado. Se guardan
+  // con el slug de su disco para no pintar los del anterior mientras llegan.
+  const [rel, setRel] = useState({ slug: null, items: [] });
+  useEffect(()=>{
+    if (!disco) return;
+    let vivo = true;
+    fetchRelacionadas(disco)
+      .then(cands => { if (vivo) setRel({ slug: disco.slug, items: relacionadas(disco, cands) }); })
+      .catch(() => { /* sin enlaces: la ficha sigue igual */ });
+    return () => { vivo = false; };
+  },[disco]);
+  const bloqueSeo = useMemo(
+    () => disco ? bloqueFichaHtml(disco, rel.slug === disco.slug ? rel.items : [], S) : '',
+    [disco, rel]);
+  // Los enlaces del bloque son <a href> de verdad; el clic normal abre la ficha
+  // sin recargar, con el handle que lleva cada enlace.
+  const clicBloque = e => {
+    const a = e.target.closest && e.target.closest('a[data-handle]');
+    if (!a || !onOpenRecord) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const handle = a.getAttribute('data-handle');
+    if (!handle) return;
+    e.preventDefault();
+    fetchShopifyProductByHandle(handle).then(p => { if (p) onOpenRecord(p); }).catch(() => { window.location.href = a.href; });
+  };
   if (!r) return null;
   const variants = r.variants || [];
   const hasChoice = variants.length > 1;
@@ -2453,6 +2496,7 @@ function Modal({ r, onClose, onAdd, isWished, onWishlistToggle, onNavigate, auth
             </>)}
           </div>
         </div>
+        {bloqueSeo && <div onClick={clicBloque} dangerouslySetInnerHTML={{ __html: bloqueSeo }} />}
       </div>
     </div>
   );
@@ -4865,10 +4909,10 @@ function RubadubImporter() {
         // añadiria una tercera convencion a las dos que ya conviven en la
         // tienda. Antes de "arreglarlo", tres cosas que no son obvias:
         //   1. Las URLs NO salen del handle. El slug de routing se recalcula en
-        //      parseProduct() con makeSlug(artist, title, catalog), duplicado
-        //      literalmente en scripts/prerender.mjs, que escribe las paginas
-        //      estaticas. Cambiar handles no rompe URLs; tocar makeSlug si, y
-        //      hay que tocarlo en los dos sitios a la vez.
+        //      parseProduct() con makeSlug(artist, title, catalog), de
+        //      lib/ficha-seo.mjs, la misma que usa scripts/prerender.mjs para
+        //      las paginas estaticas. Cambiar handles no rompe URLs; tocar
+        //      makeSlug si.
         //   2. fetchShopifyProductByHandle() (carrito/wishlist) busca por el
         //      handle REAL del producto. Cada producto conserva el handle con el
         //      que nacio, asi que cambiar la convencion no rompe los vivos —
@@ -5505,6 +5549,7 @@ function DBHImporter() {
   const [error, setError]       = useState('');
   const [margin, setMargin]     = useState(60);
   const [liveHandles, setLiveHandles] = useState(null);   // null = sin consultar
+  const [bandejaAviso, setBandejaAviso] = useState('');
   const csvRef = useRef(null);
   const zipRef = useRef(null);
 
@@ -5585,6 +5630,12 @@ function DBHImporter() {
       // Build zip map by catalog number
       const zipMap = {};
       zipFiles.forEach(f => { zipMap[catnoFromZip(f.name)] = f; });
+      // Lo que se pidio desde la bandeja de escucha (disco ya disponible): su
+      // audio y portada salen de alli si no hay ZIP, y el disco pasa a cargado.
+      setProgress({ done:0, total:0, current:'Mirando la bandeja de escucha…' });
+      const bandeja = await pedidosDeBandeja(csvRows.filter(r => parseInt(r['QTY Shipped'] || 0) > 0).map(r => String(r['Catalog'] || '').toUpperCase().trim()));
+      setBandejaAviso(bandeja.aviso);
+      const enTiendaDeBandeja = [];
 
       for (let i = 0; i < csvRows.length; i++) {
         const row = csvRows[i];
@@ -5651,6 +5702,22 @@ function DBHImporter() {
             }
           } catch(e) { itemError = e.message; }
         }
+        const deBandeja = bandeja.mapa.get(rdKey(catno));
+        const yaEnTienda = estaEnTienda(vivos, catno);
+        if (deBandeja && yaEnTienda) enTiendaDeBandeja.push({ clave: deBandeja.clave, como: vivos.skuReal?.get(rdKey(catno)) || catno });
+        else if (deBandeja && !zipFile) {
+          try {
+            setProgress({ done:i, total, current:`${catno} — copiando audio de la bandeja…` });
+            const r = await fetchAdmin(`${WORKER_URL}?action=listen-promote`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clave: deBandeja.clave, safeKey, handle }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            tracks = d.tracks || [];
+            coverUrl = d.coverUrl || '';
+          } catch (e) { itemError = `bandeja de escucha: ${e.message}`; }
+        }
 
         // Build description HTML using shared helper
         const descHtml  = buildDescriptionHtml({ artist, title, label, year, tracks, sourceNotes: desc });
@@ -5661,7 +5728,8 @@ function DBHImporter() {
         processed.push({
           _catno: catno, _title: title, _artist: artist,
           _coverUrl: coverUrl, _tracks: tracks, _error: itemError,
-          _isPresale: isPresale, _zipFound: !!zipFile, _alreadyLive: estaEnTienda(vivos, catno),
+          _isPresale: isPresale, _zipFound: !!zipFile || (!!deBandeja && !yaEnTienda && tracks.length > 0), _alreadyLive: yaEnTienda,
+          _bandeja: deBandeja ? deBandeja.clave : '',
           'Handle': handle,
           'Title': title || catno,
           'Body (HTML)': `${descHtml}${audioHtml}`,
@@ -5699,6 +5767,17 @@ function DBHImporter() {
         setProgress({ done:i+1, total, current:'' });
       }
 
+      // Lo pedido que ya estaba en la tienda: no se copia nada (va por Add stock),
+      // pero sale de "Para pedir" como cargado.
+      for (const x of enTiendaDeBandeja) {
+        try {
+          const r = await fetchAdmin(`${WORKER_URL}?action=listen-decide`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clave: x.clave, decision: 'cargado', en_tienda: x.como }),
+          });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        } catch (e) { setBandejaAviso(a => `${a ? a + ' · ' : ''}${x.clave} ya en tienda, pero no se pudo marcar cargado en la bandeja (${e.message})`); }
+      }
       setResults(processed);
       autoRecomputeEntities('DBH');
       setStatus('review');
@@ -5822,6 +5901,13 @@ function DBHImporter() {
           </div>
 
           {liveHandles===null&&<div style={{marginBottom:10,fontSize:10,color:S.muted}}>Comprobando cuáles ya existen en la tienda…</div>}
+          {(bandejaAviso || results.some(r => r._bandeja)) && (
+            <div style={{marginBottom:10,padding:'8px 12px',border:`1px solid ${bandejaAviso?'#ff880055':S.border}`,borderRadius:4,fontSize:10,color:bandejaAviso?'#ff8800':S.muted}}>
+              {results.some(r => r._bandeja) && <>🎧 Pedidos desde la bandeja de escucha: {results.filter(r => r._bandeja && !r._alreadyLive && r._tracks?.length).length} con su audio y portada (pasan a Cargados)
+                {results.some(r => r._bandeja && r._alreadyLive) && <>, {results.filter(r => r._bandeja && r._alreadyLive).length} ya en tienda (Add stock)</>}. </>}
+              {bandejaAviso}
+            </div>
+          )}
           <EnTiendaBloque results={results} live={liveHandles} documento={documento} source="dbh" />
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,maxHeight:500,overflowY:'auto',padding:4}}>
             {results.map((r,i)=>(
@@ -9934,10 +10020,20 @@ const LISTEN_VISTAS = [
   ['por_decidir', 'Por decidir'],
   ['pendientes', 'Pendientes'],
   ['elegidos', 'Elegidos pre-order'],
+  ['para_pedir', 'Para pedir'],
   ['rechazados', 'Rechazados'],
   ['cargados', 'Cargados'],
 ];
-const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : d === 'cargado' ? 'cargados' : 'rechazados';
+const vistaDeDecision = d => !d ? 'por_decidir' : d === 'pendiente' ? 'pendientes' : d === 'preorder' ? 'elegidos' : d === 'cargado' ? 'cargados'
+  : (d === 'pedir' || d === 'pedido') ? 'para_pedir' : 'rechazados';
+// "Para pedir": el texto que se pega en el carrito de DBH o en el correo a RD.
+const textoPedido = (dist, items) => {
+  const uds = items.reduce((s, x) => s + (x.cantidad || 2), 0);
+  const total = items.reduce((s, x) => s + (x.dealerPrice || 0) * (x.cantidad || 2), 0);
+  return [`Pedido ${dist} — ${items.length} discos, ${uds} uds, ${coma(total)} €`,
+    ...items.map(x => [x.catno, `${x.artist} — ${x.title}`, `${x.cantidad || 2} uds`,
+      x.dealerPrice == null ? '' : x.gbp != null ? `£${coma(x.gbp)}` : `${coma(x.dealerPrice)} €`, x.ficha_url || ''].filter(Boolean).join(' · '))].join('\n');
+};
 const LISTEN_PAGINA = 30;
 const coma = n => Number(n).toFixed(2).replace('.', ',');
 const mmss = s => (Number.isFinite(s) && s > 0) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00';
@@ -10186,18 +10282,19 @@ function ListenInbox({ onCargar, ultimaCarga }) {
     finally { setBusy(''); }
   };
 
-  const decidir = async (it, decision, tipo) => {
+  const decidir = async (it, decision, tipo, extra = {}) => {
     setBusy(it.clave); setErr('');
     try {
       const r = await fetch(`${WORKER_URL}?action=listen-decide`, {
         method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clave: it.clave, decision, tipo }),
+        body: JSON.stringify({ clave: it.clave, decision, tipo, ...extra }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       const previo = cacheRef.current.get(it.clave);
       const nuevo = { ...previo, decision: d.item.decision || undefined, decided_at: d.item.decided_at || undefined, rechazo: d.item.rechazo || undefined,
-        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined, en_tienda_como: undefined } : {}) };
+        cantidad: d.item.cantidad ?? undefined, pedido_at: d.item.pedido_at ?? undefined,
+        ...(previo?.decision === 'cargado' ? { cargado_at: undefined, handle: undefined, en_tienda_como: undefined, cargado_desde: undefined } : {}) };
       const m = new Map(cacheRef.current).set(it.clave, nuevo);
       cacheRef.current = m;
       setCache(m);
@@ -10212,6 +10309,42 @@ function ListenInbox({ onCargar, ultimaCarga }) {
     } catch (e) {
       setErr(`No se pudo guardar la decisión de ${it.catno}: ${e.message}`);
     } finally { setBusy(''); }
+  };
+
+  // "Para pedir": copiar el pedido de un distribuidor y marcarlo pedido. Van
+  // sobre TODOS sus discos en 'pedir', no solo la pagina abierta.
+  const [pidiendo, setPidiendo] = useState('');
+  const porPedir = async (dist) => {
+    const todos = [];
+    let cur = null;
+    do {
+      const d = await pide(`vista=para_pedir&limit=100${cur ? `&cursor=${encodeURIComponent(cur)}` : ''}`);
+      guarda(d.items || [], d.expires_in);
+      todos.push(...(d.items || []));
+      cur = d.cursor || null;
+    } while (cur);
+    return todos.filter(x => x.decision === 'pedir' && x.distribuidor === dist);
+  };
+  const copiarPedido = async (dist) => {
+    setPidiendo(dist); setErr('');
+    try {
+      const items = await porPedir(dist);
+      if (!items.length) { setAviso(`No hay discos de ${dist} por pedir.`); return; }
+      await navigator.clipboard.writeText(textoPedido(dist, items));
+      setAviso(`Copiado el pedido de ${dist}: ${items.length} discos. Cuando lo hagas, pulsa "Marcar pedido".`);
+    } catch (e) { setErr(`Copiar pedido: ${e.message}`); }
+    finally { setPidiendo(''); }
+  };
+  const marcarPedido = async (dist) => {
+    setPidiendo(dist); setErr('');
+    try {
+      const items = await porPedir(dist);
+      if (!items.length) { setAviso(`No hay discos de ${dist} por pedir.`); return; }
+      if (!window.confirm(`Marcar como pedidos ${items.length} discos de ${dist}?\n\n${items.map(x => `${x.catno}: ${x.cantidad || 2}`).join('\n')}`)) return;
+      for (const it of items) await decidir(it, 'pedido');
+      setAviso(`${items.length} discos de ${dist} marcados como pedidos. Entran en la tienda con la factura.`);
+    } catch (e) { setErr(`Marcar pedido: ${e.message}`); }
+    finally { setPidiendo(''); }
   };
 
   // "Cargar elegidos": TODOS los elegidos (no solo la pagina abierta) al
@@ -10245,8 +10378,15 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       // La pestana y su contador, con los elegidos confirmados (no los de la lista atrasada).
       setCounts(c => c && { ...c, elegidos: todos.length });
       setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: [...new Set([...l.claves, ...todos.map(x => x.clave)])], count: Math.max(l.count, todos.length) } : l);
-      const res = await onCargar(todos);
+      // Lo que ya se envia (preorder: false) no es un pre-order: ni stock 0 ni
+      // forthcoming. Se pide desde "Para pedir"; el worker ya no deja elegirlo,
+      // esto cubre los que se eligieron antes del 10-11.
+      const disponibles = todos.filter(it => it.preorder === false);
       const motivos = {};
+      for (const it of disponibles) motivos[it.clave] = { txt: 'no entra: ya disponible, no es un pre-order (va a Para pedir)', col: '#ff8800' };
+      const cargables = todos.filter(it => it.preorder !== false);
+      if (!cargables.length) { setMotivoCarga(m => ({ ...m, ...motivos })); setAviso(`Cargar elegidos — ${disponibles.length} ya disponible(s): no van al Pre-order.`); return; }
+      const res = await onCargar(cargables);
       for (const x of res.enTienda || []) motivos[x.clave] = { txt: `no entra: ya en tienda como ${x.handle || x.como}${x.handle && x.como !== x.handle ? ` (SKU ${x.como})` : ''}`, col: '#ff8800' };
       for (const c of res.sinAudio || []) motivos[c] = { txt: 'en el manifest sin audio: espera su ZIP', col: '#ff8800' };
       for (const e of res.errores || []) if (e.clave !== '—') motivos[e.clave] = { txt: `no entra: ${e.error}`, col: S.danger };
@@ -10419,6 +10559,23 @@ function ListenInbox({ onCargar, ultimaCarga }) {
               </div>)}
             </details>}
           </div>
+          {vista === 'para_pedir' && (() => {
+            const grupos = {};
+            for (const x of visibles) if (x.decision === 'pedir') (grupos[x.distribuidor] ||= []).push(x);
+            return Object.keys(grupos).length > 0 && <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {Object.entries(grupos).map(([dist, its]) => {
+                const uds = its.reduce((s, x) => s + (x.cantidad || 2), 0);
+                const total = its.reduce((s, x) => s + (x.dealerPrice || 0) * (x.cantidad || 2), 0);
+                return <div key={dist} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '6px 10px', border: `1px solid ${S.border}`, borderRadius: 2, fontSize: 10 }}>
+                  <b style={{ color: S.text }}>{dist}</b>
+                  <span style={{ color: S.muted }}>{its.length} discos por pedir · {uds} uds · <b style={{ color: S.text }}>{coma(total)} €</b> coste dealer{lista?.cursor ? ' (de lo cargado)' : ''}</span>
+                  <span style={{ flex: 1 }} />
+                  <button disabled={!!pidiendo} onClick={() => copiarPedido(dist)} title="Copia la lista (catno, disco, unidades, coste, ficha) para el carrito o el correo" style={btn}>{pidiendo === dist ? '…' : 'Copiar pedido'}</button>
+                  <button disabled={!!pidiendo} onClick={() => marcarPedido(dist)} title="Los pasa a pedidos; llegan a la tienda con la factura" style={{ ...btn, color: S.accent, borderColor: `${S.accent}55` }}>Marcar pedido</button>
+                </div>;
+              })}
+            </div>;
+          })()}
           {!visibles.length && <div style={{ fontSize: 10, color: S.muted, padding: '10px 0' }}>{cargando ? 'Cargando…' : 'Nada en esta vista.'}</div>}
 
           {visibles.map(it => {
@@ -10434,6 +10591,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                     <span style={{ fontSize: 9, color: S.accent, fontFamily: 'monospace' }}>{it.catno}</span>
                     <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
                     <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
+                    {it.preorder === false && <span title="Ya se envía (New this week, New last week o Back in Stock): no es un pre-order" style={{ fontSize: 8, color: '#5ad1ff', border: '1px solid #5ad1ff66', borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>disponible ya</span>}
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
                     {motivoCarga[it.clave] && it.decision === 'preorder' && <span title="Resultado del último Cargar elegidos. Add stock no se toca desde aquí." style={{ fontSize: 8, color: motivoCarga[it.clave].col, border: `1px solid ${motivoCarga[it.clave].col}66`, borderRadius: 2, padding: '0 5px' }}>{motivoCarga[it.clave].txt}</span>}
                   </div>
@@ -10469,19 +10627,28 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                   </div>}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                     {it.decision === 'preorder' && <span style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ ELEGIDO PARA PRE-ORDER</span>}
+                    {it.decision === 'pedir' && <span style={{ fontSize: 8, color: '#5ad1ff', fontWeight: 700, display: 'inline-flex', gap: 4, alignItems: 'center' }}>PARA PEDIR ·
+                      <input type="number" min="1" max="99" defaultValue={it.cantidad || 2} key={`${it.clave}-${it.cantidad || 2}`} disabled={busy === it.clave}
+                        onBlur={e => { const n = parseInt(e.target.value, 10); if (n >= 1 && n <= 99 && n !== (it.cantidad || 2)) decidir(it, 'pedir', undefined, { cantidad: n }); else e.target.value = it.cantidad || 2; }}
+                        onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+                        style={{ width: 38, background: S.bg, border: `1px solid ${S.border}`, color: S.text, borderRadius: 2, fontSize: 9, padding: '0 3px' }} /> uds</span>}
+                    {it.decision === 'pedido' && <span title="Entra en la tienda con la factura del distribuidor: su importer copia el audio de la bandeja" style={{ fontSize: 8, color: '#5ad1ff', fontWeight: 700 }}>PEDIDO EL {fechaCorta(it.pedido_at || it.decided_at)} · {it.cantidad || 2} uds</span>}
                     {it.decision === 'cargado' && (it.en_tienda_como
                       ? <span title="No se copió nada: ya estaba en la tienda. Deshacer lo devuelve a Elegidos." style={{ fontSize: 8, color: '#ff8800', fontWeight: 700 }}>CARGADO EL {fechaCorta(it.cargado_at)} · ya en tienda como {it.en_tienda_como}</span>
                       : <span title="Audio y portada copiados al producto por List pre-orders; la copia de la bandeja se borra a los 7 días" style={{ fontSize: 8, color: S.accent, fontWeight: 700 }}>✓ CARGADO EL {fechaCorta(it.cargado_at)}{it.handle ? ` · ${it.handle}` : ''}</span>)}
                     {it.decision === 'pendiente' && <span title="El audio se borra a los 30 días de entrar en la bandeja" style={{ fontSize: 8, color: '#ff8800' }}>pendiente desde {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'rechazado' && <span style={{ fontSize: 8, color: S.danger }}>{it.rechazo === 'definitivo' ? 'Nunca' : `No, por ahora (${DIAS_RECHAZO_TEMPORAL} días)`} · {fechaCorta(it.decided_at)}</span>}
                     {it.decision === 'cargado' ? (
-                      <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} title="Vuelve a Elegidos; lo ya copiado al producto se queda" style={btn}>deshacer carga</button>
+                      <button disabled={busy === it.clave} onClick={() => decidir(it, it.cargado_desde || (it.preorder === false ? 'pedido' : 'preorder'))} title={it.preorder === false ? 'Vuelve a Para pedir; lo ya copiado al producto se queda' : 'Vuelve a Elegidos; lo ya copiado al producto se queda'} style={btn}>deshacer carga</button>
                     ) : rechazando === it.clave ? (<>
                       <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'temporal')} title={`Oculto ${DIAS_RECHAZO_TEMPORAL} días; luego vuelve marcado`} style={btn}>No, por ahora</button>
                       <button disabled={busy === it.clave} onClick={() => decidir(it, 'rechazado', 'definitivo')} title="No vuelve a salir (se puede recuperar)" style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Nunca</button>
                       <button onClick={() => setRechazando('')} style={btn}>cancelar</button>
                     </>) : (<>
-                      {it.decision !== 'preorder' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} style={{ ...btn, color: S.accent, borderColor: `${S.accent}55` }}>Pre-order</button>}
+                      {it.preorder === false
+                        ? (it.decision !== 'pedir' && it.decision !== 'pedido' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'pedir')} title="Ya se envía: a la lista Para pedir (2 uds por defecto)" style={{ ...btn, color: '#5ad1ff', borderColor: '#5ad1ff55' }}>Pedir</button>)
+                        : (it.decision !== 'preorder' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'preorder')} style={{ ...btn, color: S.accent, borderColor: `${S.accent}55` }}>Pre-order</button>)}
+                      {it.decision === 'pedido' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'pedir')} title="Vuelve a por pedir (si al final no se pidió)" style={btn}>no pedido</button>}
                       {it.decision !== 'pendiente' && it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => decidir(it, 'pendiente')} title="Se queda en la bandeja; el audio se borra a los 30 días de entrar" style={btn}>Pendiente</button>}
                       {it.decision !== 'rechazado' && <button disabled={busy === it.clave} onClick={() => setRechazando(it.clave)} style={{ ...btn, color: S.danger, borderColor: `${S.danger}55` }}>Rechazar</button>}
                       {it.decision && <button disabled={busy === it.clave} onClick={() => decidir(it, null)} style={btn}>deshacer</button>}
@@ -12879,6 +13046,25 @@ function AddStockPanel({ filas, documento, source }) {
 //
 // Si la consulta del catalogo falla no se bloquea el import, pero se dice: sin
 // ella el CSV puede llevar discos que ya existen.
+// Lo pedido desde la bandeja (decision pedir / pedido) para los catnos de una
+// factura: rdKey(catno) → disco. Sin secreto de admin no se consulta (el importer
+// sigue igual, con sus ZIP). Nunca lanza.
+async function pedidosDeBandeja(catnos) {
+  const out = { mapa: new Map(), aviso: '' };
+  const lista = [...new Set(catnos.filter(Boolean))];
+  if (!lista.length) return out;
+  if (!(entitiesSecret || mailSecretStore.v)) { out.aviso = 'sin secreto de admin: no se miró la bandeja de escucha'; return out; }
+  try {
+    for (let i = 0; i < lista.length; i += 100) {
+      const r = await fetchAdmin(`${WORKER_URL}?action=listen-list&claves=${encodeURIComponent(lista.slice(i, i + 100).join(','))}`);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      for (const it of d.items || []) if (it.decision === 'pedir' || it.decision === 'pedido') out.mapa.set(rdKey(it.catno), it);
+    }
+  } catch (e) { out.aviso = `no se pudo leer la bandeja de escucha (${e.message})`; }
+  return out;
+}
+
 async function cargarEnTienda() {
   try { return await fetchLiveHandles(); }
   catch (e) { const s = new Set(); s.skuReal = new Map(); s.error = e?.message || 'error'; return s; }
@@ -16109,13 +16295,13 @@ export default function App() {
             <ILink to={GIFT_CARD.path} onNavigate={openGiftCard} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{GIFT_CARD.label}</ILink>
           )}
           {POLICY_PAGES.map(pg=>(
-            <ILink key={pg.path} to={pg.path} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
+            <ILink key={pg.path} to={`${pg.path}/`} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
           ))}
         </nav>
       </footer>
 
 
-      <Modal onNavigate={navigate} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
+      <Modal onNavigate={navigate} onOpenRecord={openProduct} auth={auth} onSignIn={handleSignIn} followSlugs={followSlugs}
         onFollowChange={(slug,next)=>setFollowSlugs(f=>next?[...new Set([...f,slug])]:f.filter(x=>x!==slug))}
         r={selected} onClose={closeProduct} onAdd={r=>{addToCart(r);setCartOpen(true);}} isWished={isWished} onWishlistToggle={wishlistToggle} />
       <CartDrawer cart={cart} open={cartOpen} onClose={()=>setCartOpen(false)} onRemove={id=>setCart(c=>c.filter(i=>i.id!==id))} onCheckout={async()=>{ await shopifyCheckout(cart, auth?.session||null); setCart([]); setCartOpen(false); }} />

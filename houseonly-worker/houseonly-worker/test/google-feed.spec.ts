@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import {
 	gtinValido,
+	pesoParaGoogle,
 	productoAItem,
 	renderFeedXml,
 	handleGoogleFeed,
@@ -89,7 +90,25 @@ describe("productoAItem", () => {
 		expect(xml).toContain("<g:mpn>FAT072</g:mpn>");
 		expect(xml).toContain("<g:google_product_category>543523</g:google_product_category>");
 		expect(xml).toContain("<g:product_type>Vinyl</g:product_type>");
-		expect(xml).not.toContain("shipping_weight");
+		expect(xml).not.toContain("shipping_weight");   // sin peso en la variante, no se inventa uno
+	});
+
+	it("peso de Shopify -> g:shipping_weight en gramos", () => {
+		const peso = (value: number, unit = "KILOGRAMS") => ({ inventoryItem: { measurement: { weight: { value, unit } } } });
+		const xml1 = renderFeedXml([esItem(productoAItem(producto({}, peso(0.45))))], "t");
+		expect(xml1).toContain("<g:shipping_weight>450 g</g:shipping_weight>");
+		const xml2 = renderFeedXml([esItem(productoAItem(producto({}, peso(0.9))))], "t");
+		expect(xml2).toContain("<g:shipping_weight>900 g</g:shipping_weight>");
+		expect(bienFormado(xml2)).toBe(true);
+	});
+
+	it("pesoParaGoogle: unidades, ceros y basura", () => {
+		expect(pesoParaGoogle({ value: 450, unit: "GRAMS" })).toBe("450 g");
+		expect(pesoParaGoogle({ value: 1, unit: "POUNDS" })).toBe("454 g");
+		expect(pesoParaGoogle({ value: 0, unit: "KILOGRAMS" })).toBe("");
+		expect(pesoParaGoogle({ value: 1, unit: "STONES" })).toBe("");
+		expect(pesoParaGoogle(null)).toBe("");
+		expect(pesoParaGoogle(undefined)).toBe("");
 	});
 
 	it("barcode de 13 digitos valido -> g:gtin, sin identifier_exists", () => {
@@ -135,7 +154,8 @@ describe("productoAItem", () => {
 	it("vendor 'House Only' no es artista en el titulo; el enlace sigue al prerender", () => {
 		const it = esItem(productoAItem(producto({ vendor: "House Only" })));
 		expect(it.title).toBe("Black Magic EP (2026 Re-release)");
-		expect(it.link).toBe("https://houseonly.store/products/house-only-black-magic-ep-2026-re-release/");
+		// lib/ficha-seo.mjs: la misma regla en el slug que en el titulo, aqui y en el prerender.
+		expect(it.link).toBe("https://houseonly.store/products/black-magic-ep-2026-re-release/");
 	});
 
 	it("titulo a 150 y descripcion a 5000 como mucho", () => {
