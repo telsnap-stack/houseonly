@@ -257,22 +257,28 @@ describe("listen: ingesta", () => {
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1, emails_cerrados: 1 });
 	});
 
-	it("DBH: solo las fichas Coming soon; ZIP de release_zip, portada sin trasera, _info.txt como texto", async () => {
+	it("DBH: entran todas las fichas, el Back in Stock con preorder false; ZIP de release_zip, portada sin trasera, _info.txt como texto", async () => {
 		const zip = zipDe({ "DBH777_info.txt": 40, "DBH777_cover_back.jpg": 900, "DBH777_cover.jpg": 100,
 			"DBH777 - 1. Test Artist - A1. Uno.mp3": 30, "DBH777 - 2. Test Artist - B1. Dos.mp3": 20 });
-		const f = redes(zip, { "https://dbh-music.com/shop/release_zip/777": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }) });
+		const zip555 = zipDe({ "OLD555 - 1. Test Artist - A1. Viejo.mp3": 30 });
+		const f = redes(zip, {
+			"https://dbh-music.com/shop/release_zip/777": () => new Response(zip, { headers: { "content-type": "application/x-zip" } }),
+			"https://dbh-music.com/shop/release_zip/555": () => new Response(zip555, { headers: { "content-type": "application/x-zip" } }),
+		});
 		await archiva("DBH__DBH-Music---OUT-SOON-DBH777---Test__2026-11-01.html",
 			dbhEmail("OUT SOON: DBH-777 - Test Artist - Test EP<br />Muy recomendado.", dbhFicha(777, "DBH-777"), dbhFicha(555, "OLD555", "Back in Stock")), "2026-11-01", "DBH");
 		// La newsletter vuelve a traer el mismo disco: entra una sola vez.
 		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-02.html", dbhEmail("here's our newest Newsletter", dbhFicha(777, "DBH777")), "2026-11-02", "DBH");
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, emails_cerrados: 2, saltados: { no_preorder: 1, duplicado: 1 } });
+		expect(r).toMatchObject({ nuevos: 2, por_estado: { listo: 2 }, emails_cerrados: 2, saltados: { no_preorder: 0, duplicado: 1 } });
 		const d = await rel("DBH777");
-		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07",
+		expect(d).toMatchObject({ catno: "DBH-777", distribuidor: "DBH", dealerPrice: 8.8, release: "2026-12-07", preorder: true,
 			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
 		expect(d.gbp).toBeUndefined();
+		// Back in Stock: ya se envia, entra marcado como no pre-order.
+		expect(await rel("OLD555")).toMatchObject({ catno: "OLD555", distribuidor: "DBH", preorder: false, estado: "listo" });
 		expect((await E.LISTEN_R2.head("listen/DBH777/cover.jpg")).size).toBe(100);
-		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(1);
+		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(2);
 		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=DBH777"), E, true)).json();
 		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
 	});

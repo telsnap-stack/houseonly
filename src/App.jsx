@@ -10269,8 +10269,15 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       // La pestana y su contador, con los elegidos confirmados (no los de la lista atrasada).
       setCounts(c => c && { ...c, elegidos: todos.length });
       setLista(l => l && l.vista === 'elegidos' ? { ...l, claves: [...new Set([...l.claves, ...todos.map(x => x.clave)])], count: Math.max(l.count, todos.length) } : l);
-      const res = await onCargar(todos);
+      // Lo que ya se envia (preorder: false, DBH desde el 10-11) no es un
+      // pre-order: ni stock 0 ni forthcoming. Se queda en Elegidos hasta que
+      // exista su flujo de pedido.
+      const disponibles = todos.filter(it => it.preorder === false);
       const motivos = {};
+      for (const it of disponibles) motivos[it.clave] = { txt: 'no entra: ya disponible, no es un pre-order (falta su flujo de pedido)', col: '#ff8800' };
+      const cargables = todos.filter(it => it.preorder !== false);
+      if (!cargables.length) { setMotivoCarga(m => ({ ...m, ...motivos })); setAviso(`Cargar elegidos — ${disponibles.length} ya disponible(s): no van al Pre-order.`); return; }
+      const res = await onCargar(cargables);
       for (const x of res.enTienda || []) motivos[x.clave] = { txt: `no entra: ya en tienda como ${x.handle || x.como}${x.handle && x.como !== x.handle ? ` (SKU ${x.como})` : ''}`, col: '#ff8800' };
       for (const c of res.sinAudio || []) motivos[c] = { txt: 'en el manifest sin audio: espera su ZIP', col: '#ff8800' };
       for (const e of res.errores || []) if (e.clave !== '—') motivos[e.clave] = { txt: `no entra: ${e.error}`, col: S.danger };
@@ -10444,6 +10451,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
                     <span style={{ fontSize: 9, color: S.accent, fontFamily: 'monospace' }}>{it.catno}</span>
                     <span style={{ fontSize: 11, color: S.text, fontWeight: 700 }}>{it.artist} — {it.title}</span>
                     <span style={{ fontSize: 8, color: est.col, border: `1px solid ${est.col}66`, borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>{est.txt}</span>
+                    {it.preorder === false && <span title="Ya se envía (New this week, New last week o Back in Stock): no es un pre-order" style={{ fontSize: 8, color: '#5ad1ff', border: '1px solid #5ad1ff66', borderRadius: 2, padding: '0 5px', textTransform: 'uppercase', letterSpacing: 1 }}>disponible ya</span>}
                     {it.audio_limpiado_at && <span style={{ fontSize: 8, color: S.muted }}>audio borrado el {fechaCorta(it.audio_limpiado_at)}</span>}
                     {motivoCarga[it.clave] && it.decision === 'preorder' && <span title="Resultado del último Cargar elegidos. Add stock no se toca desde aquí." style={{ fontSize: 8, color: motivoCarga[it.clave].col, border: `1px solid ${motivoCarga[it.clave].col}66`, borderRadius: 2, padding: '0 5px' }}>{motivoCarga[it.clave].txt}</span>}
                   </div>

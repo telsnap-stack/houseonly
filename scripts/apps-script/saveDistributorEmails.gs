@@ -17,7 +17,13 @@
  * so it never duplicates and never misses one. The .html it writes is the raw
  * email HTML body — exactly what the importer's builders parse.
  *
- * CHANGES vs previous version (2026-11-04):
+ * CHANGES vs previous version (2026-11-10):
+ *  - DBH: fuera la lista de asuntos (Upcoming, Out soon, Shipping this week,
+ *    Newsletter). Ahora entra todo noreply@dbh-music.com salvo recibos ("has
+ *    been received", "has been shipped") y cuenta ("account data"). Con la
+ *    lista se quedaban sin archivar "OUT THIS WEEK" y "RE-PRESS LANDED".
+ *
+ * CHANGES vs version of 2026-11-04:
  *  - NEW: fuente SUBWAX (distribution@subwax.es).
  *
  * CHANGES vs version of 2026-11-03:
@@ -86,9 +92,9 @@ var SOURCES = [
   },
   {
     prefix: 'DBH',
-    // DBH pre-order announcements + newsletter. Excludes receipts & account mail.
+    // Todo noreply@dbh-music.com salvo recibos y cuenta (2026-11-10): la bandeja
+    // oye tambien novedades, represses y back in stock.
     query: 'from:noreply@dbh-music.com ' +
-           '(subject:Upcoming OR subject:"Out soon" OR subject:"Shipping this week" OR subject:Newsletter) ' +
            '-subject:"has been received" -subject:"has been shipped" ' +
            '-subject:"account data"'
   },
