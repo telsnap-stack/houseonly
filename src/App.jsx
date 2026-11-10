@@ -10048,6 +10048,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
   const [lista, setLista] = useState(null);       // {vista, claves, count, cursor}; null = sin cargar
   const [counts, setCounts] = useState(null);
   const [lastRun, setLastRun] = useState(null);
+  const [descartes, setDescartes] = useState(null); // historial de 7 dias: no pre-order y rechazados
   const [cargando, setCargando] = useState(false);
   const [err, setErr] = useState('');
   const [aviso, setAviso] = useState('');
@@ -10119,6 +10120,7 @@ function ListenInbox({ onCargar, ultimaCarga }) {
       guarda(d.items || [], d.expires_in);
       setCounts(d.counts || null);
       setLastRun(d.last_run || null);
+      if (d.descartes) setDescartes(d.descartes);
       setPromote(d.promote || null);
       setModo(d.modo || '');
       // La lista de KV va hasta 60 s por detras de lo recien decidido: en la
@@ -10260,6 +10262,24 @@ function ListenInbox({ onCargar, ultimaCarga }) {
     const a = audioRef.current; if (!a || !tiempo.d) return;
     const r = e.currentTarget.getBoundingClientRect();
     a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * tiempo.d;
+  };
+
+  // Borra la marca del correo de un descarte: la pasada siguiente lo vuelve a abrir.
+  const reintentar = async (d) => {
+    setBusy(`desc:${d.clave}`); setErr('');
+    try {
+      const r = await fetch(`${WORKER_URL}?action=listen-reintentar`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clave: d.clave }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setDescartes(xs => (xs || []).filter(x => x.clave !== d.clave));
+      setAviso(j.fuera_de_ventana
+        ? `${d.catno}: correo de hace más de 7 días; el cron ya no lo abre, lánzalo con una pasada manual con dias=10.`
+        : `${d.catno}: entra en la próxima pasada (minuto :41).`);
+    } catch (e) { setErr(`Reintentar ${d.catno}: ${e.message}`); }
+    finally { setBusy(''); }
   };
 
   const decidir = async (it, decision, tipo, extra = {}) => {
@@ -10523,6 +10543,20 @@ function ListenInbox({ onCargar, ultimaCarga }) {
             {lastRun?.descartados_asunto?.length > 0 && <details style={{ marginTop: 4 }}>
               <summary style={{ cursor: 'pointer' }}>{lastRun.descartados_asunto.length} correos sin abrir por el asunto</summary>
               {lastRun.descartados_asunto.map(d => <div key={d} style={{ paddingLeft: 10 }}>{d.replace(/\.html \(/, ' (')}</div>)}
+            </details>}
+            {/* Historial de 7 dias de lo abierto que no entro (no pre-order o rechazado), con el motivo: un fallo de regla
+                (el TBA de TV, 2026-11-06) se ve aqui aunque el cron pise la ultima pasada cada hora. */}
+            {descartes?.length > 0 && <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer' }}>{descartes.length} discos descartados en los últimos 7 días ({descartes.filter(d => d.tipo === 'no_preorder').length} no pre-order, {descartes.filter(d => d.tipo === 'rechazado').length} rechazados)</summary>
+              {descartes.map(d => <div key={d.clave} style={{ paddingLeft: 10, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <b style={{ color: S.text }}>{d.catno}</b>
+                <span>{d.tipo === 'rechazado' ? `rechazado (${d.motivo})` : d.motivo}</span>
+                <span>· {d.correo.replace(/^[A-Z]+__/, '').replace(/__\d{4}-\d{2}-\d{2}\.html$/, '')}</span>
+                <span>· {String(d.pasada).slice(0, 16).replace('T', ' ')} UTC</span>
+                {d.tipo === 'no_preorder'
+                  ? <button onClick={() => reintentar(d)} disabled={busy === `desc:${d.clave}`} style={{ ...btn, padding: '0 6px', fontSize: 9 }}>{busy === `desc:${d.clave}` ? '…' : 'reintentar'}</button>
+                  : <span style={{ fontStyle: 'italic' }}>recupéralo en Pre-order</span>}
+              </div>)}
             </details>}
           </div>
           {vista === 'para_pedir' && (() => {

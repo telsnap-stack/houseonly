@@ -921,7 +921,7 @@ import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
 import { handleSubwaxStock, handleSubwaxRefresh, handleSubwaxOrder, refreshSubwax } from './lib/subwax';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, SALTOS_TRACKER } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, handleListenReintentar, SALTOS_TRACKER } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -1948,7 +1948,7 @@ export default {
 
     // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
     //   GET  ?action=listen-list   Bearer  discos + URLs firmadas (1 h)
-    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano (&dias=1-14 &fuente=DBH)
+    //   POST ?action=listen-run    Bearer  una pasada de ingesta a mano (&dias=1-14 &fuente=DBH &tope=1-50 discos)
     //   GET  ?action=listen-file   firma   el MP3/portada, con Range
     //   POST ?action=listen-decide Bearer  preorder | pendiente | rechazado | null
     if (action === 'listen-list' && request.method === 'GET') {
@@ -1971,6 +1971,10 @@ export default {
     }
     if (action === 'listen-decide' && request.method === 'POST') {
       return await handleListenDecide(request, env, bearerAdminValido(request, env));
+    }
+    //   POST ?action=listen-reintentar Bearer {clave}: borra la marca del correo de un descarte no_preorder
+    if (action === 'listen-reintentar' && request.method === 'POST') {
+      return await handleListenReintentar(request, env, bearerAdminValido(request, env));
     }
     if (action === 'listen-file' && (request.method === 'GET' || request.method === 'HEAD')) {
       return await handleListenFile(request, env);

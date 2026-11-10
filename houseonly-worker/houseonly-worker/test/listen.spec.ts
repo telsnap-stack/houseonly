@@ -4,7 +4,7 @@ import { zipSync } from "fflate";
 import {
 	runListenIngest, emailsCandidatos, eligeFicheros, urlFirmada, handleListenFile, handleListenList,
 	ZIP_MAX_BYTES, dropboxDescarga, handleListenDecide, limpiaBandeja, enlacesDePista, cuentaPistas, esElPromopack,
-	handleListenPromote, handleListenUpload, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
+	handleListenPromote, handleListenUpload, handleListenRun, handleListenReintentar, listDescartes, completaPortadas, productoEnTienda, reparaSinZip, destinoDeTracker, porQueSinZip, mp3Suelto,
 } from "../src/lib/listen";
 import * as shopifyAdmin from "../src/lib/shopify-admin";
 import { parseDbhEmail, parseSubwaxEmail, parseDistributorEmail } from "../src/lib/distributor-email.mjs";
@@ -217,12 +217,15 @@ describe("listen: ingesta", () => {
 
 	it("sin JPG en el ZIP, la portada del email; rechazados no se bajan; RD que ya se envia entra como disponible", async () => {
 		const f = redes(zipDe({ "a.mp3": 10, "Side A.png": 10 }));
-		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo" }));
+		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo", fecha: "2026-10-20T09:00:00Z" }));
 		await archiva("RD__X---Y-NOC001__2026-11-01.html", rdEmail("NOC001"));
 		await archiva("RD__X---Y-REJ001__2026-11-01.html", rdEmail("REJ001"));
 		await archiva("RD__X---Y-SHP001__2026-11-01.html", rdEmail("SHP001").replace("Please Pre-Order", "Shipping to you today"));
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 2, saltados: { rechazado: 1, no_preorder: 0 } });
+		// El resumen dice cuales y por que, no solo cuantos.
+		expect(r.rechazados).toEqual(["REJ001 (definitivo, rechazado el 2026-10-20)"]);
+		expect(r.no_preorder).toBeUndefined();
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
 		expect(await rel("NOC001")).toMatchObject({ preorder: true });
 		// Sin "Please Pre-Order": ya se envia, entra para pedir, no como pre-order.
@@ -236,8 +239,45 @@ describe("listen: ingesta", () => {
 		await archiva("TV__TVT003---Test-EP---Test-Artist-30-10-2026__2026-11-01.html", tvEmail("TVT003", "30-10-2026"), "2026-11-01", "TV");
 		const r = await runListenIngest(E, { now: NOW });
 		expect(r).toMatchObject({ nuevos: 1, por_estado: { listo: 1 }, saltados: { no_preorder: 1 } });
+		expect(r.no_preorder).toEqual(["TVT003: salida 2026-10-30, ya pasada"]);
 		expect(await rel("TVT002")).toMatchObject({ distribuidor: "TV", release: "", dealerPrice: 9.5 });
 		expect(await rel("TVT003")).toBeNull();
+	});
+
+	it("historial de descartes 7 dias: sobrevive a la pasada siguiente, reintentar reabre el correo, entrar lo quita", async () => {
+		redes(zipDe({ "a.mp3": 10 }));
+		await E.SYNC_STATE.put("preorder:rejected:REJ002", JSON.stringify({ catno: "REJ002", tipo: "temporal", fecha: "2026-10-30T09:00:00Z" }));
+		const tv = "TV__TVT004---Test-EP---Test-Artist-30-10-2026__2026-11-01.html";
+		await archiva(tv, tvEmail("TVT004", "30-10-2026"), "2026-11-01", "TV");
+		await archiva("RD__X---Y-REJ002__2026-11-01.html", rdEmail("REJ002"));
+		await runListenIngest(E, { now: NOW });
+		// La pasada siguiente no ve nada (correos cerrados) y pisa el resumen; el historial sigue.
+		const r2 = await runListenIngest(E, { now: new Date(NOW.getTime() + 3600e3) });
+		expect(r2.no_preorder).toBeUndefined();
+		expect(await listDescartes(E)).toEqual([
+			{ clave: "REJ002", catno: "REJ002", tipo: "rechazado", motivo: "temporal, rechazado el 2026-10-30", correo: "RD__X---Y-REJ002__2026-11-01.html", pasada: NOW.toISOString() },
+			{ clave: "TVT004", catno: "TVT004", tipo: "no_preorder", motivo: "salida 2026-10-30, ya pasada", correo: tv, pasada: NOW.toISOString() },
+		]);
+		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&vista=por_decidir"), E, true)).json();
+		expect(body.descartes.map((d: any) => d.clave)).toEqual(["REJ002", "TVT004"]);
+
+		const pide = (clave: string, ok = true) => handleListenReintentar(new Request("https://w/?action=listen-reintentar", { method: "POST", body: JSON.stringify({ clave }) }), E, ok, NOW);
+		expect((await pide("TVT004", false)).status).toBe(401);
+		expect((await pide("NADA01")).status).toBe(404);
+		expect((await pide("REJ002")).status).toBe(409);
+		expect(await (await pide("TVT004")).json()).toEqual({ ok: true, clave: "TVT004", correo: tv, fuera_de_ventana: false });
+		expect(await E.SYNC_STATE.get(`listen:mail:${tv}`)).toBeNull();
+
+		// Con la regla "arreglada" (aqui: el correo ahora trae TBA) la pasada siguiente lo mete y sale del historial.
+		await E.EMAILS.put(`msg:${tv}`, tvEmail("TVT004", "TBA"));
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 1 });
+		expect((await listDescartes(E)).map(d => d.clave)).toEqual(["REJ002"]);
+	});
+
+	it("reintentar avisa si el correo ya queda fuera de la ventana del cron", async () => {
+		await E.SYNC_STATE.put("listen:desc:OLD002", "", { metadata: { c: "OLD002", t: "no_preorder", m: "x", e: "TV__OLD002---X__2026-10-20.html", f: NOW.toISOString() } });
+		const r = await handleListenReintentar(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "OLD002" }) }), E, true, NOW);
+		expect(await r.json()).toMatchObject({ ok: true, fuera_de_ventana: true });
 	});
 
 	it("lo que ya esta en la tienda no entra (handle o SKU, misma edicion); archivado si", async () => {
@@ -342,6 +382,26 @@ describe("listen: ingesta", () => {
 		// 3: las 6 que quedan, y la lista se cierra.
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: false, emails_cerrados: 1 });
 		expect(await deLista()).toHaveLength(25);
+	});
+
+	it("listen-run &tope=N: como mucho N discos entre las dos fases, para responder antes del corte de 60 s", async () => {
+		redes(zipDe({ "A1.mp3": 10 }));
+		const lista = `<html><body><p>New Releases Shipping This Week</p>${["TOP101", "TOP102", "TOP103"].map(c => `
+<p>Artist: Test Artist<br>Title: Test ${c}<br>Label: Test Rec<br>Cat: ${c}<br>Format: 12"<br>Price: £8.99</p>
+<p>A1. Uno <a href="${TRACKER}">Download Zip</a></p>`).join("")}</body></html>`;
+		// listen-run usa el reloj real: correos de hoy y ayer.
+		const dia = (n: number) => new Date(Date.now() - n * 86400e3).toISOString().slice(0, 10);
+		await archiva(`RD__Rubadub-New-Releases-Shipping-This-Week__${dia(1)}.html`, lista, dia(1));
+		for (let i = 1; i <= 4; i++) await archiva(`RD__X---Y-TOP00${i}__${dia(0)}.html`, rdEmail(`TOP00${i}`), dia(0));
+		const corre = async (tope: string) => (await (await handleListenRun(E, true, new Request(`https://w/?action=listen-run&tope=${tope}`, { method: "POST" }))).json()) as any;
+		expect(await corre("3")).toMatchObject({ nuevos: 3, quedan: true });
+		expect(await rel("TOP101")).toBeNull();
+		// Queda 1 anuncio; con tope 2, el hueco que sobra es para la lista.
+		expect(await corre("2")).toMatchObject({ nuevos: 2, quedan: true });
+		expect(await rel("TOP004")).not.toBeNull();
+		expect(await rel("TOP101")).not.toBeNull();
+		// Sin tope, lo que queda de la lista y se cierra.
+		expect(await runListenIngest(E, { force: true })).toMatchObject({ nuevos: 2, quedan: false });
 	});
 
 	it("RD: los represses (asunto de digest) se abren; fuera solo las listas masivas, y el resumen las nombra", async () => {
