@@ -107,12 +107,13 @@ const MAX_EMAIL_AGE_DAYS = 7;
 // Discos intentados por pasada. A ~10 MB por promopack y una pasada por hora,
 // sobra para los ~6 anuncios diarios de octubre.
 const PER_RUN = 6;
-// Las fichas de las listas de RD (New Releases Shipping, ~150-200 por correo)
-// van despues, con su propio tope, y solo si los correos de un disco ya estan
-// al dia: nunca les quitan sitio (Eduardo, 2026-11-10).
+// Las fichas de las listas (RD New Releases Shipping, ~150-200 por correo; las
+// newsletters semanales de DBH, ~25-90) van despues, con su propio tope, y solo
+// si los correos de un disco ya estan al dia: nunca les quitan sitio
+// (Eduardo, 2026-11-10).
 export const PER_RUN_LISTAS = 20;
-const RD_LISTAS = /New-Releases-Shipping/i;
-const esLista = (e: IdxEntry) => e.prefix === 'RD' && RD_LISTAS.test(e.subject);
+const LISTAS: Record<string, RegExp> = { RD: /New-Releases-Shipping/i, DBH: /Newsletter/i };
+const esLista = (e: IdxEntry) => !!LISTAS[e.prefix]?.test(e.subject);
 // Tope del ZIP. Se lee en memoria (128 MB por isolate) y se descomprime fichero
 // a fichero, asi que el pico es el ZIP mas un MP3. Por encima: descarga manual.
 export const ZIP_MAX_BYTES = 50 * 1024 * 1024;
@@ -740,9 +741,9 @@ export async function runListenIngest(env: ListenEnv, opts: { force?: boolean; n
   const { candidatos, descartados } = triaEmails(idx, now, opts.dias, opts.fuente);
   // A la vista en el resumen: si algo se queda fuera por el asunto, se ve.
   if (descartados.length) out.descartados_asunto = descartados.map(d => `${d.email.name} (${d.motivo})`);
-  // Primero los correos de un disco (anuncios, newsletters de DBH...), luego
-  // las listas de RD con lo que sobre: si quedan correos de la primera fase,
-  // las listas esperan a la pasada siguiente.
+  // Primero los correos de un disco (anuncios, OUT SOON...), luego las listas
+  // (RD y newsletters de DBH) con lo que sobre: si quedan correos de la primera
+  // fase, las listas esperan a la pasada siguiente.
   const fases = [
     { emails: candidatos.filter(e => !esLista(e)), tope: PER_RUN },
     { emails: candidatos.filter(esLista), tope: PER_RUN_LISTAS },
