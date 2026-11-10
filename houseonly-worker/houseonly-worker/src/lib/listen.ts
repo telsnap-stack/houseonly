@@ -194,6 +194,7 @@ export interface ListenRelease {
   subido_a_mano_at?: string;     // listen-upload: audio conseguido por otra via
   reparado_at?: string;          // listen-repair ya lo reintento (sin_zip)
   reparado_v?: number;           // con que version de listen-repair (REPARA_VERSION)
+  grande_reintentado_at?: string; // reintentaGrandes ya lo probo (una vez, salga como salga)
   // false = ya se envia (DBH New this week / New last week / Back in Stock):
   // no es un pre-order. Sin el campo (registros anteriores al 10-11), pre-order.
   preorder?: boolean;
@@ -231,6 +232,7 @@ function metaDe(r: ListenRelease) {
     x: r.decision, dt: r.decided_at, al: r.audio_limpiado_at,
     pc: r.portada_comprobada ? 1 : undefined,
     rz: r.reparado_v || (r.reparado_at ? 1 : undefined),
+    rg: r.grande_reintentado_at ? 1 : undefined,
   };
 }
 
@@ -1474,6 +1476,78 @@ export async function reparaSinZip(env: ListenEnv, now = new Date(), despues = '
     cursor = l.list_complete ? undefined : l.cursor;
   } while (cursor);
   return out;
+}
+
+// ── reintento de los ZIP grandes ───────────────────────────────
+
+// Hasta el 10-11 un promopack de mas de 50 MB quedaba en descarga_manual con
+// "ZIP demasiado grande" (HG001, GP01...). Desde #226 la ingesta los baja por R2;
+// los de antes los reintenta el cron (sin el corte de 60 s de una llamada a
+// mano), pocos por pasada porque cada uno baja hasta 400 MB.
+const GRANDES_POR_PASADA = 2;
+const ERA_GRANDE = /^ZIP demasiado grande/;
+
+export interface ListenGrandesResult {
+  intentados: number;
+  listos: string[];      // catno
+  fallidos: string[];    // "<catno>: <motivo>"
+  quedan: boolean;
+  finished_at: string;
+}
+
+/**
+ * Una tanda (cron :41, tras la ingesta): los descarga_manual por "ZIP demasiado
+ * grande" sin rechazar se reintentan una vez. Si entra, el disco pasa a listo
+ * con su audio y conserva su decision. Si falla (R2, Dropbox caido o caducado),
+ * se queda como estaba, marcado, con el motivo en el detalle: no se repite.
+ */
+export async function reintentaGrandes(env: ListenEnv, now = new Date(), porPasada = GRANDES_POR_PASADA): Promise<ListenGrandesResult> {
+  const out: ListenGrandesResult = { intentados: 0, listos: [], fallidos: [], quedan: false, finished_at: '' };
+  const dia = now.toISOString().slice(0, 10);
+  let cursor: string | undefined;
+  todo: do {
+    const l: any = await env.SYNC_STATE.list({ prefix: REL_PREFIX, limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.metadata || {};
+      if (m.e !== 'descarga_manual' || m.rg || m.x === 'rechazado') continue;
+      const prev = await env.SYNC_STATE.get<ListenRelease>(k.name, 'json');
+      if (!prev || prev.estado !== 'descarga_manual' || prev.grande_reintentado_at || prev.decision === 'rechazado' || !ERA_GRANDE.test(prev.detalle || '')) continue;
+      if (out.intentados >= porPasada) { out.quedan = true; break todo; }
+      out.intentados++;
+      const marca = { ...prev, grande_reintentado_at: now.toISOString() };
+      const falla = async (motivo: string) => {
+        out.fallidos.push(`${prev.catno}: ${motivo}`);
+        await guardaRelease(env, { ...marca, detalle: `reintento del ${dia} sin éxito: ${motivo} (antes: ${prev.detalle})`.slice(0, 500) });
+      };
+      try {
+        const html = await env.EMAILS.get(`msg:${prev.email}`);
+        const rows: any[] = html ? filasDelEmail(prev.distribuidor, html, prev.email_date) : [];
+        const row = rows.find(r => claveCatno(r.catno) === prev.clave);
+        if (!row) { await falla(html ? 'el disco ya no está en su correo' : 'su correo ya no está archivado'); continue; }
+        const unDisco = !POR_FICHAS.has(prev.distribuidor) && new Set(rows.map(r => claveCatno(r.catno)).filter(Boolean)).size === 1;
+        const email: IdxEntry = { name: prev.email, prefix: prev.distribuidor, subject: '', date: prev.email_date };
+        const n = await ingiereDisco(env, row, email, prev.ingested_at, unDisco ? html! : undefined);
+        if (n.estado !== 'listo' || !n.tracks.length) { await falla(`${n.estado}: ${n.detalle || 'sin audio'}`); continue; }
+        await guardaRelease(env, { ...marca, estado: 'listo', detalle: n.detalle, zip_link: n.zip_link, tracks: n.tracks, bytes: n.bytes,
+          cover: n.cover || prev.cover, textos: n.textos || prev.textos });
+        out.listos.push(prev.catno);
+      } catch (e: any) {
+        await falla(String(e?.message || e).slice(0, 200));
+      }
+    }
+    cursor = l.list_complete ? undefined : l.cursor;
+  } while (cursor);
+  out.finished_at = new Date().toISOString();
+  return out;
+}
+
+/** El cron: con la bandeja en live, una tanda; el resumen en meta:listen_grandes_last. */
+export async function cronGrandes(env: ListenEnv, now = new Date()): Promise<void> {
+  if ((await env.SYNC_STATE.get(MODE_KEY)) !== 'live') return;
+  let r: any;
+  try { r = await reintentaGrandes(env, now); }
+  catch (e: any) { r = { ok: false, error: String(e?.message || e).slice(0, 300), finished_at: new Date().toISOString() }; }
+  if (r.intentados !== 0 || r.error) await env.SYNC_STATE.put('meta:listen_grandes_last', JSON.stringify(r));
 }
 
 /** POST ?action=listen-repair[&despues=<clave>] (Bearer) — una tanda de reparacion de sin_zip. */

@@ -921,7 +921,7 @@ import { handleStockAdd, handleStockCsv } from './lib/stock-add';
 import { handleProductMedia } from './lib/product-media';
 import { mtEnrich, MT_MAX_CATNOS } from './lib/mt-enrich';
 import { handleSubwaxStock, handleSubwaxRefresh, handleSubwaxOrder, refreshSubwax } from './lib/subwax';
-import { LISTEN_CRON, runListenIngest, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, SALTOS_TRACKER } from './lib/listen';
+import { LISTEN_CRON, runListenIngest, cronGrandes, handleListenFile, handleListenList, handleListenRun, handleListenDecide, handleListenPromote, handleListenUpload, handleListenRepair, SALTOS_TRACKER } from './lib/listen';
 
 // Fase 5a (docs/entities.md): seguir artistas y sellos, y el feed de lo suyo.
 import {
@@ -3381,8 +3381,10 @@ export default {
     // Ingesta de audio de los anuncios de RD/TV. Solo hace algo con
     // meta:listen_mode = live; el resultado queda en meta:listen_last_run.
     if (event.cron === LISTEN_CRON) {
+      // Tras la ingesta, una tanda de reintento de los ZIP grandes de antes del 10-11.
       ctx.waitUntil(runListenIngest(env).catch((err) => env.SYNC_STATE.put('meta:listen_last_run',
-        JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) }))));
+        JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })))
+        .then(() => cronGrandes(env)));
       return;
     }
 
