@@ -291,7 +291,7 @@ describe("listen: ingesta", () => {
 		expect(body.items[0].tracks.map((t: any) => t.name)).toEqual(["Uno", "Dos"]);
 	});
 
-	it("RD: las fichas de las listas van despues de los correos de un disco, con tope propio de 20", async () => {
+	it("las listas (RD New Releases Shipping, newsletters de DBH) van despues de los correos de un disco, con tope propio de 20", async () => {
 		redes(zipDe({ "A1.mp3": 10, "cover.jpg": 20 }));
 		const lista = (cats: string[]) => `<html><body><p>New Releases Shipping This Week</p>${cats.map(c => `
 <img src="https://mcusercontent.com/x/images/${c}.jpg">
@@ -300,20 +300,25 @@ describe("listen: ingesta", () => {
 		const enLista = Array.from({ length: 25 }, (_, i) => `LST${String(i + 1).padStart(3, "0")}`);
 		// La lista es el correo mas antiguo: aun asi va despues.
 		await archiva("RD__Rubadub-New-Releases-Shipping-This-Week__2026-11-01.html", lista(enLista), "2026-11-01");
+		// La newsletter de DBH tambien es una lista: segunda fase, con la de RD.
+		await archiva("DBH__DBH-Music---Newsletter-KW45-2026__2026-11-01.html", dbhEmail("here's our newest Newsletter", dbhFicha(901, "NWS901", "New&nbsp;this&nbsp;week")), "2026-11-01", "DBH");
 		for (let i = 1; i <= 7; i++) await archiva(`RD__X---Y-UNO00${i}__2026-11-02.html`, rdEmail(`UNO00${i}`), "2026-11-02");
 		const deLista = async () => (await Promise.all(enLista.map(c => rel(c)))).filter(Boolean);
 
 		// 1: seis anuncios (tope 6) y quedan; la lista espera entera.
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: true });
 		expect(await deLista()).toHaveLength(0);
-		// 2: el anuncio que faltaba y, con lo que sobra, 20 fichas de la lista.
+		expect(await rel("NWS901")).toBeNull();
+		// 2: el anuncio que faltaba y, con lo que sobra, 20 fichas de listas: la
+		// newsletter (mismo dia, va antes por nombre) y 19 de la lista de RD.
 		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 21, quedan: true });
 		expect(await rel("UNO007")).toMatchObject({ preorder: true });
-		const veinte = await deLista();
-		expect(veinte).toHaveLength(20);
-		expect(veinte.every((r: any) => r.preorder === false)).toBe(true);   // ya se envian: para pedir
-		// 3: las 5 que quedan, y la lista se cierra.
-		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 5, quedan: false, emails_cerrados: 1 });
+		expect(await rel("NWS901")).toMatchObject({ preorder: false, distribuidor: "DBH" });
+		const diecinueve = await deLista();
+		expect(diecinueve).toHaveLength(19);
+		expect(diecinueve.every((r: any) => r.preorder === false)).toBe(true);   // ya se envian: para pedir
+		// 3: las 6 que quedan, y la lista se cierra.
+		expect(await runListenIngest(E, { now: NOW })).toMatchObject({ nuevos: 6, quedan: false, emails_cerrados: 1 });
 		expect(await deLista()).toHaveLength(25);
 	});
 
