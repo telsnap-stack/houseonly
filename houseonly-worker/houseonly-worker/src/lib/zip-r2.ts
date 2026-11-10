@@ -8,7 +8,8 @@
 
 import { inflateSync } from 'fflate';
 
-// R2 pide partes de al menos 5 MiB (menos la ultima).
+// R2 pide partes de al menos 5 MiB y, menos la ultima, todas exactamente del
+// mismo tamaño (si no, completeMultipartUpload falla con 10048).
 export const PARTE_R2_BYTES = 8 * 1024 * 1024;
 
 export class ZipDemasiado extends Error {}
@@ -28,18 +29,19 @@ export async function bajaZipAR2(reader: ReadableStreamDefaultReader<Uint8Array>
   const subida = await bucket.createMultipartUpload(key, { httpMetadata: { contentType: 'application/zip' } });
   const partes: R2UploadedPart[] = [];
   let pendiente: Uint8Array[] = [], enPendiente = 0, total = 0;
-  const vuelca = async () => {
-    const parte = new Uint8Array(enPendiente);
+  // Sube los primeros `n` bytes de lo pendiente como una parte; el resto se queda.
+  const vuelca = async (n: number) => {
+    const junto = new Uint8Array(enPendiente);
     let o = 0;
-    for (const t of pendiente) { parte.set(t, o); o += t.byteLength; }
-    partes.push(await subida.uploadPart(partes.length + 1, parte));
-    pendiente = []; enPendiente = 0;
+    for (const t of pendiente) { junto.set(t, o); o += t.byteLength; }
+    partes.push(await subida.uploadPart(partes.length + 1, junto.subarray(0, n)));
+    pendiente = n < enPendiente ? [junto.slice(n)] : []; enPendiente -= n;
   };
   const anade = async (t: Uint8Array) => {
     total += t.byteLength;
     if (total > tope) throw new ZipDemasiado(`más de ${Math.round(tope / 1048576)} MB`);
     pendiente.push(t); enPendiente += t.byteLength;
-    if (enPendiente >= PARTE_R2_BYTES) await vuelca();
+    while (enPendiente >= PARTE_R2_BYTES) await vuelca(PARTE_R2_BYTES);
   };
   try {
     for (const t of inicio) await anade(t);
@@ -50,7 +52,7 @@ export async function bajaZipAR2(reader: ReadableStreamDefaultReader<Uint8Array>
         await anade(value);
       }
     } catch (e) { await reader.cancel().catch(() => {}); throw e; }
-    if (enPendiente || !partes.length) await vuelca();
+    if (enPendiente || !partes.length) await vuelca(enPendiente);
     await subida.complete(partes);
     return total;
   } catch (e) {
