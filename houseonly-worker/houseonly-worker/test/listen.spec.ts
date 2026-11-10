@@ -142,6 +142,10 @@ describe("listen: qué emails y qué ficheros", () => {
 			e("RD", "Older-CAT005", "2026-10-25"),
 			e("RD", "New-Theo-Parrish-Sound-Signature-Represses", "2026-10-30"), e("RD", "Imports-Shipping-Today-X", "2026-10-30"),
 		];
+		// RD por etapas (10-11): "New Releases Shipping This/Next Week" se abre; "Imports Shipping Today", no.
+		const rdListas = [e("RD", "Rubadub-New-Releases-Shipping-This-Week", "2026-11-02"), e("RD", "Rubadub-New-Releases-Shipping-Next-Week", "2026-11-02")];
+		expect(emailsCandidatos([...rdListas, e("RD", "Imports-Shipping-Today-Y", "2026-11-02")], NOW).map(x => x.subject))
+			.toEqual(["Rubadub-New-Releases-Shipping-Next-Week", "Rubadub-New-Releases-Shipping-This-Week"]);
 		// listen-run a mano: ventana mas larga y una sola fuente.
 		expect(emailsCandidatos(idx, NOW, 10, "RD").map(x => x.subject)).toEqual(["Older-CAT005", "Old-CAT004", "New-Theo-Parrish-Sound-Signature-Represses", "Artist---Title-CAT001"]);
 		// Las newsletters de DBH entran (traen fichas "Coming soon"); las demas no.
@@ -210,16 +214,19 @@ describe("listen: ingesta", () => {
 		expect(body.items[0].textos.promotext).toMatch(/k=listen%2FTXT001%2Fpromotext\.txt&exp=\d+&sig=/);
 	});
 
-	it("sin JPG en el ZIP, la portada del email; rechazados y no pre-order no se bajan", async () => {
+	it("sin JPG en el ZIP, la portada del email; rechazados no se bajan; RD que ya se envia entra como disponible", async () => {
 		const f = redes(zipDe({ "a.mp3": 10, "Side A.png": 10 }));
 		await E.SYNC_STATE.put("preorder:rejected:REJ001", JSON.stringify({ catno: "REJ001", tipo: "definitivo" }));
 		await archiva("RD__X---Y-NOC001__2026-11-01.html", rdEmail("NOC001"));
 		await archiva("RD__X---Y-REJ001__2026-11-01.html", rdEmail("REJ001"));
 		await archiva("RD__X---Y-SHP001__2026-11-01.html", rdEmail("SHP001").replace("Please Pre-Order", "Shipping to you today"));
 		const r = await runListenIngest(E, { now: NOW });
-		expect(r).toMatchObject({ nuevos: 1, saltados: { rechazado: 1, no_preorder: 1 } });
+		expect(r).toMatchObject({ nuevos: 2, saltados: { rechazado: 1, no_preorder: 0 } });
 		expect((await rel("NOC001")).cover).toEqual({ key: "listen/NOC001/cover.jpg", from: "email" });
-		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(1);
+		expect(await rel("NOC001")).toMatchObject({ preorder: true });
+		// Sin "Please Pre-Order": ya se envia, entra para pedir, no como pre-order.
+		expect(await rel("SHP001")).toMatchObject({ preorder: false, estado: "listo" });
+		expect(f.mock.calls.filter(c => String(c[0]).includes("dropbox")).length).toBe(2);
 	});
 
 	it("TV con Release date TBA entra en la bandeja sin fecha; el que ya salio sigue fuera", async () => {
@@ -276,7 +283,8 @@ describe("listen: ingesta", () => {
 			cover: { key: "listen/DBH777/cover.jpg", from: "zip" }, textos: { promotext: "listen/DBH777/promotext.txt" } });
 		expect(d.gbp).toBeUndefined();
 		// Back in Stock: ya se envia, entra marcado como no pre-order.
-		expect(await rel("OLD555")).toMatchObject({ catno: "OLD555", distribuidor: "DBH", preorder: false, estado: "listo" });
+		expect(await rel("OLD555")).toMatchObject({ catno: "OLD555", distribuidor: "DBH", preorder: false, estado: "listo",
+			ficha_url: "https://dbh-music.com/shop/release_view/555" });
 		expect((await E.LISTEN_R2.head("listen/DBH777/cover.jpg")).size).toBe(100);
 		expect(f.mock.calls.filter(c => String(c[0]).includes("release_zip")).length).toBe(2);
 		const body: any = await (await handleListenList(new Request("https://w/?action=listen-list&claves=DBH777"), E, true)).json();
@@ -691,7 +699,7 @@ describe("listen: decisiones y limpieza", () => {
 		const pide = async (qs: string) => (await handleListenList(new Request(`https://w/?action=listen-list&${qs}`), E, true)).json() as any;
 
 		const p1 = await pide("vista=por_decidir&limit=2");
-		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0 });
+		expect(p1.counts).toEqual({ por_decidir: 5, pendientes: 1, elegidos: 1, rechazados: 0, cargados: 0, para_pedir: 0 });
 		expect(p1.items.map((x: any) => x.clave)).toEqual(["PAG001", "PAG002"]);
 		expect(p1).toMatchObject({ count: 5, cursor: "2" });
 		expect(p1.promote).toEqual({ activo: false, audio: "audio/", covers: "covers/", pruebas: false });
@@ -709,6 +717,61 @@ describe("listen: decisiones y limpieza", () => {
 		const sueltas = await pide("claves=PAG003,ele-001,NOPE99");
 		expect(sueltas.items.map((x: any) => x.clave).sort()).toEqual(["ELE001", "PAG003"]);
 		expect(sueltas.items[0].tracks[0].url).toMatch(/sig=[0-9a-f]{64}$/);
+	});
+
+	it("pedir / pedido: solo los disponibles, cantidad 2 por defecto y editable, vista Para pedir", async () => {
+		await pon(base("DIS001", { distribuidor: "DBH", preorder: false }));
+		await pon(base("PRE001", { preorder: true }));
+		await pon(base("VIE001"));                                           // registro anterior: pre-order
+		// Un disponible no es un pre-order, y un pre-order no se pide.
+		expect((await decide({ clave: "DIS001", decision: "preorder" })).status).toBe(409);
+		expect((await decide({ clave: "PRE001", decision: "pedir" })).status).toBe(409);
+		expect((await decide({ clave: "VIE001", decision: "pedido" })).status).toBe(409);
+		expect((await decide({ clave: "DIS001", decision: "pedir", cantidad: 0 })).status).toBe(400);
+
+		const d1: any = await (await decide({ clave: "DIS001", decision: "pedir" })).json();
+		expect(d1.item).toMatchObject({ decision: "pedir", cantidad: 2, pedido_at: null, decided_at: NOW.toISOString() });
+		// Cambiar la cantidad no mueve la fecha.
+		const despues = NOW.getTime() + 3600_000;
+		const cambia = (body: any) => handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify(body) }), E, true, despues);
+		expect(((await (await cambia({ clave: "DIS001", decision: "pedir", cantidad: 3 })).json()) as any).item)
+			.toMatchObject({ cantidad: 3, decided_at: NOW.toISOString() });
+		const d2: any = await (await cambia({ clave: "DIS001", decision: "pedido" })).json();
+		expect(d2.item).toMatchObject({ decision: "pedido", cantidad: 3, pedido_at: new Date(despues).toISOString() });
+
+		const vista: any = await (await handleListenList(new Request("https://w/?action=listen-list&vista=para_pedir"), E, true)).json();
+		expect(vista.items.map((x: any) => [x.clave, x.decision, x.cantidad])).toEqual([["DIS001", "pedido", 3]]);
+		expect(vista.counts).toMatchObject({ para_pedir: 1, elegidos: 0 });
+		// Fuera de la lista se olvida la cantidad.
+		expect(((await (await decide({ clave: "DIS001", decision: "pendiente" })).json()) as any).item).toMatchObject({ cantidad: null, pedido_at: null });
+	});
+
+	it("listen-promote desde un pedido: marca cargado, recuerda de donde viene y deshacer vuelve a pedido", async () => {
+		await pon(base("PED001", { distribuidor: "DBH", preorder: false, decision: "pedido", decided_at: NOW.toISOString(), cantidad: 2, pedido_at: NOW.toISOString() }));
+		await E.SYNC_STATE.put("meta:listen_promote", "on");
+		const promo = handleListenPromote(new Request("https://w/?action=listen-promote", { method: "POST", body: JSON.stringify({ clave: "PED001", safeKey: "PED001", handle: "ped001" }) }), E, true, "https://pub.example", NOW.getTime());
+		const r: any = await (await promo).json();
+		expect(r).toMatchObject({ ok: true, coverUrl: "https://pub.example/covers/PED001.jpg" });
+		expect(await rel("PED001")).toMatchObject({ decision: "cargado", cargado_desde: "pedido", handle: "ped001" });
+		const d: any = await (await handleListenDecide(new Request("https://w/", { method: "POST", body: JSON.stringify({ clave: "PED001", decision: "pedido" }) }),
+			E, true, NOW.getTime(), async () => true)).json();
+		expect(d.item).toMatchObject({ decision: "pedido", cantidad: 2 });
+		expect((await rel("PED001")).cargado_desde).toBeUndefined();
+		// Llega en la factura pero ya estaba en la tienda: cargado sin copiar, y deshacer vuelve a pedido.
+		const enTienda: any = await (await decide({ clave: "PED001", decision: "cargado", en_tienda: "ped001" })).json();
+		expect(enTienda.item).toMatchObject({ decision: "cargado", en_tienda_como: "ped001" });
+		expect((await rel("PED001")).cargado_desde).toBe("pedido");
+	});
+
+	it("limpieza de pedir / pedido a 60 dias, no a 30", async () => {
+		const hace = (d: number) => new Date(NOW.getTime() - d * 86400000).toISOString();
+		await pon(base("PIR040", { preorder: false, decision: "pedir", decided_at: hace(40), ingested_at: hace(40) }));
+		await pon(base("PDO061", { preorder: false, decision: "pedido", decided_at: hace(61), ingested_at: hace(61) }));
+		expect(await limpiaBandeja(E, NOW)).toEqual({ rechazados: 0, sin_audio: 1, fuera: 0, cargados: 0 });
+		expect((await rel("PIR040")).tracks).toHaveLength(1);
+		expect(await rel("PDO061")).toMatchObject({ decision: "pedido", tracks: [] });
+		// 60 dias mas sin audio: fuera.
+		expect((await limpiaBandeja(E, new Date(NOW.getTime() + 61 * 86400000))).fuera).toBe(1);
 	});
 
 	it("listen-promote: apagado no hace nada; encendido COPIA a los prefijos del entorno, marca cargado y no repite", async () => {
