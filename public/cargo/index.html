@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Cargo Player — House Only</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Cargo Player, servido por Pages en /cargo/. Datos y audio del worker
+   (?action=cargo-*), con el mismo secreto de admin que /admin. */
+:root{
+  --bg:#0b0b0a; --panel:#141413; --panel2:#1b1b19; --line:#2a2a27;
+  --fg:#f1f0ea; --muted:#9a9990; --acc:#d4ff00; --accfg:#0b0b0a;
+  --ok:#5fd38d; --warn:#ffb454; --bad:#ff6b5e; --info:#7fb8ff;
+  --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.wrap{max-width:1280px;margin:0 auto;padding:0 16px 80px;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start}
+header.top{grid-column:1/-1;display:flex;align-items:baseline;gap:14px;padding:18px 0 4px;flex-wrap:wrap}
+header.top h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.01em}
+header.top h1 span{color:var(--acc)}
+header.top p{margin:0;color:var(--muted);font-size:12.5px;flex:1;min-width:200px}
+header.top .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.status{color:var(--muted);font-size:12.5px}
+.status b{color:var(--fg)}
+a{color:var(--acc)}
+.btn.sm{padding:5px 8px;font-size:12px}
+.drop{border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--muted);margin:12px 0}
+.drop.on{border-color:var(--acc);color:var(--fg)}
+.row .l2 .lb{color:var(--fg)}
+.row .l2 .au{font-family:var(--mono);font-size:11px;color:var(--ok)}
+.row .l2 .au.y{color:var(--info)}
+.row .l2 .au.n{color:var(--muted)}
+.login{min-height:100vh;display:grid;place-items:center;padding:16px}
+.login form{width:320px;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px}
+.login h1{font-size:16px;margin:0 0 6px}
+.login p{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+.login label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:8px 0 4px}
+.login input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.login .btn{width:100%;margin-top:14px;padding:10px}
+.login .err{color:var(--bad);font-size:12.5px;margin-top:8px;min-height:1.2em}
+.main{min-width:0}
+.player{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0 12px;border-bottom:1px solid var(--line)}
+.now{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px;align-items:center}
+.art{width:64px;height:64px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);object-fit:cover;display:block}
+.now .meta{min-width:0}
+.now .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.now .s{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.now .trk{color:var(--acc);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.4em}
+.ctrls{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 11px;line-height:1}
+.btn:hover{border-color:var(--muted)}
+a.btn{color:inherit;text-decoration:none;display:inline-block}
+.btn.acc{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600}
+.btn.acc:hover{filter:brightness(.92)}
+.btn[disabled]{opacity:.4;cursor:not-allowed}
+.btn.play{width:44px;height:36px;padding:0;font-size:15px}
+.seek{flex:1 1 200px;display:flex;align-items:center;gap:8px;min-width:0}
+.seek input[type=range]{flex:1;min-width:0;accent-color:var(--acc)}
+.seek time{font-family:var(--mono);font-size:11.5px;color:var(--muted);min-width:34px}
+.tracks{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.tr{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12px;max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr:hover{border-color:var(--muted)}
+.tr.on{border-color:var(--acc);color:var(--acc)}
+#ytbox{display:none;margin-top:10px;max-width:340px;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden}#ytbox.on{display:block}#ytbox iframe{width:100%;height:100%;border:0}
+.lblp{color:var(--muted);font-size:12px}
+.pstat{font-size:12.5px;color:var(--muted);margin-top:8px;min-height:1.3em}
+.pstat a{color:var(--fg)}
+.keys{color:var(--muted);font-size:12px;margin-top:6px}
+kbd{font-family:var(--mono);font-size:11px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.tools{display:flex;gap:8px;flex-wrap:wrap;padding:14px 0 10px;align-items:center}
+.tabs{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:3px}
+.tab{background:none;border:0;border-radius:6px;padding:6px 11px;color:var(--muted)}
+.tab[aria-pressed=true]{background:var(--panel2);color:var(--fg)}
+.tab small{font-family:var(--mono);color:var(--muted);margin-left:4px}
+input[type=search],select,input[type=text]{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+input[type=search]{flex:1 1 200px}
+select{max-width:170px}
+.chk{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.count{color:var(--muted);font-size:12.5px;padding:2px 0 8px}
+.list{border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:9px 8px;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+.row:hover{background:var(--panel)}
+.row.sel{background:var(--panel2);border-left-color:var(--acc)}
+.row .l1{display:flex;gap:8px;align-items:baseline;min-width:0}
+.row .cat{font-family:var(--mono);font-size:12px;color:var(--acc);flex:none}
+.row .name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .name em{font-style:normal;font-weight:400;color:var(--muted)}
+.row .l2{color:var(--muted);font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.row .l2 .new{color:var(--ok)}
+.row .l2 .old{color:var(--warn)}
+.row .ctl{grid-row:1/3;grid-column:2;display:flex;align-items:center;gap:8px}
+.price{font-family:var(--mono);font-size:12.5px;min-width:56px;text-align:right}
+.price.np{color:var(--muted)}
+.step{display:flex;align-items:center;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.step button{background:none;border:0;width:30px;height:30px;font-size:16px}
+.step button:hover{background:var(--panel2)}
+.step output{min-width:26px;text-align:center;font-family:var(--mono)}
+.step.has{border-color:var(--acc)}
+.step.has output{color:var(--acc);font-weight:600}
+.step.over{border-color:var(--bad)}
+.step.over output{color:var(--bad)}
+.more{display:block;margin:16px auto;padding:10px 18px}
+.cart{position:sticky;top:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;max-height:calc(100vh - 24px);overflow:auto}
+.cart h2{margin:0 0 10px;font-size:15px}
+.field{display:grid;gap:3px;margin-bottom:8px}
+.field label{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.field input{width:100%}
+.lines{margin:10px 0 0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.lines li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);align-items:center;font-size:12.5px}
+.lines .q{font-family:var(--mono);color:var(--acc)}
+.lines .n{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lines .n span{color:var(--muted)}
+.lines .rm{background:none;border:0;color:var(--muted);padding:2px 6px}
+.lines .rm:hover{color:var(--bad)}
+.total{display:flex;justify-content:space-between;font-weight:600;padding:10px 0 2px}
+.total span:last-child{font-family:var(--mono)}
+.sub{font-size:12px;color:var(--muted);margin-bottom:4px}
+.actions{display:grid;gap:8px;margin-top:10px}
+.actions .btn{padding:10px 12px;text-align:center}
+.msg{font-size:12.5px;color:var(--muted);min-height:1.3em;margin-top:6px}
+.cartempty{color:var(--muted);font-size:13px;padding:6px 0}
+.mini{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .cart{position:static;max-height:none}
+  .row{grid-template-columns:minmax(0,1fr)}
+  .row .ctl{grid-row:auto;grid-column:1;justify-content:space-between}
+  .keys{display:none}
+  .now{grid-template-columns:48px minmax(0,1fr)}
+  .art{width:48px;height:48px}
+  .mini{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--acc);color:var(--accfg);padding:10px 16px;justify-content:space-between;align-items:center;font-weight:600;text-decoration:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="login" id="login">
+  <form id="loginForm" method="post" action="#" autocomplete="on">
+    <h1>Cargo <span style="color:var(--acc)">Player</span></h1>
+    <p>Mismo secreto de admin que <code>/admin</code> (<span id="envName"></span>). Queda en memoria hasta recargar; el llavero del navegador puede recordarlo.</p>
+    <label for="lu">Usuario</label>
+    <input id="lu" type="text" name="username" autocomplete="username" value="admin" readonly>
+    <label for="lp">Secreto</label>
+    <input id="lp" type="password" name="password" autocomplete="current-password" placeholder="BOOTSTRAP_AUTH_SECRET">
+    <button class="btn acc" type="submit" id="lb">Entrar</button>
+    <div class="err" id="lerr"></div>
+  </form>
+</div>
+
+<div class="wrap" id="app" hidden>
+  <header class="top">
+    <h1>Cargo <span>Player</span></h1>
+    <p>Stock report de Cargo Distribution (UK) · vinilo · pedido de Telsnap S.L. · precios de dealer en libras (GBP), tal como vienen en la lista</p>
+    <div class="right">
+      <span class="status" id="status">Cargando…</span>
+      <button class="btn sm" id="prep" title="Busca sello, géneros y audio de los discos que faltan (se guarda en R2)">Preparar audio</button>
+      <label class="btn sm" for="file" title="Sube el Excel nuevo de Cargo">Subir stock report</label>
+      <input type="file" id="file" accept=".xlsx" hidden>
+    </div>
+  </header>
+
+  <div class="main">
+    <div class="drop" id="drop" hidden>Arrastra aquí el stock report de Cargo (.xlsx) o usa «Subir stock report».</div>
+    <section class="player" aria-label="Reproductor">
+      <div class="now">
+        <img class="art" id="art" alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+        <div class="meta">
+          <div class="t" id="nowT">Elige un disco para escucharlo</div>
+          <div class="s" id="nowS">Clic en cualquier fila, o usa ↑ ↓ del teclado</div>
+          <div class="trk" id="nowTrk"></div>
+        </div>
+      </div>
+      <div class="ctrls">
+        <button class="btn" id="prevRel" title="Disco anterior (↑)">⏮</button>
+        <button class="btn" id="prevTrk" title="Pista anterior (←)">◀</button>
+        <button class="btn acc play" id="pp" title="Play / pausa (espacio)" disabled>▶</button>
+        <button class="btn" id="nextTrk" title="Pista siguiente (→)">▶</button>
+        <button class="btn" id="nextRel" title="Disco siguiente (↓)">⏭</button>
+        <div class="seek"><time id="cur">0:00</time><input type="range" id="seek" min="0" max="1000" value="0" aria-label="Posición"><time id="dur">0:00</time></div>
+        <label class="chk"><input type="checkbox" id="auto" checked> Pasar al siguiente disco</label>
+      </div>
+      <div class="tracks" id="tracks"></div>
+      <div id="ytbox"><div id="ytp"></div></div>
+      <div class="pstat" id="pstat" role="status"></div>
+      <div class="keys"><kbd>↑</kbd> <kbd>↓</kbd> disco · <kbd>←</kbd> <kbd>→</kbd> pista · <kbd>espacio</kbd> pausa · <kbd>+</kbd> <kbd>−</kbd> copias · <kbd>2</kbd> pone 2 copias</div>
+      <audio id="aud" preload="none"></audio>
+    </section>
+
+    <div class="tools">
+      <div class="tabs" id="tabs"></div>
+      <input type="search" id="q" placeholder="Buscar artista, título, sello, ref. o EAN" aria-label="Buscar">
+      <select id="lbl" aria-label="Sello"><option value="">Todos los sellos</option></select>
+      <select id="yr" aria-label="Año"></select>
+      <select id="sort" aria-label="Orden"><option value="new">Más nuevos primero</option><option value="az">Artista A–Z</option><option value="label">Sello A–Z</option><option value="stock">Más stock primero</option></select>
+      <label class="chk"><input type="checkbox" id="priced"> Solo con precio</label>
+      <label class="chk"><input type="checkbox" id="withAudio"> Solo con audio</label>
+      <label class="chk"><input type="checkbox" id="onlyCart"> Solo mi pedido</label>
+    </div>
+    <div class="count" id="count"></div>
+    <div class="list" id="list"></div>
+    <button class="btn more" id="more" hidden>Mostrar más</button>
+  </div>
+
+  <aside class="cart" id="cart" aria-label="Pedido">
+    <h2>Pedido</h2>
+    <div class="field"><label for="client">Client</label><input type="text" id="client" value="Telsnap S.L."></div>
+    <div class="field"><label for="date">Date</label><input type="text" id="date"></div>
+    <ul class="lines" id="lines"></ul>
+    <div class="total"><span>Total dealer (GBP)</span><span id="total">£0.00</span></div>
+    <div class="sub" id="totalSub"></div>
+    <div class="actions">
+      <button class="btn acc" id="xlsx">Descargar pedido (.xlsx)</button>
+      <button class="btn" id="copy">Copiar lista (para pegar en Excel)</button>
+      <button class="btn" id="clear">Vaciar pedido</button>
+    </div>
+    <div class="msg" id="msg" role="status"></div>
+  </aside>
+</div>
+<a class="mini" id="mini" href="#cart"><span id="miniN">Pedido</span><span id="miniT">£0.00</span></a>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script>
+// ── Entorno ──────────────────────────────────────────────────
+const H = location.hostname;
+const PROD = H === 'houseonly.store' || H === 'www.houseonly.store' || H === 'houseonly.pages.dev';
+const WORKER = new URLSearchParams(location.search).get('worker') || (PROD ? 'https://houseonly-worker.emontagut.workers.dev' : 'https://houseonly-worker-staging.emontagut.workers.dev');
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = n => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const hace = iso => { const m = (Date.now() - Date.parse(iso)) / 60000; if (!(m >= 0)) return ''; if (m < 60) return `${Math.round(m)} min`; if (m < 48 * 60) return `${Math.round(m / 60)} h`; return `${Math.round(m / 1440)} días`; };
+const KEEP = new Set(["DJ","UK","USA","EP","LP","II","III","IV","VI","VII","VIII","IX","XI","XII","NYC","LA","OST","MC","MF","TV","CD","DVD","XL","VA","ID","OK","BBC"]);
+const tc = s => String(s || "").toLowerCase().replace(/[\p{L}\p{N}']+/gu, w => { const u = w.toUpperCase(); return KEEP.has(u) ? u : w.charAt(0).toUpperCase() + w.slice(1); });
+
+let SECRET = '';
+let D = [], IDX = {}, STOCK = null, LAST = null;
+let tab = 0, selId = null, cart = {}, shown = 150, view = [];
+try { const c = JSON.parse(localStorage.getItem("cargo_cart") || "{}"); if (c && typeof c === "object") cart = c; } catch (e) { }
+const saveCart = () => { try { localStorage.setItem("cargo_cart", JSON.stringify(cart)); } catch (e) { } };
+const key = r => r.ean;
+let byKey = new Map();
+const td = new Date(); $("#date").value = String(td.getDate()).padStart(2, "0") + "/" + String(td.getMonth() + 1).padStart(2, "0") + "/" + td.getFullYear();
+const priceTxt = r => r.price > 0 ? fmt(r.price) : "sin precio";
+const dateTxt = d => d ? `${String(d).slice(6, 8)}/${String(d).slice(4, 6)}/${String(d).slice(0, 4)}` : "";
+const say = t => { $("#msg").textContent = t };
+
+// ── API ──────────────────────────────────────────────────────
+async function api(action, opts = {}) {
+  const r = await fetch(`${WORKER}?action=${action}${opts.query || ''}`, {
+    method: opts.method || 'GET',
+    headers: { 'Authorization': `Bearer ${SECRET}`, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  let j = null; try { j = await r.json(); } catch (e) { }
+  if (!r.ok) throw Object.assign(new Error((j && j.error) || `HTTP ${r.status}`), { status: r.status, body: j });
+  return j;
+}
+
+// ── Login (mismo truco que /admin para que el llavero lo recuerde) ──
+$("#envName").textContent = PROD ? 'producción' : 'staging';
+$("#loginForm").addEventListener('submit', async e => {
+  e.preventDefault();
+  const s = $("#lp").value.trim(); if (!s) return;
+  $("#lb").disabled = true; $("#lerr").textContent = '';
+  try {
+    const r = await fetch(`${WORKER}?action=admin-check`, { headers: { 'Authorization': `Bearer ${s}` } });
+    if (!r.ok) { $("#lerr").textContent = r.status === 401 ? 'Secreto incorrecto' : `El worker respondió ${r.status}`; $("#lb").disabled = false; return; }
+    SECRET = s; $("#lp").value = '';
+    try { history.replaceState(history.state, '', location.href); } catch (e2) { }
+    $("#login").hidden = true; $("#app").hidden = false;
+    await cargar();
+  } catch (e2) { $("#lerr").textContent = `Sin conexión con el worker: ${e2.message}`; $("#lb").disabled = false; }
+});
+
+// ── Electrónica: primera criba por prefijo de catno y artista ──
+// Es solo el punto de partida (el report no trae género). En cuanto Discogs
+// responde por un disco manda Discogs: Electronic dentro, Rock/Pop sin
+// Electronic fuera.
+const PRE = new Set("GI HDBLP HDB HYPLP HYP ZIQ PAN WSDM WSDMLP CIS CSR TEKLIFE VLEK PRESH AD AGMR HOD LDN WYCH MIX SCOB SCOBLP PLZ VISTA META ADX AIR SPCTR LUMB SBKT PC BOTCAVE CAT KALLISTALP NOHL SRV REGRM SPGRM DFA XL XLLP XLT YT YTLP RVNGNL ZZK DBL PXC TIMESIG OHX OHM FLAT".split(" "));
+const ART = ["VENETIAN SNARES","µ-ZIQ","COIL","BURIAL","K-LONE","FACTORY FLOOR","HAXAN CLOAK","GAZELLE TWIN","HANNAH DIAMOND","A.G. COOK","VEGYN","PYE CORNER AUDIO","SILVER APPLES","CUT HANDS","COSEY FANNI TUTTI","CHRIS & COSEY","CARTER TUTTI","AMON TOBIN","FACTA","TRISTAN ARP","SALAMANDA","TASO","HEAVEE","TRAXMAN","KUEDO","CLAUDE SPEEED","INTERPLANETARY PROPHET","DATACH'I","NAYTRONIX","MURLO","PALMISTRY","SAGAT","PETER VAN HOESEN","ULRICH SCHNAUSS","JOHN FOXX","PAUL HASLINGER","BLANCMANGE","KINCAID","FADER","NEAR FUTURE","CKTRL","DAN SHAKE","NUKULUK","DADUB","ZIÚR","BASS CLEF","DRMCNT","MORDANT MUSIC","BASS COMMUNION","EDWARD KA-SPEL","SION ORGAN","CARLA DAL FORNO","SEVEN ORBITS","BENGAL SOUND","AL CISNEROS VS THE BUG","JK FLESH","GHOST DUBS","LUSINE","MATTHEW DEAR","PANTHA DU PRINCE","ETIENNE DE CRECY","FKA TWIGS","SBTRKT","LAUREL HALO","ACTRESS","KODE9","MERZBOW","VLADISLAV DELAY","BERNARD PARMEGIANI","LUC FERRARI","MORT GARSON","CARL STONE","RIAN TREANOR","JLIN","RP BOO","GARY NUMAN","KRAFTWERK","TANGERINE DREAM","APHEX TWIN","AUTECHRE","BOARDS OF CANADA","FOUR TET","DAPHNI","BONOBO","JON HOPKINS","MOODYMANN","THEO PARRISH","KENNY DIXON","JAMES BLAKE","BRIAN ENO","JEAN-MICHEL JARRE","VANGELIS","DEPECHE MODE","NEW ORDER","PET SHOP BOYS","ORBITAL","UNDERWORLD","CHEMICAL BROTHERS","LEFTFIELD","LCD SOUNDSYSTEM","JESSY LANZA","FATIMA AL QADIRI","IKONIKA","DARKSTAR","TERROR DANJAH","COOLY G","DVA","DJ RASHAD","ZOMBY","LEE GAMBLE","KING MIDAS SOUND","FLYING LOTUS","THE PRODIGY","EVERYTHING IS RECORDED","DVR","SMERZ","LAPSLEY","DIZZEE RASCAL","PEACHES","MURCOF","DEADBEATZ","MODESELEKTOR","BIBIO","CLARK","TOMUTONTTU"];
+const BAD = new Set(["THE BUG CLUB","PITCHSHIFTER","THE MISTYS","SARAH NIXEY","THE BRITISH STEREO COLLECTIVE"]);
+const pre = c => { const m = String(c).match(/[A-Za-z]+/); return m ? m[0].toUpperCase() : "#"; };
+function adivinaElectronico(cat, artist) {
+  const a = String(artist).toUpperCase();
+  if (BAD.has(a)) return 0;
+  if (PRE.has(pre(cat))) return 1;
+  return ART.some(k => a === k || (k.length > 6 && a.includes(k))) ? 1 : 0;
+}
+// Discogs manda cuando ya lo sabe: idx[ean] = [sello, generos, flag, electronicoSegunDiscogs]
+const lab = r => (IDX[r.ean] || [])[0] || "";
+const gen = r => (IDX[r.ean] || [])[1] || "";
+const flag = r => (IDX[r.ean] || [])[2] || "";
+const electronico = r => { const x = IDX[r.ean]; if (x && x[1]) return x[3] === 1; return r.e === 1; };
+
+// ── Datos ────────────────────────────────────────────────────
+function aplica(j) {
+  STOCK = j.stock; IDX = j.idx || {}; LAST = j.last;
+  const rows = STOCK ? STOCK.rows : [];
+  const seen = (STOCK && STOCK.seen) || {};
+  D = rows.map((a, i) => ({ id: i, cat: a[0], artist: a[1], title: a[2], ean: a[3], fmt: a[4], discs: a[5], stock: a[6], price: a[7], date: a[8], st: a[9], e: a[10], seen: seen[a[3]] || '' }));
+  D.forEach(r => { r.dA = tc(r.artist); r.dT = tc(r.title); r.hay = (r.artist + " " + r.title + " " + r.cat + " " + r.ean).toLowerCase(); });
+  byKey = new Map(D.map(r => [r.ean, r]));
+  $("#drop").hidden = !!rows.length;
+  pinta();
+  drawYears(); drawLabels(); drawTabs(); drawList(); drawCart();
+}
+function pinta() {
+  if (!STOCK) { $("#status").textContent = 'Aún no hay stock report: súbelo.'; return; }
+  const el = D.filter(electronico);
+  const conA = el.filter(r => flag(r) === 'a').length, conY = el.filter(r => flag(r) === 'y').length;
+  const pend = LAST && LAST.pendientes != null ? LAST.pendientes : null;
+  $("#status").innerHTML = `Report de hace <b>${hace(STOCK.updated_at)}</b> · <b>${el.length}</b> electrónicos de ${D.length} · audio <b>${conA}</b> + YouTube <b>${conY}</b> · sellos <b>${new Set(D.map(lab).filter(Boolean)).size}</b>${pend ? ` · faltan ${pend} por mirar` : ''}`;
+}
+async function cargar() {
+  try { aplica(await api('cargo-stock')); } catch (e) { $("#status").textContent = `Error: ${e.message}`; }
+}
+
+// ── Subir el stock report (se parsea aquí; al worker solo van las filas) ──
+// Cabeceras del report de Cargo (11.11.26): «Article Number», «Available (PC Free Stock - Open EDI)», «Article Status», «Release Date», «Title», «Artist Name», «EAN Number», «Format», «Number of Discs», «Export dealer price (where applicable)». Llevan saltos de línea delante.
+const COLS = { cat: /^article number/i, stock: /^available/i, status: /^article status/i, date: /^release date/i, title: /^title$/i, artist: /^artist/i, ean: /^ean/i, fmt: /^format$/i, discs: /discs/i, price: /dealer price/i };
+const val = v => (v && typeof v === 'object') ? (v.result ?? v.text ?? (v.richText ? v.richText.map(t => t.text).join('') : v)) : v;
+const num = v => { const n = Number(String(val(v) ?? '').replace(/[£,\s]/g, '')); return Number.isFinite(n) ? n : 0; };
+async function subeReport(file) {
+  say(''); $("#status").textContent = `Leyendo ${file.name}…`;
+  try {
+    const wb = new ExcelJS.Workbook(); await wb.xlsx.load(await file.arrayBuffer());
+    const ws = wb.worksheets[0]; const col = {};
+    ws.getRow(1).eachCell((c, i) => { const h = String(val(c.value) || '').replace(/\s+/g, ' ').trim(); for (const [k, re] of Object.entries(COLS)) if (col[k] == null && re.test(h)) col[k] = i; });
+    const falta = Object.keys(COLS).filter(k => col[k] == null);
+    if (falta.length) throw new Error(`no encuentro las columnas: ${falta.join(', ')}`);
+    const rows = [];
+    ws.eachRow((row, n) => {
+      if (n === 1) return;
+      const g = k => val(row.getCell(col[k]).value);
+      if (String(g('fmt') || '').trim().toUpperCase() !== 'VL') return;     // solo vinilo
+      const stock = num(g('stock')); if (stock <= 0) return;
+      const st = parseInt(String(g('status') || '').slice(0, 2), 10) || 0; if (st >= 90) return;   // 91/92 = borrados
+      const d = g('date'); const dd = d instanceof Date ? d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate() : 0;
+      const cat = String(g('cat') || '').trim(), artist = String(g('artist') || '').trim();
+      rows.push([cat, artist, String(g('title') || '').trim(), String(g('ean') || '').trim(), 'VL', num(g('discs')) || 1, stock, num(g('price')), dd, st, adivinaElectronico(cat, artist)]);
+    });
+    $("#status").textContent = `Subiendo ${rows.length} vinilos…`;
+    const r = await api('cargo-upload', { method: 'POST', body: { file: file.name, rows } });
+    say(`Stock report cargado: ${r.filas} vinilos en stock, ${r.electronicos} electrónicos a primera vista${r.nuevos ? `, ${r.nuevos} nuevos desde el anterior` : ''}.`);
+    await cargar(); prepara();
+  } catch (e) { $("#status").textContent = `No se pudo leer el report: ${e.message}`; }
+}
+$("#file").addEventListener('change', e => { const f = e.target.files[0]; if (f) subeReport(f); e.target.value = ''; });
+['dragover', 'dragenter'].forEach(t => document.addEventListener(t, e => { e.preventDefault(); $("#drop").hidden = false; $("#drop").classList.add('on'); }));
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) $("#drop").classList.remove('on'); });
+document.addEventListener('drop', e => { e.preventDefault(); $("#drop").classList.remove('on'); const f = e.dataTransfer.files[0]; if (f) subeReport(f); });
+
+// ── Preparar: tandas de segundo plano en el worker hasta acabar o parar ──
+let preparando = false;
+async function prepara() {
+  if (preparando) { preparando = false; return; }
+  preparando = true; $("#prep").textContent = 'Parar';
+  try {
+    for (let i = 0; i < 400 && preparando; i++) {
+      const r = await api('cargo-refresh', { method: 'POST', query: '&n=8' });
+      const j = await api('cargo-stock'); IDX = j.idx || {}; LAST = j.last; pinta(); drawLabels(); drawList(false);
+      if (!r.pendientes || !r.hechos) break;
+    }
+  } catch (e) { say(`Preparar: ${e.message}`); }
+  preparando = false; $("#prep").textContent = 'Preparar audio';
+}
+$("#prep").onclick = prepara;
+
+// ── Filtros ──────────────────────────────────────────────────
+const NUEVO_DIAS = 14;
+const CUT = (() => { const d = new Date(Date.now() - 90 * 864e5); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); })();
+const isNew = r => r.date >= CUT || r.st === 20 || r.st === 21 || (r.seen && Date.now() - Date.parse(r.seen) < NUEVO_DIAS * 864e5);
+const TABS = [["Electrónica", r => electronico(r)], ["Novedades", r => electronico(r) && isNew(r)], ["Todo el vinilo", () => true]];
+function drawTabs() {
+  $("#tabs").innerHTML = TABS.map((t, i) => `<button class="tab" data-tab="${i}" aria-pressed="${i === tab}">${t[0]}<small>${D.filter(r => t[1](r)).length.toLocaleString("es-ES")}</small></button>`).join("");
+}
+function drawYears() {
+  const cur = $("#yr").value, ys = [...new Set(D.filter(r => r.date).map(r => String(r.date).slice(0, 4)))].sort().reverse();
+  $("#yr").innerHTML = '<option value="">Todos los años</option>' + ys.map(y => `<option>${y}</option>`).join("");
+  if (ys.includes(cur)) $("#yr").value = cur;
+}
+function drawLabels() {
+  const cur = $("#lbl").value, m = new Map();
+  D.filter(TABS[tab][1]).forEach(r => { const l = lab(r); if (l) m.set(l, (m.get(l) || 0) + 1); });
+  const ls = [...m.keys()].sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+  $("#lbl").innerHTML = `<option value="">Todos los sellos${ls.length ? ` (${ls.length})` : ''}</option>` + ls.map(l => `<option value="${esc(l)}">${esc(l)} (${m.get(l)})</option>`).join("");
+  if (m.has(cur)) $("#lbl").value = cur;
+}
+function compute() {
+  const q = $("#q").value.trim().toLowerCase().split(/\s+/).filter(Boolean), yr = $("#yr").value, lb = $("#lbl").value;
+  const only = $("#onlyCart").checked, pr = $("#priced").checked, wa = $("#withAudio").checked;
+  let rows = D.filter(r => {
+    if (only) return !!cart[key(r)];
+    if (!TABS[tab][1](r)) return false;
+    if (pr && !(r.price > 0)) return false;
+    if (wa && !(flag(r) === 'a' || flag(r) === 'y')) return false;
+    if (yr && String(r.date).slice(0, 4) !== yr) return false;
+    if (lb && lab(r) !== lb) return false;
+    const hay = r.hay + " " + (lab(r) + " " + gen(r)).toLowerCase();
+    for (const w of q) if (!hay.includes(w)) return false;
+    return true;
+  });
+  const s = $("#sort").value;
+  if (s === "az") rows.sort((a, b) => a.artist.localeCompare(b.artist, "en") || a.title.localeCompare(b.title, "en"));
+  else if (s === "label") rows.sort((a, b) => (lab(a) || "~").localeCompare(lab(b) || "~", "en") || b.date - a.date);
+  else if (s === "stock") rows.sort((a, b) => b.stock - a.stock || b.date - a.date);
+  else rows.sort((a, b) => b.date - a.date || a.artist.localeCompare(b.artist, "en"));
+  view = rows;
+}
+const AU = { a: ['♪ audio', ''], y: ['▶ YouTube', ' y'], n: ['sin audio', ' n'] };
+function rowHtml(r) {
+  const q = cart[key(r)] || 0, over = q > r.stock, f = AU[flag(r)];
+  return `<div class="row${r.id === selId ? " sel" : ""}" data-id="${r.id}">
+    <div class="l1"><span class="cat">${esc(r.cat)}</span><span class="name">${esc(r.dA)} <em>— ${esc(r.dT)}</em></span></div>
+    <div class="l2">${lab(r) ? `<span class="lb">${esc(lab(r))}</span>` : ""}<span>${esc(r.fmt)}${r.discs > 1 ? " ×" + r.discs : ""}</span><span>stock ${r.stock}</span><span class="${isNew(r) ? "new" : ""}">${dateTxt(r.date)}</span>${f ? `<span class="au${f[1]}">${f[0]}</span>` : ""}${gen(r) ? `<span>${esc(gen(r).split(', ').slice(0, 3).join(' · '))}</span>` : ""}</div>
+    <div class="ctl"><span class="price${r.price > 0 ? "" : " np"}">${priceTxt(r)}</span>
+      <div class="step${q ? " has" : ""}${over ? " over" : ""}"><button data-d="-1" aria-label="Quitar una copia">−</button><output>${q}</output><button data-d="1" aria-label="Añadir una copia">+</button></div>
+    </div></div>`;
+}
+function drawList(reset = true) {
+  if (reset) shown = 150;
+  compute();
+  $("#count").textContent = `${view.length.toLocaleString("es-ES")} referencias`;
+  $("#list").innerHTML = view.slice(0, shown).map(rowHtml).join("") || '<div class="cartempty" style="padding:20px 8px">Nada que mostrar con estos filtros.</div>';
+  $("#more").hidden = shown >= view.length;
+  $("#more").textContent = `Mostrar más (${Math.min(150, view.length - shown)} de ${(view.length - shown).toLocaleString("es-ES")} restantes)`;
+}
+function showMore() { shown += 150; drawList(false); }
+
+// ── Audio: lo resuelve y guarda el worker (R2); aquí solo se pide y se toca ──
+const aud = $("#aud");
+const AUD = {}, EN_CURSO = {};
+function pideAudio(r) {
+  if (AUD[r.ean]) return Promise.resolve(AUD[r.ean]);
+  if (!EN_CURSO[r.ean]) EN_CURSO[r.ean] = api('cargo-audio', { query: `&ean=${r.ean}` }).then(a => {
+    AUD[r.ean] = a; delete EN_CURSO[r.ean];
+    IDX[r.ean] = [a.label || '', [...(a.genres || []), ...(a.styles || [])].join(', '), a.state !== 'ok' ? 'n' : a.src === 'youtube' ? 'y' : 'a', (a.genres || []).some(g => /electronic/i.test(g)) ? 1 : 0];
+    const el = document.querySelector(`.row[data-id="${r.id}"]`); if (el) el.outerHTML = rowHtml(r);
+    return a;
+  }, e => { delete EN_CURSO[r.ean]; throw e; });
+  return EN_CURSO[r.ean];
+}
+// Mientras suena uno, los dos siguientes ya se van resolviendo.
+function adelanta() {
+  const ids = view.map(r => r.id), i = ids.indexOf(selId);
+  for (const j of [i + 1, i + 2]) { const r = D[ids[j]]; if (r && !AUD[r.ean]) pideAudio(r).catch(() => { }); }
+}
+const q2 = s => encodeURIComponent(s);
+const altLinks = r => `<a href="https://www.discogs.com/search/?q=${r.ean}&type=release" target="_blank" rel="noopener">Discogs</a> · <a href="https://bandcamp.com/search?q=${q2(r.dA + " " + r.dT)}" target="_blank" rel="noopener">Bandcamp</a> · <a href="https://www.youtube.com/results?search_query=${q2(r.dA + " " + r.dT)}" target="_blank" rel="noopener">YouTube</a>`;
+const FUENTE = { deezer: 'Deezer (clips de 30 s)', apple: 'Apple Music (clips de 30 s)', bandcamp: 'Bandcamp (tramo de 90 s)', youtube: 'YouTube (vídeos del disco en Discogs)' };
+
+let ytP = null, ytReady = null, ytMode = false, ytTick = null;
+function loadYT() {
+  if (ytReady) return ytReady;
+  ytReady = new Promise((res, rej) => {
+    if (window.YT && YT.Player) return res();
+    const s = document.createElement("script"); s.src = "https://www.youtube.com/iframe_api"; s.onerror = () => rej(new Error("YouTube no accesible"));
+    window.onYouTubeIframeAPIReady = res; document.head.appendChild(s); setTimeout(() => rej(new Error("YouTube no responde")), 12000);
+  }); return ytReady;
+}
+function stopYT() { ytMode = false; clearInterval(ytTick); try { ytP && ytP.pauseVideo && ytP.pauseVideo(); } catch (e) { } $("#ytbox").classList.remove("on"); }
+async function playYT(id, go) {
+  try { await loadYT(); } catch (e) { ytReady = null; $("#pstat").innerHTML = `No pude cargar YouTube (${esc(e.message)}). <a href="https://www.youtube.com/watch?v=${id}" target="_blank" rel="noopener">Abrir en YouTube</a>`; return; }
+  ytMode = true; $("#ytbox").classList.add("on");
+  if (!ytP) {
+    ytP = new YT.Player("ytp", { videoId: id, width: "100%", height: "100%", playerVars: { autoplay: go ? 1 : 0, playsinline: 1, rel: 0 }, events: {
+      onReady: e => { if (go) e.target.playVideo(); },
+      onStateChange: e => { if (e.data === 0) onEnded(); setPP(); },
+      onError: () => { const a = cur && cur.audio; if (a && trkIdx < lista(a).length - 1) setTimeout(() => playTrack(trkIdx + 1), 1200); else if ($("#auto").checked) setTimeout(() => stepRel(1), 1200); },
+    } });
+  } else { go ? ytP.loadVideoById(id) : ytP.cueVideoById(id); }
+  clearInterval(ytTick); ytTick = setInterval(() => { try { const c = ytP.getCurrentTime(), d = ytP.getDuration(); $("#cur").textContent = mmss(c); $("#dur").textContent = mmss(d); if (d) $("#seek").value = Math.round(c / d * 1000); } catch (e) { } }, 500);
+}
+
+let cur = null, trkIdx = 0, token = 0;
+const lista = a => a && a.state === 'ok' ? (a.tracks && a.tracks.length ? a.tracks : a.yt || []) : [];
+const mmss = t => { if (!isFinite(t)) return "0:00"; t = Math.floor(t); return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0"); };
+function setPP() { let on = !aud.paused && !aud.ended; if (ytMode) { try { on = ytP.getPlayerState() === 1; } catch (e) { on = false; } } $("#pp").textContent = on ? "❚❚" : "▶"; }
+function drawTracks() {
+  const t = lista(cur && cur.audio);
+  $("#tracks").innerHTML = t.map((x, i) => `<button class="tr${i === trkIdx ? " on" : ""}" data-trk="${i}" title="${esc(x.name)}">${i + 1}. ${esc(x.name)}</button>`).join("");
+}
+function playTrack(i, go = true) {
+  const t = lista(cur && cur.audio); if (!t.length) return;
+  trkIdx = (i + t.length) % t.length; const T = t[trkIdx];
+  $("#nowTrk").textContent = `${trkIdx + 1}/${t.length} · ${T.name}`; drawTracks();
+  if (T.yt) { aud.pause(); aud.removeAttribute("src"); playYT(T.yt, go); return; }
+  stopYT(); aud.src = T.url;
+  if (go) aud.play().catch(() => { $("#pstat").textContent = "El navegador bloqueó el audio. Pulsa ▶."; });
+}
+async function selectRel(id, go = true, skip = 0) {
+  const r = D[id]; if (!r) return; selId = id; const my = ++token;
+  $("#nowT").textContent = `${r.dA} — ${r.dT}`;
+  $("#nowS").textContent = [r.cat, lab(r), `stock ${r.stock}`, priceTxt(r)].filter(Boolean).join(" · ");
+  $("#nowTrk").textContent = ""; $("#tracks").innerHTML = "";
+  $("#pstat").textContent = AUD[r.ean] ? "" : "Buscando audio (Discogs, Deezer, Apple, Bandcamp)… la primera vez tarda unos segundos.";
+  $("#art").src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  aud.pause(); aud.removeAttribute("src"); stopYT(); $("#pp").disabled = true; setPP();
+  document.querySelectorAll(".row.sel").forEach(e => e.classList.remove("sel"));
+  const el = document.querySelector(`.row[data-id="${id}"]`); if (el) { el.classList.add("sel"); el.scrollIntoView({ block: "nearest" }); }
+  let a;
+  try { a = await pideAudio(r); } catch (e) { if (my === token) $("#pstat").innerHTML = `No pude consultar el worker (${esc(e.message)}). ${altLinks(r)}`; return; }
+  if (my !== token) return;
+  cur = { r, audio: a }; trkIdx = 0;
+  const el2 = document.querySelector(`.row[data-id="${id}"]`); if (el2) el2.classList.add("sel");
+  if (a.cover) $("#art").src = a.cover;
+  $("#nowS").textContent = [r.cat, a.label || lab(r), a.year, `stock ${r.stock}`, priceTxt(r)].filter(Boolean).join(" · ");
+  adelanta();
+  if (a.state === 'ok') {
+    $("#pstat").innerHTML = `${esc(FUENTE[a.src] || a.src)}${a.album ? `: <b>${esc(a.by)} — ${esc(a.album)}</b>` : ''}${a.genres && a.genres.length ? ` · ${esc([...a.genres, ...(a.styles || [])].join(', '))}` : ''}${a.page ? ` · <a href="${esc(a.page)}" target="_blank" rel="noopener">ficha</a>` : ''}${a.discogs ? ` · <a href="https://www.discogs.com/release/${a.discogs}" target="_blank" rel="noopener">Discogs</a>` : ''} · ¿no es este disco? ${altLinks(r)}`;
+    $("#pp").disabled = false; playTrack(0, go);
+  } else {
+    const t = a.tried || {};
+    $("#pstat").innerHTML = `Sin audio en ninguna fuente (Discogs: ${esc(t.discogs || '—')} · Deezer: ${esc(t.deezer || '—')} · Apple: ${esc(t.apple || '—')} · Bandcamp: ${esc(t.bandcamp || '—')}). Prueba en: ${altLinks(r)}`;
+    if (go && $("#auto").checked && skip < 8) return stepRel(1, skip + 1);
+  }
+}
+function stepRel(d, skip = 0) {
+  const ids = view.map(r => r.id); if (!ids.length) return;
+  let i = ids.indexOf(selId); i = i < 0 ? (d > 0 ? 0 : ids.length - 1) : Math.min(ids.length - 1, Math.max(0, i + d));
+  if (i >= shown) { shown = i + 20; drawList(false); }
+  selectRel(ids[i], true, skip);
+}
+function onEnded() {
+  const t = lista(cur && cur.audio); if (!t.length) return;
+  if (trkIdx < t.length - 1) playTrack(trkIdx + 1); else if ($("#auto").checked) stepRel(1);
+  setPP();
+}
+aud.addEventListener("timeupdate", () => { if (ytMode) return; $("#cur").textContent = mmss(aud.currentTime); $("#dur").textContent = mmss(aud.duration); if (aud.duration) $("#seek").value = Math.round(aud.currentTime / aud.duration * 1000); });
+aud.addEventListener("play", setPP); aud.addEventListener("pause", setPP); aud.addEventListener("ended", onEnded);
+aud.addEventListener("error", () => { if (aud.getAttribute("src")) { $("#pstat").textContent = "Esta pista no se pudo reproducir; paso a la siguiente."; setTimeout(onEnded, 800); } });
+$("#seek").addEventListener("input", e => { if (ytMode) { try { ytP.seekTo(ytP.getDuration() * e.target.value / 1000, true); } catch (_) { } return; } if (aud.duration) aud.currentTime = aud.duration * e.target.value / 1000; });
+$("#pp").onclick = () => { if (ytMode) { try { ytP.getPlayerState() === 1 ? ytP.pauseVideo() : ytP.playVideo(); } catch (e) { } setTimeout(setPP, 200); return; } if (aud.paused) aud.play().catch(() => { }); else aud.pause(); };
+$("#prevTrk").onclick = () => playTrack(trkIdx - 1); $("#nextTrk").onclick = () => playTrack(trkIdx + 1);
+$("#prevRel").onclick = () => stepRel(-1); $("#nextRel").onclick = () => stepRel(1);
+
+// ── Pedido ───────────────────────────────────────────────────
+function setQty(id, q) {
+  const r = D[id]; q = Math.max(0, Math.min(999, q)); if (q) cart[key(r)] = q; else delete cart[key(r)];
+  saveCart(); drawCart();
+  const el = document.querySelector(`.row[data-id="${id}"]`);
+  if (el) { const s = el.querySelector(".step"); s.classList.toggle("has", !!q); s.classList.toggle("over", q > r.stock); s.querySelector("output").textContent = q; }
+  if ($("#onlyCart").checked && !q) drawList();
+}
+const cartItems = () => Object.keys(cart).map(k => byKey.get(k)).filter(Boolean).map(r => ({ r, q: cart[key(r)] }));
+function drawCart() {
+  const items = cartItems(); let total = 0, units = 0, np = 0;
+  items.forEach(({ r, q }) => { total += r.price * q; units += q; if (!(r.price > 0)) np++; });
+  total = Math.round(total * 100) / 100;
+  $("#total").textContent = fmt(total);
+  $("#totalSub").textContent = items.length ? `${items.length} refs · ${units} uds${np ? ` · ${np} sin precio en la lista (no suman)` : ""}` : "";
+  $("#lines").innerHTML = items.length ? items.map(({ r, q }) => `<li><span class="q">${q}×</span><span class="n">${esc(r.cat)} <span>${esc(r.dA)}</span></span><button class="rm" data-rm="${r.id}" aria-label="Quitar ${esc(r.cat)}">✕</button></li>`).join("") : '<li class="cartempty" style="display:block;border:0">Aún no hay discos. Usa + en cada fila.</li>';
+  $("#miniN").textContent = `Pedido · ${items.length} refs · ${units} uds`; $("#miniT").textContent = fmt(total);
+  ["xlsx", "copy", "clear"].forEach(k => $("#" + k).disabled = !items.length);
+  return { items, total, units };
+}
+async function buildXlsx(items) {
+  const wb = new ExcelJS.Workbook(); const ws = wb.addWorksheet("Order");
+  ws.columns = [{ width: 8 }, { width: 16 }, { width: 16 }, { width: 30 }, { width: 38 }, { width: 24 }, { width: 8 }, { width: 14 }, { width: 14 }];
+  ws.addRow(["Date", $("#date").value]); ws.addRow(["Client", $("#client").value]); ws.addRow([]);
+  const h = ws.addRow(["Qty", "Cat. no.", "EAN", "Artist", "Title", "Label", "Format", "Dealer price (GBP)", "Line total (GBP)"]);
+  h.font = { bold: true }; h.eachCell(c => { c.border = { bottom: { style: "thin" } }; });
+  const first = ws.rowCount + 1;
+  items.forEach(({ r, q }) => {
+    const row = ws.addRow([q, r.cat, r.ean, r.artist, r.title, lab(r), r.fmt, r.price > 0 ? r.price : null, null]);
+    row.getCell(3).numFmt = "@"; row.getCell(8).numFmt = '"£"#,##0.00'; row.getCell(9).numFmt = '"£"#,##0.00';
+    row.getCell(9).value = { formula: `IF(H${row.number}="","",A${row.number}*H${row.number})` };
+  });
+  const last = ws.rowCount; ws.addRow([]);
+  const t = ws.addRow(["", "", "", "", "", "", "", "Total", { formula: `SUM(I${first}:I${last})` }]); t.font = { bold: true }; t.getCell(9).numFmt = '"£"#,##0.00';
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  return wb.xlsx.writeBuffer();
+}
+
+// ── Eventos ──────────────────────────────────────────────────
+document.addEventListener("click", e => {
+  const tb = e.target.closest("[data-tab]"); if (tb) { tab = +tb.dataset.tab; $("#onlyCart").checked = false; drawTabs(); drawLabels(); drawList(); return; }
+  const tr = e.target.closest("[data-trk]"); if (tr) { playTrack(+tr.dataset.trk); return; }
+  const rm = e.target.closest("[data-rm]"); if (rm) { setQty(+rm.dataset.rm, 0); return; }
+  const row = e.target.closest(".row"); if (!row) return;
+  const id = +row.dataset.id, b = e.target.closest(".step button");
+  if (b) { setQty(id, (cart[key(D[id])] || 0) + (+b.dataset.d)); return; }
+  selectRel(id);
+});
+let tmr; $("#q").addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(() => drawList(), 180); });
+["yr", "lbl", "sort", "priced", "withAudio", "onlyCart"].forEach(i => $("#" + i).addEventListener("change", () => drawList()));
+$("#more").onclick = showMore;
+new IntersectionObserver(es => { if (es[0].isIntersecting && !$("#more").hidden) showMore(); }, { rootMargin: "600px" }).observe($("#more"));
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input,select,textarea") || $("#app").hidden) return;
+  const k = e.key;
+  if (k === "ArrowDown") { e.preventDefault(); stepRel(1); }
+  else if (k === "ArrowUp") { e.preventDefault(); stepRel(-1); }
+  else if (k === "ArrowRight") { e.preventDefault(); playTrack(trkIdx + 1); }
+  else if (k === "ArrowLeft") { e.preventDefault(); playTrack(trkIdx - 1); }
+  else if (k === " " && cur) { e.preventDefault(); $("#pp").click(); }
+  else if (selId != null && (k === "+" || k === "=")) setQty(selId, (cart[key(D[selId])] || 0) + 1);
+  else if (selId != null && (k === "-" || k === "_")) setQty(selId, (cart[key(D[selId])] || 0) - 1);
+  else if (selId != null && k === "2") setQty(selId, 2);
+});
+$("#clear").onclick = function () {
+  if (this.dataset.armed) { cart = {}; saveCart(); delete this.dataset.armed; this.textContent = "Vaciar pedido"; drawCart(); drawList(); say("Pedido vaciado."); return; }
+  this.dataset.armed = 1; this.textContent = "Pulsa otra vez para vaciar"; setTimeout(() => { delete this.dataset.armed; this.textContent = "Vaciar pedido"; }, 3000);
+};
+$("#copy").onclick = async () => {
+  const { items } = drawCart();
+  const tsv = items.map(({ r, q }) => [q, r.cat, r.ean, r.artist, r.title, lab(r), r.fmt, r.price > 0 ? String(r.price) : ""].join("\t")).join("\n");
+  try { await navigator.clipboard.writeText(tsv); say("Copiado. Pega en tu Excel."); }
+  catch (e) { const ta = document.createElement("textarea"); ta.value = tsv; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); say("Copiado."); } catch (_) { say("No se pudo copiar."); } ta.remove(); }
+};
+$("#xlsx").onclick = async () => {
+  const { items } = drawCart(); if (!items.length) return;
+  try {
+    const buf = await buildXlsx(items);
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    a.download = "Cargo_Order_Telsnap_" + new Date().toISOString().slice(0, 10) + ".xlsx"; document.body.appendChild(a); a.click(); a.remove();
+    say("Pedido descargado.");
+  } catch (e) { say("No se pudo generar el archivo. Usa «Copiar lista»."); }
+};
+drawCart(); setPP();
+</script>
+</body>
+</html>

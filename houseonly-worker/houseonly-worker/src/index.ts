@@ -954,6 +954,7 @@ import { handleGoogleFeed, handleGoogleFeedRebuild, rebuildGoogleFeed } from './
 import { handleShopPolicies } from './lib/shop-policies';
 import { handleGenerosExtra, handleGenerosExtraRebuild, recalculaGenerosExtra } from './lib/generos-extra';
 import { handleWsZips } from './lib/ws-zips';
+import { handleCargoStock, handleCargoUpload, handleCargoAudio, handleCargoRefresh, pasadaCargo } from './lib/cargo';
 import {
   EBAY_CRON, runEbayAutolist, runEbayAutoBackfill, pollEbayOrders, handleEbayNotification,
   handleEbayMode, handleEbayItems, handleEbayExclude, handleEbayBackfill, handleEbayRun, handleEbayStoreCategories, handleDiscogsSnapshot,
@@ -1944,6 +1945,24 @@ export default {
     }
     if (action === 'subwax-order' && request.method === 'POST') {
       return await handleSubwaxOrder(request, env, bearerAdminValido(request, env));
+    }
+
+    // ── CARGO PLAYER (src/lib/cargo.ts) ────────────────────
+    //   GET  ?action=cargo-stock    Bearer  stock report + indice (sello/generos/audio por EAN) + ultima pasada
+    //   POST ?action=cargo-upload   Bearer  {file, rows} filas ya parseadas por la pagina (/cargo/)
+    //   GET  ?action=cargo-audio    Bearer  &ean= [&force=1] audio de un disco; si no esta, lo resuelve en el acto
+    //   POST ?action=cargo-refresh  Bearer  &n= una pasada de segundo plano a mano (el cron :41 hace 6/hora)
+    if (action === 'cargo-stock' && request.method === 'GET') {
+      return await handleCargoStock(env, bearerAdminValido(request, env));
+    }
+    if (action === 'cargo-upload' && request.method === 'POST') {
+      return await handleCargoUpload(request, env, bearerAdminValido(request, env));
+    }
+    if (action === 'cargo-audio' && request.method === 'GET') {
+      return await handleCargoAudio(request, env, bearerAdminValido(request, env), R2_PUBLIC);
+    }
+    if (action === 'cargo-refresh' && request.method === 'POST') {
+      return await handleCargoRefresh(request, env, bearerAdminValido(request, env), R2_PUBLIC);
     }
 
     // ── BANDEJA DE ESCUCHA (src/lib/listen.ts) ─────────────
@@ -3385,6 +3404,10 @@ export default {
       ctx.waitUntil(runListenIngest(env).catch((err) => env.SYNC_STATE.put('meta:listen_last_run',
         JSON.stringify({ scheduled_at: new Date(event.scheduledTime).toISOString(), ok: false, error: err?.message || String(err) })))
         .then(() => cronGrandes(env)));
+      // Cargo Player: una tanda de segundo plano (sello/generos/audio). Si
+      // falla, el error queda en cargo:last y la siguiente hora lo reintenta.
+      ctx.waitUntil(pasadaCargo(env, R2_PUBLIC).catch((err) => env.SYNC_STATE.put('cargo:last',
+        JSON.stringify({ ok: false, at: new Date(event.scheduledTime).toISOString(), error: err?.message || String(err) }))));
       return;
     }
 
