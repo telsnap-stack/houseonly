@@ -216,7 +216,7 @@ const DISCOGS_429_MAX_ATTEMPTS = 6;
 // whole window each time.
 const DISCOGS_429_BACKOFF_MS = 20_000;
 
-async function discogsFetch(
+export async function discogsFetch(
   token: string,
   path: string,
   init?: RequestInit & { _attempt?: number },
