@@ -6,7 +6,7 @@ import {
   textoFicha, relacionadas, consultasRelacionadas, bloqueFichaHtml,
 } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
 import { makeReleaseSlug } from '../houseonly-worker/houseonly-worker/src/lib/slug.ts';
-import { productosDelCatalogo, renderProductHtml, renderSitemap, conPiePoliticas } from '../scripts/prerender.mjs';
+import { productosDelCatalogo, renderProductHtml, renderSitemap, conPiePoliticas, renderHomeHtml } from '../scripts/prerender.mjs';
 
 // Lo que devuelve la Storefront API (FAR04 tal cual estaba el 2026-11-08).
 const nodo = (o = {}) => ({
@@ -178,6 +178,23 @@ test('pie de politicas: enlaces con barra final (sin redireccion 308)', () => {
   const html = conPiePoliticas(PLANTILLA);
   assert.ok(html.includes('<a href="/shipping/"'));
   assert.ok(!/<a href="\/shipping"/.test(html));
+});
+
+test('portada y pie: identidad del negocio a la vista (Merchant Center)', () => {
+  const html = conPiePoliticas(renderHomeHtml(PLANTILLA));
+  assert.ok(!html.includes('<title>houseonly</title>'));
+  assert.ok(/<title>House Only — Vinyl Record Store/.test(html));
+  assert.ok(html.includes('<meta name="description"'));
+  const ld = JSON.parse(html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s)[1]);
+  assert.equal(ld['@type'], 'OnlineStore');
+  assert.equal(ld.legalName, 'Telsnap S.L.');
+  assert.equal(ld.address.addressCountry, 'ES');
+  assert.equal(ld.email, 'info@houseonly.store');
+  // El pie nombra a la sociedad y deja el correo sin ofuscar por Cloudflare.
+  assert.ok(html.includes('operated by Telsnap S.L.'));
+  assert.ok(/<!--email_off-->[^<]*VAT ESB75303990[\s\S]*mailto:info@houseonly\.store[\s\S]*<!--\/email_off-->/.test(html));
+  // La canonical de la plantilla se conserva en la portada.
+  assert.ok(html.includes('<link rel="canonical" href="https://houseonly.store/" />'));
 });
 
 test('sitemap: una URL por slug aunque dos discos lo compartan', () => {

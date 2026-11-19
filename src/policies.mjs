@@ -21,6 +21,25 @@ export const CONTACT_LINKS = {
   discogs: { label: 'Discogs store', url: 'https://www.discogs.com/seller/houseonly/profile' },
 };
 
+// Quien esta detras de la tienda. Va en el pie de todas las paginas (app y
+// HTML prerenderizado) y en el JSON-LD de la portada: Google Merchant Center
+// suspende por "Misrepresentation" si no ve la identidad del negocio a la vista.
+// Mismos datos que /legal y que Business info de Merchant Center.
+export const BUSINESS = {
+  name: 'House Only',
+  legalName: 'Telsnap S.L.',
+  vat: 'ESB75303990',
+  street: 'Avenida de Pesadilla 20',
+  postalCode: '28708',
+  city: 'Fuente del Fresno',
+  region: 'Madrid',
+  country: 'Spain',
+  countryCode: 'ES',
+  about: 'House Only is an independent record shop in Madrid, Spain. We sell new, sealed vinyl — house, deep house, techno, electro and drum & bass — and ship worldwide.',
+};
+export const BUSINESS_LINE = `${BUSINESS.name} is operated by ${BUSINESS.legalName} · VAT ${BUSINESS.vat} · ${BUSINESS.street}, ${BUSINESS.postalCode} ${BUSINESS.city}, ${BUSINESS.region}, ${BUSINESS.country}`;
+export const HOME_TITLE = 'House Only — Vinyl Record Store · House, Techno & Electro · Worldwide Shipping';
+
 /** La pagina de una ruta ("/shipping" o "/shipping/"), o null. */
 export function policyPageFor(path) {
   const p = String(path || '').replace(/\/+$/, '') || '/';
