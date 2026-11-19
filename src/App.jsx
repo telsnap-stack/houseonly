@@ -11,7 +11,7 @@ import { trackNameFromFilename } from "../houseonly-worker/houseonly-worker/src/
 // Las mismas reglas que el worker para elegir que se sube de un promopack (descarga manual).
 import { eligeFicheros, PARTE_MAX_BYTES, base as baseFichero } from "../houseonly-worker/houseonly-worker/src/lib/listen-ficheros.mjs";
 import { makeSlug, artistaDeVendor, tituloFicha, metaDeTags, relacionadas, consultasRelacionadas, bloqueFichaHtml } from "../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs";
-import { POLICY_PAGES, CONTACT_LINKS, policyPageFor } from "./policies.mjs";
+import { POLICY_PAGES, CONTACT_LINKS, BUSINESS, BUSINESS_LINE, policyPageFor } from "./policies.mjs";
 // Rechazos del tab Pre-order: el mismo modulo que guarda el worker.
 import { parseDistributorEmail, parseDbhEmail, parseSubwaxEmail, rdHtmlToText, rdCleanDropbox, decodeHtmlEntities, RD_DIGEST_PRESALES, MAIL_DIGEST, MAIL_REVISION, MAIL_ORDER, FUENTES_REENVIO, RD_GBP_EUR } from "../houseonly-worker/houseonly-worker/src/lib/distributor-email.mjs";
 import { clasificaFilas, fechaCorta, DIAS_RECHAZO_TEMPORAL, indiceTienda, buscaEnTienda, esPedidoAntiguo, DIAS_PEDIDO_ANTIGUO } from "../houseonly-worker/houseonly-worker/src/lib/preorder-rechazos.mjs";
@@ -16306,6 +16306,12 @@ export default function App() {
             <ILink key={pg.path} to={`${pg.path}/`} onNavigate={(to)=>{setCartOpen(false);navigate(to);window.scrollTo(0,0);}} style={{fontSize:9,color:S.muted,letterSpacing:1.5,textTransform:'uppercase',transition:'color 0.15s'}}>{pg.label}</ILink>
           ))}
         </nav>
+        {/* Quien esta detras de la tienda, a la vista en todas las paginas
+            (Merchant Center lo exige). Mismo texto que el pie prerenderizado. */}
+        <p style={{fontSize:10,color:S.muted,lineHeight:1.7,margin:'14px auto 0',maxWidth:'70ch'}}>
+          {BUSINESS.about}<br />
+          {BUSINESS_LINE} · <a href={`mailto:${CONTACT_LINKS.email}`} style={{color:S.muted}}>{CONTACT_LINKS.email}</a>
+        </p>
       </footer>
 
 

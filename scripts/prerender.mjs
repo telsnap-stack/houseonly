@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { descripcionDeProducto, cortesDelJson } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
 import { makeSlug, artistaDeVendor, encabezadoFicha, h1Ficha, tituloFicha, metaDeTags, gtinDe, relacionadas, bloqueFichaHtml } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
 import { generoDeTags } from '../houseonly-worker/houseonly-worker/src/lib/genres.mjs';
-import { POLICY_PAGES, CONTACT_LINKS } from '../src/policies.mjs';
+import { POLICY_PAGES, CONTACT_LINKS, BUSINESS, BUSINESS_LINE, HOME_TITLE } from '../src/policies.mjs';
 import { GIFT_CARD, esTarjetaRegalo } from '../src/giftcard.mjs';
 import { pathToFileURL } from 'node:url';
 
@@ -368,8 +368,8 @@ function renderPolicyHtml(template, pg, policy) {
 <h1 style="font-size:32px;margin:0">${escapeHtml(policy.title || pg.title)}</h1>
 ${policy.lastUpdated ? `<p style="font-size:12px;color:#585858;margin:8px 0 0">${escapeHtml(policy.lastUpdated)}</p>` : ''}
 <div style="height:22px"></div>
-${contacto}
-<div data-policy-type="${escapeHtml(pg.type)}" data-policy-title="${escapeHtml(policy.title || pg.title)}" data-policy-updated="${escapeHtml(policy.lastUpdated || '')}" style="max-width:65ch">${policy.html}</div>
+<!--email_off-->${contacto}
+<div data-policy-type="${escapeHtml(pg.type)}" data-policy-title="${escapeHtml(policy.title || pg.title)}" data-policy-updated="${escapeHtml(policy.lastUpdated || '')}" style="max-width:65ch">${policy.html}</div><!--/email_off-->
 <p><a href="/" style="color:#c8ff00">Back to the shop</a></p>
 </main>`;
   return template
@@ -387,10 +387,48 @@ export function conPiePoliticas(html) {
   const enlaces = POLICY_PAGES
     .map(pg => `<a href="${escapeHtml(pg.path)}/" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(pg.label)}</a>`)
     .join('');
-  const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav></footer>`;
+  const quien = `<p style="color:#585858;font-size:10px;line-height:1.7;margin:14px auto 0;max-width:70ch">${escapeHtml(BUSINESS.about)}<br /><!--email_off-->${escapeHtml(BUSINESS_LINE)} · <a href="mailto:${escapeHtml(CONTACT_LINKS.email)}" style="color:#585858">${escapeHtml(CONTACT_LINKS.email)}</a><!--/email_off--></p>`;
+  const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav>${quien}</footer>`;
   // Al final del contenido de #root, haya algo dentro (paginas de politicas) o no.
   if (html.includes('<div id="root"></div>')) return html.replace('<div id="root"></div>', `<div id="root">${pie}</div>`);
   return html.replace(/(<div id="root">[\s\S]*?<\/main>)(<\/div>)/, `$1${pie}$2`);
+}
+
+// Portada. La plantilla sale de Vite con <title>houseonly</title> y nada mas:
+// aqui se le pone titulo, descripcion y el JSON-LD de la tienda (quien es, donde
+// esta, como contactar), que es lo que Merchant Center coteja con Business info.
+// Solo para dist/index.html: las demas paginas parten de la plantilla limpia.
+export function renderHomeHtml(template) {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'OnlineStore',
+    name: BUSINESS.name,
+    legalName: BUSINESS.legalName,
+    url: `${SITE_URL}/`,
+    description: BUSINESS.about,
+    email: CONTACT_LINKS.email,
+    vatID: BUSINESS.vat,
+    address: {
+      '@type': 'PostalAddress',
+      streetAddress: BUSINESS.street,
+      postalCode: BUSINESS.postalCode,
+      addressLocality: BUSINESS.city,
+      addressRegion: BUSINESS.region,
+      addressCountry: BUSINESS.countryCode,
+    },
+    contactPoint: { '@type': 'ContactPoint', contactType: 'customer service', email: CONTACT_LINKS.email, url: `${SITE_URL}/contact/` },
+    sameAs: [CONTACT_LINKS.instagram.url, CONTACT_LINKS.discogs.url],
+  };
+  const seoHead = `  <title>${escapeHtml(HOME_TITLE)}</title>
+  <meta name="description" content="${escapeHtml(BUSINESS.about)}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(HOME_TITLE)}" />
+  <meta property="og:description" content="${escapeHtml(BUSINESS.about)}" />
+  <meta property="og:url" content="${SITE_URL}/" />
+  <script type="application/ld+json">${escapeJson(JSON.stringify(jsonLd))}</script>`;
+  return template
+    .replace(/<title>[^<]*<\/title>/, '')
+    .replace('</head>', `${seoHead}\n  </head>`);
 }
 
 // /ig — destino del link de la bio de Instagram. La lista la pinta el cliente
@@ -535,7 +573,7 @@ async function main() {
 
   // La portada (y el fallback de la SPA) es la propia plantilla: se reescribe
   // con el pie al final, cuando ya no hace falta limpia.
-  writeFileSync(join(DIST_DIR, 'index.html'), conPiePoliticas(template));
+  writeFileSync(join(DIST_DIR, 'index.html'), conPiePoliticas(renderHomeHtml(template)));
 
   console.log('[prerender] Generating sitemap.xml...');
   writeFileSync(join(DIST_DIR, 'sitemap.xml'), renderSitemap(products, entities, policyPaths, { giftCard: giftCardPublicada }));
