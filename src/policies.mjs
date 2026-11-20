@@ -53,7 +53,7 @@ export const ABOUT_PAGE = {
   lastUpdated: '',
   html: `<p>House Only is an independent, one-person record shop based in Madrid, Spain. We sell new vinyl: house, deep house, techno, electro, drum &amp; bass and the music around them, chosen record by record.</p>
 <h2>How the shop works</h2>
-<p>Records shown as in stock are in our hands in Madrid and ship from here with Correos, usually within 1–3 business days of your order. Pre-orders are marked as pre-orders, with the expected release date when the label has given one. Payment goes through Shopify's secure checkout, where you see shipping and the full total before you pay.</p>
+<p>Records shown as in stock are in our hands in Madrid and ship from here, usually with Correos and always with tracking, within 1–3 business days of your order. Pre-orders are marked as pre-orders, with the expected release date when the label has given one. Payment goes through Shopify's secure checkout, where you see shipping and the full total before you pay.</p>
 <p>Delivery times, costs and returns are explained in our <a href="/shipping/">Shipping Policy</a> and <a href="/returns/">Returns &amp; Refunds</a>.</p>
 <h2>Prices and taxes</h2>
 <p>${TAX_NOTE} Orders shipped outside the EU carry no VAT; your country may charge import duties and taxes on delivery.</p>
