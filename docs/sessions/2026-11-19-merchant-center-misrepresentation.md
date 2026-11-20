@@ -51,3 +51,25 @@
 - Pendiente de Eduardo: aprobar el PR (con o sin el commit del aviso de
   impuestos), teléfono de atención (opcional), y confirmar "with tracking" en
   la política de envíos de Shopify.
+
+### Mismo día, más tarde
+
+- **Términos de Shopify decían "Prices are in euros and include Spanish VAT"**
+  y la tienda cobra sin IVA incluido (`shop.taxesIncluded = false`,
+  `taxShipping = true`). Corregido en el admin de Shopify (Settings → Policies):
+  ahora dicen que los precios no incluyen IVA y que se añade en el checkout
+  para la UE. Los precios y la configuración de impuestos no se tocaron.
+- Envíos (Shopify y Términos): "usually via Correos and always with tracking".
+- Devoluciones (Shopify): la devolución va a Madrid; desde fuera de España es
+  envío internacional a cargo del comprador.
+- La app de Shopify del conector no tiene `write_legal_policies`: las políticas
+  se editaron desde el admin en Chrome.
+- Las páginas de políticas de houseonly.store se generan en el build: estos
+  textos no salen en la web hasta el siguiente deploy (PR #230).
+- Merchant Center: "Ship-from locations" solo admite Francia, Alemania y
+  EE. UU.; no se puede poner Madrid. Sin teléfono de atención (decisión de
+  Eduardo). No se configuran los países incompletos.
+- Google Business Profile: no se crea; Google no lo admite para negocios solo
+  online sin atención presencial.
+- Soporte de Merchant Center: el formulario de contacto exige un Google Ads
+  Customer ID y la cuenta no tiene; no se pudo enviar.
