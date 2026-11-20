@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { descripcionDeProducto, cortesDelJson } from '../houseonly-worker/houseonly-worker/src/lib/html-text.mjs';
 import { makeSlug, artistaDeVendor, encabezadoFicha, h1Ficha, tituloFicha, metaDeTags, gtinDe, relacionadas, bloqueFichaHtml } from '../houseonly-worker/houseonly-worker/src/lib/ficha-seo.mjs';
 import { generoDeTags } from '../houseonly-worker/houseonly-worker/src/lib/genres.mjs';
-import { POLICY_PAGES, CONTACT_LINKS, BUSINESS, BUSINESS_LINE, HOME_TITLE, ABOUT_PAGE } from '../src/policies.mjs';
+import { POLICY_PAGES, CONTACT_LINKS, BUSINESS, BUSINESS_LINE, HOME_TITLE, ABOUT_PAGE, TAX_NOTE } from '../src/policies.mjs';
 import { GIFT_CARD, esTarjetaRegalo } from '../src/giftcard.mjs';
 import { pathToFileURL } from 'node:url';
 
@@ -387,7 +387,7 @@ export function conPiePoliticas(html) {
   const enlaces = POLICY_PAGES
     .map(pg => `<a href="${escapeHtml(pg.path)}/" style="color:#585858;text-decoration:none;margin:0 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase">${escapeHtml(pg.label)}</a>`)
     .join('');
-  const quien = `<p style="color:#585858;font-size:10px;line-height:1.7;margin:14px auto 0;max-width:70ch">${escapeHtml(BUSINESS.about)}<br /><!--email_off-->${escapeHtml(BUSINESS_LINE)} · <a href="mailto:${escapeHtml(CONTACT_LINKS.email)}" style="color:#585858">${escapeHtml(CONTACT_LINKS.email)}</a><!--/email_off--><br /><a href="${escapeHtml(CONTACT_LINKS.instagram.url)}" rel="me" style="color:#585858">Instagram ${escapeHtml(CONTACT_LINKS.instagram.label)}</a> · <a href="${escapeHtml(CONTACT_LINKS.discogs.url)}" rel="me" style="color:#585858">${escapeHtml(CONTACT_LINKS.discogs.label)}</a></p>`;
+  const quien = `<p style="color:#585858;font-size:10px;line-height:1.7;margin:14px auto 0;max-width:70ch">${escapeHtml(BUSINESS.about)}<br />${escapeHtml(TAX_NOTE)}<br /><!--email_off-->${escapeHtml(BUSINESS_LINE)} · <a href="mailto:${escapeHtml(CONTACT_LINKS.email)}" style="color:#585858">${escapeHtml(CONTACT_LINKS.email)}</a><!--/email_off--><br /><a href="${escapeHtml(CONTACT_LINKS.instagram.url)}" rel="me" style="color:#585858">Instagram ${escapeHtml(CONTACT_LINKS.instagram.label)}</a> · <a href="${escapeHtml(CONTACT_LINKS.discogs.url)}" rel="me" style="color:#585858">${escapeHtml(CONTACT_LINKS.discogs.label)}</a></p>`;
   const pie = `<footer style="border-top:1px solid #1e1e1e;padding:24px 20px;text-align:center;font-family:Inter,system-ui,sans-serif"><nav aria-label="Store policies">${enlaces}</nav>${quien}</footer>`;
   // Al final del contenido de #root, haya algo dentro (paginas de politicas) o no.
   if (html.includes('<div id="root"></div>')) return html.replace('<div id="root"></div>', `<div id="root">${pie}</div>`);

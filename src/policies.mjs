@@ -39,6 +39,10 @@ export const BUSINESS = {
   about: 'House Only is an independent record shop in Madrid, Spain. We sell new, sealed vinyl — house, deep house, techno, electro and drum & bass — and ship worldwide.',
 };
 export const BUSINESS_LINE = `${BUSINESS.name} is operated by ${BUSINESS.legalName} · VAT ${BUSINESS.vat} · ${BUSINESS.street}, ${BUSINESS.postalCode} ${BUSINESS.city}, ${BUSINESS.region}, ${BUSINESS.country}`;
+// Aviso de impuestos. Los precios NO cambian (decision de Eduardo: sin IVA, se
+// anade en el checkout como hace Shopify); esto solo lo dice a la vista, porque
+// la politica de Misrepresentation de Google pide dejar claro el coste total.
+export const TAX_NOTE = 'Prices exclude VAT. For orders delivered in the EU, VAT is added at checkout, where you see the full total before you pay.';
 export const HOME_TITLE = 'House Only — Vinyl Record Store · House, Techno & Electro · Worldwide Shipping';
 
 // /about no sale de Shopify (no hay politica de ese tipo): el texto vive aqui.
@@ -51,6 +55,8 @@ export const ABOUT_PAGE = {
 <h2>How the shop works</h2>
 <p>Records shown as in stock are in our hands in Madrid and ship from here with Correos, usually within 1–3 business days of your order. Pre-orders are marked as pre-orders, with the expected release date when the label has given one. Payment goes through Shopify's secure checkout, where you see shipping and the full total before you pay.</p>
 <p>Delivery times, costs and returns are explained in our <a href="/shipping/">Shipping Policy</a> and <a href="/returns/">Returns &amp; Refunds</a>.</p>
+<h2>Prices and taxes</h2>
+<p>${TAX_NOTE} Orders shipped outside the EU carry no VAT; your country may charge import duties and taxes on delivery.</p>
 <h2>Who is behind it</h2>
 <p>${BUSINESS_LINE}.</p>
 <p>Write to us at <a href="mailto:${CONTACT_LINKS.email}">${CONTACT_LINKS.email}</a> and we answer within one business day. You can also find us on <a href="${CONTACT_LINKS.instagram.url}">Instagram ${CONTACT_LINKS.instagram.label}</a> and on <a href="${CONTACT_LINKS.discogs.url}">Discogs</a>, where we sell under the same name.</p>`,
