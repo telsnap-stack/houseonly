@@ -197,6 +197,17 @@ test('portada y pie: identidad del negocio a la vista (Merchant Center)', () => 
   assert.ok(html.includes('<link rel="canonical" href="https://houseonly.store/" />'));
 });
 
+test('about: pagina propia, enlazada en el pie, con la sociedad y el contacto', async () => {
+  const { POLICY_PAGES, ABOUT_PAGE, policyPageFor } = await import('./policies.mjs');
+  assert.equal(policyPageFor('/about/').type, 'ABOUT');
+  assert.ok(POLICY_PAGES.find(p => p.path === '/about').local);
+  assert.ok(ABOUT_PAGE.html.includes('Telsnap S.L.'));
+  assert.ok(ABOUT_PAGE.html.includes('info@houseonly.store'));
+  const pie = conPiePoliticas(PLANTILLA);
+  assert.ok(pie.includes('<a href="/about/"'));
+  assert.ok(pie.includes('instagram.com/onlyhouseonly'));
+});
+
 test('sitemap: una URL por slug aunque dos discos lo compartan', () => {
   const productos = productosDelCatalogo([
     nodo({ title: 'Wind On Water', vendor: 'Fresh & Low', variants: { edges: [{ node: { sku: 'RXT-05', price: { amount: '12' } } }] } }),
